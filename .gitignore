@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+data/vector_store/
+data/embeddings/
+output/
+logs/
+.DS_Store
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
