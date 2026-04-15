@@ -1,0 +1,29 @@
+{
+  "description": "SNOMED CT top-level and overly generic concept IDs — flag low confidence if used as final code",
+  "source": "SNOMED CT International Edition hierarchy roots",
+  "note": "Concepts below are valid SNOMED IDs but are parent/root nodes too abstract for clinical coding. A specific descendant should be used instead.",
+  "root_concepts": {
+    "138875005": "SNOMED CT Concept (root)",
+    "404684003": "Clinical finding (root)",
+    "71388002": "Surgical procedure (root of all surgery)",
+    "64572001": "Disease (root of all diseases)",
+    "272379006": "Event",
+    "363787002": "Observable entity",
+    "48176007": "Social context",
+    "243796009": "Situation with explicit context",
+    "370115009": "Special concept",
+    "123037004": "Body structure (root)",
+    "308916002": "Environment or geographical location",
+    "125605004": "Fracture (generic)",
+    "128139000": "Inflammatory disorder (generic)",
+    "417163006": "Traumatic AND/OR non-traumatic injury (generic)",
+    "128294001": "Chronic disease (generic)",
+    "308490002": "Musculoskeletal finding (generic)",
+    "363858001": "Procedure on foot (generic)",
+    "416940007": "Past history of procedure (generic)",
+    "57148006":  "Wound (generic)",
+    "416940007": "Past history (generic)"
+  },
+  "confidence_cap": 0.4,
+  "action": "downgrade_confidence_and_flag_for_review"
+}

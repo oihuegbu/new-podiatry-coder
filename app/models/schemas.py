@@ -48,9 +48,12 @@ class HCPCSCode(BaseModel):
     description: str = ""
     confidence: float = 0.0
     modifiers: list[str] = Field(default_factory=list)
+    units: int = 1
     linked_diagnoses: list[str] = Field(default_factory=list)
-    evidence_spans: list[str] = Field(default_factory=list)
     rationale: str = ""
+    supporting_text: str = ""
+    needs_review: bool = False
+    review_reason: str | None = None
 
 
 class SNOMEDCode(BaseModel):
@@ -59,6 +62,7 @@ class SNOMEDCode(BaseModel):
     entity_text: str = ""
     category: str = ""
     confidence: float = 0.0
+    is_root_concept: bool = False
 
 
 class ValidationIssue(BaseModel):

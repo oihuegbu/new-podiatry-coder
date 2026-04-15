@@ -63,11 +63,19 @@ class MedicalCodingPipeline:
         imaging_today = extraction["imaging_performed_today"]
         supplies_today = extraction["supplies_dispensed_today"]
 
+        prior_surgery_info = extraction.get("prior_surgery_info", {}) or {}
+
         logger.info(f"  Patient: {metadata.get('patient_name')} | DOS: {metadata.get('date_of_service')}")
         logger.info(f"  Category: {note_category}")
         logger.info(f"  Procedures today: {procedures_today}")
         logger.info(f"  Imaging today: {imaging_today}")
         logger.info(f"  Supplies today: {supplies_today}")
+        if prior_surgery_info.get("is_post_op_visit"):
+            logger.info(
+                f"  Post-op visit: day {prior_surgery_info.get('days_post_op')} "
+                f"after {prior_surgery_info.get('prior_surgery_description')} "
+                f"(CPT {prior_surgery_info.get('prior_surgery_cpt')})"
+            )
 
         # Step 2: NER — extract clinical entities
         logger.info("[2/5] Extracting clinical entities (NER)...")
@@ -104,11 +112,12 @@ class MedicalCodingPipeline:
             entities=entity_dicts,
             rag_candidates=merged,
             vision_context=vision_context,
+            prior_surgery_info=prior_surgery_info,
         )
 
         # Step 5: Validation
         logger.info("[5/5] Validating codes...")
-        validation = self.validator.validate(coding_result)
+        validation = self.validator.validate(coding_result, prior_surgery_info=prior_surgery_info)
 
         elapsed = time.time() - start
 
@@ -131,10 +140,21 @@ class MedicalCodingPipeline:
                 "corrections_made": coding_result.get("corrections_made", []),
                 "audit_notes": coding_result.get("audit_notes", ""),
                 "vision_context": vision_context,
+                "prior_surgery_info": prior_surgery_info,
             },
             model_source="gpt-4o",
             api_usage=usage,
-            **validation,
+            **{k: v for k, v in validation.items()
+               if k not in ("auto_coding_review_reasons", "auto_coding_summary")},
+            # Merge LLM-generated review reasons with rule-based reasons
+            auto_coding_review_reasons=(
+                coding_result.get("auto_coding_review_reasons", [])
+                + validation.get("auto_coding_review_reasons", [])
+            ),
+            auto_coding_summary=(
+                coding_result.get("auto_coding_summary", "")
+                or validation.get("auto_coding_summary", "")
+            ),
         )
 
         self._print_summary(result)
@@ -170,7 +190,11 @@ class MedicalCodingPipeline:
 
     def _to_cpt(self, raw: dict):
         from app.models.schemas import CPTCode
-        return CPTCode(**{k: v for k, v in raw.items() if k in CPTCode.model_fields})
+        data = {k: v for k, v in raw.items() if k in CPTCode.model_fields}
+        # Ensure dict fields default to empty dict when LLM returns null
+        if data.get("mdm_details") is None:
+            data["mdm_details"] = {}
+        return CPTCode(**data)
 
     def _to_hcpcs(self, raw: dict):
         from app.models.schemas import HCPCSCode

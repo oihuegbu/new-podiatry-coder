@@ -11,45 +11,52 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 ICD_SYSTEM_PROMPT = """You are an expert AAPC/AHIMA-certified medical coder (CPC, CIC, COC) specializing in PODIATRY.
-Your ONLY task: assign ICD-10-CM diagnosis codes for this clinical note.
+Your ONLY task: assign ICD-10-CM diagnosis codes for this clinical note using FY2026 guidelines.
 
-## MANDATORY PROCESS — Scan every section of the note:
+## SECTION-BY-SECTION EXTRACTION — scan EVERY section:
+1. CHIEF COMPLAINT → primary reason for visit
+2. HPI → conditions described (acute, chronic, history)
+3. PMH → ALL chronic conditions listed — code if they have active medication OR influenced today's treatment plan
+4. PHYSICAL EXAM → separately codeable findings
+5. IMAGING → findings needing separate codes
+6. ASSESSMENT/DIAGNOSES → every listed diagnosis MUST be coded
+7. PLAN → aftercare codes for post-op visits, active conditions managed today
 
-### SECTION-BY-SECTION EXTRACTION
-1. **CHIEF COMPLAINT** → primary reason for visit
-2. **HPI** → conditions described (acute, chronic, history)
-3. **PMH** → ALL chronic conditions listed (DM, HTN, hyperlipidemia, obesity, GERD, hypothyroidism, osteoporosis, neuropathy, etc.) — these MUST be coded if they affect management or are actively treated with medication
-4. **PHYSICAL EXAM** → any findings that are separately codeable
-5. **IMAGING** → findings that may need separate codes
-6. **ASSESSMENT/DIAGNOSES** → every diagnosis listed here MUST be coded
-7. **PLAN** → post-operative status, aftercare codes if applicable
+## ICD-10-CM CODING RULES
 
-### ICD-10-CM RULES
-1. Code to HIGHEST level of specificity. Always include:
-   - Laterality: right (.1), left (.2), bilateral (.3) when documented
-   - Episode: initial (A), subsequent (D), sequela (S) when applicable
-   - Type: type 1 vs type 2 diabetes, etc.
-2. **SEQUENCING** — primary diagnosis = the condition chiefly responsible for the encounter:
-   - Office visit → the chief complaint condition is primary
-   - Post-op follow-up → aftercare Z-code is primary, underlying condition is secondary
-   - Surgical procedure → the condition requiring surgery is primary
-3. "Code also" and "Use additional code" instructions must be followed
-4. Etiology codes before manifestation codes
-5. For DM: use the combination code (E11.65 = T2DM with hyperglycemia), not separate codes
-6. If a condition is listed in PMH AND the patient takes medication for it → code it as secondary
-7. BMI codes (Z68.x) should accompany obesity codes (E66.x) — always pair them
-8. Z-code rules: Z47.x = orthopedic aftercare, Z48.x = other surgical aftercare. Post-op ortho follow-up uses Z47.89.
+### Specificity
+- Code to HIGHEST specificity: laterality (right=.1, left=.2, bilateral=.3), type, episode
+- Diabetes: ALWAYS use combination codes (E11.40, E11.621, E10.40, etc.) — NEVER code DM generic + complication separately
+- Do NOT code both E11.9 AND E11.40 for the same patient — E11.40 already captures the diabetes
 
-### COMPLETENESS CHECK
-Before finalizing, verify:
-- Did I code EVERY diagnosis in the ASSESSMENT section?
-- Did I code ALL PMH conditions that have active medications?
-- Did I code the correct aftercare Z-code for post-op visits?
-- Did I pair BMI + obesity codes when BMI is documented?
-- Did I include laterality on EVERY lateralized condition?
-- Is my primary diagnosis correctly sequenced?
+### Ulcer Anatomic Site — CRITICAL
+- L97.1xx = pressure ulcer heel/ankle
+- L97.4xx = non-pressure ulcer of HEEL and MIDFOOT (calcaneus, dorsum of foot, midfoot)
+- L97.5xx = non-pressure ulcer of OTHER PART of foot (metatarsal heads, ball of foot, toes)
+- L97.3xx = non-pressure ulcer of ankle
+- The 5th metatarsal head, ball of foot, and lesser metatarsal heads → L97.5xx NOT L97.4xx
+- Plantar surface 5th MTH → L97.522 (left), L97.521 (right)
 
-## OUTPUT — Return valid JSON:
+### Sequencing
+- Primary = condition chiefly responsible for the encounter
+- Post-op follow-up: Z47.xx/Z48.xx aftercare is primary, underlying condition is secondary
+- DM with foot ulcer: E10.621/E11.621 FIRST, then ulcer site code (L97.xxx) second
+- Manifestation codes NEVER come before etiology codes
+- Post-op aftercare Z-codes: Z48.89 = encounter for other specified surgical aftercare (most post-op visits WITHOUT device removal); Z47.2 = ONLY when a device (pin, wire, plate) is ACTUALLY REMOVED at this visit
+
+### PMH Coding Rules
+- Code PMH conditions IF they have an active medication AND/OR influenced treatment decisions today
+- DO NOT code Z79.84 (long-term hypoglycemic drug), Z79.899 (other long-term drug) for routine outpatient podiatry visits — underlying conditions (E11.x, I10, E78.5) are sufficient
+- CKD: code N18.x if it affected today's treatment plan (e.g., drug withheld due to renal function)
+- CAD, Hypertension, Hyperlipidemia: code if actively managed with medication listed in the note
+
+### Do NOT code:
+- Symptom codes (pain, swelling, erythema) when a definitive diagnosis explains them
+- Z47/Z48 aftercare UNLESS this is explicitly a post-operative follow-up visit
+- BMI codes unless BMI is documented as a number in the note
+- Z79.84 or Z79.899 on outpatient podiatry encounters
+
+## OUTPUT — Return valid JSON only:
 {
   "icd10_codes": [
     {
@@ -57,8 +64,8 @@ Before finalizing, verify:
       "description": "Hallux valgus (acquired), right foot",
       "type": "primary",
       "confidence": 0.95,
-      "rationale": "Listed in assessment as primary complaint. Laterality: right foot documented.",
-      "supporting_text": "exact quote from note that supports this code",
+      "rationale": "Listed in assessment. Laterality: right foot documented.",
+      "supporting_text": "exact quote from note",
       "laterality": "RIGHT",
       "source_section": "ASSESSMENT"
     }
@@ -74,82 +81,117 @@ CRITICAL: Return ONLY valid JSON. No markdown, no code blocks."""
 # ---------------------------------------------------------------------------
 
 CPT_SYSTEM_PROMPT = """You are an expert AAPC-certified medical coder (CPC) specializing in PODIATRY CPT coding.
-Your ONLY task: assign CPT codes for procedures, E/M services, and imaging performed on this date of service.
+Your ONLY task: assign CPT codes for ALL services performed on this date of service.
 
-## MANDATORY PROCESS — Scan for ALL billable services:
+## 1. E/M (Evaluation & Management)
 
-### 1. E/M (Evaluation & Management)
-Determine if an E/M code applies:
-- New patient visit → 99202-99205
-- Established patient visit → 99211-99215
-- Calculate MDM level using the 2021+ framework:
-  * PROBLEMS: 1=minimal, 2=low (1 chronic stable or 2+ self-limited), 3=moderate (1 chronic worsening or 2+ chronic stable), 4=high
-  * DATA: 1=minimal, 2=limited (order/review tests), 3=moderate (independent interpretation of test), 4=extensive
-  * RISK: 1=minimal, 2=low (OTC drugs, minor surgery), 3=moderate (prescription drugs, minor surgery with risk factors), 4=high (major surgery, hospitalization)
-  * MDM = 2-of-3 highest. Low=2, Moderate=3, High=4.
-- If BOTH E/M AND procedure on same day → E/M gets modifier -25 ONLY if there was a separately identifiable evaluation beyond the procedure decision
+### New vs Established Patient — CRITICAL
+- NEW patient = not seen by this provider OR any provider of the same specialty/group in the PAST 3 YEARS
+- Look at the NOTE TYPE field: "NEW PATIENT" → 99202–99205; "ESTABLISHED PATIENT" → 99211–99215
+- NEVER assign 99211-99215 to a new patient visit. NEVER assign 99202-99205 to an established patient.
 
-### 2. SURGICAL PROCEDURES
-- Code ONLY procedures that were PERFORMED today (look for: "performed", "excised", "debrided", "avulsed", etc.)
+### AMA 2021 MDM Three-Axis Table (2-of-3 rule)
+MDM level = whichever level is met by AT LEAST 2 of 3 axes:
+
+**PROBLEMS axis:**
+- Minimal (1): 1 self-limited/minor problem
+- Low (2): 2+ self-limited problems; OR 1 stable chronic illness; OR 1 acute uncomplicated illness
+- Moderate (3): 1+ chronic illness with exacerbation/progression; OR 2+ stable chronic illnesses; OR new problem with uncertain prognosis; OR acute illness with systemic symptoms
+- High (4): Chronic illness with severe exacerbation threatening life or bodily function; OR acute or chronic illness requiring hospitalization
+
+**DATA axis:**
+- Minimal (1): No data reviewed or ordered
+- Limited (2): Ordered and/or reviewed tests, documents from external source; OR independent interpretation of test ordered by another provider
+- Moderate (3): Independent interpretation of test performed by another provider; OR discussion of test with ordering provider; OR independent historian; OR independent review of external records
+- Extensive (4): Independent interpretation of test AND discussion of management with external provider AND use of independent historian
+
+**RISK axis:**
+- Minimal (1): OTC medication management, rest, bandages, superficial dressings
+- Low (2): Prescription drug management; OR minor surgery WITHOUT identified patient risk factors
+- Moderate (3): Prescription drug management WITH minor surgery; OR minor surgery WITH identified risk factors (DM, obesity, age, anticoagulants); OR new diagnosis requiring further workup; OR diagnostic procedure requiring specialist consultation
+- High (4): Major surgery; OR parenteral controlled substances; OR drug therapy requiring intensive monitoring for toxicity; OR decision regarding hospitalization; OR decision not to resuscitate
+
+**E/M Level Assignment:**
+- 2-of-3 Minimal → 99202 (new) / 99212 (established)
+- 2-of-3 Low → 99202/99203 (new) / 99212/99213 (established)
+- 2-of-3 Moderate → 99204 (new) / 99214 (established)
+- 2-of-3 High → 99205 (new) / 99215 (established)
+
+**Elective surgery decision = MODERATE risk minimum.** Multiple comorbidities = MODERATE problems minimum.
+
+### Global Surgical Period — CRITICAL
+- If this is a post-op follow-up within a prior surgery's global period: use 99024 (post-op follow-up visit, no charge), NOT a billable E/M
+- 90-day global period applies to all major surgeries (28xxx bunion/foot reconstruction, 29893 endoscopic plantar fasciotomy, etc.)
+- 10-day global period applies to minor procedures (11750 nail matrixectomy, etc.)
+- The prior surgery information will be provided in the context if detected
+
+### Modifier -25 Rule — CRITICAL
+- Apply modifier -25 ONLY when BOTH conditions are true:
+  1. A separately identifiable E/M service was performed beyond the decision to perform a procedure
+  2. A BILLABLE PROCEDURE (surgical CPT with a global period > 0) was performed the SAME DAY
+- Diagnostic imaging (73xxx), labs (80xxx-89xxx) are NOT procedures — they do NOT trigger modifier -25
+- Example: 99204 + 73630 (X-ray only) → NO modifier -25 on E/M
+- Example: 99202 + 11750 (matrixectomy) → YES modifier -25 required
+
+### Medicare Routine Foot Care Compliance
+- For visits where ONLY routine diabetic foot care is performed (11721 nail debridement, 11057 callus), do NOT add a separate E/M unless a DISTINCT unrelated medical problem was evaluated and documented beyond the foot care scope
+
+## 2. SURGICAL PROCEDURES
+- Code ONLY procedures PERFORMED today (verbs: "performed", "excised", "debrided", "avulsed", "applied", "resected")
 - Do NOT code planned/scheduled/future procedures
-- Match the procedure description EXACTLY to the CPT code description:
-  * OPEN procedure → use open CPT code
-  * ENDOSCOPIC procedure → use endoscopic CPT code
-  * Check anatomical site: foot vs ankle vs toe
-  * Partial vs complete procedures
+- Match EXACTLY to CPT description: open vs endoscopic, partial vs complete, number of lesions
 
-### 3. IMAGING / RADIOLOGY
-- Code X-rays if performed on this date of service
-- Common podiatry imaging CPTs:
-  * 73620 = foot X-ray, 2 views
-  * 73630 = foot X-ray, complete (3+ views)
-  * 73650 = calcaneus X-ray
-  * 73660 = toe X-ray
-  * 73600 = ankle X-ray, 2 views
-  * 73610 = ankle X-ray, complete (3+ views)
-- Look for phrases: "X-ray", "radiograph", "imaging performed", "views obtained"
-- If the note says "X-ray (3 views)" → code 73630 (complete), NOT 73620 (2 views)
+### Callus/Corn Paring — Count Lesions Exactly
+- 11055 = paring of 1 lesion
+- 11056 = paring of 2-3 lesions
+- 11057 = paring of 4 or MORE lesions
+- Count each callus/corn individually: "bilateral 1st and 5th MTH" = 4 lesions → 11057
 
-### 4. MODIFIERS — Apply ALL applicable:
-- **-RT** (right side), **-LT** (left side) — on ALL lateralized procedures
-- **-TA** = right great toe, **-T5** = left great toe
-- **-T1** = right 2nd toe, **-T6** = left 2nd toe
-- **-T2** = right 3rd toe, **-T7** = left 3rd toe
-- **-T3** = right 4th toe, **-T8** = left 4th toe
-- **-T4** = right 5th toe, **-T9** = left 5th toe
-- **-25** = significant, separately identifiable E/M on same day as procedure
-- **-59/XE/XS** = distinct procedural service (for NCCI edit bypass)
-- **-50** = bilateral procedure
+### NCCI Bundling — CRITICAL
+- Before finalizing CPT codes, check each pair: does one procedure's description INCLUDE another service you've coded?
+- 28119 (calcaneal spur ostectomy "with or without plantar fascial release") INCLUDES plantar fascial release → do NOT also code 29893 or 28060 for the fascial component
+- If CPT A's description says "with or without B" and you coded B separately → REMOVE the separate B code
+- When uncertain, check: would billing both codes for the same anatomic site on the same day create a bundling conflict?
 
-### COMPLETENESS CHECK
-Before finalizing, verify:
-- Did I code an E/M visit if the note documents evaluation (history, exam, MDM)?
-- Did I code EVERY imaging study mentioned as performed?
-- Did I code ALL surgical procedures documented as completed?
-- Did I apply laterality modifiers (RT/LT) to every lateralized procedure?
-- Did I apply toe modifiers (TA/T1-T9) for toe-specific procedures?
-- Did I add modifier -25 to E/M if procedures were also performed?
-- Did I match the surgical approach (open vs endoscopic) to the correct CPT?
+## 3. IMAGING / RADIOLOGY
+- 73620 = foot X-ray, 2 views; 73630 = foot X-ray, 3+ views (complete)
+- 73600 = ankle X-ray, 2 views; 73610 = ankle X-ray, 3+ views
+- Apply RT or LT laterality modifier to all imaging
+
+## 4. MODIFIERS
+- RT/LT = right/left side on ALL lateralized procedures and imaging
+- TA = right great toe; T5 = left great toe
+- T1-T4 = right 2nd-5th toes; T6-T9 = left 2nd-5th toes
+- 50 = bilateral procedure (same procedure both sides, same session)
+- 59/XE/XS/XP/XU = distinct procedural service (NCCI edit bypass — requires documentation of distinct service)
 
 ## OUTPUT — Return valid JSON:
 {
   "cpt_codes": [
     {
-      "code": "11750",
-      "description": "Excision of nail and nail matrix, partial or complete, for permanent removal",
+      "code": "99204",
+      "description": "...",
       "confidence": 0.95,
-      "modifiers": ["RT", "TA"],
-      "modifier_reasoning": ["Right foot — RT", "Great toe — TA"],
-      "source": "procedure",
-      "mdm_details": {},
+      "modifiers": [],
+      "modifier_reasoning": ["No modifier -25 — no same-day procedure performed; imaging (73630) is diagnostic not procedural"],
+      "source": "E/M",
+      "mdm_details": {
+        "problems_score": 3,
+        "data_score": 2,
+        "risk_score": 3,
+        "mdm_level": "moderate",
+        "problems_rationale": "...",
+        "data_rationale": "...",
+        "risk_rationale": "..."
+      },
       "procedure_status": "completed",
-      "laterality": "RT",
-      "linked_diagnoses": ["L60.0", "L08.9"],
+      "laterality": null,
+      "linked_diagnoses": ["M20.11", "E11.9"],
       "units": 1,
-      "evidence_spans": ["exact quote from note"]
+      "evidence_spans": ["exact quote"]
     }
   ],
-  "em_level_reasoning": "Full MDM calculation if E/M coded"
+  "em_level_reasoning": "Full MDM calculation including all three axes"
 }
 
 CRITICAL: Return ONLY valid JSON. No markdown, no code blocks."""
@@ -159,46 +201,59 @@ CRITICAL: Return ONLY valid JSON. No markdown, no code blocks."""
 # PASS 3 — HCPCS Level II + SNOMED
 # ---------------------------------------------------------------------------
 
-HCPCS_SNOMED_SYSTEM_PROMPT = """You are an expert medical coder. Assign HCPCS Level II codes and SNOMED CT codes.
+HCPCS_SNOMED_SYSTEM_PROMPT = """You are an expert medical coder. Assign HCPCS Level II supply/DME codes and SNOMED CT clinical codes.
 
 ## HCPCS RULES
-1. ONLY code items that were DISPENSED/PROVIDED/APPLIED on this date of service
-2. Look for action verbs: "applied", "dispensed", "fitted", "provided", "placed"
-3. Do NOT code items that were "prescribed", "ordered", "recommended" but not given in office
-4. Common podiatry HCPCS:
-   - L3260 = surgical shoe
-   - L4361 = walking boot (CAM boot, pneumatic boot)
-   - L3000-L3030 = foot orthotics
-   - A6021-A6024 = wound dressings (collagen, foam, etc.)
-   - Q4100+ = skin substitute grafts
-5. "Continue surgical shoe" for existing patient = do NOT code (already dispensed previously)
-6. "Applied CAM walker boot" = code L4361 (dispensed on this date)
+1. ONLY code items that were DISPENSED/PROVIDED/APPLIED/FITTED on this date of service
+2. Look for action verbs: "applied", "dispensed", "fitted", "provided", "placed", "replaced"
+3. Do NOT code items that were "prescribed", "ordered", "recommended", "referred" but not physically given today
+4. Do NOT code A5513 (diabetic shoe insert) unless the insert was physically given/replaced at this visit
+5. Named wound products have directly assignable codes:
+   - Aquacel Ag → A6196 (alginate wound cover)
+   - MedHoney → A6248
+   - Mepilex → A6212 (foam non-adhesive)
+   - Collagen dressings → A6020-A6024 range
+6. Cast supplies are separately billable when TCC is applied (Q4038/Q4039 based on material)
+7. For supplies where the exact type is unclear, set needs_review=true with reason
 
 ## SNOMED CT RULES
-1. Assign SNOMED codes for ALL clinical findings, disorders, procedures, and body structures
-2. Cover: primary diagnosis, secondary diagnoses, procedures performed, anatomical sites
-3. Use standard SNOMED CT concept IDs
+1. Assign SNOMED codes for ALL clinical findings, disorders, procedures, and anatomical sites documented
+2. Use the MOST SPECIFIC concept available — never use a parent/root concept when a specific child exists
+3. AVOID these generic root concepts (too broad, flag if used):
+   - 71388002 (Surgical procedure — root of ALL surgery, useless)
+   - 404684003 (Clinical finding — root)
+   - 64572001 (Disease — root)
+   - 123037004 (Body structure — root)
+4. For surgical procedures: find the specific procedure concept, not a parent category
+   - "Endoscopic plantar fasciotomy" → 239175002 (Plantar fasciotomy), NOT 71388002
+   - "Calcaneal spur excision" → 274203009 (Excision of calcaneal spur), NOT 71388002
+5. DEDUPLICATION: Do NOT assign the same concept_id to two different clinical terms
+   - If the same concept_id appears for two different entity texts, one mapping is wrong — find the correct ID for each
+6. Confidence calibration: if you must use a parent concept because no specific one exists, set confidence ≤ 0.4
 
 ## OUTPUT — Return valid JSON:
 {
   "hcpcs_codes": [
     {
-      "code": "L4361",
-      "description": "Walking boot, pneumatic",
+      "code": "A6196",
+      "description": "Alginate wound cover, pad size 16 sq in or less",
       "confidence": 0.90,
       "modifiers": [],
-      "linked_diagnoses": ["M72.2"],
-      "evidence_spans": ["Applied compression dressing and CAM walker boot"],
-      "rationale": "CAM walker boot applied in office post-operatively"
+      "units": 1,
+      "linked_diagnoses": ["L97.522"],
+      "rationale": "Aquacel Ag dressing applied and explicitly documented.",
+      "supporting_text": "PLAN: Applied Aquacel Ag dressing.",
+      "needs_review": false,
+      "review_reason": null
     }
   ],
   "snomed_codes": [
     {
-      "concept_id": "202735001",
-      "description": "Plantar fasciitis",
-      "entity_text": "plantar fasciitis",
-      "category": "disorder",
-      "confidence": 0.90
+      "concept_id": "239175002",
+      "description": "Plantar fasciotomy",
+      "entity_text": "endoscopic plantar fasciotomy",
+      "category": "procedure",
+      "confidence": 0.95
     }
   ]
 }
@@ -207,60 +262,81 @@ CRITICAL: Return ONLY valid JSON. No markdown, no code blocks."""
 
 
 # ---------------------------------------------------------------------------
-# PASS 4 — Self-Verification & Correction
+# PASS 4 — Self-Verification & Correction (Anchor-and-Audit)
 # ---------------------------------------------------------------------------
 
-VERIFICATION_SYSTEM_PROMPT = """You are a senior certified medical coding auditor (CCS, CPC-A). Your job is to AUDIT and CORRECT a set of medical codes assigned to a podiatry clinical note.
+VERIFICATION_SYSTEM_PROMPT = """You are a senior certified medical coding auditor (CCS, CPC-A, CPMA). Audit and correct a complete code set for a podiatry clinical note.
 
-## ABSOLUTE RULES — READ BEFORE AUDITING
+## ABSOLUTE RULES — MUST READ BEFORE AUDITING
 
-### RULE 1: PROTECTED CODES — NEVER REMOVE THESE
-Codes derived from diagnoses EXPLICITLY LISTED in the physician's ASSESSMENT/DIAGNOSES section are PROTECTED. You CANNOT remove them. The physician documented them as distinct diagnoses — that is ground truth. You may CHANGE the specific code (e.g., make it more specific) but you CANNOT remove the diagnosis entirely.
+### RULE 1: PROTECTED CODES — NEVER REMOVE
+Codes derived from diagnoses EXPLICITLY LISTED in the Assessment/Diagnoses section are PROTECTED.
+You CANNOT remove them. You may change the specific code (e.g., make it more specific) but CANNOT eliminate the diagnosis.
+Protected anchors will be listed below.
 
-You will receive a list of PROTECTED ANCHORS below. Every anchor MUST have a corresponding code in the final output.
+### RULE 2: PROTECT CORRECTLY-INFERRED ENCOUNTER CODES
+Post-operative aftercare codes derived from the clinical context are ALSO protected:
+- Z48.89 (surgical aftercare) is correct for post-op visits when NO device is being removed
+- Z47.2 (removal of internal fixation device) is ONLY correct when a pin, wire, K-wire, or plate is ACTUALLY REMOVED at this visit
+- If the note says "hardware removal scheduled for week 4" → the current visit uses Z48.89, NOT Z47.2
+- Do NOT change Z48.89 to Z47.2 unless device removal is EXPLICITLY documented as occurring today
 
-### RULE 2: ASYMMETRIC THRESHOLDS
-- To KEEP a code: you need reasonable support from the note
-- To REMOVE a code: you need ABSOLUTE CERTAINTY it is unsupported AND it is NOT a protected anchor
-- When in doubt: KEEP the code and flag for review rather than removing it
+### RULE 3: ASYMMETRIC THRESHOLDS
+- To KEEP a code: reasonable support from note is sufficient
+- To REMOVE a code: you must have ABSOLUTE CERTAINTY it is unsupported AND it is NOT a protected anchor
+- When in doubt: KEEP the code and set needs_review=true rather than removing
 
-### RULE 3: REMOVAL REQUIRES QUOTED JUSTIFICATION
-You may ONLY remove a code if:
-1. It is NOT derived from the Assessment section, AND
-2. It is NOT a PMH condition with active medication, AND
-3. You provide the EXACT quote from the note proving it should not be coded
+### RULE 4: REMOVAL REQUIRES QUOTED JUSTIFICATION
+You may ONLY remove a code if ALL of these are true:
+1. NOT derived from the Assessment section
+2. NOT a PMH condition with active medication
+3. NOT a correctly-inferred encounter/aftercare code
+4. You provide the EXACT quote from the note proving it should not be coded
 
 ## AUDIT CHECKLIST
 
-### Completeness Checks (ADD what's missing)
-1. Is EVERY diagnosis in the ASSESSMENT section coded? (check each bullet point)
-2. Are ALL PMH conditions with active medications coded?
-3. Is an E/M code assigned if the note documents HPI + exam + MDM? (history, exam, and plan = E/M visit)
-4. Are ALL imaging studies PERFORMED on this date coded?
-5. Are ALL surgical procedures PERFORMED on this date coded?
-6. Is modifier -25 on E/M when procedures/imaging also billed?
-7. Are ALL laterality modifiers applied? (RT/LT)
-8. Are toe modifiers applied? (TA for great toe, T1-T9 for specific toes)
-9. For post-op visits: is the underlying condition coded alongside the aftercare Z-code?
+### A. Completeness — ADD what is missing
+1. Is every diagnosis in the ASSESSMENT section coded?
+2. Are all PMH conditions with active medications coded as secondary?
+3. Is an E/M code assigned if the note documents HPI + exam + MDM?
+4. Are all imaging studies PERFORMED today coded?
+5. Are all surgical procedures PERFORMED today coded?
+6. Is modifier -25 on E/M ONLY when a billable PROCEDURE (not imaging) was also performed?
+7. Are all laterality modifiers applied (RT/LT)?
+8. For post-op visits within global period: was 99024 used instead of a billable E/M?
 
-### Over-Coding Checks (REMOVE only if certain and NOT protected)
-1. Do NOT add symptom codes (pain, swelling) when a definitive diagnosis explains them
-2. Do NOT add Z47/Z48 aftercare codes unless this is a follow-up for PRIOR surgery
-3. Do NOT add BMI codes unless BMI is explicitly documented as a number
-4. Do NOT add codes for conditions not documented anywhere in the note
+### B. Over-Coding — REMOVE only if certain and NOT protected
+1. Do NOT add symptom codes when a definitive diagnosis explains them
+2. Do NOT add Z47/Z48 aftercare unless this is explicitly a follow-up for prior surgery
+3. Do NOT add Z79.84, Z79.899 long-term drug codes on outpatient podiatry encounters
+4. Do NOT code both E11.9 and E11.40 (or any more-specific DM code) simultaneously
+5. Do NOT code A5513/A5512 diabetic shoes unless physically dispensed today (not just referred)
 
-### Quality Checks
-1. Does every CPT have at least one linked ICD-10 diagnosis?
-2. Is the primary diagnosis correctly sequenced?
-3. Are there any NCCI edit conflicts between CPT codes?
+### C. NCCI Bundling — CHECK EVERY CPT PAIR
+For each pair of CPT codes, ask: does one code's description include the other service?
+- If CPT X description says "with or without Y" and you've coded Y separately → REMOVE Y
+- 28119 (calcaneal spur ostectomy "with or without plantar fascial release"):
+  * If 28119 is in the code set, REMOVE any separate plantar fascial release code (29893, 28060)
+  * If 29893 is in the code set, REMOVE any separate calcaneal spur code that includes fascial release
+- When a bundling conflict is identified, keep the more comprehensive code and remove the component
+
+### D. MDM Level Verification
+- Surgical decision (elective surgery scheduled) = MODERATE risk, MODERATE problems minimum → 99204/99205
+- Post-op follow-up within 90-day global period = 99024 (zero charge), not 99213/99214
+- Modifier -25: ONLY when a billable same-day procedure (with global period > 0) was performed
+- Imaging (73xxx) does NOT trigger modifier -25
+
+### E. SNOMED Consistency
+- Check for duplicate concept_id assigned to different entity texts → flag the incorrect one
+- Check for root/parent concepts (71388002, 404684003, 64572001) → flag with confidence ≤ 0.4
 
 ## OUTPUT — Return valid JSON:
 {
   "corrections_made": [
     {
-      "type": "ADDED|REMOVED|CHANGED|RESEQUENCED|FLAGGED",
+      "type": "ADDED|REMOVED|CHANGED|RESEQUENCED|FLAGGED|RETAINED|SELECTED|EXCLUDED",
       "code": "73630",
-      "reason": "X-ray (3 views) documented as performed but was not coded",
+      "reason": "X-ray (3 views) documented as performed but not coded",
       "evidence": "exact quote from note"
     }
   ],
@@ -268,8 +344,12 @@ You may ONLY remove a code if:
   "cpt_codes": [ ... corrected COMPLETE list ... ],
   "hcpcs_codes": [ ... corrected COMPLETE list ... ],
   "snomed_codes": [ ... corrected COMPLETE list ... ],
-  "em_level_reasoning": "...",
-  "audit_notes": "Summary of audit findings"
+  "em_level_reasoning": "Full reasoning including new/established patient designation and MDM axes",
+  "audit_notes": "Summary of all audit actions taken",
+  "auto_coding_review_reasons": [
+    "Detailed explanation of each correction or flag for human review"
+  ],
+  "auto_coding_summary": "One-paragraph summary of the coding set and any corrections made"
 }
 
 CRITICAL: Return ONLY valid JSON. No markdown, no code blocks."""
@@ -286,18 +366,20 @@ def assign_codes(
     entities: list[dict],
     rag_candidates: dict,
     vision_context: dict | None = None,
+    prior_surgery_info: dict | None = None,
 ) -> tuple[dict, dict]:
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     note_context = _build_note_context(note_sections, patient_metadata)
     entity_summary = _format_entities(entities)
-    candidate_summary = _format_candidates(rag_candidates)
     vision_block = _format_vision_context(vision_context) if vision_context else ""
+    global_block = _format_global_period_context(prior_surgery_info) if prior_surgery_info else ""
 
     # --- PASS 1: ICD-10-CM ---
     logger.info("  Pass 1/4: ICD-10-CM diagnosis coding...")
     icd_prompt = f"""{note_context}
 {vision_block}
+{global_block}
 
 ## EXTRACTED CLINICAL ENTITIES
 {entity_summary}
@@ -305,10 +387,10 @@ def assign_codes(
 ## ICD-10-CM CANDIDATE CODES (from official FY2026 database via semantic search)
 {_format_candidates_for_system(rag_candidates, 'icd10')}
 
-Select the correct ICD-10-CM codes. PREFER candidates from the list above.
-Code EVERY diagnosis in the ASSESSMENT section AND every PMH condition with active medication.
-Do NOT code symptoms (pain, swelling) when a definitive diagnosis explains them.
-Do NOT add Z47/Z48 aftercare codes unless this IS a follow-up visit for a PRIOR surgery."""
+Assign ICD-10-CM codes. PREFER candidates from the list above (all verified in official database).
+Code EVERY diagnosis in the ASSESSMENT section AND every PMH condition with active medication that affected care.
+Follow the anatomic ulcer site rules exactly (L97.4xx vs L97.5xx).
+Do NOT code Z79.84 or Z79.899 on this outpatient podiatry encounter."""
 
     icd_raw, usage = chat_completion(ICD_SYSTEM_PROMPT, icd_prompt, temperature=CODING_TEMPERATURE, max_tokens=2500)
     _add_usage(total_usage, usage)
@@ -318,8 +400,18 @@ Do NOT add Z47/Z48 aftercare codes unless this IS a follow-up visit for a PRIOR 
     # --- PASS 2: CPT ---
     logger.info("  Pass 2/4: CPT procedure/E&M/imaging coding...")
     icd_summary = _summarize_icd(icd_result.get("icd10_codes", []))
+    note_type = patient_metadata.get("note_type", "").upper()
+    is_new_patient = "NEW" in note_type
+    is_post_op = (prior_surgery_info or {}).get("is_post_op_visit", False)
+    days_post_op = (prior_surgery_info or {}).get("days_post_op")
+    prior_cpt = (prior_surgery_info or {}).get("prior_surgery_cpt", "")
+
     cpt_prompt = f"""{note_context}
 {vision_block}
+{global_block}
+
+## PATIENT TYPE: {"NEW PATIENT → Use 99202-99205 ONLY" if is_new_patient else "ESTABLISHED PATIENT → Use 99211-99215 ONLY"}
+{"## ⚠ POST-OP VISIT: Prior surgery CPT " + prior_cpt + ", Day " + str(days_post_op) + " post-op → Check global period → Use 99024 if within global period, NOT a billable E/M" if is_post_op else ""}
 
 ## ASSIGNED ICD-10-CM CODES (from Pass 1)
 {icd_summary}
@@ -330,9 +422,9 @@ Do NOT add Z47/Z48 aftercare codes unless this IS a follow-up visit for a PRIOR 
 ## CPT CANDIDATE CODES (from official database via semantic search)
 {_format_candidates_for_system(rag_candidates, 'cpt')}
 
-Select the correct CPT codes. PREFER candidates from the list above.
-Link each CPT to supporting ICD-10-CM codes from the list above.
-Code ALL performed procedures, ALL imaging, and E/M if applicable."""
+Assign CPT codes. Link each CPT to supporting ICD-10-CM codes.
+Check EVERY CPT pair for NCCI bundling before finalizing.
+Apply modifier -25 ONLY when a billable procedure (not imaging) was performed same day."""
 
     cpt_raw, usage = chat_completion(CPT_SYSTEM_PROMPT, cpt_prompt, temperature=CODING_TEMPERATURE, max_tokens=2500)
     _add_usage(total_usage, usage)
@@ -353,7 +445,8 @@ Code ALL performed procedures, ALL imaging, and E/M if applicable."""
 ## HCPCS CANDIDATE CODES (from official database via semantic search)
 {_format_candidates_for_system(rag_candidates, 'hcpcs')}
 
-Assign HCPCS codes for supplies/DME dispensed today and SNOMED codes for all clinical concepts."""
+Assign HCPCS codes for supplies dispensed today and SNOMED codes for all clinical concepts.
+Only code supplies that were PHYSICALLY given/applied today — not ordered or prescribed."""
 
     hcpcs_raw, usage = chat_completion(HCPCS_SNOMED_SYSTEM_PROMPT, hcpcs_prompt, temperature=CODING_TEMPERATURE, max_tokens=2500)
     _add_usage(total_usage, usage)
@@ -370,13 +463,15 @@ Assign HCPCS codes for supplies/DME dispensed today and SNOMED codes for all cli
         "em_level_reasoning": cpt_result.get("em_level_reasoning", ""),
     }
 
-    # Build protected anchors from Assessment section + PMH
     assessment_text = note_sections.get("assessment_diagnoses", "")
     pmh_text = note_sections.get("pmh_medications_allergies", "")
-    anchor_block = _build_anchor_block(assessment_text, pmh_text, vision_context)
+    anchor_block = _build_anchor_block(assessment_text, pmh_text, vision_context, prior_surgery_info)
 
     verify_prompt = f"""{note_context}
 {vision_block}
+{global_block}
+
+## PATIENT TYPE: {"NEW PATIENT" if is_new_patient else "ESTABLISHED PATIENT"}
 
 {anchor_block}
 
@@ -386,7 +481,7 @@ Assign HCPCS codes for supplies/DME dispensed today and SNOMED codes for all cli
 ## CURRENTLY ASSIGNED CODES (to audit)
 {json.dumps(combined, indent=2)}
 
-## RAG CANDIDATE CODES (for reference — verified to exist in official databases)
+## RAG CANDIDATE CODES (verified in official databases)
 ### ICD-10-CM Candidates
 {_format_candidates_for_system(rag_candidates, 'icd10')}
 
@@ -397,11 +492,15 @@ Assign HCPCS codes for supplies/DME dispensed today and SNOMED codes for all cli
 {_format_candidates_for_system(rag_candidates, 'hcpcs')}
 
 ## AUDIT INSTRUCTIONS
-1. Check every PROTECTED ANCHOR above has a corresponding code. If not, ADD it.
-2. Check completeness: E/M visit? Imaging? Procedures? Supplies? All coded?
-3. Only REMOVE codes if they have ZERO documentation support AND are NOT protected anchors.
-4. When in doubt, KEEP the code and flag with needs_review=true.
-5. Return the COMPLETE corrected code set."""
+1. Verify every PROTECTED ANCHOR has a code. If missing, ADD it.
+2. Check NCCI bundling for every CPT pair. Remove bundled component codes.
+3. Verify modifier -25 logic: only on E/M when a billable procedure (not imaging) was performed.
+4. Check new/established patient type matches E/M code range.
+5. Check global period: if post-op visit within global period, use 99024.
+6. Remove Z79.84, Z79.899 if present — not appropriate for outpatient podiatry.
+7. Remove duplicate DM codes (e.g., E11.9 when E11.40 already coded).
+8. Check SNOMED for duplicate concept IDs and root-concept fallbacks.
+9. Return the COMPLETE corrected code set with auto_coding_review_reasons and auto_coding_summary."""
 
     verify_raw, usage = chat_completion(VERIFICATION_SYSTEM_PROMPT, verify_prompt, temperature=CODING_TEMPERATURE, max_tokens=4096)
     _add_usage(total_usage, usage)
@@ -423,6 +522,8 @@ Assign HCPCS codes for supplies/DME dispensed today and SNOMED codes for all cli
         "em_level_reasoning": verified.get("em_level_reasoning", combined["em_level_reasoning"]),
         "corrections_made": corrections,
         "audit_notes": verified.get("audit_notes", ""),
+        "auto_coding_review_reasons": verified.get("auto_coding_review_reasons", []),
+        "auto_coding_summary": verified.get("auto_coding_summary", ""),
     }
 
     logger.info(
@@ -532,12 +633,17 @@ def _safe_parse(raw: str, required_key: str) -> dict:
         return {required_key: []}
 
 
-def _build_anchor_block(assessment_text: str, pmh_text: str, vision_ctx: dict | None) -> str:
-    """Build the PROTECTED ANCHORS section from Assessment + PMH + Vision context."""
+def _build_anchor_block(
+    assessment_text: str,
+    pmh_text: str,
+    vision_ctx: dict | None,
+    prior_surgery_info: dict | None = None,
+) -> str:
+    """Build the PROTECTED ANCHORS section from Assessment + PMH + Vision + prior surgery context."""
     lines = [
         "## PROTECTED ANCHORS — These MUST have corresponding codes in the final output",
         "",
-        "### Assessment Section Diagnoses (NEVER remove these — physician documented them)",
+        "### Assessment Section Diagnoses (NEVER remove — physician documented these)",
     ]
 
     if assessment_text:
@@ -550,10 +656,21 @@ def _build_anchor_block(assessment_text: str, pmh_text: str, vision_ctx: dict | 
 
     lines.append("")
     lines.append("### PMH Conditions with Active Medications (must be coded as secondary)")
-
     if pmh_text:
-        lines.append(f'  Source text: "{pmh_text[:300]}"')
-        lines.append("  Every condition in PMH that has a corresponding medication MUST be coded.")
+        lines.append(f'  Source text: "{pmh_text[:400]}"')
+        lines.append("  Every PMH condition with an active medication MUST be coded.")
+
+    # Post-op aftercare anchor
+    if prior_surgery_info and prior_surgery_info.get("is_post_op_visit"):
+        days = prior_surgery_info.get("days_post_op")
+        desc = prior_surgery_info.get("prior_surgery_description", "prior surgery")
+        lines.append("")
+        lines.append("### Post-Op Aftercare Code (PROTECTED — inferred from clinical context)")
+        lines.append(f'  - ANCHOR: Aftercare code for post-op follow-up after "{desc}"')
+        lines.append(f"  - Days post-op: {days}")
+        lines.append("  - Z48.89 is correct UNLESS a device (K-wire, pin, plate) is explicitly removed today")
+        lines.append("  - Z47.2 is ONLY correct when hardware removal is documented as performed today")
+        lines.append("  - DO NOT change Z48.89 to Z47.2 unless today's note explicitly states device removal")
 
     if vision_ctx:
         procs = vision_ctx.get("procedures_performed_today", [])
@@ -579,12 +696,11 @@ def _build_anchor_block(assessment_text: str, pmh_text: str, vision_ctx: dict | 
                 lines.append(f'  - ANCHOR: "{s}"')
 
         note_cat = vision_ctx.get("note_category", "")
-        if note_cat and ("visit" in note_cat or "followup" in note_cat or "follow_up" in note_cat or "post_op" in note_cat):
+        if note_cat and any(kw in note_cat for kw in ("visit", "followup", "follow_up", "post_op", "urgent")):
             lines.append("")
             lines.append("### E/M Visit Detection")
             lines.append(f"  Note category: {note_cat}")
-            lines.append("  If this is a patient visit (not surgery-only), an E/M code MUST be assigned")
-            lines.append("  if the note documents history + examination + medical decision making.")
+            lines.append("  If this is a patient visit with HPI + exam + plan, an E/M MUST be coded.")
 
     return "\n".join(lines)
 
@@ -592,7 +708,7 @@ def _build_anchor_block(assessment_text: str, pmh_text: str, vision_ctx: dict | 
 def _format_vision_context(ctx: dict) -> str:
     if not ctx:
         return ""
-    parts = ["## VISION EXTRACTION CONTEXT (from intelligent PDF reading)"]
+    parts = ["## VISION EXTRACTION CONTEXT (from intelligent PDF reading — ground truth)"]
     parts.append(f"- Note category: {ctx.get('note_category', 'unknown')}")
     procs = ctx.get("procedures_performed_today", [])
     parts.append(f"- Procedures PERFORMED today: {procs if procs else 'NONE'}")
@@ -600,8 +716,25 @@ def _format_vision_context(ctx: dict) -> str:
     parts.append(f"- Imaging PERFORMED today: {imgs if imgs else 'NONE'}")
     sups = ctx.get("supplies_dispensed_today", [])
     parts.append(f"- Supplies DISPENSED today: {sups if sups else 'NONE'}")
-    parts.append("NOTE: Only code items listed above as performed/dispensed. This is ground truth from reading the PDF.")
+    parts.append("NOTE: Only code items listed above as performed/dispensed today.")
     return "\n".join(parts)
+
+
+def _format_global_period_context(info: dict) -> str:
+    if not info or not info.get("is_post_op_visit"):
+        return ""
+    days = info.get("days_post_op")
+    desc = info.get("prior_surgery_description", "prior surgery")
+    cpt = info.get("prior_surgery_cpt", "unknown")
+    return (
+        f"## GLOBAL SURGICAL PERIOD CONTEXT\n"
+        f"- This is a POST-OPERATIVE FOLLOW-UP visit\n"
+        f"- Prior surgery: {desc} (CPT {cpt})\n"
+        f"- Days post-op: {days}\n"
+        f"- Major surgeries (28xxx, 29893, etc.) have a 90-day global period\n"
+        f"- During the global period: post-op visits use CPT 99024, NOT a billable E/M\n"
+        f"- The pre-op day + surgery day + global days are included in the surgical package fee"
+    )
 
 
 def _add_usage(total: dict, new: dict):

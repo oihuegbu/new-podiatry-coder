@@ -29,6 +29,10 @@ MUE_FILE = ATTACHMENTS_DIR / "latest_mue_practitioner.json"
 LCD_FILE = ATTACHMENTS_DIR / "podiatry_routine_foot_care_qualifying_dx.json"
 NOTES_DIR = ATTACHMENTS_DIR
 
+# --- Supplementary rule tables (bundled with system) ---
+GLOBAL_PERIODS_FILE = DATA_DIR / "global_periods.json"
+SNOMED_ROOTS_FILE = DATA_DIR / "snomed_root_concepts.json"
+
 # --- RAG settings ---
 RAG_TOP_K: int = 15
 RAG_SIMILARITY_THRESHOLD: float = 0.35
