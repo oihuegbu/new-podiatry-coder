@@ -1,9 +1,23 @@
 from pydantic import BaseModel, Field
 
 
+class SupportingCondition(BaseModel):
+    """PMH-sourced or advisory ICD codes — informational, not placed on the billable claim."""
+    code: str
+    description: str = ""
+    type: str = "advisory"
+    confidence: float = 0.0
+    rationale: str = ""
+    supporting_text: str = ""
+    source_section: str = ""
+    billable_tier: str = "advisory"
+    needs_review: bool = True
+    review_reason: str | None = None
+
+
 class ClinicalEntity(BaseModel):
     text: str = Field(description="Exact text span from clinical note")
-    category: str = Field(description="diagnosis|procedure|medication|supply|finding|body_structure")
+    category: str = Field(description="diagnosis|procedure|medication|supply|finding|body_structure|allergy")
     clinical_term: str = Field(description="Normalized clinical term")
     laterality: str | None = Field(default=None, description="RIGHT|LEFT|BILATERAL")
     specificity: str | None = Field(default=None, description="Additional specificity details")
@@ -100,6 +114,7 @@ class CodingResult(BaseModel):
     patient_metadata: dict = Field(default_factory=dict)
     note_sections: dict = Field(default_factory=dict)
     icd_codes: list[ICDCode] = Field(default_factory=list)
+    supporting_conditions: list[SupportingCondition] = Field(default_factory=list)
     cpt_codes: list[CPTCode] = Field(default_factory=list)
     hcpcs_codes: list[HCPCSCode] = Field(default_factory=list)
     snomed_codes: list[SNOMEDCode] = Field(default_factory=list)

@@ -97,7 +97,6 @@ class MedicalCodingPipeline:
         logger.info("[4/5] Assigning codes (4-pass: ICD → CPT → HCPCS → Verify)...")
         entity_dicts = [e.model_dump() for e in entities]
 
-        # Pass vision context to coding engine
         vision_context = {
             "note_category": note_category,
             "procedures_performed_today": procedures_today,
@@ -117,7 +116,12 @@ class MedicalCodingPipeline:
 
         # Step 5: Validation
         logger.info("[5/5] Validating codes...")
-        validation = self.validator.validate(coding_result, prior_surgery_info=prior_surgery_info)
+        plan_text = sections.get("plan", "")
+        validation = self.validator.validate(
+            coding_result,
+            prior_surgery_info=prior_surgery_info,
+            note_plan_text=plan_text,
+        )
 
         elapsed = time.time() - start
 
@@ -130,6 +134,7 @@ class MedicalCodingPipeline:
             note_sections={k: v[:200] + "..." if len(v) > 200 else v
                            for k, v in sections.items() if k != "full_text"},
             icd_codes=[self._to_icd(c) for c in coding_result.get("icd10_codes", [])],
+            supporting_conditions=[self._to_supporting(c) for c in coding_result.get("supporting_conditions", [])],
             cpt_codes=[self._to_cpt(c) for c in coding_result.get("cpt_codes", [])],
             hcpcs_codes=[self._to_hcpcs(c) for c in coding_result.get("hcpcs_codes", [])],
             snomed_codes=[self._to_snomed(c) for c in coding_result.get("snomed_codes", [])],
@@ -146,7 +151,6 @@ class MedicalCodingPipeline:
             api_usage=usage,
             **{k: v for k, v in validation.items()
                if k not in ("auto_coding_review_reasons", "auto_coding_summary")},
-            # Merge LLM-generated review reasons with rule-based reasons
             auto_coding_review_reasons=(
                 coding_result.get("auto_coding_review_reasons", [])
                 + validation.get("auto_coding_review_reasons", [])
@@ -188,10 +192,13 @@ class MedicalCodingPipeline:
         from app.models.schemas import ICDCode
         return ICDCode(**{k: v for k, v in raw.items() if k in ICDCode.model_fields})
 
+    def _to_supporting(self, raw: dict):
+        from app.models.schemas import SupportingCondition
+        return SupportingCondition(**{k: v for k, v in raw.items() if k in SupportingCondition.model_fields})
+
     def _to_cpt(self, raw: dict):
         from app.models.schemas import CPTCode
         data = {k: v for k, v in raw.items() if k in CPTCode.model_fields}
-        # Ensure dict fields default to empty dict when LLM returns null
         if data.get("mdm_details") is None:
             data["mdm_details"] = {}
         return CPTCode(**data)
@@ -208,9 +215,13 @@ class MedicalCodingPipeline:
         logger.info(f"\n--- RESULTS: {r.document_id} ---")
         logger.info(f"  Tier: {r.auto_coding_tier} | Confidence: {r.auto_coding_confidence} | Audit: {r.pre_submission_audit_score}")
         logger.info(f"  Time: {r.processing_time:.1f}s")
-        logger.info(f"  ICD-10-CM:")
+        logger.info(f"  ICD-10-CM (billable):")
         for c in r.icd_codes:
             logger.info(f"    [{c.type:>9}] {c.code:>8} — {c.description[:55]}")
+        if r.supporting_conditions:
+            logger.info(f"  Supporting Conditions (advisory):")
+            for c in r.supporting_conditions:
+                logger.info(f"    [advisory] {c.code:>8} — {c.description[:55]}")
         logger.info(f"  CPT:")
         for c in r.cpt_codes:
             mods = ",".join(c.modifiers) if c.modifiers else ""
@@ -218,7 +229,8 @@ class MedicalCodingPipeline:
         if r.hcpcs_codes:
             logger.info(f"  HCPCS:")
             for c in r.hcpcs_codes:
-                logger.info(f"    {c.code:>8} — {c.description[:55]}")
+                mods = ",".join(c.modifiers) if c.modifiers else ""
+                logger.info(f"    {c.code:>8} {('['+mods+']') if mods else '':>10} — {c.description[:55]}")
         if r.snomed_codes:
             logger.info(f"  SNOMED:")
             for c in r.snomed_codes:

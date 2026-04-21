@@ -16,6 +16,7 @@ Extract ALL clinically relevant entities from the podiatry clinical note.
 - **medication**: Medications prescribed or currently taken
 - **supply**: DME, braces, boots, shoes, orthotics DISPENSED/PROVIDED today
 - **body_structure**: Specific anatomical sites referenced
+- **allergy**: Drug allergies documented in the Allergies section (e.g., "Penicillin — rash")
 
 ## Rules
 1. Extract from ALL sections of the note (CC, HPI, PMH, PE, Imaging, Assessment, Plan)
@@ -26,6 +27,7 @@ Extract ALL clinically relevant entities from the podiatry clinical note.
 6. For supplies: ONLY extract if DISPENSED today (e.g., "applied CAM walker" = yes, "prescribed surgical shoe" = maybe)
 7. Include specificity details (e.g., "2nd digit", "great toe", "medial calcaneal tubercle")
 8. Use the EXACT text from the note in the "text" field
+9. For allergies: extract each documented drug allergy as a separate entity with category "allergy"
 
 ## Output Format
 Return valid JSON:
@@ -33,7 +35,7 @@ Return valid JSON:
   "entities": [
     {
       "text": "exact text from note",
-      "category": "diagnosis|procedure|finding|medication|supply|body_structure",
+      "category": "diagnosis|procedure|finding|medication|supply|body_structure|allergy",
       "clinical_term": "normalized clinical term",
       "laterality": "RIGHT|LEFT|BILATERAL|null",
       "specificity": "additional detail or null",
@@ -71,7 +73,7 @@ def extract_entities(note_sections: dict) -> list[ClinicalEntity]:
     raw, usage = chat_completion(
         system_prompt=NER_SYSTEM_PROMPT,
         user_prompt=user_prompt,
-        temperature=0.05,
+        temperature=0.0,
         max_tokens=3000,
     )
 

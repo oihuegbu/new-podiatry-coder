@@ -38,7 +38,7 @@ RAG_TOP_K: int = 15
 RAG_SIMILARITY_THRESHOLD: float = 0.35
 
 # --- Coding engine ---
-CODING_TEMPERATURE: float = 0.05
+CODING_TEMPERATURE: float = 0.0
 CODING_MAX_TOKENS: int = 4096
 
 # --- Logging ---

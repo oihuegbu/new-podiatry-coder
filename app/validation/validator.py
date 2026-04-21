@@ -9,20 +9,28 @@ POST_OP_EM = {"99024"}
 ROUTINE_FOOT_CARE_CPTS = {"11719", "11720", "11721", "11055", "11056", "11057"}
 IMAGING_PREFIXES = ("70", "71", "72", "73", "74", "75", "76", "77", "78", "79")
 VALID_MODIFIERS = {
-    "25", "59", "XE", "XS", "XP", "XU", "50", "51", "76", "77",
+    "25", "57", "59", "XE", "XS", "XP", "XU", "50", "51", "76", "77",
     "LT", "RT", "TA", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9",
-    "26", "TC", "47", "80", "81", "82", "AS", "QW", "QX", "QY", "QZ",
+    "26", "TC", "47", "80", "81", "82", "AS", "QW", "QX", "QY", "QZ", "KX",
 }
 MANIFESTATION_PREFIXES = {"H36", "G63", "N08", "M14"}
 ETIOLOGY_PREFIXES = {"E10", "E11", "E13", "I70", "I73"}
-# DM combination code prefixes — when any of these is coded, E11.9/E10.9 is redundant
 DM_COMBINATION_PREFIXES = (
     "E10.1", "E10.2", "E10.3", "E10.4", "E10.5", "E10.6", "E10.7", "E10.8",
     "E11.1", "E11.2", "E11.3", "E11.4", "E11.5", "E11.6", "E11.7", "E11.8",
     "E13.1", "E13.2", "E13.3", "E13.4", "E13.5", "E13.6", "E13.7", "E13.8",
 )
-# Long-term drug Z-codes that should not appear on outpatient podiatry claims
-INAPPROPRIATE_LONGTERM_ZCODES = {"Z79.84", "Z79.899", "Z79.84", "Z79.01", "Z79.02"}
+INAPPROPRIATE_LONGTERM_ZCODES = {"Z79.84", "Z79.899", "Z79.01", "Z79.02"}
+
+# HCPCS L-code prefixes for unilateral equipment requiring RT/LT
+UNILATERAL_L_PREFIXES = ("L1", "L2", "L3", "L4", "L5")
+
+# Surgical scheduling language that implies -57 is needed
+SURGICAL_DECISION_KEYWORDS = [
+    "patient elects", "will proceed with", "scheduled for", "consented for",
+    "surgical correction", "will undergo", "elects surgical", "schedule surgery",
+    "plan for surgery", "plan for bunionectomy", "plan for procedure",
+]
 
 
 class CodingValidator:
@@ -35,6 +43,7 @@ class CodingValidator:
         self,
         coding_result: dict,
         prior_surgery_info: dict | None = None,
+        note_plan_text: str = "",
     ) -> dict:
         self.issues = []
         self._bundled_codes_to_suppress = set()
@@ -43,6 +52,7 @@ class CodingValidator:
         cpt = coding_result.get("cpt_codes", [])
         hcpcs = coding_result.get("hcpcs_codes", [])
         snomed = coding_result.get("snomed_codes", [])
+        # supporting_conditions are advisory — not validated as billable codes
 
         self._check_code_existence(icd, cpt, hcpcs)
         self._check_ncci(cpt)
@@ -53,7 +63,10 @@ class CodingValidator:
         self._check_orphan_dx(icd, cpt, hcpcs)
         self._check_modifiers(cpt)
         self._check_em_modifier25(cpt)
+        self._check_modifier57(cpt, note_plan_text)
         self._check_global_period(cpt, prior_surgery_info)
+        self._check_hcpcs_laterality(cpt, hcpcs)
+        self._check_bmi_zcode(icd)
         self._check_redundant_dm_codes(icd)
         self._check_inappropriate_zcodes(icd)
         self._check_snomed_consistency(snomed)
@@ -71,7 +84,6 @@ class CodingValidator:
         audit = self._documentation_audit(coding_result)
         tier, confidence, reasons = self._compute_tier(icd, cpt, hcpcs)
 
-        # pre_submission_audit_findings = only ERROR and WARNING items (not INFO)
         critical_issues = [
             i for i in self.issues if i.severity in ("ERROR", "WARNING", "CRITICAL")
         ]
@@ -133,15 +145,9 @@ class CodingValidator:
                 if not conflict:
                     continue
 
-                # Determine modifier indicator:
-                # '0' = no modifier exception allowed (hard edit)
-                # '1' = modifier exception allowed
-                # '9' = concept does not apply
-                # '' or other = treat as hard edit
                 mod_indicator = str(conflict.get("modifier", "")).strip()
                 modifier_allowed = mod_indicator in ("1", "9")
 
-                # Check if a valid separator modifier is present on either code
                 sep_modifiers = {"59", "XE", "XS", "XP", "XU"}
                 code_i_entry = next((c for c in cpt if c.get("code") == codes[i]), {})
                 code_j_entry = next((c for c in cpt if c.get("code") == codes[j]), {})
@@ -165,12 +171,9 @@ class CodingValidator:
                         denial_risk="MEDIUM",
                     )
                 else:
-                    # Hard edit — no modifier exception possible
-                    # column2 code is the one to suppress (codes[j] when entry is c1|c2)
                     key_fwd = f"{codes[i]}|{codes[j]}"
-                    key_rev = f"{codes[j]}|{codes[i]}"
                     if self.db.ncci.get(key_fwd):
-                        bundled = codes[j]   # j is the column-2 (component) code
+                        bundled = codes[j]
                         primary = codes[i]
                     else:
                         bundled = codes[i]
@@ -236,7 +239,7 @@ class CodingValidator:
                 )
 
     def _check_orphan_dx(self, icd, cpt, hcpcs):
-        """Flag ICD codes not linked to any procedure — WARNING level (affects tier)."""
+        """Flag ICD codes (billable) not linked to any procedure — WARNING level."""
         linked = set()
         for c in cpt + hcpcs:
             for dx in c.get("linked_diagnoses", []):
@@ -265,11 +268,7 @@ class CodingValidator:
                     )
 
     def _check_em_modifier25(self, cpt):
-        """
-        Two-directional modifier -25 check:
-        1. MISSING: E/M + billable procedure but no -25
-        2. INCORRECT: E/M has -25 but only imaging (no billable procedure) was performed
-        """
+        """Two-directional modifier -25 check."""
         em_entry = None
         has_billable_procedure = False
         has_imaging_only = False
@@ -281,7 +280,6 @@ class CodingValidator:
             elif code.startswith(IMAGING_PREFIXES):
                 has_imaging_only = True
             elif code not in POST_OP_EM:
-                # Any non-E/M, non-imaging, non-post-op code = billable procedure
                 has_billable_procedure = True
 
         if em_entry is None:
@@ -290,7 +288,6 @@ class CodingValidator:
         em_code = em_entry.get("code", "")
         has_mod25 = "25" in em_entry.get("modifiers", [])
 
-        # Case 1: Modifier -25 present but NO billable procedure (only imaging)
         if has_mod25 and not has_billable_procedure:
             self._add(
                 "WARNING", em_code, "modifier_25_incorrect",
@@ -300,7 +297,6 @@ class CodingValidator:
                 denial_risk="MEDIUM",
             )
 
-        # Case 2: Billable procedure present but modifier -25 MISSING
         if has_billable_procedure and not has_mod25:
             self._add(
                 "WARNING", em_code, "em_procedure_same_day",
@@ -309,11 +305,45 @@ class CodingValidator:
                 denial_risk="MEDIUM",
             )
 
+    def _check_modifier57(self, cpt, note_plan_text: str = ""):
+        """Flag when E/M lacks -57 but plan text indicates surgical decision was made today."""
+        if not note_plan_text:
+            return
+
+        em_entry = next((c for c in cpt if c.get("code", "") in EM_CODES), None)
+        if em_entry is None:
+            return
+
+        plan_lower = note_plan_text.lower()
+        has_surgical_decision = any(kw in plan_lower for kw in SURGICAL_DECISION_KEYWORDS)
+        if not has_surgical_decision:
+            return
+
+        # No -57 needed if a procedure was performed today (surgery happened at this visit)
+        has_same_day_procedure = any(
+            c.get("code", "") not in EM_CODES
+            and c.get("code", "") not in POST_OP_EM
+            and not c.get("code", "").startswith(IMAGING_PREFIXES)
+            for c in cpt
+        )
+        if has_same_day_procedure:
+            return
+
+        em_code = em_entry.get("code", "")
+        has_mod57 = "57" in em_entry.get("modifiers", [])
+
+        if not has_mod57:
+            self._add(
+                "ERROR", em_code, "modifier_57_missing",
+                f"E/M {em_code} billed at a visit where the decision for major surgery was made "
+                f"but modifier -57 is absent. AMA guidelines require -57 when the decision for a "
+                f"90-day global procedure is made at a separate E/M visit.",
+                "Add modifier -57 to protect the E/M from bundling into the surgical global period",
+                denial_risk="HIGH",
+            )
+
     def _check_global_period(self, cpt, prior_surgery_info: dict | None):
-        """
-        Detect when a billable E/M is billed during a prior surgery's global period.
-        The correct code during global period is 99024 (post-op follow-up, no charge).
-        """
+        """Detect billable E/M billed during a prior surgery's global period."""
         if not prior_surgery_info or not prior_surgery_info.get("is_post_op_visit"):
             return
 
@@ -322,12 +352,10 @@ class CodingValidator:
         prior_desc = prior_surgery_info.get("prior_surgery_description", "prior surgery")
 
         if days_post_op is None or not prior_cpt:
-            # Can't determine global period without days and prior CPT
-            # Flag as INFO for human review
             self._add(
                 "INFO", "", "global_period",
-                f"Post-operative visit detected but could not determine days post-op or prior CPT. "
-                f"Verify this visit does not fall within a global surgical period.",
+                "Post-operative visit detected but could not determine days post-op or prior CPT. "
+                "Verify this visit does not fall within a global surgical period.",
                 "Manually confirm global period status before submission",
                 denial_risk="MEDIUM",
             )
@@ -336,11 +364,9 @@ class CodingValidator:
         global_days = self.db.get_global_period(prior_cpt)
 
         if global_days == 0:
-            # No global period concern
             return
 
         if days_post_op <= global_days:
-            # Visit falls within global period — billable E/M should be 99024
             billable_em = [c for c in cpt if c.get("code", "") in EM_CODES]
             if billable_em:
                 for em in billable_em:
@@ -349,15 +375,61 @@ class CodingValidator:
                         f"E/M {em.get('code')} billed on post-op day {days_post_op} for {prior_desc} "
                         f"(CPT {prior_cpt}, {global_days}-day global period). "
                         f"This visit is included in the surgical package — use 99024 instead.",
-                        "Replace with CPT 99024 (post-operative follow-up visit, no charge to patient)",
+                        "Replace with CPT 99024 (post-operative follow-up visit, no charge)",
                         denial_risk="HIGH",
                     )
 
+    def _check_hcpcs_laterality(self, cpt, hcpcs):
+        """Flag HCPCS L-codes missing RT/LT when procedure laterality is known."""
+        procedure_side = None
+        for c in cpt:
+            mods = c.get("modifiers", [])
+            if "RT" in mods or any(m in mods for m in ("TA", "T1", "T2", "T3", "T4")):
+                procedure_side = "RT"
+                break
+            elif "LT" in mods or any(m in mods for m in ("T5", "T6", "T7", "T8", "T9")):
+                procedure_side = "LT"
+                break
+
+        for entry in hcpcs:
+            code = entry.get("code", "")
+            if not code.startswith(UNILATERAL_L_PREFIXES):
+                continue
+
+            mods = entry.get("modifiers", [])
+            has_laterality = "RT" in mods or "LT" in mods or "50" in mods
+
+            if not has_laterality:
+                if procedure_side:
+                    suggestion = f"Add {procedure_side} modifier to match surgical procedure laterality"
+                else:
+                    suggestion = "Add RT or LT modifier to specify the dispensed side"
+                self._add(
+                    "ERROR", code, "hcpcs_laterality",
+                    f"HCPCS {code} (L-code) is missing a laterality modifier (RT or LT). "
+                    f"CMS requires laterality on unilateral DME/orthotic L-codes — "
+                    f"claims are rejected without it.",
+                    suggestion,
+                    denial_risk="HIGH",
+                )
+
+    def _check_bmi_zcode(self, icd):
+        """Warn when obesity (E66.x) is coded but no BMI Z-code (Z68.xx) is present."""
+        codes = [c.get("code", "") for c in icd]
+        has_obesity = any(c.startswith("E66") for c in codes)
+        has_bmi = any(c.startswith("Z68") for c in codes)
+
+        if has_obesity and not has_bmi:
+            self._add(
+                "WARNING", "Z68", "bmi_zcode_missing",
+                "Obesity (E66.x) is coded but no BMI Z-code (Z68.xx) is present. "
+                "ICD-10-CM guidelines require Z68.xx when obesity is coded and BMI is documented.",
+                "Add Z68.xx code corresponding to the documented BMI value (e.g., BMI 36.2 → Z68.36)",
+                denial_risk="LOW",
+            )
+
     def _check_redundant_dm_codes(self, icd):
-        """
-        Flag when both a DM generic code (E11.9/E10.9) AND a more specific DM
-        combination code are present — they cannot both be coded for the same encounter.
-        """
+        """Flag DM generic code alongside a more specific DM combination code."""
         codes = [c.get("code", "") for c in icd]
         has_dm_generic = any(c in ("E11.9", "E10.9", "E13.9") for c in codes)
         has_dm_specific = any(c.startswith(pfx) for c in codes for pfx in DM_COMBINATION_PREFIXES)
@@ -373,10 +445,8 @@ class CodingValidator:
             )
 
     def _check_inappropriate_zcodes(self, icd):
-        """Flag long-term drug Z-codes that are inappropriate for outpatient podiatry encounters."""
+        """Flag long-term drug Z-codes inappropriate for outpatient podiatry."""
         for entry in icd:
-            code = entry.get("code", "").replace(".", "")
-            # Rebuild with dot for comparison
             dotted = entry.get("code", "")
             if dotted in INAPPROPRIATE_LONGTERM_ZCODES:
                 self._add(
@@ -388,19 +458,14 @@ class CodingValidator:
                 )
 
     def _check_snomed_consistency(self, snomed):
-        """
-        Two checks:
-        1. Duplicate concept_id assigned to different entity texts (label drift)
-        2. Root/parent concepts used instead of specific descendants (low confidence)
-        """
-        seen_ids: dict[str, str] = {}  # concept_id → first entity_text seen
+        """Label drift detection + root concept detection."""
+        seen_ids: dict[str, str] = {}
 
         for entry in snomed:
             concept_id = str(entry.get("concept_id", "")).strip()
             entity_text = entry.get("entity_text", "")
             description = entry.get("description", "")
 
-            # Check for duplicate concept_id with different label
             if concept_id in seen_ids:
                 if seen_ids[concept_id] != entity_text:
                     self._add(
@@ -413,7 +478,6 @@ class CodingValidator:
             else:
                 seen_ids[concept_id] = entity_text
 
-            # Check for root/generic concepts
             if self.db.is_snomed_root(concept_id):
                 root_label = self.db.get_snomed_root_label(concept_id)
                 current_conf = entry.get("confidence", 1.0)
@@ -472,7 +536,7 @@ class CodingValidator:
                     p = mdm.get("problems_score", mdm.get("problem_score", "?"))
                     d = mdm.get("data_score", "?")
                     r = mdm.get("risk_score", "?")
-                    support.append(f"MDM: {mdm.get('mdm_level')} (problems_score: {p} / data_score: {d} / risk_score: {r})")
+                    support.append(f"MDM: {mdm.get('mdm_level')} (P:{p}/D:{d}/R:{r})")
                     linked = entry.get("linked_diagnoses", [])
                     if linked:
                         support.append(f"Linked DX: {', '.join(linked)}")
@@ -518,13 +582,6 @@ class CodingValidator:
         return max(0.0, round(1.0 - errors * 0.15 - warns * 0.05 - infos * 0.01, 2))
 
     def _compute_tier(self, icd, cpt, hcpcs) -> tuple[str, float, list[str]]:
-        """
-        Tier rules (enforced strictly):
-        - Any ERROR → REJECT
-        - Any WARNING → REVIEW
-        - INFO only → AUTO (with high confidence)
-        - Zero issues → AUTO (highest confidence)
-        """
         errors = [i for i in self.issues if i.severity == "ERROR"]
         warnings = [i for i in self.issues if i.severity == "WARNING"]
         infos = [i for i in self.issues if i.severity == "INFO"]
@@ -542,7 +599,6 @@ class CodingValidator:
         avg = sum(confs) / len(confs) if confs else 0.5
         conf = round(min(base, avg), 2)
 
-        # Build human-readable review reasons
         reasons = []
         for i in errors:
             reasons.append(f"[ERROR] {i.code}: {i.message}")
@@ -559,8 +615,6 @@ class CodingValidator:
         if tier == "REVIEW":
             return f"Coder review required — {len(reasons)} issue(s) need resolution before submission."
         return f"Claim rejected — {len(reasons)} critical error(s) must be corrected before submission."
-
-    # --- Helper ---
 
     def _add(self, severity, code, category, message, recommendation, denial_risk=None):
         self.issues.append(ValidationIssue(
