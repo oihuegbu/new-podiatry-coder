@@ -112,15 +112,18 @@ class MedicalCodingPipeline:
             rag_candidates=merged,
             vision_context=vision_context,
             prior_surgery_info=prior_surgery_info,
+            db=self.ref_db,
         )
 
         # Step 5: Validation
         logger.info("[5/5] Validating codes...")
         plan_text = sections.get("plan", "")
+        full_text = sections.get("full_text", "")
         validation = self.validator.validate(
             coding_result,
             prior_surgery_info=prior_surgery_info,
             note_plan_text=plan_text,
+            note_full_text=full_text,
         )
 
         elapsed = time.time() - start

@@ -8,6 +8,10 @@ EM_CODES = {"99202", "99203", "99204", "99205", "99211", "99212", "99213", "9921
 POST_OP_EM = {"99024"}
 ROUTINE_FOOT_CARE_CPTS = {"11719", "11720", "11721", "11055", "11056", "11057"}
 IMAGING_PREFIXES = ("70", "71", "72", "73", "74", "75", "76", "77", "78", "79")
+INJECTION_CODES = {"64455", "64632", "64450", "64640", "20600", "20605", "20610", "20550", "20551"}
+IMAGE_GUIDANCE_CODES = {"77002", "76942"}
+FLUORO_KEYWORDS = ["fluoroscopic", "fluoroscopy", "c-arm", "under fluoroscopic"]
+ULTRASOUND_KEYWORDS = ["ultrasound guided", "ultrasound-guided", "sonographic", "us-guided", "under ultrasound"]
 VALID_MODIFIERS = {
     "25", "57", "59", "XE", "XS", "XP", "XU", "50", "51", "76", "77",
     "LT", "RT", "TA", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9",
@@ -44,6 +48,7 @@ class CodingValidator:
         coding_result: dict,
         prior_surgery_info: dict | None = None,
         note_plan_text: str = "",
+        note_full_text: str = "",
     ) -> dict:
         self.issues = []
         self._bundled_codes_to_suppress = set()
@@ -64,6 +69,7 @@ class CodingValidator:
         self._check_modifiers(cpt)
         self._check_em_modifier25(cpt)
         self._check_modifier57(cpt, note_plan_text)
+        self._check_image_guidance(cpt, note_full_text)
         self._check_global_period(cpt, prior_surgery_info)
         self._check_hcpcs_laterality(cpt, hcpcs)
         self._check_bmi_zcode(icd)
@@ -228,8 +234,15 @@ class CodingValidator:
                 denial_risk="MEDIUM",
             )
 
+    # Codes that are legitimately billed without a linked ICD (global-period / admin codes)
+    _NO_DX_REQUIRED = {
+        "99024",  # Postoperative follow-up visit, included in global service, no charge
+    }
+
     def _check_cpt_dx_linkage(self, cpt):
         for entry in cpt:
+            if entry.get("code", "") in self._NO_DX_REQUIRED:
+                continue
             if not entry.get("linked_diagnoses"):
                 self._add(
                     "WARNING", entry.get("code", ""), "cpt_icd_linkage",
@@ -238,23 +251,34 @@ class CodingValidator:
                     denial_risk="MEDIUM",
                 )
 
-    def _check_orphan_dx(self, icd, cpt, hcpcs):
-        """Flag ICD codes (billable) not linked to any procedure — WARNING level."""
-        linked = set()
-        for c in cpt + hcpcs:
-            for dx in c.get("linked_diagnoses", []):
-                d = dx if isinstance(dx, str) else dx.get("code", "")
-                linked.add(d.replace(".", "").upper())
+    # E/M codes whose linked_diagnoses implicitly cover all billable conditions
+    _EM_CODES = {
+        "99202", "99203", "99204", "99205",
+        "99211", "99212", "99213", "99214", "99215",
+        "99024",  # post-op follow-up — global period, no charge; no ICD linkage required
+    }
 
+    def _check_orphan_dx(self, icd, cpt, hcpcs):
+        """Flag ICD codes (billable) not linked to any procedure — WARNING level.
+
+        On a CMS-1500 claim every diagnosis is available to every procedure on the claim.
+        The "orphan" concept only matters when an ICD code has ZERO CPT/HCPCS codes to
+        hang off — i.e. the whole encounter has no procedures.  When any billable CPT or
+        HCPCS code is present, secondary diagnoses (comorbidities, BMI, etc.) are
+        implicitly supported by the encounter and do NOT need individual linkage.
+        """
+        if cpt or hcpcs:
+            # Any procedure/supply present → all diagnoses are valid secondary DX
+            return
+
+        # Only reaches here if the LLM produced ICD codes with NO procedures at all
         for entry in icd:
-            code = entry.get("code", "").replace(".", "").upper()
-            if code not in linked:
-                self._add(
-                    "WARNING", entry.get("code", ""), "ORPHAN_DIAGNOSIS",
-                    f"{entry.get('code')} is not linked to any CPT or HCPCS code — may appear unsupported",
-                    "Link to a CPT/HCPCS code or remove if not addressed today",
-                    denial_risk="MEDIUM",
-                )
+            self._add(
+                "WARNING", entry.get("code", ""), "ORPHAN_DIAGNOSIS",
+                f"{entry.get('code')} coded but no CPT/HCPCS procedure found — entire encounter may lack medical necessity",
+                "Ensure at least one billable procedure or E/M code is present",
+                denial_risk="HIGH",
+            )
 
     def _check_modifiers(self, cpt):
         for entry in cpt:
@@ -268,41 +292,42 @@ class CodingValidator:
                     )
 
     def _check_em_modifier25(self, cpt):
-        """Two-directional modifier -25 check."""
+        """Two-directional modifier -25 check — auto-corrects missing -25."""
         em_entry = None
         has_billable_procedure = False
-        has_imaging_only = False
 
         for c in cpt:
             code = c.get("code", "")
             if code in EM_CODES:
                 em_entry = c
-            elif code.startswith(IMAGING_PREFIXES):
-                has_imaging_only = True
-            elif code not in POST_OP_EM:
+            elif code not in POST_OP_EM and not code.startswith(IMAGING_PREFIXES):
                 has_billable_procedure = True
 
         if em_entry is None:
             return
 
         em_code = em_entry.get("code", "")
-        has_mod25 = "25" in em_entry.get("modifiers", [])
+        mods = em_entry.setdefault("modifiers", [])
+        has_mod25 = "25" in mods
 
         if has_mod25 and not has_billable_procedure:
+            mods.remove("25")
             self._add(
-                "WARNING", em_code, "modifier_25_incorrect",
-                f"Modifier -25 on {em_code} without a same-day billable procedure. "
-                f"Diagnostic imaging (73xxx) does NOT trigger modifier -25.",
-                "Remove modifier -25 if no same-day billable procedure was performed",
-                denial_risk="MEDIUM",
+                "INFO", em_code, "modifier_25_removed",
+                f"AUTO-CORRECTED: Removed modifier -25 from {em_code} — no same-day billable "
+                f"procedure found. Diagnostic imaging (73xxx) does NOT trigger modifier -25.",
+                "Modifier -25 auto-removed",
+                denial_risk="LOW",
             )
 
         if has_billable_procedure and not has_mod25:
+            mods.append("25")
             self._add(
-                "WARNING", em_code, "em_procedure_same_day",
-                f"E/M {em_code} billed with a same-day procedure but modifier -25 is missing",
-                "Add modifier -25 if E/M was separately identifiable beyond the procedure decision",
-                denial_risk="MEDIUM",
+                "INFO", em_code, "modifier_25_added",
+                f"AUTO-CORRECTED: Added modifier -25 to {em_code} — same-day billable procedure "
+                f"detected. Without -25, payer bundles the E/M into the procedure global period.",
+                "Modifier -25 auto-added",
+                denial_risk="LOW",
             )
 
     def _check_modifier57(self, cpt, note_plan_text: str = ""):
@@ -339,6 +364,39 @@ class CodingValidator:
                 f"but modifier -57 is absent. AMA guidelines require -57 when the decision for a "
                 f"90-day global procedure is made at a separate E/M visit.",
                 "Add modifier -57 to protect the E/M from bundling into the surgical global period",
+                denial_risk="HIGH",
+            )
+
+    def _check_image_guidance(self, cpt, note_full_text: str = ""):
+        """Flag missing image guidance codes when injection performed under fluoroscopy or ultrasound."""
+        if not note_full_text:
+            return
+
+        cpt_codes = {c.get("code", "") for c in cpt}
+        if not (cpt_codes & INJECTION_CODES):
+            return
+
+        note_lower = note_full_text.lower()
+        has_fluoro = any(kw in note_lower for kw in FLUORO_KEYWORDS)
+        has_us = any(kw in note_lower for kw in ULTRASOUND_KEYWORDS)
+
+        if has_fluoro and "77002" not in cpt_codes:
+            self._add(
+                "ERROR", "77002", "image_guidance_missing",
+                "Injection performed under fluoroscopic guidance but CPT 77002 "
+                "(fluoroscopic guidance for needle placement) is missing. "
+                "77002 is separately billable whenever fluoroscopic guidance is documented.",
+                "Add CPT 77002 to the claim alongside the injection code",
+                denial_risk="HIGH",
+            )
+
+        if has_us and "76942" not in cpt_codes:
+            self._add(
+                "ERROR", "76942", "image_guidance_missing",
+                "Injection performed under ultrasound guidance but CPT 76942 "
+                "(ultrasonic guidance for needle placement with permanent record) is missing. "
+                "76942 is separately billable whenever ultrasound guidance is documented.",
+                "Add CPT 76942 to the claim alongside the injection code",
                 denial_risk="HIGH",
             )
 
@@ -380,7 +438,7 @@ class CodingValidator:
                     )
 
     def _check_hcpcs_laterality(self, cpt, hcpcs):
-        """Flag HCPCS L-codes missing RT/LT when procedure laterality is known."""
+        """Auto-correct HCPCS L-codes missing RT/LT when procedure laterality is known."""
         procedure_side = None
         for c in cpt:
             mods = c.get("modifiers", [])
@@ -396,22 +454,28 @@ class CodingValidator:
             if not code.startswith(UNILATERAL_L_PREFIXES):
                 continue
 
-            mods = entry.get("modifiers", [])
+            mods = entry.setdefault("modifiers", [])
             has_laterality = "RT" in mods or "LT" in mods or "50" in mods
 
             if not has_laterality:
                 if procedure_side:
-                    suggestion = f"Add {procedure_side} modifier to match surgical procedure laterality"
+                    mods.append(procedure_side)
+                    self._add(
+                        "INFO", code, "hcpcs_laterality_added",
+                        f"AUTO-CORRECTED: Added {procedure_side} modifier to HCPCS {code} — "
+                        f"inferred from CPT procedure side. CMS requires laterality on unilateral L-codes.",
+                        f"Laterality {procedure_side} auto-added",
+                        denial_risk="LOW",
+                    )
                 else:
-                    suggestion = "Add RT or LT modifier to specify the dispensed side"
-                self._add(
-                    "ERROR", code, "hcpcs_laterality",
-                    f"HCPCS {code} (L-code) is missing a laterality modifier (RT or LT). "
-                    f"CMS requires laterality on unilateral DME/orthotic L-codes — "
-                    f"claims are rejected without it.",
-                    suggestion,
-                    denial_risk="HIGH",
-                )
+                    self._add(
+                        "ERROR", code, "hcpcs_laterality",
+                        f"HCPCS {code} (L-code) is missing a laterality modifier (RT or LT). "
+                        f"CMS requires laterality on unilateral DME/orthotic L-codes — "
+                        f"claims are rejected without it. Could not infer side from CPT codes.",
+                        "Manually add RT or LT modifier to match the dispensed side",
+                        denial_risk="HIGH",
+                    )
 
     def _check_bmi_zcode(self, icd):
         """Warn when obesity (E66.x) is coded but no BMI Z-code (Z68.xx) is present."""
@@ -460,6 +524,20 @@ class CodingValidator:
     def _check_snomed_consistency(self, snomed):
         """Label drift detection + root concept detection."""
         seen_ids: dict[str, str] = {}
+        _LATERALITY = {"right", "left", "bilateral", "rt", "lt", "r ", "l "}
+
+        def _is_bilateral_pair(a: str, b: str) -> bool:
+            """Return True when a and b are the same clinical concept but differ by laterality."""
+            a_lower, b_lower = a.lower(), b.lower()
+            a_has_side = any(w in a_lower for w in _LATERALITY)
+            b_has_side = any(w in b_lower for w in _LATERALITY)
+            if not (a_has_side and b_has_side):
+                return False
+            # Strip laterality words and compare core text
+            for w in ("right", "left", "bilateral", " rt", " lt"):
+                a_lower = a_lower.replace(w, "").strip()
+                b_lower = b_lower.replace(w, "").strip()
+            return a_lower == b_lower
 
         for entry in snomed:
             concept_id = str(entry.get("concept_id", "")).strip()
@@ -467,11 +545,12 @@ class CodingValidator:
             description = entry.get("description", "")
 
             if concept_id in seen_ids:
-                if seen_ids[concept_id] != entity_text:
+                if seen_ids[concept_id] != entity_text and not _is_bilateral_pair(seen_ids[concept_id], entity_text):
+                    # INFO — SNOMED consistency issue; does not affect billing or claims
                     self._add(
-                        "WARNING", concept_id, "snomed_label_drift",
+                        "INFO", concept_id, "snomed_label_drift",
                         f"SNOMED concept {concept_id} ({description}) assigned to two different terms: "
-                        f'"{seen_ids[concept_id]}" and "{entity_text}". One mapping is incorrect.',
+                        f'"{seen_ids[concept_id]}" and "{entity_text}". One mapping may be incorrect.',
                         "Review both SNOMED mappings and correct the wrong one",
                         denial_risk="LOW",
                     )
@@ -484,8 +563,9 @@ class CodingValidator:
                 if current_conf > self.db.snomed_root_confidence_cap:
                     entry["confidence"] = self.db.snomed_root_confidence_cap
                     entry["is_root_concept"] = True
+                # INFO (not WARNING) — SNOMED quality issue only; does not affect billing or claim
                 self._add(
-                    "WARNING", concept_id, "snomed_root_concept",
+                    "INFO", concept_id, "snomed_root_concept",
                     f"SNOMED {concept_id} is a top-level parent concept ({root_label}) — "
                     f"too generic for clinical coding. A specific descendant should be used.",
                     f"Find a more specific SNOMED concept for '{entity_text}'",

@@ -20,14 +20,19 @@ LOGS_DIR = BASE_DIR / "logs"
 
 ATTACHMENTS_DIR = BASE_DIR.parent / "kachi203-attachments"
 
-# --- Source data files ---
-ICD10_FILE = ATTACHMENTS_DIR / "icd10cm_codes.json"
-CPT_FILE = ATTACHMENTS_DIR / "cpt_codes.json"
-HCPCS_FILE = ATTACHMENTS_DIR / "hcpcs_codes_20260330_211727.json"
-NCCI_FILE = ATTACHMENTS_DIR / "latest_ncci_data.json"
-MUE_FILE = ATTACHMENTS_DIR / "latest_mue_practitioner.json"
-LCD_FILE = ATTACHMENTS_DIR / "podiatry_routine_foot_care_qualifying_dx.json"
-NOTES_DIR = ATTACHMENTS_DIR
+# --- Code reference files — stored in data/codes/ inside the repo
+#     Override any filename via .env without touching code
+CODES_DIR = DATA_DIR / os.getenv("CODES_DIR", "codes")
+
+ICD10_FILE  = CODES_DIR / os.getenv("ICD10_FILENAME",  "icd10cm_codes.json")
+CPT_FILE    = CODES_DIR / os.getenv("CPT_FILENAME",    "cpt_codes.json")
+HCPCS_FILE  = CODES_DIR / os.getenv("HCPCS_FILENAME",  "hcpcs_codes.json")
+NCCI_FILE   = CODES_DIR / os.getenv("NCCI_FILENAME",   "ncci_data.json")
+MUE_FILE    = CODES_DIR / os.getenv("MUE_FILENAME",    "mue_practitioner.json")
+LCD_FILE    = CODES_DIR / os.getenv("LCD_FILENAME",    "podiatry_lcd.json")
+
+# Notes directory (PDFs to process) — can be any folder
+NOTES_DIR = Path(os.getenv("NOTES_DIR", str(ATTACHMENTS_DIR)))
 
 # --- Supplementary rule tables (bundled with system) ---
 GLOBAL_PERIODS_FILE = DATA_DIR / "global_periods.json"
