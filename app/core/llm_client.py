@@ -1,18 +1,39 @@
+from __future__ import annotations
+
+import json
+
 from openai import OpenAI
-from app.core.config import OPENAI_API_KEY, OPENAI_MODEL, OPENAI_EMBEDDING_MODEL
+from app.core.config import (
+    LLM_PROVIDER,
+    OPENAI_API_KEY,
+    OPENAI_MODEL,
+    OPENAI_EMBEDDING_MODEL,
+    ANTHROPIC_API_KEY,
+    CLAUDE_MODEL,
+)
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
-_client: OpenAI | None = None
+_openai_client: OpenAI | None = None
+_anthropic_client = None  # anthropic.Anthropic, lazy-imported
 
 
 def get_openai_client() -> OpenAI:
-    global _client
-    if _client is None:
-        _client = OpenAI(api_key=OPENAI_API_KEY)
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
         logger.info("OpenAI client initialized")
-    return _client
+    return _openai_client
+
+
+def get_anthropic_client():
+    global _anthropic_client
+    if _anthropic_client is None:
+        import anthropic  # lazy import so openai-only installs still work
+        _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        logger.info("Anthropic client initialized")
+    return _anthropic_client
 
 
 def chat_completion(
@@ -23,8 +44,34 @@ def chat_completion(
     max_tokens: int = 4096,
     json_mode: bool = True,
 ) -> tuple[str, dict]:
+    if LLM_PROVIDER == "claude":
+        return _claude_chat_completion(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=model,
+            max_tokens=max_tokens,
+            json_mode=json_mode,
+        )
+    return _openai_chat_completion(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        json_mode=json_mode,
+    )
+
+
+def _openai_chat_completion(
+    system_prompt: str,
+    user_prompt: str,
+    model: str | None,
+    temperature: float,
+    max_tokens: int,
+    json_mode: bool,
+) -> tuple[str, dict]:
     client = get_openai_client()
-    kwargs = {
+    kwargs: dict = {
         "model": model or OPENAI_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -46,16 +93,114 @@ def chat_completion(
     return content, usage
 
 
+def _extract_json_from_text(text: str) -> str:
+    """Pull the outermost JSON object or array from a string.
+
+    Claude sometimes wraps the response in prose or markdown fences even when
+    instructed not to. This function finds the first '{' or '[' and the matching
+    closing delimiter so downstream JSON parsers always get clean input.
+    """
+    text = text.strip()
+
+    # Fast path: already clean JSON
+    if text.startswith("{") or text.startswith("["):
+        return text
+
+    # Strip a single ```json … ``` or ``` … ``` fence
+    import re
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
+    if fence_match:
+        return fence_match.group(1).strip()
+
+    # Last resort: find first { or [ and walk to the matching closer
+    for start_char, end_char in (("{", "}"), ("[", "]")):
+        idx = text.find(start_char)
+        if idx == -1:
+            continue
+        depth = 0
+        in_str = False
+        escape = False
+        for i, ch in enumerate(text[idx:], start=idx):
+            if escape:
+                escape = False
+                continue
+            if ch == "\\" and in_str:
+                escape = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch == start_char:
+                depth += 1
+            elif ch == end_char:
+                depth -= 1
+                if depth == 0:
+                    return text[idx : i + 1]
+
+    # Nothing found — return as-is and let the caller handle the parse error
+    return text
+
+
+def _claude_chat_completion(
+    system_prompt: str,
+    user_prompt: str,
+    model: str | None,
+    max_tokens: int,
+    json_mode: bool,
+) -> tuple[str, dict]:
+    client = get_anthropic_client()
+
+    full_user_prompt = user_prompt
+    if json_mode:
+        full_user_prompt = (
+            user_prompt
+            + "\n\nIMPORTANT: Respond with valid JSON only. No markdown fences, no prose outside the JSON object."
+        )
+
+    # With adaptive thinking, thinking tokens count against max_tokens.
+    # Ensure there is always enough headroom for the actual JSON output.
+    effective_max_tokens = max(max_tokens * 3, 16384)
+
+    response = client.messages.create(
+        model=model or CLAUDE_MODEL,
+        max_tokens=effective_max_tokens,
+        thinking={"type": "adaptive"},
+        system=system_prompt,
+        messages=[{"role": "user", "content": full_user_prompt}],
+    )
+
+    # Extract text from response content blocks (skip thinking blocks)
+    content = ""
+    for block in response.content:
+        if block.type == "text":
+            content = block.text
+            break
+
+    # For JSON mode: extract the JSON object/array regardless of surrounding prose or fences
+    if json_mode:
+        content = _extract_json_from_text(content)
+
+    usage = {
+        "prompt_tokens": response.usage.input_tokens,
+        "completion_tokens": response.usage.output_tokens,
+        "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
+    }
+    return content, usage
+
+
 def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]:
+    # Anthropic has no embeddings API — always use OpenAI for embeddings
     client = get_openai_client()
-    model = model or OPENAI_EMBEDDING_MODEL
+    embed_model = model or OPENAI_EMBEDDING_MODEL
 
     batch_size = 2048
-    all_embeddings = []
+    all_embeddings: list[list[float]] = []
 
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
-        response = client.embeddings.create(model=model, input=batch)
+        response = client.embeddings.create(model=embed_model, input=batch)
         all_embeddings.extend([item.embedding for item in response.data])
 
     return all_embeddings
