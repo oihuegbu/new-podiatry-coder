@@ -28,6 +28,7 @@ def main():
     parser = argparse.ArgumentParser(description="Podiatry Medical Coding System")
     parser.add_argument("--note", type=str, help="Process a single PDF note (filename or path)")
     parser.add_argument("--rebuild-index", action="store_true", help="Force rebuild FAISS vector indices")
+    parser.add_argument("--no-cache", action="store_true", help="Skip cache lookup and force fresh processing")
     args = parser.parse_args()
 
     logger.info("=" * 70)
@@ -64,7 +65,7 @@ def main():
 
     for pdf_path in note_files:
         try:
-            result = pipeline.process_note(pdf_path)
+            result = pipeline.process_note(pdf_path, use_cache=not args.no_cache)
             results.append(result)
 
             output_file = OUTPUT_DIR / f"{pdf_path.stem}_results.json"

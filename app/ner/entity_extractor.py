@@ -1,6 +1,7 @@
 import json
 from app.core.llm_client import chat_completion
 from app.models.schemas import ClinicalEntity
+from app.ner.biomed_ner import enrich_entities
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -84,6 +85,16 @@ def extract_entities(note_sections: dict) -> list[ClinicalEntity]:
         logger.error("Failed to parse NER response")
         return []
 
+    # Tag entities with default ner_source before GLiNER enrichment
+    for item in entities_data:
+        item.setdefault("ner_source", "llm")
+        item.setdefault("ner_confidence", 1.0)
+
+    # Layer 2: GLiNER-BioMed confirmation — tags each entity as gliner_confirmed or llm_only
+    full_text = note_sections.get("full_text", "")
+    if full_text:
+        entities_data = enrich_entities(entities_data, full_text)
+
     entities = []
     for item in entities_data:
         try:
@@ -93,5 +104,11 @@ def extract_entities(note_sections: dict) -> list[ClinicalEntity]:
         except Exception as e:
             logger.warning(f"Skipping malformed entity: {e}")
 
-    logger.info(f"Extracted {len(entities)} entities (usage: {usage.get('total_tokens', 0)} tokens)")
+    confirmed = sum(1 for e in entities if e.ner_source == "gliner_confirmed")
+    llm_only = sum(1 for e in entities if e.ner_source == "llm_only")
+    logger.info(
+        f"Extracted {len(entities)} entities "
+        f"(GLiNER-confirmed: {confirmed}, LLM-only: {llm_only}, "
+        f"tokens: {usage.get('total_tokens', 0)})"
+    )
     return entities

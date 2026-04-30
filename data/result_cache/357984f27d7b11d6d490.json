@@ -1,0 +1,445 @@
+{
+  "document_id": "NOTE_04_Patricia_Okafor_Plantar_Fascia_Release_Heel_Spur",
+  "timestamp": "2026-04-30T19:32:52.359818",
+  "success": true,
+  "processing_time": 90.02,
+  "patient_metadata": {
+    "patient_name": "Patricia N. Okafor",
+    "date_of_birth": "12/30/1961",
+    "date_of_service": "February 08, 2026",
+    "provider": "Dr. James A. Morales, DPM, FACFAS",
+    "npi": "2345678901",
+    "mrn": "AFR-001201",
+    "insurance": "Cigna HMO I ID: CIG7720145 I Group: GRP9918",
+    "note_type": "SURGICAL PROCEDURE – PLANTAR FASCIA RELEASE & HEEL SPUR EXCISION"
+  },
+  "note_sections": {
+    "chief_complaint": "Chronic bilateral heel pain, right worse than left, for 18 months.",
+    "hpi": "Mrs. Okafor is a 64-year-old female with an 18-month history of plantar heel pain, right greater than left. Pain is worst with first steps in the morning and after prolonged sitting. Conservative mana...",
+    "pmh_medications_allergies": "PMH: Obesity (BMI 36.2), GERD. Medications: Pantoprazole 40 mg QD, Ibuprofen PRN. Allergies: NKDA.",
+    "physical_examination": "Right foot: significant tenderness at medial calcaneal tubercle with palpation. Tight Achilles tendon with ankle dorsiflexion limited to 5 degrees. No erythema or swelling. Silfverskiold test positive...",
+    "imaging_diagnostics": "Bilateral heel X-ray: Prominent calcaneal traction spur right measuring 8mm, left 4mm.",
+    "assessment_diagnoses": "• Plantar fascial fibromatosis (plantar fasciitis), right foot\n• Calcaneal spur, right foot\n• Obesity, unspecified",
+    "plan": "Performed right endoscopic plantar fasciotomy with calcaneal spur excision under MAC anesthesia and ankle tourniquet. Portal placed medially; visualization confirmed fascial release. Spur debrided wit..."
+  },
+  "icd_codes": [
+    {
+      "code": "M72.2",
+      "description": "Plantar fascial fibromatosis",
+      "type": "primary",
+      "confidence": 0.95,
+      "rationale": "Listed in Assessment as plantar fasciitis, right foot.",
+      "supporting_text": "Plantar fascial fibromatosis (plantar fasciitis), right foot",
+      "laterality": "RIGHT",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "M77.31",
+      "description": "Calcaneal spur, right foot",
+      "type": "secondary",
+      "confidence": 0.95,
+      "rationale": "Listed in Assessment as calcaneal spur, right foot.",
+      "supporting_text": "Calcaneal spur, right foot",
+      "laterality": "RIGHT",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "E66.9",
+      "description": "Obesity, unspecified",
+      "type": "secondary",
+      "confidence": 0.9,
+      "rationale": "Listed in Assessment as obesity, unspecified.",
+      "supporting_text": "Obesity, unspecified",
+      "laterality": null,
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "Z68.36",
+      "description": "Body mass index (BMI) 36.0-36.9, adult",
+      "type": "secondary",
+      "confidence": 0.9,
+      "rationale": "BMI documented as 36.2, required when obesity is coded.",
+      "supporting_text": "Obesity (BMI 36.2)",
+      "laterality": null,
+      "source_section": "PMH",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    }
+  ],
+  "supporting_conditions": [
+    {
+      "code": "K21.9",
+      "description": "Gastro-esophageal reflux disease without esophagitis",
+      "type": "advisory",
+      "confidence": 0.85,
+      "rationale": "PMH condition with active medication (pantoprazole). Not in Assessment.",
+      "supporting_text": "PMH: GERD. Medications: Pantoprazole 40 mg QD",
+      "source_section": "PMH",
+      "billable_tier": "advisory",
+      "needs_review": true,
+      "review_reason": "PMH condition not addressed as separate encounter problem today"
+    }
+  ],
+  "cpt_codes": [
+    {
+      "code": "28119",
+      "description": "Ostectomy, calcaneus; for spur, with or without plantar fascial release",
+      "confidence": 0.95,
+      "modifiers": [
+        "RT"
+      ],
+      "modifier_reasoning": [
+        "Right side procedure for calcaneal spur excision and plantar fascial release"
+      ],
+      "source": "Surgical Procedure",
+      "mdm_details": {},
+      "procedure_status": "completed",
+      "laterality": "right",
+      "linked_diagnoses": [
+        "M72.2",
+        "M77.31"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "Performed right endoscopic plantar fasciotomy with calcaneal spur excision"
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 1,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "73650",
+      "description": "Radiologic examination, calcaneus; minimum 2 views",
+      "confidence": 0.9,
+      "modifiers": [
+        "50"
+      ],
+      "modifier_reasoning": [
+        "Bilateral heel X-ray performed"
+      ],
+      "source": "Imaging",
+      "mdm_details": {},
+      "procedure_status": "completed",
+      "laterality": "bilateral",
+      "linked_diagnoses": [
+        "M72.2",
+        "M77.31"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "Bilateral heel X-ray: Prominent calcaneal traction spur right measuring 8mm, left 4mm"
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 2,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "99024",
+      "description": "Postoperative follow-up visit",
+      "confidence": 0.9,
+      "modifiers": [],
+      "modifier_reasoning": [],
+      "source": "Postoperative Care",
+      "mdm_details": {},
+      "procedure_status": "completed",
+      "laterality": null,
+      "linked_diagnoses": [
+        "M72.2",
+        "M77.31"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "Follow-up 1 week."
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 1,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    }
+  ],
+  "hcpcs_codes": [
+    {
+      "code": "L4360",
+      "description": "Walking boot, non-pneumatic",
+      "confidence": 0.95,
+      "modifiers": [
+        "RT"
+      ],
+      "units": 1,
+      "linked_diagnoses": [
+        "M72.2",
+        "M77.31"
+      ],
+      "rationale": "Non-pneumatic CAM walker boot applied post-surgery for right foot plantar fasciotomy and calcaneal spur excision.",
+      "supporting_text": "Applied compression dressing and CAM walker boot.",
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    }
+  ],
+  "snomed_codes": [
+    {
+      "concept_id": "444780001",
+      "description": "Plantar fasciitis",
+      "entity_text": "plantar fasciitis, right foot",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "299706006",
+      "description": "Calcaneal spur",
+      "entity_text": "calcaneal spur, right foot",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "414916001",
+      "description": "Obesity",
+      "entity_text": "obesity, unspecified",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    }
+  ],
+  "em_level_reasoning": "No E/M code was assigned as this was a surgical procedure note with no separate evaluation and management service documented.",
+  "error_message": null,
+  "validation_issues": [
+    {
+      "severity": "WARNING",
+      "code": "28119",
+      "category": "laterality_not_in_note",
+      "message": "28119 has laterality modifier ['RT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document.",
+      "recommendation": "Verify laterality is documented in the note before billing",
+      "denial_risk": "MEDIUM"
+    },
+    {
+      "severity": "WARNING",
+      "code": "L4360",
+      "category": "laterality_not_in_note",
+      "message": "L4360 has laterality modifier ['RT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document.",
+      "recommendation": "Verify laterality is documented in the note before billing",
+      "denial_risk": "MEDIUM"
+    }
+  ],
+  "warnings": [],
+  "encounter_integrity": {
+    "encounter_issues": [],
+    "error_count": 0,
+    "warning_count": 0
+  },
+  "documentation_audit": {
+    "audit_entries": [
+      {
+        "code": "M72.2",
+        "description": "Plantar fascial fibromatosis",
+        "documentation_support": [
+          "Rationale: Listed in Assessment as plantar fasciitis, right foot.",
+          "Section: ASSESSMENT",
+          "Supporting text: Plantar fascial fibromatosis (plantar fasciitis), right foot"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "M77.31",
+        "description": "Calcaneal spur, right foot",
+        "documentation_support": [
+          "Rationale: Listed in Assessment as calcaneal spur, right foot.",
+          "Section: ASSESSMENT",
+          "Supporting text: Calcaneal spur, right foot"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "E66.9",
+        "description": "Obesity, unspecified",
+        "documentation_support": [
+          "Rationale: Listed in Assessment as obesity, unspecified.",
+          "Section: ASSESSMENT",
+          "Supporting text: Obesity, unspecified"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "Z68.36",
+        "description": "Body mass index (BMI) 36.0-36.9, adult",
+        "documentation_support": [
+          "Rationale: BMI documented as 36.2, required when obesity is coded.",
+          "Section: PMH",
+          "Supporting text: Obesity (BMI 36.2)"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "28119",
+        "description": "Ostectomy, calcaneus; for spur, with or without plantar fascial release",
+        "documentation_support": [
+          "Section: Surgical Procedure"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "73650",
+        "description": "Radiologic examination, calcaneus; minimum 2 views",
+        "documentation_support": [
+          "Section: Imaging"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "99024",
+        "description": "Postoperative follow-up visit",
+        "documentation_support": [
+          "Section: Postoperative Care"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "L4360",
+        "description": "Walking boot, non-pneumatic",
+        "documentation_support": [
+          "Rationale: Non-pneumatic CAM walker boot applied post-surgery for right foot plantar fasciotomy and calcaneal spur excision.",
+          "Supporting text: Applied compression dressing and CAM walker boot."
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      }
+    ],
+    "total_codes": 8,
+    "fully_supported": 8,
+    "partially_supported": 0,
+    "unsupported": 0,
+    "codes_with_gaps": 0,
+    "documentation_score": 1.0
+  },
+  "pre_submission_audit_findings": [
+    {
+      "severity": "WARNING",
+      "code": "28119",
+      "category": "laterality_not_in_note",
+      "message": "28119 has laterality modifier ['RT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document.",
+      "recommendation": "Verify laterality is documented in the note before billing",
+      "denial_risk": "MEDIUM"
+    },
+    {
+      "severity": "WARNING",
+      "code": "L4360",
+      "category": "laterality_not_in_note",
+      "message": "L4360 has laterality modifier ['RT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document.",
+      "recommendation": "Verify laterality is documented in the note before billing",
+      "denial_risk": "MEDIUM"
+    }
+  ],
+  "pre_submission_audit_score": 0.9,
+  "auto_coding_tier": "REVIEW",
+  "auto_coding_confidence": 0.4,
+  "auto_coding_review_reasons": [
+    "Added 99024 for post-operative visit within global period.",
+    "Retained all protected anchors as per assessment section.",
+    "[WARNING] 28119: 28119 has laterality modifier ['RT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document.",
+    "[WARNING] L4360: L4360 has laterality modifier ['RT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document."
+  ],
+  "auto_coding_summary": "The coding set was reviewed and corrected to include a post-operative visit code (99024) for the surgical procedure performed. All protected diagnosis anchors were retained, and no E/M code was necessary as the note was focused on the surgical procedure.",
+  "rag_context": {
+    "entities_extracted": 20,
+    "candidates_per_system": {
+      "icd10": 173,
+      "cpt": 46,
+      "hcpcs": 44
+    },
+    "corrections_made": [
+      {
+        "type": "ADDED",
+        "code": "99024",
+        "reason": "Post-operative visit within global period for right endoscopic plantar fasciotomy and calcaneal spur excision.",
+        "evidence": "Performed right endoscopic plantar fasciotomy with calcaneal spur excision under MAC anesthesia."
+      },
+      {
+        "type": "RETAINED",
+        "code": "M72.2",
+        "reason": "Protected anchor for plantar fasciitis, right foot.",
+        "evidence": "Listed in Assessment as plantar fasciitis, right foot."
+      },
+      {
+        "type": "RETAINED",
+        "code": "M77.31",
+        "reason": "Protected anchor for calcaneal spur, right foot.",
+        "evidence": "Listed in Assessment as calcaneal spur, right foot."
+      },
+      {
+        "type": "RETAINED",
+        "code": "E66.9",
+        "reason": "Protected anchor for obesity, unspecified.",
+        "evidence": "Listed in Assessment as obesity, unspecified."
+      },
+      {
+        "type": "RETAINED",
+        "code": "Z68.36",
+        "reason": "BMI documented as 36.2, required when obesity is coded.",
+        "evidence": "BMI documented as 36.2."
+      }
+    ],
+    "audit_notes": "Added 99024 for post-operative visit. Retained all protected anchors. No E/M code needed as this was a surgical procedure note.",
+    "vision_context": {
+      "note_category": "surgical_procedure",
+      "procedures_performed_today": [
+        "right endoscopic plantar fasciotomy",
+        "calcaneal spur excision"
+      ],
+      "imaging_performed_today": [
+        "Bilateral heel X-ray"
+      ],
+      "supplies_dispensed_today": [
+        "compression dressing",
+        "CAM walker boot"
+      ]
+    },
+    "prior_surgery_info": {
+      "is_post_op_visit": false,
+      "days_post_op": null,
+      "prior_surgery_description": null,
+      "prior_surgery_cpt": null
+    }
+  },
+  "model_source": "openai",
+  "api_usage": {
+    "prompt_tokens": 21899,
+    "completion_tokens": 3126,
+    "total_tokens": 25025
+  },
+  "physician_documented_codes": [],
+  "missing_physician_codes": [],
+  "cached_result": false
+}

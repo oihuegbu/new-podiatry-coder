@@ -1,0 +1,929 @@
+{
+  "document_id": "NOTE_07_Walter_Jensen_Routine_Diabetic_Foot_Care",
+  "timestamp": "2026-04-30T21:46:27.143369",
+  "success": true,
+  "processing_time": 224.01,
+  "patient_metadata": {
+    "patient_name": "Walter G. Jensen",
+    "date_of_birth": "11/08/1948",
+    "date_of_service": "February 12, 2026",
+    "provider": "Dr. Amara Osei, DPM",
+    "npi": "1234567890",
+    "mrn": "AFR-001399",
+    "insurance": "Medicare Part B ID: 2TF7-MK9-XA41 | Supp: Aetna Medicare Supplement",
+    "note_type": "ESTABLISHED PATIENT \u2013 ROUTINE DIABETIC FOOT CARE"
+  },
+  "note_sections": {
+    "chief_complaint": "Routine diabetic foot care and nail management.",
+    "hpi": "Mr. Jensen is a 77-year-old male with a 20-year history of Type 2 Diabetes and severe peripheral neuropathy presenting for routine nail debridement and callus reduction. He wears custom diabetic footw...",
+    "pmh_medications_allergies": "PMH: T2DM (A1C 7.4%), Peripheral Neuropathy, CKD Stage 3, CAD. Medications: Insulin NPH 20 units BID, Gabapentin 300 mg TID, Aspirin 81 mg QD, Lisinopril 20 mg QD. Allergies: NKDA.",
+    "physical_examination": "Both feet: Skin dry with fissuring bilateral heels. Thickened mycotic toenails bilateral (all 10 digits). Hyperkeratotic calluses bilateral 1st and 5th MTH. No ulceration. Monofilament absent bilatera...",
+    "imaging_diagnostics": "None today.",
+    "assessment_diagnoses": "\u2022 Type 2 DM with diabetic neuropathy, unspecified\n\u2022 Tinea unguium (onychomycosis)\n\u2022 Corns and callosities\n\u2022 Type 2 DM without complications (additional coding)",
+    "plan": "Performed debridement of mycotic toenails all 10 digits. Trimming and debridement of hyperkeratotic calluses bilateral MTH. Applied urea 40% cream to bilateral heels, instructed on daily application. ..."
+  },
+  "icd_codes": [
+    {
+      "code": "E11.40",
+      "description": "Type 2 diabetes mellitus with diabetic neuropathy, unspecified",
+      "type": "primary",
+      "confidence": 0.97,
+      "rationale": "Listed in Assessment. Combination code captures DM + neuropathy; supersedes redundant generic E11.9 per Rule M.",
+      "supporting_text": "Type 2 DM with diabetic neuropathy, unspecified",
+      "laterality": "BILATERAL",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_confirmed",
+      "physician_code_note": null
+    },
+    {
+      "code": "B35.1",
+      "description": "Tinea unguium",
+      "type": "secondary",
+      "confidence": 0.98,
+      "rationale": "Onychomycosis listed in Assessment; mycotic toenails debrided today.",
+      "supporting_text": "Tinea unguium (onychomycosis)",
+      "laterality": "BILATERAL",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "L84",
+      "description": "Corns and callosities",
+      "type": "secondary",
+      "confidence": 0.98,
+      "rationale": "Listed in Assessment; bilateral 1st/5th MTH calluses pared today.",
+      "supporting_text": "Corns and callosities",
+      "laterality": "BILATERAL",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_confirmed",
+      "physician_code_note": null
+    }
+  ],
+  "supporting_conditions": [
+    {
+      "code": "N18.30",
+      "description": "Chronic kidney disease, stage 3 unspecified",
+      "type": "advisory",
+      "confidence": 0.9,
+      "rationale": "PMH CKD Stage 3 (3a vs 3b not specified); influenced clinical decision (oral antifungal not initiated due to CKD) but not listed as Assessment diagnosis.",
+      "supporting_text": "CKD Stage 3",
+      "source_section": "PMH",
+      "billable_tier": "advisory",
+      "needs_review": true,
+      "review_reason": "PMH condition affecting today's plan but not in Assessment"
+    },
+    {
+      "code": "I25.10",
+      "description": "Atherosclerotic heart disease of native coronary artery without angina pectoris",
+      "type": "advisory",
+      "confidence": 0.85,
+      "rationale": "PMH CAD with active aspirin therapy. Not listed in Assessment.",
+      "supporting_text": "PMH: ... CAD. Medications: ... Aspirin 81 mg QD",
+      "source_section": "PMH",
+      "billable_tier": "advisory",
+      "needs_review": true,
+      "review_reason": "PMH chronic comorbidity not addressed today"
+    },
+    {
+      "code": "I10",
+      "description": "Essential (primary) hypertension",
+      "type": "advisory",
+      "confidence": 0.7,
+      "rationale": "Lisinopril 20 mg QD on medication list suggests HTN, though not explicitly listed in PMH.",
+      "supporting_text": "Lisinopril 20 mg QD",
+      "source_section": "PMH",
+      "billable_tier": "advisory",
+      "needs_review": true,
+      "review_reason": "Inferred from medication; HTN not explicitly documented"
+    }
+  ],
+  "cpt_codes": [
+    {
+      "code": "99214",
+      "description": "Office/outpatient visit, established patient, moderate MDM",
+      "confidence": 0.85,
+      "modifiers": [
+        "25"
+      ],
+      "modifier_reasoning": [
+        "Modifier -25: significant, separately identifiable E/M same day as nail debridement (11721) and callus paring (11056); separate prescription drug management (ciclopirox) and CKD-related decision-making to avoid oral antifungal"
+      ],
+      "source": "E/M",
+      "mdm_details": {
+        "problems_score": 3,
+        "data_score": 1,
+        "risk_score": 3,
+        "mdm_level": "moderate",
+        "problems_rationale": "Multiple stable chronic illnesses (T2DM with neuropathy, CKD stage 3, CAD) \u2014 moderate",
+        "data_rationale": "No external records or independent tests reviewed today",
+        "risk_rationale": "Minor procedures in patient with risk factors (DM, CKD3, age 77, LOPS, calcified vessels) + prescription drug management (ciclopirox) = moderate risk"
+      },
+      "procedure_status": "completed",
+      "laterality": null,
+      "linked_diagnoses": [
+        "E11.40",
+        "B35.1",
+        "L84"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "77-year-old male with a 20-year history of Type 2 Diabetes and severe peripheral neuropathy",
+        "T2DM (A1C 7.4%), Peripheral Neuropathy, CKD Stage 3, CAD",
+        "Topical antifungal (ciclopirox 8% nail lacquer) prescribed",
+        "Oral antifungal not initiated given CKD"
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 2,
+      "code_source": "ai_confirmed",
+      "physician_code_note": null
+    },
+    {
+      "code": "11721",
+      "description": "Debridement of nail(s) by any method; 6 or more",
+      "confidence": 0.98,
+      "modifiers": [],
+      "modifier_reasoning": [
+        "Q8: Two Class B findings (calcified vessels with reduced toe pressures, and advanced trophic changes) supporting Medicare routine foot care coverage with LOPS from diabetic neuropathy"
+      ],
+      "source": "Procedure",
+      "mdm_details": {},
+      "procedure_status": "completed",
+      "laterality": "bilateral",
+      "linked_diagnoses": [
+        "B35.1",
+        "E11.40"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "debridement of mycotic toenails all 10 digits",
+        "Thickened mycotic toenails bilateral (all 10 digits)"
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 1,
+      "code_source": "ai_confirmed",
+      "physician_code_note": null
+    },
+    {
+      "code": "11056",
+      "description": "Paring or cutting of benign hyperkeratotic lesion; 2 to 4 lesions",
+      "confidence": 0.95,
+      "modifiers": [],
+      "modifier_reasoning": [
+        "4 hyperkeratotic lesions pared (bilateral 1st and 5th MTH = 4 lesions) \u2192 11056 covers 2\u20134 lesions"
+      ],
+      "source": "Procedure",
+      "mdm_details": {},
+      "procedure_status": "completed",
+      "laterality": "bilateral",
+      "linked_diagnoses": [
+        "L84",
+        "E11.40"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "Trimming and debridement of hyperkeratotic calluses bilateral MTH",
+        "Hyperkeratotic calluses bilateral 1st and 5th MTH"
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 1,
+      "code_source": "ai_confirmed",
+      "physician_code_note": null
+    }
+  ],
+  "hcpcs_codes": [
+    {
+      "code": "A5513",
+      "description": "Multi-density insert, custom molded from model of patient's foot, for diabetic shoe",
+      "confidence": 0.65,
+      "modifiers": [
+        "KX"
+      ],
+      "units": 1,
+      "linked_diagnoses": [
+        "E11.40"
+      ],
+      "rationale": "Diabetic shoe insert replaced today (worn). Patient has custom diabetic footwear from 6 months ago. KX added to attest Medicare therapeutic shoe coverage criteria met. Laterality not specified \u2014 flag for clarification.",
+      "supporting_text": "Checked and replaced diabetic shoe insert (worn)",
+      "needs_review": true,
+      "review_reason": "Note says 'insert' (singular) without specifying RT/LT or pair (LTRT). Verify whether one or both inserts replaced and confirm A5513 (custom molded) vs A5512 (direct formed) per actual product dispensed; add RT/LT or LTRT modifier accordingly.",
+      "code_source": "ai_confirmed",
+      "physician_code_note": null
+    }
+  ],
+  "snomed_codes": [
+    {
+      "concept_id": "422088007",
+      "description": "Disorder of nervous system due to type 2 diabetes mellitus",
+      "entity_text": "Type 2 DM with diabetic neuropathy",
+      "category": "diagnosis",
+      "confidence": 0.85,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "414941008",
+      "description": "Onychomycosis due to dermatophyte",
+      "entity_text": "Tinea unguium (onychomycosis)",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "29657007",
+      "description": "Callosity",
+      "entity_text": "corns and callosities bilateral 1st and 5th MTH",
+      "category": "diagnosis",
+      "confidence": 0.85,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "90734009",
+      "description": "Chronic kidney disease stage 3",
+      "entity_text": "CKD Stage 3",
+      "category": "diagnosis",
+      "confidence": 0.95,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "53741008",
+      "description": "Coronary arteriosclerosis",
+      "entity_text": "CAD",
+      "category": "diagnosis",
+      "confidence": 0.85,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "91487003",
+      "description": "Dry skin",
+      "entity_text": "xerosis with fissuring bilateral heels",
+      "category": "finding",
+      "confidence": 0.8,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "91019004",
+      "description": "Paresthesia of foot",
+      "entity_text": "intermittent tingling bilateral feet",
+      "category": "finding",
+      "confidence": 0.75,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "309604004",
+      "description": "Absent monofilament sensation",
+      "entity_text": "monofilament absent bilateral plantar",
+      "category": "finding",
+      "confidence": 0.4,
+      "is_root_concept": true
+    },
+    {
+      "concept_id": "229873003",
+      "description": "Debridement of nail",
+      "entity_text": "debridement of mycotic toenails all 10 digits",
+      "category": "procedure",
+      "confidence": 0.85,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "47158005",
+      "description": "Paring of skin",
+      "entity_text": "trimming/debridement of hyperkeratotic calluses bilateral MTH",
+      "category": "procedure",
+      "confidence": 0.7,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "81745001",
+      "description": "Toenail structure",
+      "entity_text": "toenails bilateral all 10 digits",
+      "category": "anatomy",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "76853006",
+      "description": "Heel structure",
+      "entity_text": "heels bilateral",
+      "category": "anatomy",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "9468002",
+      "description": "Structure of head of metatarsal bone",
+      "entity_text": "1st and 5th metatarsal heads bilateral",
+      "category": "anatomy",
+      "confidence": 0.85,
+      "is_root_concept": false
+    }
+  ],
+  "em_level_reasoning": "Established patient. Problems: 2+ stable chronic illnesses (T2DM with diabetic neuropathy, CKD stage 3, CAD) = MODERATE. Data: minimal \u2014 no external records/tests reviewed. Risk: minor surgical procedures (nail/callus debridement) in high-risk patient (DM, CKD3, age 77, LOPS, calcified vessels) PLUS prescription drug management (ciclopirox 8% nail lacquer) PLUS clinical decision to avoid oral antifungal due to CKD = MODERATE. 2-of-3 axes at MODERATE \u2192 99214. Modifier -25 mandatory because billable procedures (11721, 11056) were performed the same day; the E/M includes separately identifiable work for prescription management and CKD-driven medication decision-making.",
+  "error_message": null,
+  "validation_issues": [],
+  "warnings": [],
+  "encounter_integrity": {
+    "encounter_issues": [],
+    "error_count": 0,
+    "warning_count": 0
+  },
+  "documentation_audit": {
+    "audit_entries": [
+      {
+        "code": "E11.40",
+        "description": "Type 2 diabetes mellitus with diabetic neuropathy, unspecified",
+        "documentation_support": [
+          "Rationale: Listed in Assessment. Combination code captures DM + neuropathy; supersedes redundant generic E11.9 per Rule M.",
+          "Section: ASSESSMENT",
+          "Supporting text: Type 2 DM with diabetic neuropathy, unspecified"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "B35.1",
+        "description": "Tinea unguium",
+        "documentation_support": [
+          "Rationale: Onychomycosis listed in Assessment; mycotic toenails debrided today.",
+          "Section: ASSESSMENT",
+          "Supporting text: Tinea unguium (onychomycosis)"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "L84",
+        "description": "Corns and callosities",
+        "documentation_support": [
+          "Rationale: Listed in Assessment; bilateral 1st/5th MTH calluses pared today.",
+          "Section: ASSESSMENT",
+          "Supporting text: Corns and callosities"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "99214",
+        "description": "Office/outpatient visit, established patient, moderate MDM",
+        "documentation_support": [
+          "Section: E/M",
+          "MDM: moderate (P:3/D:1/R:3)",
+          "Linked DX: E11.40, B35.1, L84"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "11721",
+        "description": "Debridement of nail(s) by any method; 6 or more",
+        "documentation_support": [
+          "Section: Procedure"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "11056",
+        "description": "Paring or cutting of benign hyperkeratotic lesion; 2 to 4 lesions",
+        "documentation_support": [
+          "Section: Procedure"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "A5513",
+        "description": "Multi-density insert, custom molded from model of patient's foot, for diabetic shoe",
+        "documentation_support": [
+          "Rationale: Diabetic shoe insert replaced today (worn). Patient has custom diabetic footwear from 6 months ago. KX added to attest Medicare therapeutic shoe coverage criteria met. Laterality not specified \u2014 flag for clarification.",
+          "Supporting text: Checked and replaced diabetic shoe insert (worn)"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      }
+    ],
+    "total_codes": 7,
+    "fully_supported": 7,
+    "partially_supported": 0,
+    "unsupported": 0,
+    "codes_with_gaps": 0,
+    "documentation_score": 1.0
+  },
+  "pre_submission_audit_findings": [],
+  "pre_submission_audit_score": 1.0,
+  "auto_coding_tier": "AUTO",
+  "auto_coding_confidence": 0.9,
+  "auto_coding_review_reasons": [
+    "All three Assessment-section diagnoses (E11.40, B35.1, L84) coded as required protected anchors.",
+    "Generic E11.9 not coded \u2014 combination code E11.40 already captures diabetes per Rule M.",
+    "PMH conditions (CKD, CAD, HTN) kept in supporting_conditions only (Rule O).",
+    "99214 retained at moderate MDM with -25 modifier per Section J (procedures performed same day).",
+    "11721-Q8 supports Medicare routine foot care with diabetic LOPS and Class B findings.",
+    "11056 correct for 4 callus lesions (bilateral 1st/5th MTH).",
+    "A5513 retained for diabetic insert replacement; KX modifier added; flagged for laterality and product type verification.",
+    "SNOMED 91175000 (incorrect 'Seizure' description) replaced with 91019004 (Paresthesia of foot).",
+    "SNOMED 309604004 confidence \u22640.4 flagged as root_concept for downstream review."
+  ],
+  "auto_coding_summary": "Established-patient routine diabetic foot care for a 77-year-old Medicare patient with T2DM + diabetic neuropathy, onychomycosis, and bilateral hyperkeratotic calluses. Final billable set: ICD-10 E11.40 (primary), B35.1, L84; CPT 99214-25, 11721-Q8, 11056; HCPCS A5513-KX (diabetic insert replacement, laterality flagged for clarification). PMH CKD3, CAD, and inferred HTN remain in supporting_conditions. SNOMED set cleaned (incorrect 'Seizure' concept replaced with paresthesia of foot; low-confidence monofilament concept flagged). No imaging, surgery, injections, orthotics, or CAM walker triggers in this encounter.",
+  "rag_context": {
+    "entities_extracted": 35,
+    "candidates_per_system": {
+      "icd10": 240,
+      "cpt": 71,
+      "hcpcs": 30
+    },
+    "corrections_made": [
+      {
+        "type": "RETAINED",
+        "code": "E11.40",
+        "reason": "Protected anchor \u2014 Type 2 DM with diabetic neuropathy listed in Assessment",
+        "evidence": "Assessment: Type 2 DM with diabetic neuropathy, unspecified"
+      },
+      {
+        "type": "RETAINED",
+        "code": "B35.1",
+        "reason": "Protected anchor \u2014 Tinea unguium listed in Assessment; mycotic toenails debrided today",
+        "evidence": "Assessment: Tinea unguium (onychomycosis)"
+      },
+      {
+        "type": "RETAINED",
+        "code": "L84",
+        "reason": "Protected anchor \u2014 Corns and callosities listed in Assessment; calluses pared today",
+        "evidence": "Assessment: Corns and callosities"
+      },
+      {
+        "type": "RETAINED",
+        "code": "99214",
+        "reason": "Established patient with moderate MDM (multiple stable chronic illnesses, prescription drug management for ciclopirox, minor procedures with patient risk factors). Modifier -25 already present per Section J because billable procedures (11721, 11056) performed same day.",
+        "evidence": "Topical antifungal (ciclopirox 8% nail lacquer) prescribed; T2DM with diabetic neuropathy, CKD3, CAD"
+      },
+      {
+        "type": "RETAINED",
+        "code": "11721-Q8",
+        "reason": "Debridement of mycotic toenails all 10 digits (\u22656 nails); Q8 supports Medicare routine foot care coverage with two Class B findings (calcified vessels with reduced toe pressures + advanced trophic changes) plus LOPS from diabetic neuropathy",
+        "evidence": "debridement of mycotic toenails all 10 digits; Monofilament absent bilateral plantar; calcified vessels; toe pressures R 42/L 39 mmHg"
+      },
+      {
+        "type": "RETAINED",
+        "code": "11056",
+        "reason": "Paring 4 hyperkeratotic lesions (bilateral 1st and 5th MTH = 4 lesions) \u2192 2\u20134 lesion code correct",
+        "evidence": "Trimming and debridement of hyperkeratotic calluses bilateral 1st and 5th MTH"
+      },
+      {
+        "type": "FLAGGED",
+        "code": "A5513",
+        "reason": "Diabetic shoe insert replacement documented today, but laterality not specified (single insert vs pair) and direct-formed vs custom-molded type not documented. Verify product and add RT/LT or LTRT and KX modifier per Medicare DMEPOS therapeutic shoe policy.",
+        "evidence": "Checked and replaced diabetic shoe insert (worn)"
+      },
+      {
+        "type": "REMOVED",
+        "code": "91175000",
+        "reason": "SNOMED concept description in input ('Seizure') does not match the clinical entity (paresthesia of feet); low confidence (0.3). Removed as incorrect mapping.",
+        "evidence": "intermittent tingling bilateral feet"
+      },
+      {
+        "type": "CHANGED",
+        "code": "91175000 \u2192 91019004",
+        "reason": "Replaced incorrect 'Seizure' concept with correct SNOMED for paresthesia of foot",
+        "evidence": "intermittent tingling bilateral feet"
+      },
+      {
+        "type": "FLAGGED",
+        "code": "309604004",
+        "reason": "Low SNOMED confidence (0.4) \u2014 flagged for downstream review of monofilament sensation finding mapping",
+        "evidence": "Monofilament absent bilateral plantar aspect"
+      },
+      {
+        "type": "RETAINED",
+        "code": "supporting_conditions (N18.30, I25.10, I10)",
+        "reason": "PMH comorbidities not addressed in Assessment \u2014 pass through as advisory; not added to billable icd10_codes",
+        "evidence": "PMH: ... CKD Stage 3, CAD; Lisinopril 20 mg QD"
+      }
+    ],
+    "audit_notes": "Three protected anchors confirmed (E11.40, B35.1, L84). Generic E11.9 correctly absent (Rule M). PMH comorbidities (CKD, CAD, HTN) correctly placed in supporting_conditions (Rule O). Modifier -25 retained on 99214 per Section J. Q8 modifier on 11721 supports Medicare routine foot care coverage. A5513 retained for diabetic shoe insert replacement; flagged for laterality clarification and KX modifier added. SNOMED 91175000 ('Seizure') was a clearly incorrect mapping for paresthesia \u2014 replaced with 91019004 (Paresthesia of foot). 309604004 flagged as low-confidence root concept for downstream review. No image guidance, no L-code orthotics, no surgery scheduling, no CAM walker, no injections \u2014 Sections I/K/N/L not triggered.",
+    "vision_context": {
+      "note_category": "established_patient_visit",
+      "procedures_performed_today": [
+        "Debridement of mycotic toenails all 10 digits",
+        "Trimming and debridement of hyperkeratotic calluses bilateral MTH"
+      ],
+      "imaging_performed_today": [],
+      "supplies_dispensed_today": [
+        "Checked and replaced diabetic shoe insert"
+      ]
+    },
+    "prior_surgery_info": {
+      "is_post_op_visit": false,
+      "days_post_op": null,
+      "prior_surgery_description": null,
+      "prior_surgery_cpt": null
+    }
+  },
+  "model_source": "claude",
+  "api_usage": {
+    "prompt_tokens": 42407,
+    "completion_tokens": 12667,
+    "total_tokens": 55074
+  },
+  "physician_documented_codes": [],
+  "missing_physician_codes": [],
+  "cached_result": false,
+  "ner_entities": [
+    {
+      "text": "Routine diabetic foot care and nail management",
+      "category": "procedure",
+      "clinical_term": "routine diabetic foot care",
+      "laterality": null,
+      "specificity": null,
+      "source_section": "CC",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "Type 2 Diabetes",
+      "category": "diagnosis",
+      "clinical_term": "Type 2 diabetes mellitus",
+      "laterality": null,
+      "specificity": "20-year history",
+      "source_section": "HPI",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.84
+    },
+    {
+      "text": "severe peripheral neuropathy",
+      "category": "diagnosis",
+      "clinical_term": "peripheral neuropathy",
+      "laterality": null,
+      "specificity": "severe",
+      "source_section": "HPI",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.787
+    },
+    {
+      "text": "custom diabetic footwear",
+      "category": "supply",
+      "clinical_term": "custom diabetic footwear",
+      "laterality": null,
+      "specificity": "provided 6 months ago",
+      "source_section": "HPI",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.948
+    },
+    {
+      "text": "intermittent tingling bilateral feet",
+      "category": "finding",
+      "clinical_term": "paresthesia of feet",
+      "laterality": "BILATERAL",
+      "specificity": "intermittent tingling",
+      "source_section": "HPI",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "T2DM",
+      "category": "diagnosis",
+      "clinical_term": "Type 2 diabetes mellitus",
+      "laterality": null,
+      "specificity": "A1C 7.4%",
+      "source_section": "PMH",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.633
+    },
+    {
+      "text": "A1C 7.4%",
+      "category": "finding",
+      "clinical_term": "Hemoglobin A1c",
+      "laterality": null,
+      "specificity": "7.4%",
+      "source_section": "PMH",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "Peripheral Neuropathy",
+      "category": "diagnosis",
+      "clinical_term": "peripheral neuropathy",
+      "laterality": null,
+      "specificity": null,
+      "source_section": "PMH",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.787
+    },
+    {
+      "text": "CKD Stage 3",
+      "category": "diagnosis",
+      "clinical_term": "chronic kidney disease stage 3",
+      "laterality": null,
+      "specificity": "Stage 3",
+      "source_section": "PMH",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.765
+    },
+    {
+      "text": "CAD",
+      "category": "diagnosis",
+      "clinical_term": "coronary artery disease",
+      "laterality": null,
+      "specificity": null,
+      "source_section": "PMH",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.84
+    },
+    {
+      "text": "Insulin NPH 20 units BID",
+      "category": "medication",
+      "clinical_term": "insulin NPH",
+      "laterality": null,
+      "specificity": "20 units BID",
+      "source_section": "PMH",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.952
+    },
+    {
+      "text": "Gabapentin 300 mg TID",
+      "category": "medication",
+      "clinical_term": "gabapentin",
+      "laterality": null,
+      "specificity": "300 mg TID",
+      "source_section": "PMH",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.952
+    },
+    {
+      "text": "Aspirin 81 mg QD",
+      "category": "medication",
+      "clinical_term": "aspirin",
+      "laterality": null,
+      "specificity": "81 mg QD",
+      "source_section": "PMH",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.957
+    },
+    {
+      "text": "Lisinopril 20 mg QD",
+      "category": "medication",
+      "clinical_term": "lisinopril",
+      "laterality": null,
+      "specificity": "20 mg QD",
+      "source_section": "PMH",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.965
+    },
+    {
+      "text": "Skin dry with fissuring bilateral heels",
+      "category": "finding",
+      "clinical_term": "xerosis with fissures",
+      "laterality": "BILATERAL",
+      "specificity": "heels",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "Thickened mycotic toenails bilateral (all 10 digits)",
+      "category": "finding",
+      "clinical_term": "mycotic toenails",
+      "laterality": "BILATERAL",
+      "specificity": "all 10 digits",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "Hyperkeratotic calluses bilateral 1st and 5th MTH",
+      "category": "finding",
+      "clinical_term": "hyperkeratotic calluses",
+      "laterality": "BILATERAL",
+      "specificity": "1st and 5th metatarsal heads",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.902
+    },
+    {
+      "text": "Monofilament absent bilateral plantar aspect",
+      "category": "finding",
+      "clinical_term": "absent monofilament sensation",
+      "laterality": "BILATERAL",
+      "specificity": "plantar aspect",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "ABI deferred (calcified vessels)",
+      "category": "finding",
+      "clinical_term": "calcified vessels",
+      "laterality": null,
+      "specificity": "ABI deferred",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.53
+    },
+    {
+      "text": "Toe pressures: R 42 mmHg",
+      "category": "finding",
+      "clinical_term": "toe pressure",
+      "laterality": "RIGHT",
+      "specificity": "42 mmHg",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "L 39 mmHg",
+      "category": "finding",
+      "clinical_term": "toe pressure",
+      "laterality": "LEFT",
+      "specificity": "39 mmHg",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "Type 2 DM with diabetic neuropathy, unspecified",
+      "category": "diagnosis",
+      "clinical_term": "Type 2 diabetes with diabetic neuropathy",
+      "laterality": null,
+      "specificity": "unspecified",
+      "source_section": "ASSESSMENT",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "Tinea unguium (onychomycosis)",
+      "category": "diagnosis",
+      "clinical_term": "onychomycosis",
+      "laterality": null,
+      "specificity": null,
+      "source_section": "ASSESSMENT",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "Corns and callosities",
+      "category": "diagnosis",
+      "clinical_term": "corns and callosities",
+      "laterality": null,
+      "specificity": null,
+      "source_section": "ASSESSMENT",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.61
+    },
+    {
+      "text": "Type 2 DM without complications",
+      "category": "diagnosis",
+      "clinical_term": "Type 2 diabetes without complications",
+      "laterality": null,
+      "specificity": "additional coding",
+      "source_section": "ASSESSMENT",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.499
+    },
+    {
+      "text": "debridement of mycotic toenails all 10 digits",
+      "category": "procedure",
+      "clinical_term": "debridement of mycotic toenails",
+      "laterality": "BILATERAL",
+      "specificity": "all 10 digits",
+      "source_section": "PLAN",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.585
+    },
+    {
+      "text": "Trimming and debridement of hyperkeratotic calluses bilateral MTH",
+      "category": "procedure",
+      "clinical_term": "paring/debridement of calluses",
+      "laterality": "BILATERAL",
+      "specificity": "metatarsal heads",
+      "source_section": "PLAN",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "Applied urea 40% cream to bilateral heels",
+      "category": "procedure",
+      "clinical_term": "topical application urea cream",
+      "laterality": "BILATERAL",
+      "specificity": "heels",
+      "source_section": "PLAN",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "urea 40% cream",
+      "category": "medication",
+      "clinical_term": "urea 40% cream",
+      "laterality": null,
+      "specificity": null,
+      "source_section": "PLAN",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.877
+    },
+    {
+      "text": "replaced diabetic shoe insert",
+      "category": "supply",
+      "clinical_term": "diabetic shoe insert",
+      "laterality": null,
+      "specificity": "replaced (worn)",
+      "source_section": "PLAN",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.843
+    },
+    {
+      "text": "ciclopirox 8% nail lacquer",
+      "category": "medication",
+      "clinical_term": "ciclopirox 8% topical nail lacquer",
+      "laterality": null,
+      "specificity": "prescribed",
+      "source_section": "PLAN",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.835
+    },
+    {
+      "text": "toenails",
+      "category": "body_structure",
+      "clinical_term": "toenails",
+      "laterality": "BILATERAL",
+      "specificity": "all 10 digits",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "1st and 5th MTH",
+      "category": "body_structure",
+      "clinical_term": "1st and 5th metatarsal heads",
+      "laterality": "BILATERAL",
+      "specificity": null,
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "heels",
+      "category": "body_structure",
+      "clinical_term": "heels",
+      "laterality": "BILATERAL",
+      "specificity": null,
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "plantar aspect",
+      "category": "body_structure",
+      "clinical_term": "plantar foot",
+      "laterality": "BILATERAL",
+      "specificity": null,
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    }
+  ]
+}

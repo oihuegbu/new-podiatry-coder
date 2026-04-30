@@ -54,8 +54,26 @@ You will receive an image of a clinical note PDF. Extract ALL information into s
     "days_post_op": 14,
     "prior_surgery_description": "Austin/Chevron bunionectomy right foot",
     "prior_surgery_cpt": "28296"
-  }
+  },
+  "physician_documented_codes": [
+    {
+      "code": "E11.42",
+      "system": "icd10",
+      "description": "Type 2 DM with polyneuropathy",
+      "section": "ASSESSMENT",
+      "raw_text": "E11.42 - Type 2 DM with polyneuropathy"
+    }
+  ]
 }
+
+## IMPORTANT RULES FOR physician_documented_codes:
+- Extract ONLY codes explicitly written by the physician (e.g., "E11.42", "CPT 11721", "L84")
+- Look in: Assessment/Diagnoses section, Plan section, anywhere codes appear with their numbers
+- ICD-10-CM codes: letter + digits format (e.g., E11.42, M20.11, L84, B35.1)
+- CPT codes: 5-digit numbers (e.g., 11721, 99213, 28296)
+- HCPCS codes: letter + 4 digits (e.g., A5513, L3020, J3301)
+- If the physician wrote NO explicit codes, return an empty array []
+- Do NOT include codes you infer — only ones literally written in the document
 
 ## IMPORTANT RULES FOR prior_surgery_info:
 - Set is_post_op_visit=true ONLY if the note explicitly documents a follow-up visit after a prior surgery
@@ -141,6 +159,12 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
     if not isinstance(prior_surgery_info, dict):
         prior_surgery_info = {}
 
+    physician_codes = result.get("physician_documented_codes", []) or []
+    if not isinstance(physician_codes, list):
+        physician_codes = []
+    if physician_codes:
+        logger.info(f"  Physician-documented codes found: {[p.get('code') for p in physician_codes]}")
+
     return {
         "metadata": metadata,
         "sections": sections,
@@ -149,5 +173,6 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
         "imaging_performed_today": result.get("imaging_performed_today", []),
         "supplies_dispensed_today": result.get("supplies_dispensed_today", []),
         "prior_surgery_info": prior_surgery_info,
+        "physician_documented_codes": physician_codes,
         "extraction_usage": usage,
     }

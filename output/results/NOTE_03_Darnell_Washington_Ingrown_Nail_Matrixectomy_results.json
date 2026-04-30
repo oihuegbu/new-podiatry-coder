@@ -1,0 +1,535 @@
+{
+  "document_id": "NOTE_03_Darnell_Washington_Ingrown_Nail_Matrixectomy",
+  "timestamp": "2026-04-30T21:40:11.835493",
+  "success": true,
+  "processing_time": 107.48,
+  "patient_metadata": {
+    "patient_name": "Darnell K. Washington",
+    "date_of_birth": "06/11/1975",
+    "date_of_service": "February 07, 2026",
+    "provider": "Dr. James A. Morales, DPM, FACFAS",
+    "npi": "2345678901",
+    "mrn": "AFR-001133",
+    "insurance": "Aetna PPO I ID: W334521009 I Group: AET5510",
+    "note_type": "SURGICAL PROCEDURE \u2013 INGROWN TOENAIL REMOVAL (MATRIXECTOMY)"
+  },
+  "note_sections": {
+    "chief_complaint": "Chronic recurrent right hallux onychocryptosis.",
+    "hpi": "Mr. Washington is a 50-year-old male with a 2-year history of recurrent ingrown right great toenail despite conservative nail care. He presents with lateral nail border embedded in periungual tissue w...",
+    "pmh_medications_allergies": "PMH: No significant PMH. Medications: None. Allergies: Sulfa drugs (GI upset).",
+    "physical_examination": "Right hallux: lateral nail border incurvated into sulcus with hypertrophic granulation tissue, moderate seropurulent drainage, tenderness to palpation of lateral fold. No cellulitis extending beyond d...",
+    "imaging_diagnostics": "None indicated.",
+    "assessment_diagnoses": "\u2022 Ingrowing nail, right great toe\n\u2022 Local infection of skin and subcutaneous tissue, unspecified",
+    "plan": "Performed partial nail avulsion with permanent chemical matrixectomy (phenol/alcohol technique) of right hallux lateral border under digital block anesthesia (lidocaine 1% without epi). Procedure tole..."
+  },
+  "icd_codes": [
+    {
+      "code": "L60.0",
+      "description": "Ingrowing nail",
+      "type": "primary",
+      "confidence": 0.98,
+      "rationale": "Listed in Assessment as 'Ingrowing nail, right great toe'. Primary reason for the surgical encounter (matrixectomy).",
+      "supporting_text": "Ingrowing nail, right great toe",
+      "laterality": "RIGHT",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "L08.9",
+      "description": "Local infection of the skin and subcutaneous tissue, unspecified",
+      "type": "secondary",
+      "confidence": 0.92,
+      "rationale": "Listed in Assessment. Documented seropurulent drainage and granulation tissue with antibiotic prescribed.",
+      "supporting_text": "Local infection of skin and subcutaneous tissue, unspecified",
+      "laterality": "RIGHT",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_confirmed",
+      "physician_code_note": null
+    }
+  ],
+  "supporting_conditions": [
+    {
+      "code": "Z88.2",
+      "description": "Allergy status to sulfonamides",
+      "type": "advisory",
+      "confidence": 0.95,
+      "rationale": "Sulfa drug allergy documented in Allergies section.",
+      "supporting_text": "Allergies: Sulfa drugs (GI upset)",
+      "source_section": "PMH",
+      "billable_tier": "advisory",
+      "needs_review": false,
+      "review_reason": "Drug allergy Z-code informational only"
+    }
+  ],
+  "cpt_codes": [
+    {
+      "code": "11750",
+      "description": "Excision of nail and nail matrix, partial or complete (e.g., for permanent removal)",
+      "confidence": 0.98,
+      "modifiers": [
+        "T5"
+      ],
+      "modifier_reasoning": [
+        "T5: right great toe (right hallux, lateral border matrixectomy)"
+      ],
+      "source": "PROCEDURE",
+      "mdm_details": {},
+      "procedure_status": "completed",
+      "laterality": "right",
+      "linked_diagnoses": [
+        "L60.0",
+        "L08.9"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "partial nail avulsion with permanent chemical matrixectomy (phenol/alcohol technique) of right hallux lateral border"
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 6,
+      "code_source": "ai_confirmed",
+      "physician_code_note": null
+    }
+  ],
+  "hcpcs_codes": [],
+  "snomed_codes": [
+    {
+      "concept_id": "47915002",
+      "description": "Ingrowing nail",
+      "entity_text": "Ingrowing nail, right great toe",
+      "category": "diagnosis",
+      "confidence": 0.92,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "128045006",
+      "description": "Local infection of skin and subcutaneous tissue",
+      "entity_text": "Local infection of skin and subcutaneous tissue",
+      "category": "diagnosis",
+      "confidence": 0.6,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "37058002",
+      "description": "Pyogenic granuloma",
+      "entity_text": "hypertrophic granulation tissue / granuloma periungual",
+      "category": "finding",
+      "confidence": 0.6,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "443530009",
+      "description": "Purulent discharge",
+      "entity_text": "moderate purulent/seropurulent discharge",
+      "category": "finding",
+      "confidence": 0.75,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "247348008",
+      "description": "Tenderness",
+      "entity_text": "tenderness to palpation of lateral nail fold",
+      "category": "finding",
+      "confidence": 0.7,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "177127008",
+      "description": "Avulsion of nail and chemical destruction of nail matrix",
+      "entity_text": "Partial nail avulsion with permanent chemical matrixectomy (phenol/alcohol) right hallux lateral border",
+      "category": "procedure",
+      "confidence": 0.85,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "231262006",
+      "description": "Digital nerve block",
+      "entity_text": "digital block anesthesia with lidocaine 1%",
+      "category": "procedure",
+      "confidence": 0.8,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "76188006",
+      "description": "Structure of great toe",
+      "entity_text": "right hallux",
+      "category": "body_structure",
+      "confidence": 0.85,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "418038007",
+      "description": "Propensity to adverse reactions to sulfonamide",
+      "entity_text": "sulfa drug allergy",
+      "category": "allergy",
+      "confidence": 0.75,
+      "is_root_concept": false
+    }
+  ],
+  "em_level_reasoning": "Surgical procedure-only encounter. Patient presented for definitive treatment of chronic recurrent ingrown right hallux toenail. Only the partial nail avulsion with permanent chemical (phenol/alcohol) matrixectomy was performed; no separately identifiable E/M service was documented beyond the work inherent to the procedure. CPT 11750 is the correct code for permanent matrix destruction (vs 11730 simple avulsion or 11765 wedge skin excision). Digital block and local anesthetic are integral to 11750 and not separately reportable. T5 modifier identifies right great toe. 10-day global period applies; modifier -25 not applicable (no E/M billed).",
+  "error_message": null,
+  "validation_issues": [],
+  "warnings": [],
+  "encounter_integrity": {
+    "encounter_issues": [],
+    "error_count": 0,
+    "warning_count": 0
+  },
+  "documentation_audit": {
+    "audit_entries": [
+      {
+        "code": "L60.0",
+        "description": "Ingrowing nail",
+        "documentation_support": [
+          "Rationale: Listed in Assessment as 'Ingrowing nail, right great toe'. Primary reason for the surgical encounter (matrixectomy).",
+          "Section: ASSESSMENT",
+          "Supporting text: Ingrowing nail, right great toe"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "L08.9",
+        "description": "Local infection of the skin and subcutaneous tissue, unspecified",
+        "documentation_support": [
+          "Rationale: Listed in Assessment. Documented seropurulent drainage and granulation tissue with antibiotic prescribed.",
+          "Section: ASSESSMENT",
+          "Supporting text: Local infection of skin and subcutaneous tissue, unspecified"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "11750",
+        "description": "Excision of nail and nail matrix, partial or complete (e.g., for permanent removal)",
+        "documentation_support": [
+          "Section: PROCEDURE"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      }
+    ],
+    "total_codes": 3,
+    "fully_supported": 3,
+    "partially_supported": 0,
+    "unsupported": 0,
+    "codes_with_gaps": 0,
+    "documentation_score": 1.0
+  },
+  "pre_submission_audit_findings": [],
+  "pre_submission_audit_score": 1.0,
+  "auto_coding_tier": "AUTO",
+  "auto_coding_confidence": 0.95,
+  "auto_coding_review_reasons": [
+    "L60.0 retained \u2014 protected Assessment anchor for ingrowing nail right great toe",
+    "L08.9 retained \u2014 protected Assessment anchor for local skin/subcutaneous infection",
+    "CPT 11750-T5 retained \u2014 accurate code and laterality modifier for permanent chemical matrixectomy of right hallux",
+    "No E/M billed \u2014 procedure-only encounter; modifier -25 not required",
+    "Z88.2 sulfa allergy kept in supporting_conditions per Rule 4",
+    "SNOMED set verified \u2014 no duplicates, no root-concept fallbacks; description for 128045006 normalized"
+  ],
+  "auto_coding_summary": "Established patient surgical-only encounter for definitive treatment of chronic recurrent right hallux onychocryptosis with secondary local infection. Billed codes: ICD-10 L60.0 (primary) and L08.9 (secondary); CPT 11750-T5 for partial nail avulsion with permanent chemical matrixectomy of the right great toe. No E/M, imaging, HCPCS supplies, or injections billed. Sulfa allergy retained as advisory in supporting_conditions. SNOMED entries cleaned of broad/duplicate concepts. Code set is complete, compliant, and ready for submission.",
+  "rag_context": {
+    "entities_extracted": 22,
+    "candidates_per_system": {
+      "icd10": 194,
+      "cpt": 51,
+      "hcpcs": 15
+    },
+    "corrections_made": [
+      {
+        "type": "RETAINED",
+        "code": "L60.0",
+        "reason": "Protected anchor \u2014 Ingrowing nail, right great toe (Assessment)",
+        "evidence": "Assessment: Ingrowing nail, right great toe"
+      },
+      {
+        "type": "RETAINED",
+        "code": "L08.9",
+        "reason": "Protected anchor \u2014 Local infection of skin and subcutaneous tissue (Assessment)",
+        "evidence": "Assessment: Local infection of skin and subcutaneous tissue, unspecified"
+      },
+      {
+        "type": "RETAINED",
+        "code": "11750-T5",
+        "reason": "Correct CPT for permanent chemical matrixectomy with T5 modifier for right great toe",
+        "evidence": "Plan: partial nail avulsion with permanent chemical matrixectomy (phenol/alcohol technique) of right hallux lateral border"
+      }
+    ],
+    "audit_notes": "Both protected anchors (L60.0, L08.9) coded correctly. CPT 11750 with T5 modifier accurately captures permanent chemical matrixectomy of right hallux. No E/M billed (procedure-only visit) \u2014 modifier -25 N/A. No imaging, no supplies dispensed, no injection \u2014 sections C, D, I, J, K, N, L not applicable. PMH negative \u2014 no codes to move. Z88.2 sulfa allergy correctly placed in supporting_conditions. SNOMED 128045006 description aligned to local infection language; minor confidence bump on procedure concept.",
+    "vision_context": {
+      "note_category": "surgical_procedure",
+      "procedures_performed_today": [
+        "Partial nail avulsion with permanent chemical matrixectomy (phenol/alcohol technique) of right hallux lateral border"
+      ],
+      "imaging_performed_today": [],
+      "supplies_dispensed_today": []
+    },
+    "prior_surgery_info": {
+      "is_post_op_visit": false,
+      "days_post_op": null,
+      "prior_surgery_description": null,
+      "prior_surgery_cpt": null
+    }
+  },
+  "model_source": "claude",
+  "api_usage": {
+    "prompt_tokens": 35567,
+    "completion_tokens": 4913,
+    "total_tokens": 40480
+  },
+  "physician_documented_codes": [],
+  "missing_physician_codes": [],
+  "cached_result": false,
+  "ner_entities": [
+    {
+      "text": "Chronic recurrent right hallux onychocryptosis",
+      "category": "diagnosis",
+      "clinical_term": "onychocryptosis",
+      "laterality": "RIGHT",
+      "specificity": "hallux, chronic recurrent",
+      "source_section": "CC",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.941
+    },
+    {
+      "text": "recurrent ingrown right great toenail",
+      "category": "diagnosis",
+      "clinical_term": "ingrown toenail",
+      "laterality": "RIGHT",
+      "specificity": "great toe, 2-year history, recurrent",
+      "source_section": "HPI",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "lateral nail border embedded in periungual tissue",
+      "category": "finding",
+      "clinical_term": "embedded lateral nail border",
+      "laterality": "RIGHT",
+      "specificity": "periungual tissue",
+      "source_section": "HPI",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "granuloma formation",
+      "category": "finding",
+      "clinical_term": "granuloma",
+      "laterality": "RIGHT",
+      "specificity": "periungual",
+      "source_section": "HPI",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.851
+    },
+    {
+      "text": "moderate purulent discharge",
+      "category": "finding",
+      "clinical_term": "purulent discharge",
+      "laterality": "RIGHT",
+      "specificity": "moderate",
+      "source_section": "HPI",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.945
+    },
+    {
+      "text": "two prior partial nail avulsions",
+      "category": "procedure",
+      "clinical_term": "prior partial nail avulsion",
+      "laterality": "RIGHT",
+      "specificity": "historical, two prior",
+      "source_section": "HPI",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "Sulfa drugs",
+      "category": "allergy",
+      "clinical_term": "sulfa drug allergy",
+      "laterality": null,
+      "specificity": "GI upset",
+      "source_section": "PMH",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.513
+    },
+    {
+      "text": "lateral nail border incurvated into sulcus",
+      "category": "finding",
+      "clinical_term": "incurvated nail border",
+      "laterality": "RIGHT",
+      "specificity": "lateral, hallux sulcus",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "hypertrophic granulation tissue",
+      "category": "finding",
+      "clinical_term": "hypertrophic granulation tissue",
+      "laterality": "RIGHT",
+      "specificity": "lateral nail fold",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.849
+    },
+    {
+      "text": "moderate seropurulent drainage",
+      "category": "finding",
+      "clinical_term": "seropurulent drainage",
+      "laterality": "RIGHT",
+      "specificity": "moderate",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.937
+    },
+    {
+      "text": "tenderness to palpation of lateral fold",
+      "category": "finding",
+      "clinical_term": "tenderness to palpation",
+      "laterality": "RIGHT",
+      "specificity": "lateral nail fold",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.892
+    },
+    {
+      "text": "Neurovascular intact",
+      "category": "finding",
+      "clinical_term": "neurovascular status intact",
+      "laterality": "RIGHT",
+      "specificity": null,
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.553
+    },
+    {
+      "text": "Ingrowing nail, right great toe",
+      "category": "diagnosis",
+      "clinical_term": "ingrowing nail",
+      "laterality": "RIGHT",
+      "specificity": "great toe",
+      "source_section": "ASSESSMENT",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "Local infection of skin and subcutaneous tissue, unspecified",
+      "category": "diagnosis",
+      "clinical_term": "local skin and subcutaneous tissue infection",
+      "laterality": "RIGHT",
+      "specificity": "unspecified",
+      "source_section": "ASSESSMENT",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.864
+    },
+    {
+      "text": "partial nail avulsion with permanent chemical matrixectomy (phenol/alcohol technique) of right hallux lateral border",
+      "category": "procedure",
+      "clinical_term": "partial nail avulsion with permanent chemical matrixectomy",
+      "laterality": "RIGHT",
+      "specificity": "hallux lateral border, phenol/alcohol technique",
+      "source_section": "PLAN",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "digital block anesthesia (lidocaine 1% without epi)",
+      "category": "procedure",
+      "clinical_term": "digital block anesthesia",
+      "laterality": "RIGHT",
+      "specificity": "lidocaine 1% without epinephrine",
+      "source_section": "PLAN",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "lidocaine 1% without epi",
+      "category": "medication",
+      "clinical_term": "lidocaine 1% plain",
+      "laterality": null,
+      "specificity": "local anesthetic, no epinephrine",
+      "source_section": "PLAN",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.942
+    },
+    {
+      "text": "Betadine soak TID x 2 weeks",
+      "category": "medication",
+      "clinical_term": "povidone-iodine soak",
+      "laterality": null,
+      "specificity": "TID x 2 weeks",
+      "source_section": "PLAN",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "Cephalexin 500 mg QID x 10 days",
+      "category": "medication",
+      "clinical_term": "cephalexin",
+      "laterality": null,
+      "specificity": "500 mg QID x 10 days",
+      "source_section": "PLAN",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    },
+    {
+      "text": "right hallux",
+      "category": "body_structure",
+      "clinical_term": "hallux",
+      "laterality": "RIGHT",
+      "specificity": "great toe",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.93
+    },
+    {
+      "text": "lateral nail border",
+      "category": "body_structure",
+      "clinical_term": "lateral nail border",
+      "laterality": "RIGHT",
+      "specificity": "hallux",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.785
+    },
+    {
+      "text": "lateral fold",
+      "category": "body_structure",
+      "clinical_term": "lateral nail fold",
+      "laterality": "RIGHT",
+      "specificity": "hallux",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
+    }
+  ]
+}

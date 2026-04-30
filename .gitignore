@@ -8,7 +8,6 @@ data/vector_store/
 data/embeddings/
 
 # Runtime output
-output/
 logs/
 
 # OS / IDE

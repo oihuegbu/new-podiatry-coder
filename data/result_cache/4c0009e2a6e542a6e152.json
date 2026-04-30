@@ -1,0 +1,389 @@
+{
+  "document_id": "NOTE_EC_299_Madeupperson_PlantarMass",
+  "timestamp": "2026-04-30T19:36:31.608385",
+  "success": true,
+  "processing_time": 103.99,
+  "patient_metadata": {
+    "patient_name": "Hyacinthe T. Madeupperson",
+    "date_of_birth": "01/08/1968",
+    "date_of_service": "October 13, 2026",
+    "provider": "V. Okonkwo-Bergmann DPM",
+    "npi": null,
+    "mrn": "SYN-000299",
+    "insurance": "Aetna PPO",
+    "note_type": "SYNTHETIC"
+  },
+  "note_sections": {
+    "chief_complaint": "Lump on bottom of foot, growing, painful",
+    "hpi": "57F noted a \"lump\" on the plantar surface of her R forefoot about 4 months ago. Initially small, has been gradually growing. Now causes pain w/ walking, especially in shoes. Also notes some discolorat...",
+    "pmh_medications_allergies": "PMH: hypothyroid, mild HTN\nMeds: levothyroxine, lisinopril\nNKDA\nFamily hx: father had melanoma (concerning)\nSocial: no tobacco, occasional alcohol",
+    "physical_examination": "R foot plantar surface:\n- Mass located at the plantar aspect of the R midfoot, slightly lateral to the central plantar surface\n- Size: approximately 2.5 cm x 2 cm x 1 cm (raised above the surrounding ...",
+    "imaging_diagnostics": "",
+    "assessment_diagnoses": "This is concerning for:\n1. Plantar fibroma (Dupuytren's-like nodule of the plantar fascia) - most common benign plantar mass\n2. Ganglion cyst - but doesn't fit the typical appearance (firm vs. soft fl...",
+    "plan": "This is NOT a case to \"just observe\" or \"shave it off\" - growing soft tissue masses on the foot need proper diagnostic workup to rule out malignancy.\n\nDiagnostic workup ordered:\n1. MRI of the R foot w..."
+  },
+  "icd_codes": [
+    {
+      "code": "M72.2",
+      "description": "Plantar fascial fibromatosis",
+      "type": "primary",
+      "confidence": 0.95,
+      "rationale": "Listed in Assessment as 'Plantar fibroma (Dupuytren's-like nodule of the plantar fascia)'.",
+      "supporting_text": "Plantar fibroma (Dupuytren's-like nodule of the plantar fascia)",
+      "laterality": "RIGHT",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "M67.471",
+      "description": "Ganglion, right ankle and foot",
+      "type": "secondary",
+      "confidence": 0.9,
+      "rationale": "Listed in Assessment as a differential diagnosis 'Ganglion cyst'.",
+      "supporting_text": "Ganglion cyst - but doesn't fit the typical appearance",
+      "laterality": "RIGHT",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "C49.21",
+      "description": "Malignant neoplasm of connective and soft tissue of right lower limb, including hip",
+      "type": "secondary",
+      "confidence": 0.85,
+      "rationale": "Listed in Assessment as 'SOFT TISSUE SARCOMA'.",
+      "supporting_text": "SOFT TISSUE SARCOMA - rare but must be considered",
+      "laterality": "RIGHT",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "C43.71",
+      "description": "Malignant melanoma of right lower limb, including hip",
+      "type": "secondary",
+      "confidence": 0.8,
+      "rationale": "Added due to concern for melanoma.",
+      "supporting_text": "Less likely: melanoma (but possible especially w/ overlying skin changes)",
+      "laterality": "RIGHT",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "D03.71",
+      "description": "Melanoma in situ of right lower limb, including hip",
+      "type": "secondary",
+      "confidence": 0.8,
+      "rationale": "Added due to concern for melanoma.",
+      "supporting_text": "Less likely: melanoma (but possible especially w/ overlying skin changes)",
+      "laterality": "RIGHT",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "M85.471",
+      "description": "Solitary bone cyst, right ankle and foot",
+      "type": "secondary",
+      "confidence": 0.8,
+      "rationale": "Added as a differential diagnosis for other benign tumors.",
+      "supporting_text": "Other benign tumors (lipoma, schwannoma, etc.)",
+      "laterality": "RIGHT",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    }
+  ],
+  "supporting_conditions": [
+    {
+      "code": "E03.9",
+      "description": "Hypothyroidism, unspecified",
+      "type": "advisory",
+      "confidence": 0.9,
+      "rationale": "PMH condition with active medication (levothyroxine). Not in Assessment.",
+      "supporting_text": "PMH: hypothyroid. Medications: levothyroxine",
+      "source_section": "PMH",
+      "billable_tier": "advisory",
+      "needs_review": true,
+      "review_reason": "PMH condition not addressed as separate encounter problem today"
+    },
+    {
+      "code": "I10",
+      "description": "Essential (primary) hypertension",
+      "type": "advisory",
+      "confidence": 0.9,
+      "rationale": "PMH condition with active medication (lisinopril). Not in Assessment.",
+      "supporting_text": "PMH: mild HTN. Medications: lisinopril",
+      "source_section": "PMH",
+      "billable_tier": "advisory",
+      "needs_review": true,
+      "review_reason": "PMH condition not addressed as separate encounter problem today"
+    }
+  ],
+  "cpt_codes": [
+    {
+      "code": "99204",
+      "description": "Office or other outpatient visit for the evaluation and management of a new patient, which requires a medically appropriate history and/or examination and moderate level of medical decision making.",
+      "confidence": 0.95,
+      "modifiers": [
+        "57"
+      ],
+      "modifier_reasoning": [
+        "Modifier -57: Decision for major surgery (excision of soft tissue mass) made at this visit, surgery not performed today"
+      ],
+      "source": "E/M",
+      "mdm_details": {
+        "problems_score": 3,
+        "data_score": 2,
+        "risk_score": 3,
+        "mdm_level": "moderate",
+        "problems_rationale": "New problem with uncertain prognosis (soft tissue mass with concerning features)",
+        "data_rationale": "MRI ordered to further evaluate the mass",
+        "risk_rationale": "Decision for major surgery (excision of soft tissue mass) made"
+      },
+      "procedure_status": "completed",
+      "laterality": null,
+      "linked_diagnoses": [
+        "M72.2",
+        "M67.471",
+        "C49.21",
+        "C43.71",
+        "D03.71",
+        "M85.471"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "Diagnostic workup ordered: MRI of the R foot w/ and w/o contrast"
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 1,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    }
+  ],
+  "hcpcs_codes": [],
+  "snomed_codes": [
+    {
+      "concept_id": "11860006",
+      "description": "Plantar fibromatosis",
+      "entity_text": "plantar fibroma",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "302859006",
+      "description": "Ganglion cyst",
+      "entity_text": "ganglion cyst",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "363346000",
+      "description": "Soft tissue sarcoma",
+      "entity_text": "soft tissue sarcoma",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "372244006",
+      "description": "Malignant melanoma",
+      "entity_text": "melanoma",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "125643001",
+      "description": "Soft tissue mass",
+      "entity_text": "soft tissue mass",
+      "category": "finding",
+      "confidence": 0.9,
+      "is_root_concept": false
+    }
+  ],
+  "em_level_reasoning": "Full MDM calculation including all three axes with explicit 2-of-3 determination. New patient visit with moderate complexity due to the decision for major surgery and diagnostic workup.",
+  "error_message": null,
+  "validation_issues": [],
+  "warnings": [],
+  "encounter_integrity": {
+    "encounter_issues": [],
+    "error_count": 0,
+    "warning_count": 0
+  },
+  "documentation_audit": {
+    "audit_entries": [
+      {
+        "code": "M72.2",
+        "description": "Plantar fascial fibromatosis",
+        "documentation_support": [
+          "Rationale: Listed in Assessment as 'Plantar fibroma (Dupuytren's-like nodule of the plantar fascia)'.",
+          "Section: ASSESSMENT",
+          "Supporting text: Plantar fibroma (Dupuytren's-like nodule of the plantar fascia)"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "M67.471",
+        "description": "Ganglion, right ankle and foot",
+        "documentation_support": [
+          "Rationale: Listed in Assessment as a differential diagnosis 'Ganglion cyst'.",
+          "Section: ASSESSMENT",
+          "Supporting text: Ganglion cyst - but doesn't fit the typical appearance"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "C49.21",
+        "description": "Malignant neoplasm of connective and soft tissue of right lower limb, including hip",
+        "documentation_support": [
+          "Rationale: Listed in Assessment as 'SOFT TISSUE SARCOMA'.",
+          "Section: ASSESSMENT",
+          "Supporting text: SOFT TISSUE SARCOMA - rare but must be considered"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "C43.71",
+        "description": "Malignant melanoma of right lower limb, including hip",
+        "documentation_support": [
+          "Rationale: Added due to concern for melanoma.",
+          "Section: ASSESSMENT",
+          "Supporting text: Less likely: melanoma (but possible especially w/ overlying skin changes)"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "D03.71",
+        "description": "Melanoma in situ of right lower limb, including hip",
+        "documentation_support": [
+          "Rationale: Added due to concern for melanoma.",
+          "Section: ASSESSMENT",
+          "Supporting text: Less likely: melanoma (but possible especially w/ overlying skin changes)"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "M85.471",
+        "description": "Solitary bone cyst, right ankle and foot",
+        "documentation_support": [
+          "Rationale: Added as a differential diagnosis for other benign tumors.",
+          "Section: ASSESSMENT",
+          "Supporting text: Other benign tumors (lipoma, schwannoma, etc.)"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "99204",
+        "description": "Office or other outpatient visit for the evaluation and management of a new patient, which requires a medically appropriate history and/or examination and moderate level of medical decision making.",
+        "documentation_support": [
+          "Section: E/M",
+          "MDM: moderate (P:3/D:2/R:3)",
+          "Linked DX: M72.2, M67.471, C49.21, C43.71, D03.71, M85.471"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      }
+    ],
+    "total_codes": 7,
+    "fully_supported": 7,
+    "partially_supported": 0,
+    "unsupported": 0,
+    "codes_with_gaps": 0,
+    "documentation_score": 1.0
+  },
+  "pre_submission_audit_findings": [],
+  "pre_submission_audit_score": 1.0,
+  "auto_coding_tier": "AUTO",
+  "auto_coding_confidence": 0.85,
+  "auto_coding_review_reasons": [
+    "Changed E/M code to 99204 for new patient visit.",
+    "Added codes for melanoma and other benign tumors based on assessment concerns."
+  ],
+  "auto_coding_summary": "The coding set was audited to reflect a new patient visit with concerns for a soft tissue mass. The E/M code was corrected to 99204, and additional ICD-10 codes were added for melanoma and other benign tumors as per the assessment. All protected anchors were coded, and the decision for major surgery was noted with modifier -57.",
+  "rag_context": {
+    "entities_extracted": 24,
+    "candidates_per_system": {
+      "icd10": 256,
+      "cpt": 30,
+      "hcpcs": 15
+    },
+    "corrections_made": [
+      {
+        "type": "CHANGED",
+        "code": "99214",
+        "reason": "Changed to 99204: This is a new patient visit, not established.",
+        "evidence": "Note category: new_patient_visit"
+      },
+      {
+        "type": "ADDED",
+        "code": "C43.71",
+        "reason": "Added code for malignant melanoma of right lower limb due to concern for melanoma.",
+        "evidence": "Assessment mentions 'Less likely: melanoma (but possible especially w/ overlying skin changes)'"
+      },
+      {
+        "type": "ADDED",
+        "code": "D03.71",
+        "reason": "Added code for melanoma in situ of right lower limb due to concern for melanoma.",
+        "evidence": "Assessment mentions 'Less likely: melanoma (but possible especially w/ overlying skin changes)'"
+      },
+      {
+        "type": "ADDED",
+        "code": "M85.471",
+        "reason": "Added code for solitary bone cyst, right ankle and foot as a differential diagnosis.",
+        "evidence": "Assessment mentions 'Other benign tumors (lipoma, schwannoma, etc.)'"
+      }
+    ],
+    "audit_notes": "Corrected E/M code to reflect new patient status. Added codes for melanoma concerns and other benign tumors. Ensured all protected anchors are coded.",
+    "vision_context": {
+      "note_category": "new_patient_visit",
+      "procedures_performed_today": [],
+      "imaging_performed_today": [],
+      "supplies_dispensed_today": []
+    },
+    "prior_surgery_info": {
+      "is_post_op_visit": false,
+      "days_post_op": null,
+      "prior_surgery_description": null,
+      "prior_surgery_cpt": null
+    }
+  },
+  "model_source": "openai",
+  "api_usage": {
+    "prompt_tokens": 23102,
+    "completion_tokens": 3421,
+    "total_tokens": 26523
+  },
+  "physician_documented_codes": [],
+  "missing_physician_codes": [],
+  "cached_result": false
+}

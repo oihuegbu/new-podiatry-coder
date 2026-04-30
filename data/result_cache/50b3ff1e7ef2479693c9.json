@@ -1,0 +1,312 @@
+{
+  "document_id": "NOTE_02_Sophia_Castellano_Hammertoe_PostOp_Day14",
+  "timestamp": "2026-04-30T19:29:59.609907",
+  "success": true,
+  "processing_time": 77.13,
+  "patient_metadata": {
+    "patient_name": "Sophia R. Castellano",
+    "date_of_birth": "09/22/1952",
+    "date_of_service": "February 06, 2026",
+    "provider": "Dr. Amara Osei, DPM",
+    "npi": "1234567890",
+    "mrn": "AFR-001088",
+    "insurance": "Medicare Part B ID: 1EG4-TE5-MK72 | Plan: Traditional",
+    "note_type": "ESTABLISHED PATIENT – POST-OP FOLLOW-UP (DAY 14)"
+  },
+  "note_sections": {
+    "chief_complaint": "Post-operative follow-up after left hammertoe correction.",
+    "hpi": "Mrs. Castellano is a 73-year-old female returning 14 days after left 2nd digit proximal interphalangeal (PIP) joint arthroplasty for hammertoe correction. She reports mild residual swelling and pain 3...",
+    "pmh_medications_allergies": "PMH: Osteoporosis, GERD, Hypothyroidism. Medications: Alendronate 70 mg weekly, Omeprazole 20 mg QD, Levothyroxine 88 mcg QD. Allergies: NKDA.",
+    "physical_examination": "Left foot: Incision well-approximated, no erythema, no dehiscence, no purulent discharge. Mild periarticular edema 2nd digit. K-wire in place, exit site clean. Neurovascular status intact.",
+    "imaging_diagnostics": "Left foot post-op X-ray: K-wire well-positioned across PIP joint, no hardware complications.",
+    "assessment_diagnoses": "• Hammer toe(s), left foot – post-operative status\n• Encounter for other specified surgical aftercare\n• Age-related osteoporosis without pathological fracture",
+    "plan": "Wound care: continue daily dry dressing changes. K-wire removal scheduled at 4-week mark. Continue surgical shoe weight bearing as tolerated. Elevate foot when resting. Prescribe Cephalexin 500 mg QID..."
+  },
+  "icd_codes": [
+    {
+      "code": "Z48.89",
+      "description": "Encounter for other specified surgical aftercare",
+      "type": "primary",
+      "confidence": 0.95,
+      "rationale": "This is a post-operative follow-up visit for surgical aftercare.",
+      "supporting_text": "Encounter for other specified surgical aftercare",
+      "laterality": "N/A",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "M20.42",
+      "description": "Other hammer toe(s) (acquired), left foot",
+      "type": "secondary",
+      "confidence": 0.95,
+      "rationale": "Post-operative status of left foot hammertoe correction.",
+      "supporting_text": "Hammer toe(s), left foot \u0013 post-operative status",
+      "laterality": "LEFT",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    }
+  ],
+  "supporting_conditions": [
+    {
+      "code": "M81.0",
+      "description": "Age-related osteoporosis without current pathological fracture",
+      "type": "advisory",
+      "confidence": 0.9,
+      "rationale": "Osteoporosis is a PMH condition with active medication (Alendronate). Not addressed as a separate encounter problem today.",
+      "supporting_text": "Age-related osteoporosis without pathological fracture",
+      "source_section": "ASSESSMENT",
+      "billable_tier": "advisory",
+      "needs_review": true,
+      "review_reason": "PMH condition not addressed as separate encounter problem today"
+    },
+    {
+      "code": "K21.9",
+      "description": "Gastro-esophageal reflux disease without esophagitis",
+      "type": "advisory",
+      "confidence": 0.9,
+      "rationale": "GERD is a PMH condition with active medication (Omeprazole). Not addressed as a separate encounter problem today.",
+      "supporting_text": "PMH: GERD. Medications: Omeprazole 20 mg QD",
+      "source_section": "PMH",
+      "billable_tier": "advisory",
+      "needs_review": true,
+      "review_reason": "PMH condition not addressed as separate encounter problem today"
+    },
+    {
+      "code": "E03.9",
+      "description": "Hypothyroidism, unspecified",
+      "type": "advisory",
+      "confidence": 0.9,
+      "rationale": "Hypothyroidism is a PMH condition with active medication (Levothyroxine). Not addressed as a separate encounter problem today.",
+      "supporting_text": "PMH: Hypothyroidism. Medications: Levothyroxine 88 mcg QD",
+      "source_section": "PMH",
+      "billable_tier": "advisory",
+      "needs_review": true,
+      "review_reason": "PMH condition not addressed as separate encounter problem today"
+    }
+  ],
+  "cpt_codes": [
+    {
+      "code": "99024",
+      "description": "Post-operative follow-up visit within global period",
+      "confidence": 1.0,
+      "modifiers": [],
+      "modifier_reasoning": [],
+      "source": "E/M",
+      "mdm_details": {},
+      "procedure_status": "completed",
+      "laterality": "left",
+      "linked_diagnoses": [
+        "Z48.89",
+        "M20.42"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "This is a POST-OPERATIVE FOLLOW-UP visit",
+        "Days post-op: 14",
+        "Major surgeries (28xxx, 29893, etc.) have a 90-day global period"
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 1,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "73650",
+      "description": "Radiologic examination, calcaneus; complete, minimum of 2 views",
+      "confidence": 0.95,
+      "modifiers": [
+        "LT"
+      ],
+      "modifier_reasoning": [
+        "Left foot X-ray performed"
+      ],
+      "source": "Imaging",
+      "mdm_details": {},
+      "procedure_status": "completed",
+      "laterality": "left",
+      "linked_diagnoses": [
+        "Z48.89",
+        "M20.42"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "Left foot post-op X-ray: K-wire well-positioned across PIP joint"
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 2,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    }
+  ],
+  "hcpcs_codes": [],
+  "snomed_codes": [
+    {
+      "concept_id": "428119001",
+      "description": "Postoperative state",
+      "entity_text": "post-operative status after left hammertoe correction",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "239873007",
+      "description": "Hammer toe deformity",
+      "entity_text": "hammertoe, left foot",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "64859006",
+      "description": "Osteoporosis",
+      "entity_text": "age-related osteoporosis without pathological fracture",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    }
+  ],
+  "em_level_reasoning": "Post-operative follow-up visit within the global period of a major surgery, therefore coded as 99024.",
+  "error_message": null,
+  "validation_issues": [
+    {
+      "severity": "INFO",
+      "code": "",
+      "category": "global_period",
+      "message": "Post-operative visit detected but could not determine days post-op or prior CPT. Verify this visit does not fall within a global surgical period.",
+      "recommendation": "Manually confirm global period status before submission",
+      "denial_risk": "MEDIUM"
+    },
+    {
+      "severity": "WARNING",
+      "code": "73650",
+      "category": "laterality_not_in_note",
+      "message": "73650 has laterality modifier ['LT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document.",
+      "recommendation": "Verify laterality is documented in the note before billing",
+      "denial_risk": "MEDIUM"
+    }
+  ],
+  "warnings": [],
+  "encounter_integrity": {
+    "encounter_issues": [],
+    "error_count": 0,
+    "warning_count": 0
+  },
+  "documentation_audit": {
+    "audit_entries": [
+      {
+        "code": "Z48.89",
+        "description": "Encounter for other specified surgical aftercare",
+        "documentation_support": [
+          "Rationale: This is a post-operative follow-up visit for surgical aftercare.",
+          "Section: ASSESSMENT",
+          "Supporting text: Encounter for other specified surgical aftercare"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "M20.42",
+        "description": "Other hammer toe(s) (acquired), left foot",
+        "documentation_support": [
+          "Rationale: Post-operative status of left foot hammertoe correction.",
+          "Section: ASSESSMENT",
+          "Supporting text: Hammer toe(s), left foot \u0013 post-operative status"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "99024",
+        "description": "Post-operative follow-up visit within global period",
+        "documentation_support": [
+          "Section: E/M"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "73650",
+        "description": "Radiologic examination, calcaneus; complete, minimum of 2 views",
+        "documentation_support": [
+          "Section: Imaging"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      }
+    ],
+    "total_codes": 4,
+    "fully_supported": 4,
+    "partially_supported": 0,
+    "unsupported": 0,
+    "codes_with_gaps": 0,
+    "documentation_score": 1.0
+  },
+  "pre_submission_audit_findings": [
+    {
+      "severity": "WARNING",
+      "code": "73650",
+      "category": "laterality_not_in_note",
+      "message": "73650 has laterality modifier ['LT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document.",
+      "recommendation": "Verify laterality is documented in the note before billing",
+      "denial_risk": "MEDIUM"
+    }
+  ],
+  "pre_submission_audit_score": 0.94,
+  "auto_coding_tier": "REVIEW",
+  "auto_coding_confidence": 0.69,
+  "auto_coding_review_reasons": [
+    "Changed radiology code to reflect specific imaging of the calcaneus.",
+    "[WARNING] 73650: 73650 has laterality modifier ['LT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document."
+  ],
+  "auto_coding_summary": "The coding set was reviewed and corrected to reflect the specific imaging performed. The visit was a post-operative follow-up within the global period, correctly coded with 99024. No additional procedures or E/M services were billed.",
+  "rag_context": {
+    "entities_extracted": 22,
+    "candidates_per_system": {
+      "icd10": 241,
+      "cpt": 73,
+      "hcpcs": 25
+    },
+    "corrections_made": [
+      {
+        "type": "CHANGED",
+        "code": "73630",
+        "reason": "Changed to 73650: Imaging was a post-op X-ray of the left foot, specifically for the calcaneus.",
+        "evidence": "Left foot post-op X-ray: K-wire well-positioned across PIP joint"
+      }
+    ],
+    "audit_notes": "Changed CPT code 73630 to 73650 as the imaging was specific to the calcaneus. No other changes were necessary as the visit was a post-operative follow-up within the global period.",
+    "vision_context": {
+      "note_category": "post_op_followup",
+      "procedures_performed_today": [],
+      "imaging_performed_today": [
+        "Left foot post-op X-ray"
+      ],
+      "supplies_dispensed_today": []
+    },
+    "prior_surgery_info": {
+      "is_post_op_visit": true,
+      "days_post_op": 14,
+      "prior_surgery_description": "left 2nd digit proximal interphalangeal (PIP) joint arthroplasty for hammertoe correction",
+      "prior_surgery_cpt": null
+    }
+  },
+  "model_source": "openai",
+  "api_usage": {
+    "prompt_tokens": 22418,
+    "completion_tokens": 2734,
+    "total_tokens": 25152
+  },
+  "physician_documented_codes": [],
+  "missing_physician_codes": [],
+  "cached_result": false
+}

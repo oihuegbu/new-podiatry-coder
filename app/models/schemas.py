@@ -23,6 +23,8 @@ class ClinicalEntity(BaseModel):
     specificity: str | None = Field(default=None, description="Additional specificity details")
     source_section: str = Field(description="Section of note: CC|HPI|PE|IMAGING|ASSESSMENT|PLAN|PMH")
     negated: bool = Field(default=False, description="Whether the entity is negated")
+    ner_source: str = Field(default="llm", description="gliner_confirmed|llm_only|llm")
+    ner_confidence: float = Field(default=1.0, description="GLiNER confidence if confirmed")
 
 
 class ICDCode(BaseModel):
@@ -37,6 +39,8 @@ class ICDCode(BaseModel):
     s3_validated: bool = False
     needs_review: bool = False
     review_reason: str | None = None
+    code_source: str = "ai_inferred"  # physician_documented|ai_confirmed|ai_inferred|ai_replaced_physician
+    physician_code_note: str | None = None  # original physician code if AI replaced it
 
 
 class CPTCode(BaseModel):
@@ -55,6 +59,8 @@ class CPTCode(BaseModel):
     ama_validated: bool = False
     mue_validated: bool = False
     mue_limit: int | None = None
+    code_source: str = "ai_inferred"
+    physician_code_note: str | None = None
 
 
 class HCPCSCode(BaseModel):
@@ -68,6 +74,8 @@ class HCPCSCode(BaseModel):
     supporting_text: str = ""
     needs_review: bool = False
     review_reason: str | None = None
+    code_source: str = "ai_inferred"
+    physician_code_note: str | None = None
 
 
 class SNOMEDCode(BaseModel):
@@ -133,3 +141,7 @@ class CodingResult(BaseModel):
     rag_context: dict = Field(default_factory=dict)
     model_source: str = ""
     api_usage: dict = Field(default_factory=dict)
+    physician_documented_codes: list[dict] = Field(default_factory=list)
+    missing_physician_codes: list[dict] = Field(default_factory=list)
+    cached_result: bool = False
+    ner_entities: list[dict] = Field(default_factory=list)

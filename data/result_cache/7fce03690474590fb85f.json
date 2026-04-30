@@ -1,0 +1,440 @@
+{
+  "document_id": "NOTE_10_Evelyn_Brooks_Mortons_Neuroma_Injection_Orthotics",
+  "timestamp": "2026-04-30T19:34:43.679303",
+  "success": true,
+  "processing_time": 95.42,
+  "patient_metadata": {
+    "patient_name": "Evelyn J. Brooks",
+    "date_of_birth": "05/31/1978",
+    "date_of_service": "February 17, 2026",
+    "provider": "Dr. James A. Morales, DPM, FACFAS",
+    "npi": "2345678901",
+    "mrn": "AFR-001589",
+    "insurance": "Cigna EPO I ID: CEP551112 I Group: GRP7740",
+    "note_type": "ESTABLISHED PATIENT – INJECTION & ORTHOTICS FITTING"
+  },
+  "note_sections": {
+    "chief_complaint": "Bilateral Morton's neuroma pain and custom orthotic fitting.",
+    "hpi": "Ms. Brooks is a 47-year-old female returning for a follow-up injection for bilateral Morton's neuromas (2nd/3rd interspace right, 3rd/4th interspace left). Her first injection 6 weeks ago provided ~60...",
+    "pmh_medications_allergies": "PMH: Anxiety disorder, seasonal allergies. Medications: Escitalopram 10 mg QD, Cetirizine 10 mg QD. Allergies: NKDA.",
+    "physical_examination": "Bilateral forefeet: Positive Mulder's click sign 2nd/3rd interspace right and 3rd/4th interspace left. Point tenderness both interspaces. No erythema. Custom orthotics evaluated: fit appropriately in ...",
+    "imaging_diagnostics": "Prior bilateral foot MRI (6 months ago): R 2nd/3rd 8mm neuroma, L 3rd/4th 9mm neuroma.",
+    "assessment_diagnoses": "• Morton's neuroma, right foot\n• Morton's neuroma, left foot\n• Pes planus (flat foot), right foot (associated)",
+    "plan": "Administered corticosteroid injection (betamethasone 6mg/1mL + 0.5% bupivacaine 1mL) bilateral interdigital neuromas under fluoroscopic guidance. Delivered and fitted custom-molded functional orthotic..."
+  },
+  "icd_codes": [
+    {
+      "code": "G57.61",
+      "description": "Lesion of plantar nerve, right lower limb",
+      "type": "primary",
+      "confidence": 0.95,
+      "rationale": "Morton's neuroma, right foot is a lesion of the plantar nerve. Listed in Assessment.",
+      "supporting_text": "Morton's neuroma, right foot",
+      "laterality": "RIGHT",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "G57.62",
+      "description": "Lesion of plantar nerve, left lower limb",
+      "type": "secondary",
+      "confidence": 0.95,
+      "rationale": "Morton's neuroma, left foot is a lesion of the plantar nerve. Listed in Assessment.",
+      "supporting_text": "Morton's neuroma, left foot",
+      "laterality": "LEFT",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "M21.41",
+      "description": "Flat foot [pes planus] (acquired), right foot",
+      "type": "secondary",
+      "confidence": 0.9,
+      "rationale": "Pes planus (flat foot), right foot is listed in Assessment.",
+      "supporting_text": "Pes planus (flat foot), right foot",
+      "laterality": "RIGHT",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    }
+  ],
+  "supporting_conditions": [
+    {
+      "code": "F41.9",
+      "description": "Anxiety disorder, unspecified",
+      "type": "advisory",
+      "confidence": 0.85,
+      "rationale": "PMH condition with active medication (Escitalopram). Not in Assessment.",
+      "supporting_text": "PMH: Anxiety disorder. Medications: Escitalopram 10 mg QD",
+      "source_section": "PMH",
+      "billable_tier": "advisory",
+      "needs_review": true,
+      "review_reason": "PMH condition not addressed as separate encounter problem today"
+    },
+    {
+      "code": "J30.9",
+      "description": "Allergic rhinitis, unspecified",
+      "type": "advisory",
+      "confidence": 0.85,
+      "rationale": "PMH condition with active medication (Cetirizine). Not in Assessment.",
+      "supporting_text": "PMH: Seasonal allergies. Medications: Cetirizine 10 mg QD",
+      "source_section": "PMH",
+      "billable_tier": "advisory",
+      "needs_review": true,
+      "review_reason": "PMH condition not addressed as separate encounter problem today"
+    }
+  ],
+  "cpt_codes": [
+    {
+      "code": "99213",
+      "description": "Established patient office or other outpatient visit, low level",
+      "confidence": 0.95,
+      "modifiers": [
+        "25"
+      ],
+      "modifier_reasoning": [
+        "Modifier -25: separately identifiable E/M performed same day as 64455 injection"
+      ],
+      "source": "E/M",
+      "mdm_details": {
+        "problems_score": 2,
+        "data_score": 2,
+        "risk_score": 3,
+        "mdm_level": "low",
+        "problems_rationale": "Two established problems: bilateral Morton's neuromas",
+        "data_rationale": "Review of prior MRI results",
+        "risk_rationale": "Corticosteroid injection = moderate risk axis"
+      },
+      "procedure_status": "completed",
+      "laterality": null,
+      "linked_diagnoses": [
+        "G57.61",
+        "G57.62"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "corticosteroid injection (betamethasone 6mg/1mL + 0.5% bupivacaine 1mL) bilateral interdigital neuromas"
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 2,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "64455",
+      "description": "Injection(s), anesthetic agent(s) and/or steroid; plantar common digital nerve(s) (e.g., Morton's neuroma)",
+      "confidence": 0.98,
+      "modifiers": [
+        "50"
+      ],
+      "modifier_reasoning": [
+        "Modifier 50: bilateral procedure"
+      ],
+      "source": "Injection",
+      "mdm_details": {},
+      "procedure_status": "completed",
+      "laterality": "bilateral",
+      "linked_diagnoses": [
+        "G57.61",
+        "G57.62"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "corticosteroid injection (betamethasone 6mg/1mL + 0.5% bupivacaine 1mL) bilateral interdigital neuromas"
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 1,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "77002",
+      "description": "Fluoroscopic guidance for needle placement",
+      "confidence": 0.95,
+      "modifiers": [],
+      "modifier_reasoning": [],
+      "source": "Image Guidance",
+      "mdm_details": {},
+      "procedure_status": "completed",
+      "laterality": null,
+      "linked_diagnoses": [
+        "G57.61",
+        "G57.62"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "under fluoroscopic guidance"
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 1,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    }
+  ],
+  "hcpcs_codes": [
+    {
+      "code": "L3020",
+      "description": "Custom foot orthosis, longitudinal arch and metatarsal support",
+      "confidence": 0.9,
+      "modifiers": [
+        "RT"
+      ],
+      "units": 1,
+      "linked_diagnoses": [
+        "G57.61",
+        "M21.41"
+      ],
+      "rationale": "Custom orthotics with metatarsal pad dispensed for right Morton's neuroma. L3020 = arch + metatarsal (NOT L3000 which is UCB shell only). RT modifier required for unilateral right-foot dispensing.",
+      "supporting_text": "Dispensed custom orthotics with metatarsal pad bilaterally.",
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "L3020",
+      "description": "Custom foot orthosis, longitudinal arch and metatarsal support",
+      "confidence": 0.9,
+      "modifiers": [
+        "LT"
+      ],
+      "units": 1,
+      "linked_diagnoses": [
+        "G57.62"
+      ],
+      "rationale": "Custom orthotics with metatarsal pad dispensed for left Morton's neuroma. L3020 = arch + metatarsal (NOT L3000 which is UCB shell only). LT modifier required for unilateral left-foot dispensing.",
+      "supporting_text": "Dispensed custom orthotics with metatarsal pad bilaterally.",
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    }
+  ],
+  "snomed_codes": [
+    {
+      "concept_id": "57709007",
+      "description": "Morton's metatarsalgia",
+      "entity_text": "interdigital neuroma bilateral",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "53223000",
+      "description": "Pes planus",
+      "entity_text": "Pes planus right foot",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    }
+  ],
+  "em_level_reasoning": "Full MDM calculation including all three axes with explicit 2-of-3 determination. Moderate risk due to corticosteroid injection.",
+  "error_message": null,
+  "validation_issues": [
+    {
+      "severity": "WARNING",
+      "code": "L3020",
+      "category": "laterality_not_in_note",
+      "message": "L3020 has laterality modifier ['RT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document.",
+      "recommendation": "Verify laterality is documented in the note before billing",
+      "denial_risk": "MEDIUM"
+    },
+    {
+      "severity": "WARNING",
+      "code": "L3020",
+      "category": "laterality_not_in_note",
+      "message": "L3020 has laterality modifier ['LT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document.",
+      "recommendation": "Verify laterality is documented in the note before billing",
+      "denial_risk": "MEDIUM"
+    }
+  ],
+  "warnings": [],
+  "encounter_integrity": {
+    "encounter_issues": [],
+    "error_count": 0,
+    "warning_count": 0
+  },
+  "documentation_audit": {
+    "audit_entries": [
+      {
+        "code": "G57.61",
+        "description": "Lesion of plantar nerve, right lower limb",
+        "documentation_support": [
+          "Rationale: Morton's neuroma, right foot is a lesion of the plantar nerve. Listed in Assessment.",
+          "Section: ASSESSMENT",
+          "Supporting text: Morton's neuroma, right foot"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "G57.62",
+        "description": "Lesion of plantar nerve, left lower limb",
+        "documentation_support": [
+          "Rationale: Morton's neuroma, left foot is a lesion of the plantar nerve. Listed in Assessment.",
+          "Section: ASSESSMENT",
+          "Supporting text: Morton's neuroma, left foot"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "M21.41",
+        "description": "Flat foot [pes planus] (acquired), right foot",
+        "documentation_support": [
+          "Rationale: Pes planus (flat foot), right foot is listed in Assessment.",
+          "Section: ASSESSMENT",
+          "Supporting text: Pes planus (flat foot), right foot"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "99213",
+        "description": "Established patient office or other outpatient visit, low level",
+        "documentation_support": [
+          "Section: E/M",
+          "MDM: low (P:2/D:2/R:3)",
+          "Linked DX: G57.61, G57.62"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "64455",
+        "description": "Injection(s), anesthetic agent(s) and/or steroid; plantar common digital nerve(s) (e.g., Morton's neuroma)",
+        "documentation_support": [
+          "Section: Injection"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "77002",
+        "description": "Fluoroscopic guidance for needle placement",
+        "documentation_support": [
+          "Section: Image Guidance"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "L3020",
+        "description": "Custom foot orthosis, longitudinal arch and metatarsal support",
+        "documentation_support": [
+          "Rationale: Custom orthotics with metatarsal pad dispensed for right Morton's neuroma. L3020 = arch + metatarsal (NOT L3000 which is UCB shell only). RT modifier required for unilateral right-foot dispensing.",
+          "Supporting text: Dispensed custom orthotics with metatarsal pad bilaterally."
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "L3020",
+        "description": "Custom foot orthosis, longitudinal arch and metatarsal support",
+        "documentation_support": [
+          "Rationale: Custom orthotics with metatarsal pad dispensed for left Morton's neuroma. L3020 = arch + metatarsal (NOT L3000 which is UCB shell only). LT modifier required for unilateral left-foot dispensing.",
+          "Supporting text: Dispensed custom orthotics with metatarsal pad bilaterally."
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      }
+    ],
+    "total_codes": 8,
+    "fully_supported": 8,
+    "partially_supported": 0,
+    "unsupported": 0,
+    "codes_with_gaps": 0,
+    "documentation_score": 1.0
+  },
+  "pre_submission_audit_findings": [
+    {
+      "severity": "WARNING",
+      "code": "L3020",
+      "category": "laterality_not_in_note",
+      "message": "L3020 has laterality modifier ['RT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document.",
+      "recommendation": "Verify laterality is documented in the note before billing",
+      "denial_risk": "MEDIUM"
+    },
+    {
+      "severity": "WARNING",
+      "code": "L3020",
+      "category": "laterality_not_in_note",
+      "message": "L3020 has laterality modifier ['LT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document.",
+      "recommendation": "Verify laterality is documented in the note before billing",
+      "denial_risk": "MEDIUM"
+    }
+  ],
+  "pre_submission_audit_score": 0.9,
+  "auto_coding_tier": "REVIEW",
+  "auto_coding_confidence": 0.4,
+  "auto_coding_review_reasons": [
+    "Changed L3000 to L3020 for orthotics with metatarsal support.",
+    "Added J0702 for betamethasone injection administered today.",
+    "[WARNING] L3020: L3020 has laterality modifier ['RT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document.",
+    "[WARNING] L3020: L3020 has laterality modifier ['LT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document."
+  ],
+  "auto_coding_summary": "The coding set was audited to ensure all protected anchors were coded, and necessary corrections were made. L3000 was changed to L3020 for orthotics, and J0702 was added for the betamethasone injection. Modifier -25 was correctly applied to the E/M code.",
+  "rag_context": {
+    "entities_extracted": 15,
+    "candidates_per_system": {
+      "icd10": 89,
+      "cpt": 39,
+      "hcpcs": 26
+    },
+    "corrections_made": [
+      {
+        "type": "CHANGED",
+        "code": "L3000",
+        "reason": "Changed to L3020: Custom orthotics with metatarsal pad dispensed for Morton's neuroma.",
+        "evidence": "Dispensed custom orthotics with metatarsal pad bilaterally."
+      },
+      {
+        "type": "ADDED",
+        "code": "J0702",
+        "reason": "Added J0702 for betamethasone injection administered today.",
+        "evidence": "Administered corticosteroid injection (betamethasone 6mg/1mL + 0.5% bupivacaine 1mL) bilateral interdigital neuromas."
+      }
+    ],
+    "audit_notes": "Changed L3000 to L3020 for orthotics. Added J0702 for betamethasone injection. Verified all protected anchors are coded. Modifier -25 correctly applied to E/M.",
+    "vision_context": {
+      "note_category": "established_patient_visit",
+      "procedures_performed_today": [
+        "corticosteroid injection (betamethasone 6mg/1mL + 0.5% bupivacaine 1mL) bilateral interdigital neuromas",
+        "fitting of custom-molded functional orthotics"
+      ],
+      "imaging_performed_today": [],
+      "supplies_dispensed_today": [
+        "custom-molded functional orthotics (L3000)"
+      ]
+    },
+    "prior_surgery_info": {
+      "is_post_op_visit": false,
+      "days_post_op": null,
+      "prior_surgery_description": null,
+      "prior_surgery_cpt": null
+    }
+  },
+  "model_source": "openai",
+  "api_usage": {
+    "prompt_tokens": 22911,
+    "completion_tokens": 4074,
+    "total_tokens": 26985
+  },
+  "physician_documented_codes": [],
+  "missing_physician_codes": [],
+  "cached_result": false
+}

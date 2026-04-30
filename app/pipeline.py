@@ -3,6 +3,8 @@ from pathlib import Path
 from datetime import datetime
 
 from app.core.logger import get_logger
+from app.core import cache as result_cache
+from app.core.config import LLM_PROVIDER
 from app.ingestion.pdf_parser import extract_from_pdf
 from app.ner.entity_extractor import extract_entities
 from app.rag.retriever import CandidateRetriever
@@ -42,7 +44,7 @@ class MedicalCodingPipeline:
         self._initialized = True
         logger.info("Pipeline initialized successfully")
 
-    def process_note(self, pdf_path: str | Path) -> CodingResult:
+    def process_note(self, pdf_path: str | Path, use_cache: bool = True) -> CodingResult:
         if not self._initialized:
             raise RuntimeError("Pipeline not initialized. Call initialize() first.")
 
@@ -50,8 +52,20 @@ class MedicalCodingPipeline:
         start = time.time()
 
         logger.info(f"\n{'='*70}")
-        logger.info(f"PROCESSING: {pdf_path.name}")
+        logger.info(f"PROCESSING: {pdf_path.name}  [provider={LLM_PROVIDER.upper()}]")
         logger.info(f"{'='*70}")
+
+        # Fix 4 — Response cache: same PDF + same pipeline version always returns same result
+        if use_cache:
+            cached = result_cache.get_cached(pdf_path)
+            if cached is not None:
+                try:
+                    r = CodingResult(**cached)
+                    r.cached_result = True
+                    self._print_summary(r)
+                    return r
+                except Exception:
+                    pass  # corrupt cache entry — reprocess
 
         # Step 1: Vision-based PDF extraction
         logger.info("[1/5] Extracting from PDF via GPT-4o Vision...")
@@ -64,6 +78,7 @@ class MedicalCodingPipeline:
         supplies_today = extraction["supplies_dispensed_today"]
 
         prior_surgery_info = extraction.get("prior_surgery_info", {}) or {}
+        physician_documented_codes = extraction.get("physician_documented_codes", []) or []
 
         logger.info(f"  Patient: {metadata.get('patient_name')} | DOS: {metadata.get('date_of_service')}")
         logger.info(f"  Category: {note_category}")
@@ -113,6 +128,7 @@ class MedicalCodingPipeline:
             vision_context=vision_context,
             prior_surgery_info=prior_surgery_info,
             db=self.ref_db,
+            physician_documented_codes=physician_documented_codes,
         )
 
         # Step 5: Validation
@@ -124,6 +140,7 @@ class MedicalCodingPipeline:
             prior_surgery_info=prior_surgery_info,
             note_plan_text=plan_text,
             note_full_text=full_text,
+            physician_documented_codes=physician_documented_codes,
         )
 
         elapsed = time.time() - start
@@ -150,8 +167,11 @@ class MedicalCodingPipeline:
                 "vision_context": vision_context,
                 "prior_surgery_info": prior_surgery_info,
             },
-            model_source="gpt-4o",
+            model_source=LLM_PROVIDER,
             api_usage=usage,
+            physician_documented_codes=physician_documented_codes,
+            missing_physician_codes=coding_result.get("missing_physician_codes", []),
+            ner_entities=entity_dicts,
             **{k: v for k, v in validation.items()
                if k not in ("auto_coding_review_reasons", "auto_coding_summary")},
             auto_coding_review_reasons=(
@@ -163,6 +183,10 @@ class MedicalCodingPipeline:
                 or validation.get("auto_coding_summary", "")
             ),
         )
+
+        # Fix 4 — Store to cache (only on success, so failed runs don't get cached)
+        if use_cache and result.success:
+            result_cache.store(pdf_path, result.model_dump())
 
         self._print_summary(result)
         return result
@@ -215,9 +239,14 @@ class MedicalCodingPipeline:
         return SNOMEDCode(**{k: v for k, v in raw.items() if k in SNOMEDCode.model_fields})
 
     def _print_summary(self, r: CodingResult):
-        logger.info(f"\n--- RESULTS: {r.document_id} ---")
-        logger.info(f"  Tier: {r.auto_coding_tier} | Confidence: {r.auto_coding_confidence} | Audit: {r.pre_submission_audit_score}")
+        cache_tag = " [CACHED]" if r.cached_result else ""
+        logger.info(f"\n--- RESULTS: {r.document_id}{cache_tag} ---")
+        logger.info(f"  Provider: {r.model_source.upper()} | Tier: {r.auto_coding_tier} | Confidence: {r.auto_coding_confidence} | Audit: {r.pre_submission_audit_score}")
         logger.info(f"  Time: {r.processing_time:.1f}s")
+        if r.physician_documented_codes:
+            logger.info(f"  Physician-documented codes: {[p.get('code') for p in r.physician_documented_codes]}")
+        if r.missing_physician_codes:
+            logger.info(f"  ⚠ MISSING physician codes: {[p.get('code') for p in r.missing_physician_codes]}")
         logger.info(f"  ICD-10-CM (billable):")
         for c in r.icd_codes:
             logger.info(f"    [{c.type:>9}] {c.code:>8} — {c.description[:55]}")

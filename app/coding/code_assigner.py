@@ -251,6 +251,16 @@ Special rules:
 - Elective surgery decision = MODERATE risk minimum → 99204/99214 or higher
 - Multiple comorbidities (2+ stable chronic) = MODERATE problems minimum
 
+### CRITICAL — Diabetic Patient Foot Care E/M Level
+When a DIABETIC patient (E10.x, E11.x, E13.x) is receiving ANY nail, callus, wound, or skin procedure:
+- Risk axis = MODERATE (DM is an identified patient risk factor for minor surgery per 2021 AMA MDM)
+- If the patient also has 2+ stable chronic conditions (DM + CKD, DM + CAD, DM + HTN, etc.):
+  → Problems = MODERATE (2+ stable chronic illnesses)
+  → Risk = MODERATE (minor surgery with DM risk factor)
+  → 2-of-3 MODERATE → **99214** (established) or **99205** (new patient), NOT 99213/99204
+- 99213 is only correct for a diabetic foot visit if: the patient has only 1 chronic condition (DM alone,
+  no other comorbidities) AND the procedures are purely routine without any risk factor documentation
+
 ### Modifier -25 — MANDATORY WHEN PROCEDURE PERFORMED SAME DAY
 - ALWAYS add -25 to the E/M code when ANY billable procedure (global period > 0) is performed same day
 - Billable procedures that trigger -25: injections (64455, 64632, 20600, 20605, 20610, 20550),
@@ -690,6 +700,27 @@ When ANY billable same-day procedure is performed (global period > 0):
   Any secondary diagnosis that clinically supports the orthotic (e.g., pes planus, neuropathy) should be
   included in linked_diagnoses so every billed ICD has procedure linkage on the claim.
 
+### N. Walking Boot Type Verification — CRITICAL REVENUE ERROR
+- **L4360** = Walking boot, NON-PNEUMATIC only
+- **L4361** = Walking boot, PNEUMATIC and/or vacuum (CAM walker with air bladder)
+- If L4360 is coded BUT the note mentions any of: "CAM walker", "CAM boot", "pneumatic", "air cast",
+  "aircast", "air bladder" → CHANGE to L4361. CAM walkers are ALWAYS pneumatic → L4361, never L4360.
+- This is a common undercoding error. L4361 is the correct code for the vast majority of walking boots
+  dispensed in podiatry practice.
+
+### O. PMH-Only Conditions in icd10_codes — MUST REMOVE
+Per ICD-10-CM outpatient coding guidelines: ONLY code conditions that were addressed, evaluated,
+or managed at TODAY'S visit. PMH comorbidities with active medications that were NOT listed in
+the ASSESSMENT/DIAGNOSES section and NOT addressed as a separate encounter problem today MUST
+be in supporting_conditions — NOT in icd10_codes.
+- Scan icd10_codes: if a code corresponds to a PMH-only condition (osteoporosis, GERD, hypothyroidism,
+  anxiety, allergic rhinitis, hyperlipidemia, etc.) that appears ONLY in PMH/medications and NOT in
+  the Assessment section → MOVE it to supporting_conditions (do NOT bill it)
+- Exception: DM (E10–E13) is billable as secondary when it influences the podiatric treatment plan
+  (e.g., DM patient receiving wound care, diabetic foot procedures, or systemic DM management)
+- Exception: HTN (I10) is billable as secondary when it appears in Assessment OR when the provider
+  explicitly addresses it at the visit
+
 ### L. J-Code Drug Billing Audit
 When an injection CPT (64455, 64632, 20600–20610, 20550) is in cpt_codes:
 - Check note for drug name and dose: triamcinolone, methylprednisolone, Kenalog, Depo-Medrol, dexamethasone, betamethasone
@@ -752,6 +783,7 @@ def assign_codes(
     vision_context: dict | None = None,
     prior_surgery_info: dict | None = None,
     db=None,
+    physician_documented_codes: list[dict] | None = None,
 ) -> tuple[dict, dict]:
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
@@ -781,6 +813,9 @@ Do NOT code Z79.84 or Z79.899 on this outpatient podiatry encounter."""
     icd_raw, usage = chat_completion(ICD_SYSTEM_PROMPT, icd_prompt, temperature=CODING_TEMPERATURE, max_tokens=2500)
     _add_usage(total_usage, usage)
     icd_result = _safe_parse(icd_raw, "icd10_codes")
+    # Hard DB gate — remove any hallucinated/invalid ICD codes immediately
+    icd_result["icd10_codes"] = _hard_db_gate(icd_result.get("icd10_codes", []), "icd10", db)
+    icd_result["supporting_conditions"] = _hard_db_gate(icd_result.get("supporting_conditions", []), "icd10", db)
     logger.info(f"    → {len(icd_result.get('icd10_codes', []))} ICD-10-CM codes, "
                 f"{len(icd_result.get('supporting_conditions', []))} supporting conditions")
 
@@ -821,6 +856,7 @@ Check EVERY CPT pair for NCCI bundling before finalizing."""
     cpt_raw, usage = chat_completion(CPT_SYSTEM_PROMPT, cpt_prompt, temperature=CODING_TEMPERATURE, max_tokens=2500)
     _add_usage(total_usage, usage)
     cpt_result = _safe_parse(cpt_raw, "cpt_codes")
+    cpt_result["cpt_codes"] = _hard_db_gate(cpt_result.get("cpt_codes", []), "cpt", db)
     logger.info(f"    → {len(cpt_result.get('cpt_codes', []))} CPT codes")
 
     # --- PASS 3: HCPCS + SNOMED ---
@@ -847,6 +883,7 @@ Only code supplies PHYSICALLY given/applied today — not ordered or prescribed.
     hcpcs_raw, usage = chat_completion(HCPCS_SNOMED_SYSTEM_PROMPT, hcpcs_prompt, temperature=CODING_TEMPERATURE, max_tokens=2500)
     _add_usage(total_usage, usage)
     hcpcs_result = _safe_parse(hcpcs_raw, "hcpcs_codes")
+    hcpcs_result["hcpcs_codes"] = _hard_db_gate(hcpcs_result.get("hcpcs_codes", []), "hcpcs", db)
     logger.info(f"    → {len(hcpcs_result.get('hcpcs_codes', []))} HCPCS, {len(hcpcs_result.get('snomed_codes', []))} SNOMED")
 
     # --- PASS 4: Constrained Self-Verification (Anchor-and-Audit) ---
@@ -872,6 +909,8 @@ Only code supplies PHYSICALLY given/applied today — not ordered or prescribed.
     pmh_text = note_sections.get("pmh_medications_allergies", "")
     anchor_block = _build_anchor_block(assessment_text, pmh_text, vision_context, prior_surgery_info)
 
+    physician_block = _format_physician_codes(physician_documented_codes or [])
+
     verify_prompt = f"""{note_context}
 {vision_block}
 {global_block}
@@ -880,6 +919,8 @@ Only code supplies PHYSICALLY given/applied today — not ordered or prescribed.
 {surgical_decision_hint}
 
 {anchor_block}
+
+{physician_block}
 
 ## EXTRACTED CLINICAL ENTITIES
 {entity_summary}
@@ -912,11 +953,17 @@ Only code supplies PHYSICALLY given/applied today — not ordered or prescribed.
 10. Remove Z79.84, Z79.899 if present.
 11. Check SNOMED for duplicate concept IDs and root-concept fallbacks.
 12. Pass supporting_conditions through unchanged — do NOT move them to icd10_codes.
-13. Return COMPLETE corrected code set with ALL original codes (corrected as needed)."""
+13. **CAM WALKER (Section N)**: If L4360 is coded and note mentions "CAM walker" → CHANGE to L4361.
+14. **PMH CONDITIONS (Section O)**: Scan icd10_codes for PMH-only conditions not in Assessment → MOVE to supporting_conditions.
+15. Return COMPLETE corrected code set with ALL original codes (corrected as needed)."""
 
     verify_raw, usage = chat_completion(VERIFICATION_SYSTEM_PROMPT, verify_prompt, temperature=CODING_TEMPERATURE, max_tokens=4096)
     _add_usage(total_usage, usage)
     verified = _safe_parse(verify_raw, "icd10_codes")
+
+    # Fix 7 — J-code enforcement + modifier hygiene
+    verified = _enforce_j_codes_from_corrections(verified)
+    verified = _strip_invalid_cpt_modifiers(verified)
 
     corrections = verified.get("corrections_made", [])
     if corrections:
@@ -938,6 +985,9 @@ Only code supplies PHYSICALLY given/applied today — not ordered or prescribed.
         "auto_coding_review_reasons": verified.get("auto_coding_review_reasons", []),
         "auto_coding_summary": verified.get("auto_coding_summary", ""),
     }
+
+    # Fix 1 — Tag every code with its provenance and detect physician code replacements
+    final_result = _tag_code_sources(final_result, physician_documented_codes or [], entities)
 
     logger.info(
         f"  Final: {len(final_result['icd10_codes'])} ICD, "
@@ -1015,8 +1065,11 @@ def _format_entities(entities: list[dict]) -> str:
     for e in entities:
         lat = f" [{e.get('laterality', '')}]" if e.get("laterality") else ""
         spec = f" — {e.get('specificity', '')}" if e.get("specificity") else ""
+        ner = e.get("ner_source", "llm")
+        # [G] = GLiNER-confirmed (biomedical NER validated), [L] = LLM-only
+        ner_tag = "[G]" if ner == "gliner_confirmed" else "[L]"
         lines.append(
-            f"- [{e.get('category', '?').upper():>14}] {e.get('clinical_term', '')}{lat}{spec} "
+            f"- {ner_tag} [{e.get('category', '?').upper():>14}] {e.get('clinical_term', '')}{lat}{spec} "
             f"(section: {e.get('source_section', '?')}, text: \"{e.get('text', '')}\")"
         )
     return "\n".join(lines)
@@ -1060,6 +1113,232 @@ def _safe_parse(raw: str, required_key: str) -> dict:
     except json.JSONDecodeError:
         logger.error(f"Failed to parse LLM response for {required_key}")
         return {required_key: []}
+
+
+# ---------------------------------------------------------------------------
+# Fix 6 — Hard Database Gate
+# ---------------------------------------------------------------------------
+
+def _hard_db_gate(entries: list[dict], code_system: str, db) -> list[dict]:
+    """Immediately remove codes that are NOT in the reference database.
+
+    This prevents invalid/hallucinated codes from ever reaching the verification
+    pass, and ensures every output code is defensible in an audit.
+    """
+    if db is None:
+        return entries
+    valid = []
+    for entry in entries:
+        code = entry.get("code", "").strip()
+        if not code:
+            continue
+        found = False
+        if code_system == "icd10":
+            found = bool(db.validate_icd10(code))
+        elif code_system == "cpt":
+            found = bool(db.validate_cpt(code))
+        elif code_system == "hcpcs":
+            found = bool(db.validate_hcpcs(code))
+            if not found:
+                # HCPCS codes are sometimes unlisted but valid — keep as INFO, don't remove
+                valid.append(entry)
+                continue
+        if found:
+            valid.append(entry)
+        else:
+            logger.warning(
+                f"    [DB GATE] {code_system.upper()} {code!r} NOT FOUND in reference DB — removed"
+            )
+    return valid
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 — Physician Code Source Tagging + Reconciliation
+# ---------------------------------------------------------------------------
+
+def _tag_code_sources(
+    result: dict,
+    physician_documented_codes: list[dict],
+    entities: list[dict] | None = None,
+) -> dict:
+    """Tag every output code with its provenance and detect physician code replacements.
+
+    Tags:
+    - physician_documented  : physician explicitly wrote this code in the note
+    - ai_confirmed          : AI assigned same code as physician (agreement), OR entity was
+                              validated by GLiNER-BioMed biomedical NER
+    - ai_replaced_physician : AI chose a DIFFERENT code in the same category as a physician code
+    - ai_inferred           : AI derived this code with no external confirmation
+    """
+    if not physician_documented_codes:
+        # No physician codes — tag everything as ai_inferred first, then upgrade via GLiNER
+        for key in ("icd10_codes", "cpt_codes", "hcpcs_codes"):
+            for e in result.get(key, []):
+                e.setdefault("code_source", "ai_inferred")
+        _upgrade_via_gliner(result, entities)
+        return result
+
+    # Build maps: exact code → physician entry; 3-char prefix → physician entries
+    phys_exact: dict[str, dict] = {}
+    phys_prefix: dict[str, list[dict]] = {}
+    for p in physician_documented_codes:
+        code = p.get("code", "").strip().upper()
+        if not code:
+            continue
+        phys_exact[code] = p
+        prefix = code[:3]
+        phys_prefix.setdefault(prefix, []).append(p)
+
+    all_ai_codes: set[str] = set()
+    for key in ("icd10_codes", "cpt_codes", "hcpcs_codes"):
+        for e in result.get(key, []):
+            all_ai_codes.add(e.get("code", "").strip().upper())
+
+    # Tag each code
+    for key in ("icd10_codes", "cpt_codes", "hcpcs_codes"):
+        for e in result.get(key, []):
+            code = e.get("code", "").strip().upper()
+            if code in phys_exact:
+                e["code_source"] = "physician_documented"
+            else:
+                # Check if a physician code in the same 3-char family was not used
+                prefix = code[:3]
+                same_family = phys_prefix.get(prefix, [])
+                replaced = [p for p in same_family if p.get("code", "").upper() not in all_ai_codes]
+                if replaced:
+                    e["code_source"] = "ai_replaced_physician"
+                    e["physician_code_note"] = (
+                        f"Physician wrote {replaced[0].get('code')} "
+                        f"({replaced[0].get('description', '')})"
+                    )
+                    logger.warning(
+                        f"    [PHYSICIAN LOCK] AI assigned {code} but physician documented "
+                        f"{replaced[0].get('code')} — flagged for review"
+                    )
+                else:
+                    e.setdefault("code_source", "ai_inferred")
+
+    # Detect physician codes completely absent from AI output
+    missing = []
+    for p in physician_documented_codes:
+        code = p.get("code", "").strip().upper()
+        if code and code not in all_ai_codes:
+            # Check if it wasn't replaced (already caught above)
+            prefix = code[:3]
+            ai_same_family = [c for c in all_ai_codes if c[:3] == prefix]
+            if not ai_same_family:
+                # Completely missing — not even a family replacement
+                missing.append(p)
+                logger.warning(
+                    f"    [MISSING PHYSICIAN CODE] {code} ({p.get('description', '')}) "
+                    f"was in physician notes but not in AI output"
+                )
+
+    result["missing_physician_codes"] = missing
+    _upgrade_via_gliner(result, entities)
+    return result
+
+
+_VALID_CPT_MODIFIERS = {
+    # Laterality / bilateral
+    "RT", "LT", "50",
+    # E/M
+    "25", "57",
+    # Procedural
+    "59", "51", "53", "26",
+    "54", "55", "56",
+    # Distinct encounter subsets (supersede 59)
+    "XE", "XS", "XP", "XU",
+    # Toe digit modifiers
+    "TA", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9",
+    # Finger digit (rare in podiatry but valid)
+    "FA", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9",
+}
+
+
+def _strip_invalid_cpt_modifiers(verified: dict) -> dict:
+    """Remove HCPCS/facility modifiers that have no valid meaning on CPT procedure codes.
+
+    Modifiers like Q8, A1-A9, GY, GA, etc. are HCPCS-only and cause claim rejections
+    when attached to CPT codes. Strip anything not in the known valid CPT modifier set.
+    """
+    for entry in verified.get("cpt_codes", []):
+        raw = entry.get("modifiers", [])
+        if not raw:
+            continue
+        valid = [m for m in raw if str(m).upper() in _VALID_CPT_MODIFIERS]
+        removed = [m for m in raw if str(m).upper() not in _VALID_CPT_MODIFIERS]
+        if removed:
+            logger.warning(
+                f"    [MODIFIER STRIP] CPT {entry.get('code')} — removed invalid modifiers: {removed}"
+            )
+            entry["modifiers"] = valid
+    return verified
+
+
+def _enforce_j_codes_from_corrections(verified: dict) -> dict:
+    """Guarantee J-codes noted as ADDED in corrections actually appear in hcpcs_codes.
+
+    The LLM sometimes writes 'ADDED J0702' in corrections_made but forgets to include
+    the code in the hcpcs_codes array. This results in silent billing loss.
+    """
+    import re
+    corrections = verified.get("corrections_made", [])
+    hcpcs_list = verified.get("hcpcs_codes", [])
+    existing = {h.get("code", "").upper() for h in hcpcs_list}
+
+    for correction in corrections:
+        if correction.get("type", "").upper() != "ADDED":
+            continue
+        code = correction.get("code", "").strip().upper()
+        if not re.match(r"^J\d{4}$", code):
+            continue
+        if code not in existing:
+            hcpcs_list.append({
+                "code": code,
+                "description": correction.get("reason", "")[:100],
+                "confidence": 0.85,
+                "modifiers": [],
+                "units": 1,
+                "linked_diagnoses": [],
+                "rationale": correction.get("reason", ""),
+                "supporting_text": correction.get("evidence", ""),
+                "needs_review": False,
+                "review_reason": None,
+                "code_source": "ai_inferred",
+            })
+            existing.add(code)
+            logger.info(f"    [J-CODE ENFORCER] Rescued {code} from corrections → added to hcpcs_codes")
+
+    verified["hcpcs_codes"] = hcpcs_list
+    return verified
+
+
+def _upgrade_via_gliner(result: dict, entities: list[dict] | None) -> None:
+    """Upgrade ai_inferred → ai_confirmed for codes whose driving entity was GLiNER-validated."""
+    if not entities:
+        return
+    confirmed_terms: set[str] = set()
+    for e in entities:
+        if e.get("ner_source") == "gliner_confirmed":
+            for field in ("clinical_term", "text"):
+                val = e.get(field, "").lower().strip()
+                if len(val) >= 4:
+                    confirmed_terms.add(val)
+    if not confirmed_terms:
+        return
+    for key in ("icd10_codes", "cpt_codes", "hcpcs_codes"):
+        for code_entry in result.get(key, []):
+            if code_entry.get("code_source") != "ai_inferred":
+                continue
+            evidence = " ".join([
+                code_entry.get("rationale", ""),
+                code_entry.get("supporting_text", ""),
+                code_entry.get("description", ""),
+                " ".join(code_entry.get("evidence_spans", [])),
+            ]).lower()
+            if any(term in evidence for term in confirmed_terms):
+                code_entry["code_source"] = "ai_confirmed"
 
 
 def _build_anchor_block(
@@ -1177,3 +1456,22 @@ def _format_global_period_context(info: dict) -> str:
 def _add_usage(total: dict, new: dict):
     for k in total:
         total[k] += new.get(k, 0)
+
+
+def _format_physician_codes(physician_codes: list[dict]) -> str:
+    """Build a block for the verification prompt listing physician-documented codes."""
+    if not physician_codes:
+        return ""
+    lines = [
+        "## PHYSICIAN-DOCUMENTED CODES (explicitly written by the provider in this note)",
+        "These codes were literally written by the physician — treat them with highest authority.",
+        "If your output differs from any of these, you MUST flag it as needs_review=true and explain why.",
+        "If a physician code is correct, include it in the output. If clinically wrong, flag for review — do NOT silently drop.",
+        "",
+    ]
+    for p in physician_codes:
+        code = p.get("code", "")
+        desc = p.get("description", "")
+        section = p.get("section", "")
+        lines.append(f"  - {code} ({desc}) [from {section}]")
+    return "\n".join(lines)

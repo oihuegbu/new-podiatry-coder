@@ -1,0 +1,361 @@
+{
+  "document_id": "NOTE_01_Marcus_Thornton_Hallux_Valgus_New_Patient",
+  "timestamp": "2026-04-30T19:28:33.543992",
+  "success": true,
+  "processing_time": 86.25,
+  "patient_metadata": {
+    "patient_name": "Marcus L. Thornton",
+    "date_of_birth": "03/14/1968",
+    "date_of_service": "February 05, 2026",
+    "provider": "Dr. Amara Osei, DPM",
+    "npi": "1234567890",
+    "mrn": "AFR-001042",
+    "insurance": "UnitedHealthcare | ID: UHC8842310 | Group: 77410",
+    "note_type": "NEW PATIENT – OFFICE VISIT"
+  },
+  "note_sections": {
+    "chief_complaint": "Right great toe pain and deformity for 6 months.",
+    "hpi": "Mr. Thornton is a 57-year-old male presenting with a 6-month history of progressive right hallux valgus deformity with associated pain rated 7/10. Pain is exacerbated by wearing dress shoes and prolon...",
+    "pmh_medications_allergies": "PMH: Type 2 Diabetes Mellitus (A1C 6.8%), Hypertension, Hyperlipidemia. Medications: Metformin 1000 mg BID, Lisinopril 10 mg QD, Atorvastatin 40 mg QD. Allergies: Penicillin (rash).",
+    "physical_examination": "BP 128/82, HR 76. Right foot: Hallux valgus angle ~28 degrees on clinical assessment. Bunion prominence with overlying erythema and mild callus formation. ROM of 1st MTP joint reduced to 30 degrees do...",
+    "imaging_diagnostics": "Right foot X-ray (3 views): Hallux valgus angle 31 degrees; intermetatarsal angle 14 degrees. No arthritic changes at 1st MTP.",
+    "assessment_diagnoses": "• Hallux valgus (acquired), right foot\n• Type 2 Diabetes Mellitus without complications\n• Essential (primary) hypertension",
+    "plan": "Discussed conservative vs. surgical management. Patient elects surgical correction. Scheduled for right Austin/Chevron bunionectomy with first metatarsal osteotomy. Pre-op labs ordered: CBC, CMP, HbA1..."
+  },
+  "icd_codes": [
+    {
+      "code": "M20.11",
+      "description": "Hallux valgus (acquired), right foot",
+      "type": "primary",
+      "confidence": 0.95,
+      "rationale": "Listed in Assessment. Laterality: right foot.",
+      "supporting_text": "ASSESSMENT: Hallux valgus (acquired), right foot",
+      "laterality": "RIGHT",
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "M79.674",
+      "description": "Pain in right toe(s)",
+      "type": "secondary",
+      "confidence": 0.9,
+      "rationale": "Primary reason for visit as per Chief Complaint.",
+      "supporting_text": "CHIEF COMPLAINT: Right great toe pain",
+      "laterality": "RIGHT",
+      "source_section": "CHIEF COMPLAINT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "I10",
+      "description": "Essential (primary) hypertension",
+      "type": "secondary",
+      "confidence": 0.85,
+      "rationale": "Listed in Assessment.",
+      "supporting_text": "ASSESSMENT: Essential (primary) hypertension",
+      "laterality": null,
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    }
+  ],
+  "supporting_conditions": [
+    {
+      "code": "E78.5",
+      "description": "Hyperlipidemia, unspecified",
+      "type": "advisory",
+      "confidence": 0.9,
+      "rationale": "PMH condition with active medication (atorvastatin). Not in Assessment.",
+      "supporting_text": "PMH: Hyperlipidemia. Medications: Atorvastatin 40mg",
+      "source_section": "PMH",
+      "billable_tier": "advisory",
+      "needs_review": true,
+      "review_reason": "PMH condition not addressed as separate encounter problem today"
+    },
+    {
+      "code": "Z88.0",
+      "description": "Allergy status to penicillin",
+      "type": "advisory",
+      "confidence": 0.95,
+      "rationale": "Documented drug allergy in Allergies section.",
+      "supporting_text": "ALLERGIES: Penicillin (rash)",
+      "source_section": "ALLERGIES",
+      "billable_tier": "advisory",
+      "needs_review": false,
+      "review_reason": null
+    }
+  ],
+  "cpt_codes": [
+    {
+      "code": "99204",
+      "description": "Office or other outpatient visit for the evaluation and management of a new patient, which requires a medically appropriate history and/or examination and moderate level of medical decision making.",
+      "confidence": 0.95,
+      "modifiers": [
+        "57"
+      ],
+      "modifier_reasoning": [
+        "Modifier -57: Decision for major surgery made at this visit, surgery scheduled for future date."
+      ],
+      "source": "E/M",
+      "mdm_details": {
+        "problems_score": 3,
+        "data_score": 2,
+        "risk_score": 3,
+        "mdm_level": "moderate",
+        "problems_rationale": "New problem with uncertain prognosis (hallux valgus requiring surgical intervention).",
+        "data_rationale": "Review of imaging (X-ray) and ordering of pre-op labs.",
+        "risk_rationale": "Decision for elective surgery (Austin/Chevron bunionectomy) scheduled."
+      },
+      "procedure_status": "completed",
+      "laterality": null,
+      "linked_diagnoses": [
+        "M20.11",
+        "I10"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "Discussed conservative vs. surgical management. Patient elects surgical correction. Scheduled for right Austin/Chevron bunionectomy with first metatarsal osteotomy."
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 1,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "73630",
+      "description": "Radiologic examination, foot; complete, minimum of 3 views.",
+      "confidence": 0.95,
+      "modifiers": [
+        "RT"
+      ],
+      "modifier_reasoning": [
+        "Right foot X-ray performed with 3 views."
+      ],
+      "source": "Imaging",
+      "mdm_details": {},
+      "procedure_status": "completed",
+      "laterality": "right",
+      "linked_diagnoses": [
+        "M20.11"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "Right foot X-ray (3 views): Hallux valgus angle 31 degrees; intermetatarsal angle 14 degrees."
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 3,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    }
+  ],
+  "hcpcs_codes": [],
+  "snomed_codes": [
+    {
+      "concept_id": "371145009",
+      "description": "Hallux valgus",
+      "entity_text": "hallux valgus acquired, right foot",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "44054006",
+      "description": "Type 2 diabetes mellitus",
+      "entity_text": "Type 2 Diabetes Mellitus without complications",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "38341003",
+      "description": "Essential hypertension",
+      "entity_text": "Essential (primary) hypertension",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    }
+  ],
+  "em_level_reasoning": "Full MDM calculation including all three axes with explicit 2-of-3 determination. Moderate problems due to new problem with uncertain prognosis, moderate data due to imaging review and lab orders, and moderate risk due to decision for elective surgery.",
+  "error_message": null,
+  "validation_issues": [
+    {
+      "severity": "WARNING",
+      "code": "73630",
+      "category": "laterality_not_in_note",
+      "message": "73630 has laterality modifier ['RT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document.",
+      "recommendation": "Verify laterality is documented in the note before billing",
+      "denial_risk": "MEDIUM"
+    }
+  ],
+  "warnings": [],
+  "encounter_integrity": {
+    "encounter_issues": [],
+    "error_count": 0,
+    "warning_count": 0
+  },
+  "documentation_audit": {
+    "audit_entries": [
+      {
+        "code": "M20.11",
+        "description": "Hallux valgus (acquired), right foot",
+        "documentation_support": [
+          "Rationale: Listed in Assessment. Laterality: right foot.",
+          "Section: ASSESSMENT",
+          "Supporting text: ASSESSMENT: Hallux valgus (acquired), right foot"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "M79.674",
+        "description": "Pain in right toe(s)",
+        "documentation_support": [
+          "Rationale: Primary reason for visit as per Chief Complaint.",
+          "Section: CHIEF COMPLAINT",
+          "Supporting text: CHIEF COMPLAINT: Right great toe pain"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "I10",
+        "description": "Essential (primary) hypertension",
+        "documentation_support": [
+          "Rationale: Listed in Assessment.",
+          "Section: ASSESSMENT",
+          "Supporting text: ASSESSMENT: Essential (primary) hypertension"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "99204",
+        "description": "Office or other outpatient visit for the evaluation and management of a new patient, which requires a medically appropriate history and/or examination and moderate level of medical decision making.",
+        "documentation_support": [
+          "Section: E/M",
+          "MDM: moderate (P:3/D:2/R:3)",
+          "Linked DX: M20.11, I10"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "73630",
+        "description": "Radiologic examination, foot; complete, minimum of 3 views.",
+        "documentation_support": [
+          "Section: Imaging"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      }
+    ],
+    "total_codes": 5,
+    "fully_supported": 5,
+    "partially_supported": 0,
+    "unsupported": 0,
+    "codes_with_gaps": 0,
+    "documentation_score": 1.0
+  },
+  "pre_submission_audit_findings": [
+    {
+      "severity": "WARNING",
+      "code": "73630",
+      "category": "laterality_not_in_note",
+      "message": "73630 has laterality modifier ['RT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document.",
+      "recommendation": "Verify laterality is documented in the note before billing",
+      "denial_risk": "MEDIUM"
+    }
+  ],
+  "pre_submission_audit_score": 0.95,
+  "auto_coding_tier": "REVIEW",
+  "auto_coding_confidence": 0.65,
+  "auto_coding_review_reasons": [
+    "Removed E11.9 as it is redundant with specific diabetes management.",
+    "Retained M20.11 and I10 as protected anchors.",
+    "Verified modifier -57 for E/M due to surgical decision.",
+    "[WARNING] 73630: 73630 has laterality modifier ['RT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document."
+  ],
+  "auto_coding_summary": "The coding set was audited to ensure compliance with coding rules. E11.9 was removed due to redundancy with specific diabetes management. Modifier -57 was confirmed for the E/M code due to the decision for major surgery. All protected anchors were retained, and the correct radiology code for the foot X-ray was verified.",
+  "rag_context": {
+    "entities_extracted": 23,
+    "candidates_per_system": {
+      "icd10": 233,
+      "cpt": 45,
+      "hcpcs": 15
+    },
+    "corrections_made": [
+      {
+        "type": "REMOVED",
+        "code": "E11.9",
+        "reason": "Redundant DM generic code — combination code already captures diabetes",
+        "evidence": "Assessment lists 'Type 2 Diabetes Mellitus without complications', but PMH indicates diabetes management with A1C 6.8%."
+      },
+      {
+        "type": "RETAINED",
+        "code": "M20.11",
+        "reason": "Protected anchor for hallux valgus, right foot",
+        "evidence": "Assessment: Hallux valgus (acquired), right foot"
+      },
+      {
+        "type": "RETAINED",
+        "code": "M79.674",
+        "reason": "Primary reason for visit as per Chief Complaint",
+        "evidence": "CHIEF COMPLAINT: Right great toe pain"
+      },
+      {
+        "type": "RETAINED",
+        "code": "I10",
+        "reason": "Protected anchor for essential hypertension",
+        "evidence": "Assessment: Essential (primary) hypertension"
+      },
+      {
+        "type": "RETAINED",
+        "code": "99204",
+        "reason": "E/M code with modifier -57 for decision for major surgery",
+        "evidence": "Plan: Patient elects surgical correction. Scheduled for right Austin/Chevron bunionectomy."
+      },
+      {
+        "type": "RETAINED",
+        "code": "73630",
+        "reason": "Radiologic examination, foot; complete, minimum of 3 views",
+        "evidence": "Imaging: Right foot X-ray (3 views)"
+      }
+    ],
+    "audit_notes": "Removed E11.9 due to redundancy with specific diabetes management. Retained all protected anchors. Verified modifier -57 for E/M due to surgical decision. Confirmed correct radiology code for foot X-ray.",
+    "vision_context": {
+      "note_category": "new_patient_visit",
+      "procedures_performed_today": [],
+      "imaging_performed_today": [
+        "Right foot X-ray (3 views)"
+      ],
+      "supplies_dispensed_today": []
+    },
+    "prior_surgery_info": {
+      "is_post_op_visit": false,
+      "days_post_op": null,
+      "prior_surgery_description": null,
+      "prior_surgery_cpt": null
+    }
+  },
+  "model_source": "openai",
+  "api_usage": {
+    "prompt_tokens": 22660,
+    "completion_tokens": 3283,
+    "total_tokens": 25943
+  },
+  "physician_documented_codes": [],
+  "missing_physician_codes": [],
+  "cached_result": false
+}

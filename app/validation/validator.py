@@ -49,6 +49,7 @@ class CodingValidator:
         prior_surgery_info: dict | None = None,
         note_plan_text: str = "",
         note_full_text: str = "",
+        physician_documented_codes: list[dict] | None = None,
     ) -> dict:
         self.issues = []
         self._bundled_codes_to_suppress = set()
@@ -76,6 +77,9 @@ class CodingValidator:
         self._check_redundant_dm_codes(icd)
         self._check_inappropriate_zcodes(icd)
         self._check_snomed_consistency(snomed)
+        # Fix 1 — Physician code preservation checks
+        all_codes = icd + cpt + hcpcs
+        self._check_physician_code_preservation(all_codes, coding_result, physician_documented_codes or [])
 
         # Remove bundled codes from CPT list (NCCI suppression)
         if self._bundled_codes_to_suppress:
@@ -661,23 +665,134 @@ class CodingValidator:
         infos = sum(1 for i in self.issues if i.severity == "INFO")
         return max(0.0, round(1.0 - errors * 0.15 - warns * 0.05 - infos * 0.01, 2))
 
+    def _check_physician_code_preservation(
+        self,
+        all_codes: list[dict],
+        coding_result: dict,
+        physician_documented_codes: list[dict],
+    ):
+        """Fix 1 — Enforce physician code lock.
+
+        Any code the AI replaced or dropped that the physician explicitly documented
+        must be flagged as REVIEW with clear audit trail.
+        """
+        # Flag codes tagged as ai_replaced_physician
+        for entry in all_codes:
+            if entry.get("code_source") == "ai_replaced_physician":
+                self._add(
+                    "WARNING",
+                    entry.get("code", ""),
+                    "physician_code_replaced",
+                    f"AI assigned {entry.get('code')} but physician documented a different code in this "
+                    f"category ({entry.get('physician_code_note', 'see note')}). "
+                    f"Verify with provider before billing — cannot be AUTO-approved.",
+                    "Review with provider: confirm AI correction or restore physician-specified code",
+                    denial_risk="HIGH",
+                )
+
+        # Flag physician codes completely missing from output
+        for p in coding_result.get("missing_physician_codes", []):
+            self._add(
+                "WARNING",
+                p.get("code", ""),
+                "physician_code_missing",
+                f"Physician-documented code {p.get('code')} ({p.get('description', '')}) "
+                f"from the {p.get('section', 'note')} section was not included in the coding output. "
+                f"A physician-specified code must either appear in output or be explicitly flagged.",
+                "Add physician code to output, or document clinical reason it was excluded",
+                denial_risk="HIGH",
+            )
+
+        # Flag codes with ai_inferred laterality modifiers (not in note text)
+        for entry in all_codes:
+            code = entry.get("code", "")
+            mods = entry.get("modifiers", [])
+            if any(m in ("RT", "LT") for m in mods):
+                if entry.get("code_source") == "ai_inferred":
+                    self._add(
+                        "WARNING",
+                        code,
+                        "laterality_not_in_note",
+                        f"{code} has laterality modifier {[m for m in mods if m in ('RT','LT')]} "
+                        f"but this is AI-inferred (not explicitly stated in physician notes). "
+                        f"If audited, must be defensible from the source document.",
+                        "Verify laterality is documented in the note before billing",
+                        denial_risk="MEDIUM",
+                    )
+
     def _compute_tier(self, icd, cpt, hcpcs) -> tuple[str, float, list[str]]:
+        """Fix 5 — Penalty-based confidence scoring.
+
+        Confidence starts at 1.0 and is reduced by each signal of uncertainty.
+        This makes the score discriminative — it reflects actual coding quality,
+        not just a uniform number.
+        """
         errors = [i for i in self.issues if i.severity == "ERROR"]
         warnings = [i for i in self.issues if i.severity == "WARNING"]
         infos = [i for i in self.issues if i.severity == "INFO"]
 
+        # --- Tier from issues ---
         if errors:
-            tier, base = "REJECT", 0.3
+            tier = "REJECT"
         elif warnings:
-            tier, base = "REVIEW", 0.75
+            tier = "REVIEW"
         elif infos:
-            tier, base = "AUTO", 0.90
+            tier = "AUTO"
         else:
-            tier, base = "AUTO", 0.97
+            tier = "AUTO"
 
-        confs = [c.get("confidence", 0.5) for lst in [icd, cpt, hcpcs] for c in lst]
-        avg = sum(confs) / len(confs) if confs else 0.5
-        conf = round(min(base, avg), 2)
+        # --- Penalty-based confidence (Fix 5) ---
+        confidence = 1.0
+        all_codes = icd + cpt + hcpcs
+
+        for entry in all_codes:
+            src = entry.get("code_source", "ai_inferred")
+            llm_conf = entry.get("confidence", 0.5)
+
+            if src == "ai_replaced_physician":
+                confidence -= 0.25  # replaced a physician code
+            elif src == "ai_inferred":
+                confidence -= 0.05  # not physician-documented
+            # physician_documented or ai_confirmed → no penalty
+
+            if llm_conf < 0.80:
+                confidence -= 0.05  # LLM itself was uncertain
+
+        # Penalties from validation issues
+        for issue in errors:
+            cat = issue.category
+            if cat == "code_existence":
+                confidence -= 0.20  # invalid code — major issue
+            elif cat == "global_period":
+                confidence -= 0.15
+            elif cat == "modifier_57_missing":
+                confidence -= 0.10
+            else:
+                confidence -= 0.08
+
+        for issue in warnings:
+            cat = issue.category
+            if cat in ("physician_code_replaced", "physician_code_missing"):
+                confidence -= 0.15  # audit risk
+            elif cat == "laterality_not_in_note":
+                confidence -= 0.10
+            elif cat == "lcd_coverage":
+                confidence -= 0.08
+            else:
+                confidence -= 0.05
+
+        for _ in infos:
+            confidence -= 0.01
+
+        # Clamp confidence to tier-appropriate range
+        if tier == "REJECT":
+            confidence = min(confidence, 0.45)
+        elif tier == "REVIEW":
+            confidence = min(confidence, 0.84)
+        else:
+            confidence = max(confidence, 0.85)  # AUTO is always ≥0.85
+
+        confidence = round(max(0.0, min(1.0, confidence)), 2)
 
         reasons = []
         for i in errors:
@@ -685,7 +800,7 @@ class CodingValidator:
         for i in warnings:
             reasons.append(f"[WARNING] {i.code}: {i.message}")
 
-        return tier, conf, reasons
+        return tier, confidence, reasons
 
     def _summary(self, tier: str, reasons: list[str]) -> str:
         if tier == "AUTO" and not reasons:

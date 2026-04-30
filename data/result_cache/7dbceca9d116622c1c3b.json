@@ -1,0 +1,400 @@
+{
+  "document_id": "NOTE_07_Walter_Jensen_Routine_Diabetic_Foot_Care",
+  "timestamp": "2026-04-30T19:21:16.657978",
+  "success": true,
+  "processing_time": 121.38,
+  "patient_metadata": {
+    "patient_name": "Walter G. Jensen",
+    "date_of_birth": "11/08/1948",
+    "date_of_service": "February 12, 2026",
+    "provider": "Dr. Amara Osei, DPM",
+    "npi": "1234567890",
+    "mrn": "AFR-001399",
+    "insurance": "Medicare Part B ID: 2TF7-MK9-XA41 | Supp: Aetna Medicare Supplement",
+    "note_type": "ESTABLISHED PATIENT – ROUTINE DIABETIC FOOT CARE"
+  },
+  "note_sections": {
+    "chief_complaint": "Routine diabetic foot care and nail management.",
+    "hpi": "Mr. Jensen is a 77-year-old male with a 20-year history of Type 2 Diabetes and severe peripheral neuropathy presenting for routine nail debridement and callus reduction. He wears custom diabetic footw...",
+    "pmh_medications_allergies": "PMH: T2DM (A1C 7.4%), Peripheral Neuropathy, CKD Stage 3, CAD. Medications: Insulin NPH 20 units BID, Gabapentin 300 mg TID, Aspirin 81 mg QD, Lisinopril 20 mg QD. Allergies: NKDA.",
+    "physical_examination": "Both feet: Skin dry with fissuring bilateral heels. Thickened mycotic toenails bilateral (all 10 digits). Hyperkeratotic calluses bilateral 1st and 5th MTH. No ulceration. Monofilament absent bilatera...",
+    "imaging_diagnostics": "None today.",
+    "assessment_diagnoses": "• Type 2 DM with diabetic neuropathy, unspecified\n• Tinea unguium (onychomycosis)\n• Corns and callosities\n• Type 2 DM without complications (additional coding)",
+    "plan": "Performed debridement of mycotic toenails all 10 digits. Trimming and debridement of hyperkeratotic calluses bilateral MTH. Applied urea 40% cream to bilateral heels, instructed on daily application. ..."
+  },
+  "icd_codes": [
+    {
+      "code": "E11.40",
+      "description": "Type 2 diabetes mellitus with diabetic neuropathy, unspecified",
+      "type": "primary",
+      "confidence": 0.95,
+      "rationale": "Listed in Assessment as 'Type 2 DM with diabetic neuropathy, unspecified'.",
+      "supporting_text": "Type 2 DM with diabetic neuropathy, unspecified",
+      "laterality": null,
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "B35.1",
+      "description": "Tinea unguium",
+      "type": "secondary",
+      "confidence": 0.9,
+      "rationale": "Listed in Assessment as 'Tinea unguium (onychomycosis)'.",
+      "supporting_text": "Tinea unguium (onychomycosis)",
+      "laterality": null,
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "L84",
+      "description": "Corns and callosities",
+      "type": "secondary",
+      "confidence": 0.9,
+      "rationale": "Listed in Assessment as 'Corns and callosities'.",
+      "supporting_text": "Corns and callosities",
+      "laterality": null,
+      "source_section": "ASSESSMENT",
+      "s3_validated": true,
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    }
+  ],
+  "supporting_conditions": [
+    {
+      "code": "N18.30",
+      "description": "Chronic kidney disease, stage 3 unspecified",
+      "type": "advisory",
+      "confidence": 0.85,
+      "rationale": "PMH condition with active medication (Lisinopril). Not in Assessment.",
+      "supporting_text": "PMH: CKD Stage 3. Medications: Lisinopril 20 mg QD",
+      "source_section": "PMH",
+      "billable_tier": "advisory",
+      "needs_review": true,
+      "review_reason": "PMH condition not addressed as separate encounter problem today"
+    },
+    {
+      "code": "I25.10",
+      "description": "Atherosclerotic heart disease of native coronary artery without angina pectoris",
+      "type": "advisory",
+      "confidence": 0.85,
+      "rationale": "PMH condition with active medication (Aspirin). Not in Assessment.",
+      "supporting_text": "PMH: CAD. Medications: Aspirin 81 mg QD",
+      "source_section": "PMH",
+      "billable_tier": "advisory",
+      "needs_review": true,
+      "review_reason": "PMH condition not addressed as separate encounter problem today"
+    }
+  ],
+  "cpt_codes": [
+    {
+      "code": "99213",
+      "description": "Established patient office or other outpatient visit, low complexity",
+      "confidence": 0.95,
+      "modifiers": [
+        "25"
+      ],
+      "modifier_reasoning": [
+        "Modifier -25: separately identifiable E/M performed same day as 11721 and 11056 procedures"
+      ],
+      "source": "E/M",
+      "mdm_details": {
+        "problems_score": 2,
+        "data_score": 1,
+        "risk_score": 2,
+        "mdm_level": "low",
+        "problems_rationale": "Chronic conditions (Type 2 Diabetes with neuropathy, onychomycosis, corns and callosities) managed during visit.",
+        "data_rationale": "No additional data reviewed or ordered.",
+        "risk_rationale": "Prescription management for topical antifungal."
+      },
+      "procedure_status": "completed",
+      "laterality": null,
+      "linked_diagnoses": [
+        "E11.40",
+        "B35.1",
+        "L84"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "Routine diabetic foot care and nail management."
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 2,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "11721",
+      "description": "Debridement of nail(s) by any method(s); 6 or more",
+      "confidence": 0.95,
+      "modifiers": [],
+      "modifier_reasoning": [],
+      "source": "Nail Procedures",
+      "mdm_details": {},
+      "procedure_status": "completed",
+      "laterality": null,
+      "linked_diagnoses": [
+        "B35.1"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "Debridement of mycotic toenails all 10 digits."
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 1,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    },
+    {
+      "code": "11056",
+      "description": "Paring or cutting of benign hyperkeratotic lesion (eg, corn or callus); 2 to 4 lesions",
+      "confidence": 0.95,
+      "modifiers": [],
+      "modifier_reasoning": [],
+      "source": "Callus / Corn / Skin Lesions",
+      "mdm_details": {},
+      "procedure_status": "completed",
+      "laterality": null,
+      "linked_diagnoses": [
+        "L84"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "Trimming and debridement of hyperkeratotic calluses bilateral MTH."
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 1,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    }
+  ],
+  "hcpcs_codes": [
+    {
+      "code": "A5513",
+      "description": "For diabetics only, multiple density insert, custom molded from model of foot",
+      "confidence": 0.95,
+      "modifiers": [],
+      "units": 1,
+      "linked_diagnoses": [
+        "E11.40",
+        "B35.1",
+        "L84"
+      ],
+      "rationale": "Replaced diabetic shoe insert due to wear. A5513 is appropriate for custom molded diabetic shoe inserts.",
+      "supporting_text": "Checked and replaced diabetic shoe insert (worn).",
+      "needs_review": false,
+      "review_reason": null,
+      "code_source": "ai_inferred",
+      "physician_code_note": null
+    }
+  ],
+  "snomed_codes": [
+    {
+      "concept_id": "44054006",
+      "description": "Type 2 diabetes mellitus with neuropathy",
+      "entity_text": "Type 2 DM with diabetic neuropathy, unspecified",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "24079001",
+      "description": "Onychomycosis",
+      "entity_text": "Tinea unguium (onychomycosis)",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "201820002",
+      "description": "Corns and callosities",
+      "entity_text": "Corns and callosities",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "24700007",
+      "description": "Peripheral neuropathy",
+      "entity_text": "Peripheral Neuropathy",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "267442002",
+      "description": "Chronic kidney disease stage 3",
+      "entity_text": "CKD Stage 3",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "53741008",
+      "description": "Coronary artery disease",
+      "entity_text": "Coronary Artery Disease",
+      "category": "diagnosis",
+      "confidence": 0.9,
+      "is_root_concept": false
+    }
+  ],
+  "em_level_reasoning": "Full MDM calculation including all three axes with explicit 2-of-3 determination. Chronic conditions managed, no additional data reviewed, prescription management for topical antifungal.",
+  "error_message": null,
+  "validation_issues": [],
+  "warnings": [],
+  "encounter_integrity": {
+    "encounter_issues": [],
+    "error_count": 0,
+    "warning_count": 0
+  },
+  "documentation_audit": {
+    "audit_entries": [
+      {
+        "code": "E11.40",
+        "description": "Type 2 diabetes mellitus with diabetic neuropathy, unspecified",
+        "documentation_support": [
+          "Rationale: Listed in Assessment as 'Type 2 DM with diabetic neuropathy, unspecified'.",
+          "Section: ASSESSMENT",
+          "Supporting text: Type 2 DM with diabetic neuropathy, unspecified"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "B35.1",
+        "description": "Tinea unguium",
+        "documentation_support": [
+          "Rationale: Listed in Assessment as 'Tinea unguium (onychomycosis)'.",
+          "Section: ASSESSMENT",
+          "Supporting text: Tinea unguium (onychomycosis)"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "L84",
+        "description": "Corns and callosities",
+        "documentation_support": [
+          "Rationale: Listed in Assessment as 'Corns and callosities'.",
+          "Section: ASSESSMENT",
+          "Supporting text: Corns and callosities"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "99213",
+        "description": "Established patient office or other outpatient visit, low complexity",
+        "documentation_support": [
+          "Section: E/M",
+          "MDM: low (P:2/D:1/R:2)",
+          "Linked DX: E11.40, B35.1, L84"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "11721",
+        "description": "Debridement of nail(s) by any method(s); 6 or more",
+        "documentation_support": [
+          "Section: Nail Procedures"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "11056",
+        "description": "Paring or cutting of benign hyperkeratotic lesion (eg, corn or callus); 2 to 4 lesions",
+        "documentation_support": [
+          "Section: Callus / Corn / Skin Lesions"
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      },
+      {
+        "code": "A5513",
+        "description": "For diabetics only, multiple density insert, custom molded from model of foot",
+        "documentation_support": [
+          "Rationale: Replaced diabetic shoe insert due to wear. A5513 is appropriate for custom molded diabetic shoe inserts.",
+          "Supporting text: Checked and replaced diabetic shoe insert (worn)."
+        ],
+        "documentation_gaps": [],
+        "supported": true
+      }
+    ],
+    "total_codes": 7,
+    "fully_supported": 7,
+    "partially_supported": 0,
+    "unsupported": 0,
+    "codes_with_gaps": 0,
+    "documentation_score": 1.0
+  },
+  "pre_submission_audit_findings": [],
+  "pre_submission_audit_score": 1.0,
+  "auto_coding_tier": "AUTO",
+  "auto_coding_confidence": 0.85,
+  "auto_coding_review_reasons": [
+    "Removed E11.9 due to redundancy with E11.40.",
+    "Added A5513 for diabetic shoe insert replacement."
+  ],
+  "auto_coding_summary": "The coding set was audited to ensure all diagnoses and procedures were accurately captured. Redundant diabetes code was removed, and a code for diabetic shoe insert replacement was added. All codes are now consistent with the clinical note and billing guidelines.",
+  "rag_context": {
+    "entities_extracted": 26,
+    "candidates_per_system": {
+      "icd10": 228,
+      "cpt": 69,
+      "hcpcs": 24
+    },
+    "corrections_made": [
+      {
+        "type": "REMOVED",
+        "code": "E11.9",
+        "reason": "Redundant DM generic code — combination code already captures diabetes",
+        "evidence": "Assessment lists 'Type 2 DM without complications' but E11.40 already captures diabetes with neuropathy."
+      },
+      {
+        "type": "ADDED",
+        "code": "A5513",
+        "reason": "Replaced diabetic shoe insert due to wear. A5513 is appropriate for custom molded diabetic shoe inserts.",
+        "evidence": "Plan: Checked and replaced diabetic shoe insert (worn)."
+      }
+    ],
+    "audit_notes": "Removed redundant generic diabetes code E11.9 as E11.40 already captures diabetes with neuropathy. Added A5513 for diabetic shoe insert replacement. Ensured all procedures and diagnoses are correctly coded and linked.",
+    "vision_context": {
+      "note_category": "established_patient_visit",
+      "procedures_performed_today": [
+        "Debridement of mycotic toenails all 10 digits",
+        "Trimming and debridement of hyperkeratotic calluses bilateral MTH"
+      ],
+      "imaging_performed_today": [],
+      "supplies_dispensed_today": []
+    },
+    "prior_surgery_info": {
+      "is_post_op_visit": false,
+      "days_post_op": null,
+      "prior_surgery_description": null,
+      "prior_surgery_cpt": null
+    }
+  },
+  "model_source": "openai",
+  "api_usage": {
+    "prompt_tokens": 24316,
+    "completion_tokens": 3865,
+    "total_tokens": 28181
+  },
+  "physician_documented_codes": [],
+  "missing_physician_codes": [],
+  "cached_result": false
+}
