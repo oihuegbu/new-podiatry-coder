@@ -1,11 +1,11 @@
 import base64
 import json
+import re
 from pathlib import Path
 from pdf2image import convert_from_path
 from io import BytesIO
+import anthropic
 
-from app.core.llm_client import chat_completion, get_openai_client
-from app.core.config import OPENAI_MODEL
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -13,42 +13,63 @@ logger = get_logger(__name__)
 
 EXTRACTION_SYSTEM_PROMPT = """You are an expert medical document parser specializing in podiatry clinical notes.
 
-You will receive an image of a clinical note PDF. Extract ALL information into structured sections.
+You will receive one or more page images of a clinical note PDF. Extract ALL information into structured sections.
+
+## ACCURACY REQUIREMENT — READ THIS FIRST
+This extracted data feeds a medical billing pipeline where a single misread character causes coding errors and claim denials.
+
+- ACCURACY over completeness: if you cannot read text with confidence, write [UNCLEAR] rather than guessing
+- Medical codes have ZERO tolerance for character substitution:
+  - The letter O and the digit 0 are different — re-read every code
+  - The letter I and the digit 1 are different — e.g., "I10" (hypertension) vs "110"
+  - The letter S and the digit 5, the letter B and the digit 8 are easily confused in print
+- Re-read every code character by character before writing it
+- Laterality is critical — RT, LT, bilateral, right, left must be read exactly as written; never assume or infer laterality
+- Drug names, dosages, injection amounts, and measurements must be verbatim — do NOT round or estimate
+- Digit/toe numbers (1st, 2nd, 3rd, 4th, 5th) must be exact — these determine which CPT code applies
 
 ## INSTRUCTIONS
-1. Read the ENTIRE document carefully — every word matters for medical coding
-2. Extract patient metadata from the header table
-3. Extract each clinical section EXACTLY as written — do not summarize or paraphrase
-4. Preserve ALL medical details: measurements, dosages, laterality, specific digits/toes
-5. Preserve bullet points and list items in the Assessment/Diagnoses section
-6. If imaging mentions specific views or measurements, include the FULL detail
-7. For the Plan section, capture EVERY action item including medications, procedures performed, follow-up
+1. Use your thinking to carefully analyze the entire document before extracting — take your time
+2. Read the ENTIRE document — every word matters for medical coding
+3. If multiple page images are provided, read ALL pages and combine information coherently
+4. Extract patient metadata from the header table exactly as printed
+5. Extract each clinical section EXACTLY as written — do not summarize, paraphrase, or improve phrasing
+6. Preserve ALL medical details: measurements, dosages, laterality, specific digits/toes
+7. Preserve bullet points and numbered lists in the Assessment/Diagnoses section
+8. If imaging mentions specific views or measurements, include the FULL detail
+9. For the Plan section, capture EVERY action item including medications, procedures performed, injections given, follow-up instructions
 
-## OUTPUT — Return valid JSON:
+## UNCLEAR TEXT PROTOCOL
+- Handwritten or poor-quality print: write the best reading followed by a question mark, e.g., "metformin 500mg?"
+- Completely unreadable word: write [UNCLEAR]
+- For physician_documented_codes: if a code is partially unclear, skip it entirely — do NOT guess a code
+- Never fabricate clinical findings, drug names, or codes you cannot clearly see
+
+## OUTPUT — Return valid JSON with no markdown fences:
 {
   "patient_metadata": {
     "patient_name": "full name",
     "date_of_birth": "MM/DD/YYYY",
     "date_of_service": "Month DD, YYYY",
     "provider": "Dr. Name, Credentials",
-    "npi": "number",
-    "mrn": "number",
-    "insurance": "full insurance line",
+    "npi": "number or null",
+    "mrn": "number or null",
+    "insurance": "full insurance line or null",
     "note_type": "e.g., NEW PATIENT – OFFICE VISIT"
   },
   "sections": {
-    "chief_complaint": "exact text",
-    "hpi": "exact text — full history of present illness",
-    "pmh_medications_allergies": "exact text — include PMH, Medications with doses, Allergies",
-    "physical_examination": "exact text — all findings, measurements, vitals",
-    "imaging_diagnostics": "exact text — study type, views, findings, measurements",
-    "assessment_diagnoses": "exact text — every diagnosis listed, preserve numbering/bullets",
-    "plan": "exact text — every action item, procedures performed, medications, follow-up"
+    "chief_complaint": "exact verbatim text",
+    "hpi": "exact verbatim text — full history of present illness",
+    "pmh_medications_allergies": "exact verbatim text — include PMH, Medications with doses, Allergies",
+    "physical_examination": "exact verbatim text — all findings, measurements, vitals",
+    "imaging_diagnostics": "exact verbatim text — study type, views, findings, measurements",
+    "assessment_diagnoses": "exact verbatim text — every diagnosis listed, preserve numbering/bullets",
+    "plan": "exact verbatim text — every action item, procedures performed, medications, follow-up"
   },
   "note_category": "new_patient_visit|established_patient_visit|post_op_followup|surgical_procedure|urgent_visit",
-  "procedures_performed_today": ["list of procedures actually done on this date, not planned"],
+  "procedures_performed_today": ["list of procedures actually done on this date, not planned for future"],
   "imaging_performed_today": ["list of imaging studies done on this date"],
-  "supplies_dispensed_today": ["list of DME/supplies given to patient today"],
+  "supplies_dispensed_today": ["list of DME/supplies/orthotics given to patient today"],
   "prior_surgery_info": {
     "is_post_op_visit": true,
     "days_post_op": 14,
@@ -67,64 +88,74 @@ You will receive an image of a clinical note PDF. Extract ALL information into s
 }
 
 ## IMPORTANT RULES FOR physician_documented_codes:
-- Extract ONLY codes explicitly written by the physician (e.g., "E11.42", "CPT 11721", "L84")
-- Look in: Assessment/Diagnoses section, Plan section, anywhere codes appear with their numbers
-- ICD-10-CM codes: letter + digits format (e.g., E11.42, M20.11, L84, B35.1)
-- CPT codes: 5-digit numbers (e.g., 11721, 99213, 28296)
-- HCPCS codes: letter + 4 digits (e.g., A5513, L3020, J3301)
+- Extract ONLY codes explicitly written by the physician in the document — no inferred codes
+- Look in: Assessment/Diagnoses section, Plan section, header fields, anywhere codes appear
+- ICD-10-CM codes: one capital letter followed by digits and optional decimal (e.g., E11.42, M20.11, L84, B35.1, I10)
+- CPT codes: exactly 5 digits (e.g., 11721, 99213, 28296) — if you count 4 or 6 digits, re-read
+- HCPCS codes: exactly one capital letter followed by exactly 4 digits (e.g., A5513, L3020, J3301, J0702)
+- CHARACTER ACCURACY CHECK before including any code:
+  - Verify letter vs digit in every position (I10 not 110, L84 not 184, O not 0)
+  - Verify decimal placement in ICD-10 codes (E11.42 not E114.2)
+  - Verify digit count in CPT codes (exactly 5)
 - If the physician wrote NO explicit codes, return an empty array []
-- Do NOT include codes you infer — only ones literally written in the document
+- If a code is partially obscured or unclear, skip it — do NOT guess
 
 ## IMPORTANT RULES FOR prior_surgery_info:
-- Set is_post_op_visit=true ONLY if the note explicitly documents a follow-up visit after a prior surgery
-- Look for language like: "post-op day X", "s/p [procedure]", "post-operative visit", "follow-up after surgery", "surgical follow-up"
-- days_post_op: the exact number if stated (e.g., "Day 14 post-op" → 14), else null
-- prior_surgery_cpt: your best estimate of the CPT code for the prior surgery, or null if unknown
-- If NOT a post-op visit, return: {"is_post_op_visit": false, "days_post_op": null, "prior_surgery_description": null, "prior_surgery_cpt": null}
+- Set is_post_op_visit=true ONLY if the note explicitly documents a follow-up after a prior surgery
+- Look for: "post-op day X", "s/p [procedure]", "post-operative visit", "follow-up after surgery", "surgical follow-up"
+- days_post_op: exact number if stated (e.g., "Day 14 post-op" → 14), else null
+- prior_surgery_cpt: best estimate CPT for the prior surgery, or null if unknown
+- If NOT a post-op visit: {"is_post_op_visit": false, "days_post_op": null, "prior_surgery_description": null, "prior_surgery_cpt": null}
 
-CRITICAL: Return ONLY valid JSON. Extract VERBATIM text from the document — do not interpret or summarize."""
+CRITICAL: Return ONLY valid JSON with no markdown code fences. Every character in every medical code must be verified before output. When uncertain about any character, re-read it; if still uncertain, use [UNCLEAR] or skip the code."""
 
 
 def extract_from_pdf(pdf_path: str | Path) -> dict:
-    """Use GPT-4o Vision to intelligently extract structured data from a clinical note PDF."""
+    """Use Claude Opus 4.7 Vision to intelligently extract structured data from a clinical note PDF."""
     pdf_path = Path(pdf_path)
-    logger.info(f"Converting {pdf_path.name} to image for GPT-4o Vision...")
+    logger.info(f"Converting {pdf_path.name} to image for Claude Opus 4.7 Vision...")
 
     images = convert_from_path(str(pdf_path), dpi=300, first_page=1, last_page=2)
 
-    image_payloads = []
+    image_blocks = []
     for img in images:
         buffer = BytesIO()
         img.save(buffer, format="PNG")
         b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-        image_payloads.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/png;base64,{b64}", "detail": "high"},
+        image_blocks.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": b64},
         })
 
-    client = get_openai_client()
-    response = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Extract all information from this clinical note:"},
-                    *image_payloads,
-                ],
-            },
-        ],
-        temperature=0.0,
-        max_tokens=3000,
-        response_format={"type": "json_object"},
+    client = anthropic.Anthropic()
+    response = client.messages.create(
+        model="claude-opus-4-7",
+        max_tokens=8192,
+        thinking={"type": "adaptive"},
+        output_config={"effort": "xhigh"},
+        system=[{
+            "type": "text",
+            "text": EXTRACTION_SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        }],
+        messages=[{
+            "role": "user",
+            "content": [
+                # Images first — improves OCR accuracy on Opus 4.7
+                *image_blocks,
+                {"type": "text", "text": "Extract all information from this clinical note into the required JSON structure. Take your time to read every character carefully, especially medical codes and laterality."},
+            ],
+        }],
     )
 
-    raw = response.choices[0].message.content
+    raw = next(block.text for block in response.content if block.type == "text")
+    # Strip markdown code fences if present
+    raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+    raw = re.sub(r"\s*```$", "", raw.strip())
     usage = {
-        "prompt_tokens": response.usage.prompt_tokens,
-        "completion_tokens": response.usage.completion_tokens,
-        "total_tokens": response.usage.total_tokens,
+        "prompt_tokens": response.usage.input_tokens,
+        "completion_tokens": response.usage.output_tokens,
+        "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
     }
 
     try:
