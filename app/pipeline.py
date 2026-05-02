@@ -35,7 +35,7 @@ class MedicalCodingPipeline:
         logger.info("Loading code reference database...")
         self.ref_db.load_all()
 
-        logger.info("Building/loading FAISS vector store...")
+        logger.info("Building/loading Qdrant hybrid vector store...")
         self.vector_store.build_or_load(force_rebuild=force_rebuild_index)
 
         self.retriever = CandidateRetriever(self.vector_store)
@@ -100,7 +100,7 @@ class MedicalCodingPipeline:
             logger.info(f"    [{e.category:>14}] {e.clinical_term} {'['+e.laterality+']' if e.laterality else ''}")
 
         # Step 3: RAG — retrieve candidate codes
-        logger.info("[3/5] Retrieving candidate codes (RAG/FAISS)...")
+        logger.info("[3/5] Retrieving candidate codes (RAG/Qdrant hybrid)...")
         entity_candidates = self.retriever.retrieve_for_entities(entities)
         note_candidates = self.retriever.retrieve_for_full_note(sections)
 

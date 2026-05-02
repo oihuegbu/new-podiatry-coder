@@ -1,8 +1,8 @@
 {
   "document_id": "NOTE_04_Patricia_Okafor_Plantar_Fascia_Release_Heel_Spur",
-  "timestamp": "2026-04-30T21:42:43.126473",
+  "timestamp": "2026-05-02T18:27:46.886488",
   "success": true,
-  "processing_time": 151.28,
+  "processing_time": 5634.54,
   "patient_metadata": {
     "patient_name": "Patricia N. Okafor",
     "date_of_birth": "12/30/1961",
@@ -11,7 +11,7 @@
     "npi": "2345678901",
     "mrn": "AFR-001201",
     "insurance": "Cigna HMO | ID: CIG7720145 | Group: GRP9918",
-    "note_type": "SURGICAL PROCEDURE \u2013 PLANTAR FASCIA RELEASE & HEEL SPUR EXCISION"
+    "note_type": "PODIATRY CLINICAL NOTE \u2014 SURGICAL PROCEDURE \u2013 PLANTAR FASCIA RELEASE & HEEL SPUR EXCISION"
   },
   "note_sections": {
     "chief_complaint": "Chronic bilateral heel pain, right worse than left, for 18 months.",
@@ -28,7 +28,7 @@
       "description": "Plantar fascial fibromatosis",
       "type": "primary",
       "confidence": 0.98,
-      "rationale": "Listed in Assessment as plantar fascial fibromatosis (plantar fasciitis), right foot. Primary reason for surgical procedure today.",
+      "rationale": "Listed in Assessment as plantar fascial fibromatosis (plantar fasciitis), right foot. Primary reason for surgery today.",
       "supporting_text": "Plantar fascial fibromatosis (plantar fasciitis), right foot",
       "laterality": "RIGHT",
       "source_section": "ASSESSMENT",
@@ -42,8 +42,8 @@
       "code": "M77.31",
       "description": "Calcaneal spur, right foot",
       "type": "secondary",
-      "confidence": 0.97,
-      "rationale": "Listed in Assessment; spur excised today. X-ray confirms 8mm right calcaneal spur.",
+      "confidence": 0.98,
+      "rationale": "Listed in Assessment; confirmed on imaging at 8mm, excised at surgery.",
       "supporting_text": "Calcaneal spur, right foot",
       "laterality": "RIGHT",
       "source_section": "ASSESSMENT",
@@ -58,8 +58,8 @@
       "description": "Calcaneal spur, left foot",
       "type": "secondary",
       "confidence": 0.85,
-      "rationale": "Bilateral heel X-ray demonstrates 4mm left calcaneal spur.",
-      "supporting_text": "Prominent calcaneal traction spur right measuring 8mm, left 4mm",
+      "rationale": "X-ray demonstrates 4mm left calcaneal spur, contributing to bilateral heel pain CC.",
+      "supporting_text": "left 4mm",
       "laterality": "LEFT",
       "source_section": "IMAGING",
       "s3_validated": true,
@@ -88,7 +88,7 @@
       "description": "Body mass index [BMI] 36.0-36.9, adult",
       "type": "secondary",
       "confidence": 0.95,
-      "rationale": "BMI 36.2 documented; required when E66.x is coded.",
+      "rationale": "BMI 36.2 documented and obesity coded; ICD-10-CM guidelines require BMI Z-code as secondary.",
       "supporting_text": "Obesity (BMI 36.2)",
       "laterality": null,
       "source_section": "PMH",
@@ -105,77 +105,48 @@
       "description": "Gastro-esophageal reflux disease without esophagitis",
       "type": "advisory",
       "confidence": 0.9,
-      "rationale": "PMH condition with active medication (pantoprazole). Not addressed in Assessment today.",
-      "supporting_text": "PMH: ... GERD. Medications: Pantoprazole 40 mg QD",
+      "rationale": "PMH GERD with active pantoprazole therapy; not addressed in Assessment today.",
+      "supporting_text": "PMH: Obesity (BMI 36.2), GERD. Medications: Pantoprazole 40 mg QD",
       "source_section": "PMH",
       "billable_tier": "advisory",
       "needs_review": true,
-      "review_reason": "PMH condition not addressed as separate encounter problem today"
+      "review_reason": "PMH condition with active medication, not in Assessment"
     }
   ],
   "cpt_codes": [
     {
-      "code": "28119",
-      "description": "Ostectomy, calcaneus; for spur, with or without plantar fascial release",
-      "confidence": 0.95,
+      "code": "29893",
+      "description": "Endoscopic plantar fasciotomy",
+      "confidence": 0.98,
       "modifiers": [
         "RT"
       ],
       "modifier_reasoning": [
-        "RT: procedure performed on right foot only"
+        "RT: performed on right foot"
       ],
       "source": "PROCEDURE",
       "mdm_details": {},
       "procedure_status": "completed",
       "laterality": "right",
       "linked_diagnoses": [
-        "M77.31",
-        "M72.2"
+        "M72.2",
+        "M77.31"
       ],
       "units": 1,
       "evidence_spans": [
-        "Performed right endoscopic plantar fasciotomy with calcaneal spur excision under MAC anesthesia and ankle tourniquet",
-        "Spur debrided with motorized burr"
+        "Performed right endoscopic plantar fasciotomy with calcaneal spur excision under MAC anesthesia and ankle tourniquet"
       ],
       "ama_validated": true,
       "mue_validated": true,
       "mue_limit": 1,
       "code_source": "ai_confirmed",
       "physician_code_note": null
-    },
-    {
-      "code": "73650",
-      "description": "Radiologic examination; calcaneus, minimum of 2 views",
-      "confidence": 0.92,
-      "modifiers": [
-        "50"
-      ],
-      "modifier_reasoning": [
-        "50: bilateral heel X-rays performed same session"
-      ],
-      "source": "IMAGING",
-      "mdm_details": {},
-      "procedure_status": "completed",
-      "laterality": "bilateral",
-      "linked_diagnoses": [
-        "M77.31",
-        "M77.32"
-      ],
-      "units": 1,
-      "evidence_spans": [
-        "Bilateral heel X-ray: Prominent calcaneal traction spur right measuring 8mm, left 4mm"
-      ],
-      "ama_validated": true,
-      "mue_validated": true,
-      "mue_limit": 2,
-      "code_source": "ai_inferred",
-      "physician_code_note": null
     }
   ],
   "hcpcs_codes": [
     {
       "code": "L4361",
-      "description": "Walking boot, pneumatic and/or vacuum, with or without joints",
+      "description": "Walking boot, pneumatic and/or vacuum, prefabricated, includes fitting and adjustment",
       "confidence": 0.9,
       "modifiers": [
         "RT"
@@ -185,17 +156,33 @@
         "M72.2",
         "M77.31"
       ],
-      "rationale": "CAM walker boot applied post-operatively to the right foot. CAM walker = pneumatic boot (L4361).",
+      "rationale": "CAM walker boot applied post-op to right foot following endoscopic plantar fasciotomy. CAM walkers are pneumatic by design \u2014 L4361 is correct (per Section N).",
       "supporting_text": "Applied compression dressing and CAM walker boot.",
       "needs_review": false,
       "review_reason": null,
+      "code_source": "ai_confirmed",
+      "physician_code_note": null
+    },
+    {
+      "code": "E0114",
+      "description": "Crutches, underarm, other than wood, adjustable or fixed, pair, with pads, tips and handgrips",
+      "confidence": 0.6,
+      "modifiers": [],
+      "units": 1,
+      "linked_diagnoses": [
+        "M72.2"
+      ],
+      "rationale": "Crutches dispensed for WBAT post-op ambulation. Bilateral pair \u2014 no laterality modifier needed.",
+      "supporting_text": "WB as tolerated with crutches.",
+      "needs_review": true,
+      "review_reason": "Crutch type (underarm vs forearm, wood vs aluminum) not specified in note.",
       "code_source": "ai_confirmed",
       "physician_code_note": null
     }
   ],
   "snomed_codes": [
     {
-      "concept_id": "202882000",
+      "concept_id": "202882003",
       "description": "Plantar fasciitis",
       "entity_text": "plantar fascial fibromatosis (plantar fasciitis), right foot",
       "category": "diagnosis",
@@ -203,7 +190,7 @@
       "is_root_concept": false
     },
     {
-      "concept_id": "75400003",
+      "concept_id": "76612000",
       "description": "Calcaneal spur",
       "entity_text": "calcaneal spur, right foot",
       "category": "diagnosis",
@@ -227,47 +214,39 @@
       "is_root_concept": false
     },
     {
-      "concept_id": "299043006",
-      "description": "Heel pain",
-      "entity_text": "chronic bilateral heel pain",
-      "category": "symptom",
-      "confidence": 0.85,
-      "is_root_concept": false
-    },
-    {
-      "concept_id": "16001004",
-      "description": "Contracture of Achilles tendon",
+      "concept_id": "102572006",
+      "description": "Achilles tendon contracture",
       "entity_text": "tight Achilles tendon, right",
-      "category": "finding",
-      "confidence": 0.8,
-      "is_root_concept": false
-    },
-    {
-      "concept_id": "298264006",
-      "description": "Limited ankle dorsiflexion",
-      "entity_text": "limited ankle dorsiflexion, right (5 degrees)",
-      "category": "finding",
-      "confidence": 0.7,
-      "is_root_concept": false
-    },
-    {
-      "concept_id": "247348008",
-      "description": "Tenderness",
-      "entity_text": "tenderness at medial calcaneal tubercle, right",
       "category": "finding",
       "confidence": 0.75,
       "is_root_concept": false
     },
     {
-      "concept_id": "433191000124108",
+      "concept_id": "298166005",
+      "description": "Limited ankle dorsiflexion",
+      "entity_text": "ankle dorsiflexion limited to 5 degrees",
+      "category": "finding",
+      "confidence": 0.7,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "247355008",
+      "description": "Tenderness on palpation",
+      "entity_text": "tenderness at medial calcaneal tubercle, right",
+      "category": "finding",
+      "confidence": 0.8,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "274098005",
       "description": "Endoscopic plantar fasciotomy",
       "entity_text": "right endoscopic plantar fasciotomy",
       "category": "procedure",
       "confidence": 0.55,
-      "is_root_concept": true
+      "is_root_concept": false
     },
     {
-      "concept_id": "55705006",
+      "concept_id": "30037006",
       "description": "Excision of calcaneal spur",
       "entity_text": "calcaneal spur excision, right",
       "category": "procedure",
@@ -275,39 +254,31 @@
       "is_root_concept": false
     },
     {
-      "concept_id": "241688005",
-      "description": "Plain X-ray of calcaneus",
-      "entity_text": "bilateral heel x-ray",
+      "concept_id": "399097000",
+      "description": "Monitored anesthesia care",
+      "entity_text": "MAC anesthesia",
       "category": "procedure",
-      "confidence": 0.7,
-      "is_root_concept": false
-    },
-    {
-      "concept_id": "32750006",
-      "description": "Body structure of calcaneus",
-      "entity_text": "calcaneus, right",
-      "category": "anatomy",
-      "confidence": 0.75,
-      "is_root_concept": false
-    },
-    {
-      "concept_id": "39896004",
-      "description": "Achilles tendon structure",
-      "entity_text": "Achilles tendon, right",
-      "category": "anatomy",
       "confidence": 0.85,
       "is_root_concept": false
     },
     {
-      "concept_id": "32849002",
+      "concept_id": "228585002",
+      "description": "Application of cast walker boot",
+      "entity_text": "CAM walker boot applied right",
+      "category": "procedure",
+      "confidence": 0.5,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "75421007",
       "description": "Plantar fascia structure",
       "entity_text": "plantar fascia, right",
       "category": "anatomy",
-      "confidence": 0.8,
+      "confidence": 0.85,
       "is_root_concept": false
     }
   ],
-  "em_level_reasoning": "No E/M billed. DOS is a scheduled surgical procedure (28119-RT, 90-day global). Pre-operative decision-making and consent occurred at a prior visit; no separately identifiable E/M today. Modifier -25 not applicable (no E/M). Modifier -57 not applicable (no E/M today; surgery performed, not scheduled).",
+  "em_level_reasoning": "No separate E/M billed today. This is a same-day surgical procedure visit; the decision for surgery was made at a prior visit (18-month course of failed conservative care: cortisone injections x2, custom orthotics, PT, NSAIDs all already tried). 29893 carries a 90-day global period and includes the day-of-surgery pre/post operative care, dressing, and CAM boot application. Per NCCI: 29893 inherently bundles calcaneal spur debridement performed via the same endoscopic approach \u2014 28119 not separately reported. Modifier -57 not applicable (decision for surgery not made today). Modifier -25 not applicable (no separate E/M billed).",
   "error_message": null,
   "validation_issues": [],
   "warnings": [],
@@ -322,7 +293,7 @@
         "code": "M72.2",
         "description": "Plantar fascial fibromatosis",
         "documentation_support": [
-          "Rationale: Listed in Assessment as plantar fascial fibromatosis (plantar fasciitis), right foot. Primary reason for surgical procedure today.",
+          "Rationale: Listed in Assessment as plantar fascial fibromatosis (plantar fasciitis), right foot. Primary reason for surgery today.",
           "Section: ASSESSMENT",
           "Supporting text: Plantar fascial fibromatosis (plantar fasciitis), right foot"
         ],
@@ -333,7 +304,7 @@
         "code": "M77.31",
         "description": "Calcaneal spur, right foot",
         "documentation_support": [
-          "Rationale: Listed in Assessment; spur excised today. X-ray confirms 8mm right calcaneal spur.",
+          "Rationale: Listed in Assessment; confirmed on imaging at 8mm, excised at surgery.",
           "Section: ASSESSMENT",
           "Supporting text: Calcaneal spur, right foot"
         ],
@@ -344,9 +315,9 @@
         "code": "M77.32",
         "description": "Calcaneal spur, left foot",
         "documentation_support": [
-          "Rationale: Bilateral heel X-ray demonstrates 4mm left calcaneal spur.",
+          "Rationale: X-ray demonstrates 4mm left calcaneal spur, contributing to bilateral heel pain CC.",
           "Section: IMAGING",
-          "Supporting text: Prominent calcaneal traction spur right measuring 8mm, left 4mm"
+          "Supporting text: left 4mm"
         ],
         "documentation_gaps": [],
         "supported": true
@@ -366,7 +337,7 @@
         "code": "Z68.36",
         "description": "Body mass index [BMI] 36.0-36.9, adult",
         "documentation_support": [
-          "Rationale: BMI 36.2 documented; required when E66.x is coded.",
+          "Rationale: BMI 36.2 documented and obesity coded; ICD-10-CM guidelines require BMI Z-code as secondary.",
           "Section: PMH",
           "Supporting text: Obesity (BMI 36.2)"
         ],
@@ -374,8 +345,8 @@
         "supported": true
       },
       {
-        "code": "28119",
-        "description": "Ostectomy, calcaneus; for spur, with or without plantar fascial release",
+        "code": "29893",
+        "description": "Endoscopic plantar fasciotomy",
         "documentation_support": [
           "Section: PROCEDURE"
         ],
@@ -383,20 +354,21 @@
         "supported": true
       },
       {
-        "code": "73650",
-        "description": "Radiologic examination; calcaneus, minimum of 2 views",
+        "code": "L4361",
+        "description": "Walking boot, pneumatic and/or vacuum, prefabricated, includes fitting and adjustment",
         "documentation_support": [
-          "Section: IMAGING"
+          "Rationale: CAM walker boot applied post-op to right foot following endoscopic plantar fasciotomy. CAM walkers are pneumatic by design \u2014 L4361 is correct (per Section N).",
+          "Supporting text: Applied compression dressing and CAM walker boot."
         ],
         "documentation_gaps": [],
         "supported": true
       },
       {
-        "code": "L4361",
-        "description": "Walking boot, pneumatic and/or vacuum, with or without joints",
+        "code": "E0114",
+        "description": "Crutches, underarm, other than wood, adjustable or fixed, pair, with pads, tips and handgrips",
         "documentation_support": [
-          "Rationale: CAM walker boot applied post-operatively to the right foot. CAM walker = pneumatic boot (L4361).",
-          "Supporting text: Applied compression dressing and CAM walker boot."
+          "Rationale: Crutches dispensed for WBAT post-op ambulation. Bilateral pair \u2014 no laterality modifier needed.",
+          "Supporting text: WB as tolerated with crutches."
         ],
         "documentation_gaps": [],
         "supported": true
@@ -414,90 +386,57 @@
   "auto_coding_tier": "AUTO",
   "auto_coding_confidence": 0.95,
   "auto_coding_review_reasons": [
-    "All Assessment-section diagnoses verified as protected anchors with corresponding ICD-10 codes.",
-    "BMI Z68.36 retained \u2014 required adjunct to E66.9 with documented BMI 36.2.",
-    "28119-RT covers both spur excision and plantar fascial release; 29893 omitted per NCCI bundling.",
-    "73650-50 confirmed as correct code for bilateral calcaneus (heel) X-ray imaging.",
-    "L4361-RT (pneumatic CAM walker) correct; not L4360.",
-    "K21.9 (GERD) correctly placed in supporting_conditions only (PMH, not addressed in Assessment).",
-    "No E/M coded \u2014 pure surgical encounter; -25 and -57 modifiers not applicable."
+    "Changed L4360 \u2192 L4361: CAM walker boots are pneumatic by design (Section N mandate).",
+    "Retained M77.32 left calcaneal spur as bilateral imaging finding.",
+    "Retained single bundled CPT 29893-RT (spur excision included in endoscopic plantar fasciotomy via same approach).",
+    "Removed placeholder/root SNOMED concept (calcaneus_placeholder, conf 0.3).",
+    "Verified GERD remains in supporting_conditions only (PMH-only)."
   ],
-  "auto_coding_summary": "Established 64-year-old female underwent right endoscopic plantar fasciotomy with calcaneal spur excision (28119-RT) for plantar fascial fibromatosis (M72.2) and right calcaneal spur (M77.31). Bilateral heel X-rays performed (73650-50) demonstrating bilateral calcaneal spurs (M77.31, M77.32). CAM walker boot dispensed (L4361-RT). Obesity (E66.9) with BMI 36.2 (Z68.36) coded as secondary. GERD retained as supporting condition only. No E/M billed (scheduled surgical encounter). All protected anchors satisfied; no corrections required to existing code set.",
+  "auto_coding_summary": "Established 64-year-old female undergoing right endoscopic plantar fasciotomy with calcaneal spur excision under MAC. Billed CPT 29893-RT (single bundled code; spur debridement included via same endoscopic approach). ICD-10: M72.2 (primary), M77.31, M77.32, E66.9, Z68.36. HCPCS: L4361-RT (CAM walker \u2014 corrected from L4360) and E0114 (crutches pair). GERD held as advisory supporting_condition. No E/M billed (global day of surgery).",
   "rag_context": {
     "entities_extracted": 34,
     "candidates_per_system": {
-      "icd10": 233,
-      "cpt": 107,
-      "hcpcs": 72
+      "icd10": 235,
+      "cpt": 104,
+      "hcpcs": 68
     },
     "corrections_made": [
       {
-        "type": "RETAINED",
-        "code": "M72.2",
-        "reason": "Primary diagnosis from Assessment; supports surgical procedure today.",
-        "evidence": "Assessment: Plantar fascial fibromatosis (plantar fasciitis), right foot"
-      },
-      {
-        "type": "RETAINED",
-        "code": "M77.31",
-        "reason": "Calcaneal spur, right foot \u2014 listed in Assessment and excised today.",
-        "evidence": "Assessment: Calcaneal spur, right foot; Spur debrided with motorized burr"
+        "type": "CHANGED",
+        "code": "L4361",
+        "reason": "CAM walker boot is pneumatic by design \u2014 L4360 is non-pneumatic; corrected per Section N",
+        "evidence": "Applied compression dressing and CAM walker boot."
       },
       {
         "type": "RETAINED",
         "code": "M77.32",
-        "reason": "Left calcaneal spur documented on bilateral imaging (4mm).",
+        "reason": "Left calcaneal spur documented on imaging contributing to bilateral heel pain CC; reasonable secondary",
         "evidence": "Bilateral heel X-ray: ... left 4mm"
       },
       {
         "type": "RETAINED",
-        "code": "E66.9",
-        "reason": "Listed in Assessment.",
-        "evidence": "Assessment: Obesity, unspecified"
-      },
-      {
-        "type": "RETAINED",
-        "code": "Z68.36",
-        "reason": "BMI 36.2 documented; required adjunct to E66.x.",
-        "evidence": "PMH: Obesity (BMI 36.2)"
-      },
-      {
-        "type": "RETAINED",
-        "code": "28119-RT",
-        "reason": "Captures both calcaneal spur ostectomy and plantar fascial release performed today; 29893 is bundled per NCCI.",
+        "code": "29893",
+        "reason": "Endoscopic plantar fasciotomy with calcaneal spur excision via same approach \u2014 spur debridement is bundled into 29893",
         "evidence": "Performed right endoscopic plantar fasciotomy with calcaneal spur excision"
       },
       {
         "type": "RETAINED",
-        "code": "73650-50",
-        "reason": "Bilateral heel X-ray = bilateral calcaneus imaging; 73650 with -50 is correct.",
-        "evidence": "Bilateral heel X-ray: Prominent calcaneal traction spur right measuring 8mm, left 4mm"
-      },
-      {
-        "type": "RETAINED",
-        "code": "L4361-RT",
-        "reason": "CAM walker boot is pneumatic \u2014 L4361 is the correct code.",
-        "evidence": "Applied compression dressing and CAM walker boot"
-      },
-      {
-        "type": "FLAGGED",
-        "code": "SNOMED 433191000124108",
-        "reason": "Confidence 0.55; flagged for review but retained as procedure performed today.",
-        "evidence": "right endoscopic plantar fasciotomy"
+        "code": "Z68.36",
+        "reason": "BMI 36.2 documented with E66.9 coded \u2014 Z-code required",
+        "evidence": "Obesity (BMI 36.2)"
       }
     ],
-    "audit_notes": "All protected anchors verified: M72.2, M77.31, E66.9 each have codes; obesity has Z68.36 BMI adjunct; M77.32 retained for left-foot imaging finding. CPT 28119-RT correctly bundles plantar fascial release with calcaneal spur ostectomy (NCCI \u2014 29893 not separately reportable). Bilateral heel imaging correctly coded as 73650-50 (calcaneus views, not 73630). HCPCS L4361-RT correct for CAM walker (pneumatic). GERD passed through to supporting_conditions per Rule 4. SNOMED 433191000124108 confidence 0.55 flagged for review.",
+    "audit_notes": "Corrected L4360 \u2192 L4361 (CAM walker is pneumatic per Section N). Retained 29893-RT (spur excision bundled). Retained M77.32 for left spur as bilateral imaging finding contributing to bilateral CC. Removed root/placeholder SNOMED 'calcaneus_placeholder' (low-confidence root concept). All Assessment anchors coded; PMH GERD remains in supporting_conditions. BMI Z68.36 retained per E66.9 pairing requirement.",
     "vision_context": {
       "note_category": "surgical_procedure",
       "procedures_performed_today": [
-        "right endoscopic plantar fasciotomy",
-        "calcaneal spur excision"
+        "Right endoscopic plantar fasciotomy with calcaneal spur excision under MAC anesthesia and ankle tourniquet",
+        "Application of compression dressing and CAM walker boot"
       ],
-      "imaging_performed_today": [
-        "Bilateral heel X-ray"
-      ],
+      "imaging_performed_today": [],
       "supplies_dispensed_today": [
-        "CAM walker boot"
+        "CAM walker boot",
+        "Crutches"
       ]
     },
     "prior_surgery_info": {
@@ -509,9 +448,9 @@
   },
   "model_source": "claude",
   "api_usage": {
-    "prompt_tokens": 40102,
-    "completion_tokens": 8382,
-    "total_tokens": 48484
+    "prompt_tokens": 40761,
+    "completion_tokens": 7342,
+    "total_tokens": 48103
   },
   "physician_documented_codes": [],
   "missing_physician_codes": [],
@@ -520,7 +459,7 @@
     {
       "text": "chronic bilateral heel pain",
       "category": "diagnosis",
-      "clinical_term": "chronic bilateral heel pain",
+      "clinical_term": "chronic heel pain",
       "laterality": "BILATERAL",
       "specificity": "right worse than left, 18 months",
       "source_section": "CC",
@@ -530,19 +469,19 @@
     },
     {
       "text": "plantar heel pain",
-      "category": "finding",
+      "category": "diagnosis",
       "clinical_term": "plantar heel pain",
       "laterality": "BILATERAL",
-      "specificity": "right greater than left, 18 months",
+      "specificity": "right greater than left",
       "source_section": "HPI",
       "negated": false,
       "ner_source": "llm_only",
       "ner_confidence": 1.0
     },
     {
-      "text": "post-static dyskinesia",
+      "text": "Pain is worst with first steps in the morning",
       "category": "finding",
-      "clinical_term": "pain with first steps in morning and after prolonged sitting",
+      "clinical_term": "post-static dyskinesia",
       "laterality": null,
       "specificity": null,
       "source_section": "HPI",
@@ -555,7 +494,7 @@
       "category": "procedure",
       "clinical_term": "prior corticosteroid injection",
       "laterality": null,
-      "specificity": "previously performed, x2",
+      "specificity": "x2, prior treatment",
       "source_section": "HPI",
       "negated": false,
       "ner_source": "llm_only",
@@ -566,7 +505,7 @@
       "category": "supply",
       "clinical_term": "custom orthotics",
       "laterality": null,
-      "specificity": "previously tried",
+      "specificity": "prior treatment",
       "source_section": "HPI",
       "negated": false,
       "ner_source": "gliner_confirmed",
@@ -577,7 +516,7 @@
       "category": "procedure",
       "clinical_term": "physical therapy",
       "laterality": null,
-      "specificity": "previously tried",
+      "specificity": "prior treatment",
       "source_section": "HPI",
       "negated": false,
       "ner_source": "llm_only",
@@ -586,9 +525,9 @@
     {
       "text": "NSAID therapy",
       "category": "medication",
-      "clinical_term": "NSAID therapy",
+      "clinical_term": "NSAID",
       "laterality": null,
-      "specificity": "previously tried",
+      "specificity": "prior treatment",
       "source_section": "HPI",
       "negated": false,
       "ner_source": "gliner_confirmed",
@@ -643,7 +582,7 @@
       "category": "medication",
       "clinical_term": "pantoprazole",
       "laterality": null,
-      "specificity": "40 mg daily",
+      "specificity": "40 mg QD",
       "source_section": "PMH",
       "negated": false,
       "ner_source": "gliner_confirmed",
@@ -661,7 +600,7 @@
       "ner_confidence": 0.938
     },
     {
-      "text": "tenderness at medial calcaneal tubercle with palpation",
+      "text": "tenderness at medial calcaneal tubercle",
       "category": "finding",
       "clinical_term": "tenderness on palpation",
       "laterality": "RIGHT",
@@ -698,7 +637,7 @@
       "category": "finding",
       "clinical_term": "positive Silfverskiold test",
       "laterality": "RIGHT",
-      "specificity": null,
+      "specificity": "equinus deformity",
       "source_section": "PE",
       "negated": false,
       "ner_source": "llm_only",
@@ -707,7 +646,7 @@
     {
       "text": "Left foot similar but less symptomatic",
       "category": "finding",
-      "clinical_term": "similar findings less symptomatic",
+      "clinical_term": "similar findings less severe",
       "laterality": "LEFT",
       "specificity": null,
       "source_section": "PE",
@@ -718,7 +657,7 @@
     {
       "text": "Prominent calcaneal traction spur right measuring 8mm",
       "category": "finding",
-      "clinical_term": "calcaneal traction spur on x-ray",
+      "clinical_term": "calcaneal spur on x-ray",
       "laterality": "RIGHT",
       "specificity": "8mm",
       "source_section": "IMAGING",
@@ -729,7 +668,7 @@
     {
       "text": "left 4mm",
       "category": "finding",
-      "clinical_term": "calcaneal traction spur on x-ray",
+      "clinical_term": "calcaneal spur on x-ray",
       "laterality": "LEFT",
       "specificity": "4mm",
       "source_section": "IMAGING",
@@ -786,7 +725,7 @@
       "category": "procedure",
       "clinical_term": "calcaneal spur excision",
       "laterality": "RIGHT",
-      "specificity": "with motorized burr",
+      "specificity": "motorized burr debridement",
       "source_section": "PLAN",
       "negated": false,
       "ner_source": "gliner_confirmed",
@@ -806,7 +745,7 @@
     {
       "text": "ankle tourniquet",
       "category": "procedure",
-      "clinical_term": "ankle tourniquet",
+      "clinical_term": "ankle tourniquet application",
       "laterality": "RIGHT",
       "specificity": null,
       "source_section": "PLAN",

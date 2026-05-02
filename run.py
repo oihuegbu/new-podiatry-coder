@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Podiatry Medical Coding System
-NER → RAG (FAISS) → LLM (GPT-4o) → Validation Pipeline
+NER → RAG (Qdrant hybrid) → LLM (Claude Opus 4.7) → Validation Pipeline
 
 Usage:
     python run.py                     # Process all notes
     python run.py --note NOTE_01...   # Process single note
-    python run.py --rebuild-index     # Force rebuild FAISS index
+    python run.py --rebuild-index     # Force rebuild Qdrant collections
 """
 
 import argparse
@@ -27,13 +27,13 @@ logger = get_logger("main")
 def main():
     parser = argparse.ArgumentParser(description="Podiatry Medical Coding System")
     parser.add_argument("--note", type=str, help="Process a single PDF note (filename or path)")
-    parser.add_argument("--rebuild-index", action="store_true", help="Force rebuild FAISS vector indices")
+    parser.add_argument("--rebuild-index", action="store_true", help="Force rebuild Qdrant vector collections")
     parser.add_argument("--no-cache", action="store_true", help="Skip cache lookup and force fresh processing")
     args = parser.parse_args()
 
     logger.info("=" * 70)
     logger.info("PODIATRY MEDICAL CODING SYSTEM")
-    logger.info(f"Pipeline: NER → RAG (FAISS) → LLM (GPT-4o) → Validation")
+    logger.info(f"Pipeline: NER → RAG (Qdrant hybrid) → LLM (Claude Opus 4.7) → Validation")
     logger.info(f"Timestamp: {datetime.now().isoformat()}")
     logger.info("=" * 70)
 

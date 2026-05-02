@@ -8,18 +8,18 @@ Automated medical coding system for podiatry clinical notes. Translates doctor's
 Doctor's Note (PDF)
        │
        ▼
-  [1] GPT-4o Vision ── Intelligent PDF extraction (sections, metadata, procedures, imaging, supplies)
+  [1] Claude Opus 4.7 Vision ── Intelligent PDF extraction (sections, metadata, procedures, imaging, supplies)
        │
        ▼
   [2] Clinical NER ── Extract 15-25 clinical entities per note (diagnoses, procedures, findings, meds)
        │
        ▼
-  [3] RAG / FAISS ── Semantic search across 94K+ embedded medical codes to retrieve candidates
-       │                 ├── 74,719 ICD-10-CM codes
-       │                 ├── 11,574 CPT codes
-       │                 └── 8,928 HCPCS codes
+  [3] RAG / Qdrant ── Hybrid search across 94K+ embedded medical codes to retrieve candidates
+       │                 ├── 74,719 ICD-10-CM codes       (dense cosine + BM25 sparse)
+       │                 ├── 11,574 CPT codes             (dense cosine + BM25 sparse)
+       │                 └── 8,928 HCPCS codes            (dense cosine + BM25 sparse)
        ▼
-  [4] Multi-Pass Code Assignment (GPT-4o)
+  [4] Multi-Pass Code Assignment (Claude Opus 4.7)
        │    ├── Pass 1: ICD-10-CM diagnosis coding
        │    ├── Pass 2: CPT procedure / E&M / imaging coding
        │    ├── Pass 3: HCPCS + SNOMED CT coding
@@ -37,8 +37,8 @@ Doctor's Note (PDF)
 
 ## Key Features
 
-- **GPT-4o Vision** reads PDFs as images for accurate section extraction
-- **FAISS vector store** with OpenAI embeddings for semantic code retrieval
+- **Claude Opus 4.7 Vision** reads PDFs as images with adaptive thinking for accurate extraction
+- **Qdrant hybrid search** (dense FastEmbed BAAI/bge-base + BM25 sparse) — fully local, no embedding API costs
 - **Multi-pass coding** separates ICD/CPT/HCPCS into focused passes for higher accuracy
 - **Anchor-and-Audit verification** protects Assessment-listed diagnoses from being removed by the self-correction pass
 - **Full validation engine** with NCCI, MUE, LCD, sequencing, and modifier checks
@@ -60,10 +60,8 @@ Create a `.env` file in the project root:
 
 ```
 OPENAI_API_KEY=sk-your-key-here
-OPENAI_MODEL=gpt-4o
-OPENAI_EMBEDDING_MODEL=text-embedding-3-small
-EMBEDDING_DIMENSIONS=1536
-FAISS_INDEX_PATH=data/vector_store
+ANTHROPIC_API_KEY=sk-ant-your-key-here
+QDRANT_PATH=data/qdrant_store
 LOG_LEVEL=INFO
 ```
 
@@ -90,11 +88,11 @@ python run.py
 # Process a single note
 python run.py --note NOTE_01_Marcus_Thornton_Hallux_Valgus_New_Patient.pdf
 
-# Force rebuild FAISS indices
+# Force rebuild Qdrant collections
 python run.py --rebuild-index
 ```
 
-The first run will embed all 94K+ codes into FAISS (takes ~5 minutes). Subsequent runs load cached indices in ~1 second.
+The first run will embed all 94K+ codes into Qdrant (dense + BM25 sparse, takes ~5 minutes). Subsequent runs load cached collections in ~1 second.
 
 ## Output Format
 
@@ -152,10 +150,10 @@ Each note produces a JSON file with:
 
 | Component | Technology |
 |---|---|
-| LLM | OpenAI GPT-4o |
-| Embeddings | OpenAI text-embedding-3-small |
-| Vector store | FAISS (faiss-cpu) |
-| PDF extraction | GPT-4o Vision + pdf2image |
+| LLM | Anthropic Claude Opus 4.7 |
+| Embeddings | FastEmbed BAAI/bge-base-en-v1.5 + BM25 (local, no API) |
+| Vector store | Qdrant (dense cosine + BM25 sparse hybrid) |
+| PDF extraction | Claude Opus 4.7 Vision + pdf2image |
 | Data models | Pydantic v2 |
 | Code databases | ICD-10-CM, CPT, HCPCS, NCCI, MUE (JSON) |
 

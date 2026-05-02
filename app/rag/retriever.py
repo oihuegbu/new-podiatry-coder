@@ -16,7 +16,7 @@ CATEGORY_TO_CODE_SYSTEMS = {
 
 
 class CandidateRetriever:
-    """Retrieves candidate medical codes for clinical entities via FAISS similarity search."""
+    """Retrieves candidate medical codes for clinical entities via Qdrant hybrid search."""
 
     def __init__(self, vector_store: MedicalCodeVectorStore):
         self.store = vector_store

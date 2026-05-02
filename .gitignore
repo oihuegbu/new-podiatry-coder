@@ -3,9 +3,8 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Auto-generated FAISS indices — rebuilt automatically from data/codes/
-data/vector_store/
-data/embeddings/
+# Auto-generated Qdrant collections — rebuilt automatically from data/codes/
+data/qdrant_store/
 
 # Runtime output
 logs/

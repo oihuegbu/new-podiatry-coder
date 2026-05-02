@@ -198,6 +198,13 @@ specific one. Codes marked "NOT FOUND IN DATABASE" in the verification pass must
   "sequencing_reasoning": "Explanation of why codes are in this order"
 }
 
+## EVIDENCE GROUNDING — ANTI-HALLUCINATION
+Every code's "supporting_text" MUST be a verbatim quote from the clinical note.
+- Do NOT assign a code if you cannot find explicit supporting text in this note
+- Do NOT infer diagnoses from medical knowledge not documented here
+- If a condition is ambiguous, prefer the less-specific code or omit it
+- Conditions mentioned only in family history are NOT billable diagnoses
+
 CRITICAL: Return ONLY valid JSON. No markdown, no code blocks."""
 
 
@@ -424,6 +431,12 @@ Use RT/LT modifier for unilateral; 50 for bilateral same session
   "em_level_reasoning": "Full MDM calculation including all three axes with explicit 2-of-3 determination"
 }
 
+## EVIDENCE GROUNDING — ANTI-HALLUCINATION
+Every "evidence_spans" entry MUST be a verbatim quote from the clinical note.
+- Do NOT code procedures not explicitly documented as performed today
+- Do NOT code E/M + procedure on the same day unless a separately identifiable service is documented
+- If a procedure is ambiguous, prefer the less-specific code or omit it
+
 CRITICAL: Return ONLY valid JSON. No markdown, no code blocks."""
 
 
@@ -587,6 +600,11 @@ This is revenue LEFT ON THE TABLE if not coded. Look for the drug name + dose in
     }
   ]
 }
+
+## EVIDENCE GROUNDING — ANTI-HALLUCINATION
+Every "supporting_evidence" entry MUST be a verbatim quote from the clinical note.
+- Do NOT code HCPCS supplies that are not explicitly documented as dispensed/applied today
+- Do NOT assign SNOMED codes for conditions not mentioned in the note
 
 CRITICAL: Return ONLY valid JSON. No markdown, no code blocks."""
 
@@ -766,6 +784,12 @@ When an injection CPT (64455, 64632, 20600–20610, 20550) is in cpt_codes:
   "auto_coding_review_reasons": ["Explanation of each correction or flag"],
   "auto_coding_summary": "One-paragraph summary of the coding set and corrections"
 }
+
+## EVIDENCE GROUNDING — ANTI-HALLUCINATION
+This is your final audit pass. Remove any code that lacks explicit verbatim evidence in the clinical note.
+- Each code in the final set must be traceable to a specific sentence in the note
+- When in doubt between two valid codes, choose the one with stronger textual support
+- Never add new codes during verification unless they fix a clear compliance error
 
 CRITICAL: Return ONLY valid JSON. No markdown, no code blocks."""
 

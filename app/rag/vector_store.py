@@ -1,34 +1,44 @@
 import hashlib
 import json
-import pickle
 from pathlib import Path
 
-import faiss
-import numpy as np
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance,
+    VectorParams,
+    SparseVectorParams,
+    PointStruct,
+    SparseVector,
+    Prefetch,
+    FusionQuery,
+    Fusion,
+)
+from fastembed import TextEmbedding, SparseTextEmbedding
 
 from app.core.config import (
-    VECTOR_STORE_DIR,
-    EMBEDDING_DIMENSIONS,
+    QDRANT_DIR,
+    QDRANT_URL,
     ICD10_FILE,
     CPT_FILE,
     HCPCS_FILE,
     RAG_TOP_K,
     RAG_SIMILARITY_THRESHOLD,
 )
-from app.core.llm_client import embed_texts
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Files whose content drives the FAISS index — any change triggers a rebuild
+# Files whose content drives the index — any change triggers a rebuild
 _INDEXED_FILES = [ICD10_FILE, CPT_FILE, HCPCS_FILE]
-_CHECKSUM_FILE = VECTOR_STORE_DIR / "codes_checksum.txt"
+_CHECKSUM_FILE = QDRANT_DIR / "codes_checksum.txt"
 _CODE_SYSTEMS  = ["icd10", "cpt", "hcpcs"]
+_DENSE_MODEL   = "BAAI/bge-base-en-v1.5"   # 768-dim, strong on specialized text
+_DENSE_DIMS    = 768
+_UPSERT_BATCH  = 500
 
 
 def _compute_checksum() -> str:
-    """Fast fingerprint: sha256 of each file's size + mtime + path.
-    Detects new files, replaced files, or in-place edits without reading GBs of JSON."""
+    """SHA-256 of each indexed file's size + mtime — detects any change without reading GBs."""
     h = hashlib.sha256()
     for p in _INDEXED_FILES:
         path = Path(p)
@@ -41,18 +51,24 @@ def _compute_checksum() -> str:
 
 
 class MedicalCodeVectorStore:
-    """FAISS-backed vector store for medical code retrieval.
+    """Qdrant-backed hybrid vector store: dense (OpenAI cosine) + sparse (BM25 keyword).
+
+    Hybrid search with RRF fusion recovers codes that pure dense search misses:
+    - BM25 catches exact medical term matches: "hammertoe", "bunionectomy", "L3020", "11721"
+    - Dense catches semantic matches: "foot pain" → plantar fasciitis codes
+    - RRF fusion ranks results from both channels together
 
     Smart rebuild logic:
-    - First run (no index on disk)  → build and cache
-    - Same code files as last run   → load from disk (fast)
-    - Any code file replaced/edited → auto-rebuild without --rebuild-index flag
-    - force_rebuild=True            → always rebuild regardless
+    - First run (no collections)     → build and persist to disk
+    - Same code files as last run    → load from disk (fast startup)
+    - Any code file replaced/edited  → auto-rebuild
+    - force_rebuild=True             → always rebuild
     """
 
     def __init__(self):
-        self.indices:  dict[str, faiss.IndexFlatIP] = {}
-        self.metadata: dict[str, list[dict]] = {}
+        self._client: QdrantClient | None = None
+        self._dense_model: TextEmbedding | None = None
+        self._sparse_model: SparseTextEmbedding | None = None
         self._loaded = False
 
     # ------------------------------------------------------------------
@@ -60,26 +76,37 @@ class MedicalCodeVectorStore:
     # ------------------------------------------------------------------
 
     def build_or_load(self, force_rebuild: bool = False) -> None:
-        VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
+        # Checksum dir must always exist regardless of Qdrant mode
+        _CHECKSUM_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-        current_checksum = _compute_checksum()
-        indices_on_disk  = self._all_indices_exist()
-        stored_checksum  = _CHECKSUM_FILE.read_text().strip() if _CHECKSUM_FILE.exists() else ""
+        if QDRANT_URL:
+            logger.info(f"Connecting to Qdrant server at {QDRANT_URL}")
+            self._client = QdrantClient(url=QDRANT_URL)
+        else:
+            QDRANT_DIR.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Using local Qdrant store at {QDRANT_DIR}")
+            self._client = QdrantClient(path=str(QDRANT_DIR))
 
-        files_unchanged  = (stored_checksum == current_checksum)
-        can_load         = indices_on_disk and files_unchanged and not force_rebuild
+        logger.info(f"Loading dense model ({_DENSE_MODEL}) and BM25 sparse model...")
+        self._dense_model  = TextEmbedding(_DENSE_MODEL)
+        self._sparse_model = SparseTextEmbedding("Qdrant/bm25")
+
+        current_checksum  = _compute_checksum()
+        stored_checksum   = _CHECKSUM_FILE.read_text().strip() if _CHECKSUM_FILE.exists() else ""
+        collections_exist = self._all_collections_exist()
+        files_unchanged   = (stored_checksum == current_checksum)
+        can_load          = collections_exist and files_unchanged and not force_rebuild
 
         if can_load:
-            logger.info("Code files unchanged — loading pre-built FAISS indices...")
-            self._load_indices()
+            logger.info("Qdrant hybrid collections up to date — ready for search")
         else:
-            if not indices_on_disk:
-                logger.info("No FAISS indices found — building for the first time...")
+            if not collections_exist:
+                logger.info("No Qdrant collections found — building for the first time...")
             elif not files_unchanged:
-                logger.info("Code files have changed — rebuilding FAISS indices...")
+                logger.info("Code files changed — rebuilding Qdrant collections...")
             else:
-                logger.info("Force rebuild requested — rebuilding FAISS indices...")
-            self._build_all_indices()
+                logger.info("Force rebuild requested — rebuilding Qdrant collections...")
+            self._build_all_collections()
             _CHECKSUM_FILE.write_text(current_checksum)
 
         self._loaded = True
@@ -91,28 +118,49 @@ class MedicalCodeVectorStore:
         top_k: int | None = None,
         threshold: float | None = None,
     ) -> list[dict]:
-        if code_system not in self.indices:
-            logger.warning(f"No index for code system: {code_system}")
+        if not self._loaded:
             return []
 
         top_k     = top_k or RAG_TOP_K
         threshold = threshold or RAG_SIMILARITY_THRESHOLD
 
-        query_emb = embed_texts([query])
-        query_vec = np.array(query_emb, dtype=np.float32)
-        faiss.normalize_L2(query_vec)
+        # Dense embedding via FastEmbed
+        dense_vec = list(self._dense_model.embed([query]))[0].tolist()
 
-        scores, ids = self.indices[code_system].search(query_vec, top_k)
+        # Sparse BM25 embedding via FastEmbed
+        sparse_emb = list(self._sparse_model.embed([query]))[0]
+        sparse_vec = SparseVector(
+            indices=sparse_emb.indices.tolist(),
+            values=sparse_emb.values.tolist(),
+        )
 
-        results = []
-        for score, idx in zip(scores[0], ids[0]):
-            if idx < 0 or score < threshold:
-                continue
-            entry = self.metadata[code_system][idx].copy()
-            entry["similarity_score"] = round(float(score), 4)
-            results.append(entry)
+        # Hybrid search: dense prefetch (with cosine threshold) + sparse prefetch, fused with RRF
+        results = self._client.query_points(
+            collection_name=code_system,
+            prefetch=[
+                Prefetch(
+                    query=dense_vec,
+                    using="dense",
+                    limit=top_k * 2,
+                    score_threshold=threshold,  # threshold on cosine similarity
+                ),
+                Prefetch(
+                    query=sparse_vec,
+                    using="sparse",
+                    limit=top_k * 2,
+                ),
+            ],
+            query=FusionQuery(fusion=Fusion.RRF),
+            limit=top_k,
+            with_payload=True,
+        )
 
-        return results
+        output = []
+        for point in results.points:
+            entry = dict(point.payload)
+            entry["similarity_score"] = round(float(point.score), 4)
+            output.append(entry)
+        return output
 
     def search_multi(
         self,
@@ -124,75 +172,79 @@ class MedicalCodeVectorStore:
         return {cs: self.search(query, cs, top_k) for cs in code_systems}
 
     # ------------------------------------------------------------------
-    # Internal — index management
+    # Internal — collection management
     # ------------------------------------------------------------------
 
-    def _all_indices_exist(self) -> bool:
-        return all(
-            (VECTOR_STORE_DIR / f"{cs}.index").exists() and
-            (VECTOR_STORE_DIR / f"{cs}_meta.pkl").exists()
-            for cs in _CODE_SYSTEMS
-        )
+    def _all_collections_exist(self) -> bool:
+        existing = {c.name for c in self._client.get_collections().collections}
+        return all(cs in existing for cs in _CODE_SYSTEMS)
 
-    def _build_all_indices(self) -> None:
-        logger.info("Building FAISS indices for all code systems — this may take a few minutes...")
-        self._build_index("icd10", self._load_icd10_records())
-        self._build_index("cpt",   self._load_cpt_records())
-        self._build_index("hcpcs", self._load_hcpcs_records())
-        logger.info("All FAISS indices built and saved")
+    def _build_all_collections(self) -> None:
+        logger.info("Building Qdrant hybrid collections — this may take a few minutes...")
+        self._build_collection("icd10", self._load_icd10_records())
+        self._build_collection("cpt",   self._load_cpt_records())
+        self._build_collection("hcpcs", self._load_hcpcs_records())
+        logger.info("All Qdrant collections built and persisted")
 
-    def _build_index(self, name: str, records: list[dict]) -> None:
+    def _build_collection(self, name: str, records: list[dict]) -> None:
         if not records:
             logger.warning(f"No records for {name} — skipping")
             return
 
-        logger.info(f"Embedding {len(records)} {name.upper()} codes...")
+        # Drop and recreate to guarantee clean state
+        if self._client.collection_exists(name):
+            self._client.delete_collection(name)
 
-        texts      = [r["embedding_text"] for r in records]
-        embeddings = []
-        batch_size = 2048
+        self._client.create_collection(
+            collection_name=name,
+            vectors_config={
+                "dense": VectorParams(size=_DENSE_DIMS, distance=Distance.COSINE),
+            },
+            sparse_vectors_config={
+                "sparse": SparseVectorParams(),
+            },
+        )
 
-        for i in range(0, len(texts), batch_size):
-            batch     = texts[i: i + batch_size]
-            batch_emb = embed_texts(batch)
-            embeddings.extend(batch_emb)
-            logger.info(f"  Embedded {min(i + batch_size, len(texts))}/{len(texts)}")
+        logger.info(f"Embedding {len(records)} {name.upper()} codes (dense + BM25 sparse)...")
+        texts    = [r["embedding_text"] for r in records]
+        point_id = 0
 
-        vectors = np.array(embeddings, dtype=np.float32)
-        faiss.normalize_L2(vectors)
+        for batch_start in range(0, len(records), _UPSERT_BATCH):
+            batch_records = records[batch_start: batch_start + _UPSERT_BATCH]
+            batch_texts   = texts[batch_start: batch_start + _UPSERT_BATCH]
 
-        index = faiss.IndexFlatIP(EMBEDDING_DIMENSIONS)
-        index.add(vectors)
+            # Dense embeddings via FastEmbed
+            batch_dense = [v.tolist() for v in self._dense_model.embed(batch_texts)]
 
-        faiss.write_index(index, str(VECTOR_STORE_DIR / f"{name}.index"))
+            # Sparse BM25 embeddings
+            batch_sparse = list(self._sparse_model.embed(batch_texts))
 
-        meta = [{k: v for k, v in r.items() if k != "embedding_text"} for r in records]
-        with open(VECTOR_STORE_DIR / f"{name}_meta.pkl", "wb") as f:
-            pickle.dump(meta, f)
+            points = []
+            for record, dense_emb, sparse_emb in zip(batch_records, batch_dense, batch_sparse):
+                payload = {k: v for k, v in record.items() if k != "embedding_text"}
+                points.append(PointStruct(
+                    id=point_id,
+                    vector={
+                        "dense": dense_emb,
+                        "sparse": SparseVector(
+                            indices=sparse_emb.indices.tolist(),
+                            values=sparse_emb.values.tolist(),
+                        ),
+                    },
+                    payload=payload,
+                ))
+                point_id += 1
 
-        self.indices[name]  = index
-        self.metadata[name] = meta
-        logger.info(f"  {name.upper()} index built: {index.ntotal} vectors")
+            self._client.upsert(collection_name=name, points=points)
+            logger.info(f"  {name.upper()}: {min(batch_start + _UPSERT_BATCH, len(records))}/{len(records)}")
 
-    def _load_indices(self) -> None:
-        for name in _CODE_SYSTEMS:
-            idx_path  = VECTOR_STORE_DIR / f"{name}.index"
-            meta_path = VECTOR_STORE_DIR / f"{name}_meta.pkl"
-            if idx_path.exists() and meta_path.exists():
-                self.indices[name] = faiss.read_index(str(idx_path))
-                with open(meta_path, "rb") as f:
-                    self.metadata[name] = pickle.load(f)
-                logger.info(f"  Loaded {name.upper()}: {self.indices[name].ntotal} vectors")
-            else:
-                logger.warning(f"  {name.upper()} index missing — rebuilding")
-                self._build_index(name, getattr(self, f"_load_{name}_records")())
+        logger.info(f"  {name.upper()} collection built: {point_id} points")
 
     # ------------------------------------------------------------------
-    # Internal — data loaders (flexible, format-agnostic)
+    # Internal — data loaders (format-agnostic, same logic as before)
     # ------------------------------------------------------------------
 
     def _load_icd10_records(self) -> list[dict]:
-        """Load ICD-10-CM codes from any JSON list with 'code' + 'description' fields."""
         raw = _read_json(ICD10_FILE)
         records = []
         for entry in _as_list(raw):
@@ -205,17 +257,16 @@ class MedicalCodeVectorStore:
                 continue
             dotted = f"{code[:3]}.{code[3:]}" if len(code) > 3 else code
             records.append({
-                "code":        dotted,
-                "code_raw":    code,
-                "description": desc,
-                "code_system": "ICD-10-CM",
-                "embedding_text": f"ICD-10-CM {dotted}: {desc}",
+                "code":            dotted,
+                "code_raw":        code,
+                "description":     desc,
+                "code_system":     "ICD-10-CM",
+                "embedding_text":  f"ICD-10-CM {dotted}: {desc}",
             })
         logger.info(f"  Loaded {len(records)} ICD-10-CM records from {ICD10_FILE.name}")
         return records
 
     def _load_cpt_records(self) -> list[dict]:
-        """Load CPT codes from a JSON list or a dict with a 'codes' list."""
         raw  = _read_json(CPT_FILE)
         data = _as_list(raw)
         records = []
@@ -227,34 +278,28 @@ class MedicalCodeVectorStore:
             if not code or not desc:
                 continue
             records.append({
-                "code":                code,
-                "short_description":   short_desc,
-                "long_description":    long_desc,
+                "code":                 code,
+                "short_description":    short_desc,
+                "long_description":     long_desc,
                 "consumer_description": _get_field(entry, ["consumer_description"]),
-                "code_system":         "CPT",
-                "embedding_text":      f"CPT {code}: {desc}",
+                "code_system":          "CPT",
+                "embedding_text":       f"CPT {code}: {desc}",
             })
         logger.info(f"  Loaded {len(records)} CPT records from {CPT_FILE.name}")
         return records
 
     def _load_hcpcs_records(self) -> list[dict]:
-        """Load HCPCS Level II codes. Handles CMS fixed-width parse artifacts where
-        the 'code' field may contain the 5-char code followed by extra text."""
         raw = _read_json(HCPCS_FILE)
         records = []
         seen: set[str] = set()
-
         for entry in _as_list(raw):
             raw_code = _get_field(entry, ["code"]).strip()
             code     = raw_code[:5] if len(raw_code) >= 5 else raw_code
-
             if len(code) != 5 or not code[0].isalpha() or not code[1:].isdigit():
                 continue
             if code in seen:
                 continue
             seen.add(code)
-
-            # Description: try raw_code remainder first (CMS artifact), then named fields
             remainder = raw_code[5:].strip() if len(raw_code) > 5 else ""
             desc = (
                 remainder
@@ -262,37 +307,32 @@ class MedicalCodeVectorStore:
             )
             if not desc:
                 continue
-
             records.append({
-                "code":        code,
-                "description": desc,
-                "code_system": "HCPCS",
-                "embedding_text": f"HCPCS {code}: {desc}",
+                "code":            code,
+                "description":     desc,
+                "code_system":     "HCPCS",
+                "embedding_text":  f"HCPCS {code}: {desc}",
             })
-
         logger.info(f"  Loaded {len(records)} HCPCS records from {HCPCS_FILE.name}")
         return records
 
 
 # ------------------------------------------------------------------
-# Helpers — keep loaders format-agnostic
+# Helpers
 # ------------------------------------------------------------------
 
-def _read_json(path: Path) -> any:
+def _read_json(path: Path):
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
-def _as_list(data: any) -> list:
-    """Normalise any top-level JSON shape to a flat list of code dicts."""
+def _as_list(data) -> list:
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        # Try common wrapper keys first
         for key in ("codes", "data", "items", "results", "entries"):
             if key in data and isinstance(data[key], list):
                 return data[key]
-        # Single-entry dict where each value is a list → concatenate
         all_lists = [v for v in data.values() if isinstance(v, list)]
         if all_lists:
             combined = []
@@ -303,7 +343,6 @@ def _as_list(data: any) -> list:
 
 
 def _get_field(entry: dict, candidates: list[str]) -> str:
-    """Return the first non-empty string value found among candidate field names."""
     for key in candidates:
         val = entry.get(key)
         if isinstance(val, str) and val.strip():

@@ -1,8 +1,8 @@
 {
   "document_id": "NOTE_02_Sophia_Castellano_Hammertoe_PostOp_Day14",
-  "timestamp": "2026-04-30T21:38:24.355378",
+  "timestamp": "2026-05-02T16:51:53.332086",
   "success": true,
-  "processing_time": 131.49,
+  "processing_time": 137.11,
   "patient_metadata": {
     "patient_name": "Sophia R. Castellano",
     "date_of_birth": "09/22/1952",
@@ -10,8 +10,8 @@
     "provider": "Dr. Amara Osei, DPM",
     "npi": "1234567890",
     "mrn": "AFR-001088",
-    "insurance": "Medicare Part B ID: 1EG4-TE5-MK72 | Plan: Traditional",
-    "note_type": "ESTABLISHED PATIENT \u2013 POST-OP FOLLOW-UP (DAY 14)"
+    "insurance": "Medicare Part B | ID: 1EG4-TE5-MK72 | Plan: Traditional",
+    "note_type": "PODIATRY CLINICAL NOTE \u2014 ESTABLISHED PATIENT \u2013 POST-OP FOLLOW-UP (DAY 14)"
   },
   "note_sections": {
     "chief_complaint": "Post-operative follow-up after left hammertoe correction.",
@@ -28,9 +28,9 @@
       "description": "Encounter for other specified surgical aftercare",
       "type": "primary",
       "confidence": 0.95,
-      "rationale": "Post-op day 14 follow-up after hammertoe correction. Aftercare Z-code is primary.",
+      "rationale": "Post-op day 14 follow-up after hammertoe correction; explicitly listed in Assessment. Z48.89 is primary for post-op aftercare visits where no device is removed today.",
       "supporting_text": "Encounter for other specified surgical aftercare",
-      "laterality": "NONE",
+      "laterality": "NA",
       "source_section": "ASSESSMENT",
       "s3_validated": true,
       "needs_review": false,
@@ -42,8 +42,8 @@
       "code": "M20.42",
       "description": "Other hammer toe(s) (acquired), left foot",
       "type": "secondary",
-      "confidence": 0.92,
-      "rationale": "Listed in Assessment: Hammer toe, left foot, post-operative status.",
+      "confidence": 0.95,
+      "rationale": "Underlying condition for which surgery was performed; listed in Assessment.",
       "supporting_text": "Hammer toe(s), left foot \u2013 post-operative status",
       "laterality": "LEFT",
       "source_section": "ASSESSMENT",
@@ -58,9 +58,9 @@
       "description": "Age-related osteoporosis without current pathological fracture",
       "type": "secondary",
       "confidence": 0.95,
-      "rationale": "Listed in Assessment as age-related osteoporosis without pathological fracture.",
+      "rationale": "Explicitly listed in Assessment.",
       "supporting_text": "Age-related osteoporosis without pathological fracture",
-      "laterality": "NONE",
+      "laterality": "NA",
       "source_section": "ASSESSMENT",
       "s3_validated": true,
       "needs_review": false,
@@ -75,34 +75,34 @@
       "description": "Gastro-esophageal reflux disease without esophagitis",
       "type": "advisory",
       "confidence": 0.9,
-      "rationale": "PMH condition with active medication (Omeprazole). Not addressed in Assessment.",
-      "supporting_text": "PMH: GERD. Omeprazole 20 mg QD",
+      "rationale": "PMH condition with active medication (omeprazole). Not addressed at today's encounter.",
+      "supporting_text": "PMH: GERD. Medications: Omeprazole 20 mg QD",
       "source_section": "PMH",
       "billable_tier": "advisory",
       "needs_review": true,
-      "review_reason": "PMH-only chronic condition with active medication"
+      "review_reason": "PMH condition not addressed as separate encounter problem today"
     },
     {
       "code": "E03.9",
       "description": "Hypothyroidism, unspecified",
       "type": "advisory",
       "confidence": 0.9,
-      "rationale": "PMH condition with active medication (Levothyroxine). Not addressed in Assessment.",
-      "supporting_text": "PMH: Hypothyroidism. Levothyroxine 88 mcg QD",
+      "rationale": "PMH condition with active medication (levothyroxine). Not addressed at today's encounter.",
+      "supporting_text": "PMH: Hypothyroidism. Medications: Levothyroxine 88 mcg QD",
       "source_section": "PMH",
       "billable_tier": "advisory",
       "needs_review": true,
-      "review_reason": "PMH-only chronic condition with active medication"
+      "review_reason": "PMH condition not addressed as separate encounter problem today"
     }
   ],
   "cpt_codes": [
     {
       "code": "99024",
-      "description": "Postoperative follow-up visit, normally included in the surgical package",
+      "description": "Postoperative follow-up visit, normally included in the surgical package, to indicate that an evaluation and management service was performed during a postoperative period for a reason(s) related to the original procedure",
       "confidence": 0.98,
       "modifiers": [],
       "modifier_reasoning": [
-        "No modifier needed; visit is within 90-day global period for hammertoe correction performed 14 days prior. Post-op X-ray and routine wound care are part of global surgical package."
+        "No modifiers required for 99024 within global period"
       ],
       "source": "E/M",
       "mdm_details": {
@@ -110,12 +110,12 @@
         "data_score": 0,
         "risk_score": 0,
         "mdm_level": "n/a",
-        "problems_rationale": "Post-op follow-up within global period \u2014 not separately billable",
-        "data_rationale": "Bundled into surgical global package",
-        "risk_rationale": "Bundled into surgical global package"
+        "problems_rationale": "Post-op follow-up day 14 within 90-day global period of CPT 28285 (hammertoe correction)",
+        "data_rationale": "Post-op X-ray reviewed as routine post-op care",
+        "risk_rationale": "Routine post-op care, bundled in global surgical package"
       },
       "procedure_status": "completed",
-      "laterality": "LT",
+      "laterality": "left",
       "linked_diagnoses": [
         "Z48.89",
         "M20.42"
@@ -123,35 +123,63 @@
       "units": 1,
       "evidence_spans": [
         "Post-operative follow-up after left hammertoe correction",
-        "returning 14 days after left 2nd digit proximal interphalangeal (PIP) joint arthroplasty for hammertoe correction"
+        "returning 14 days after left 2nd digit proximal interphalangeal (PIP) joint arthroplasty"
       ],
       "ama_validated": true,
       "mue_validated": true,
       "mue_limit": 1,
       "code_source": "ai_inferred",
       "physician_code_note": null
+    },
+    {
+      "code": "73620",
+      "description": "Radiologic examination, foot; 2 views",
+      "confidence": 0.85,
+      "modifiers": [
+        "LT"
+      ],
+      "modifier_reasoning": [
+        "LT: left foot post-op X-ray"
+      ],
+      "source": "imaging",
+      "mdm_details": {},
+      "procedure_status": "completed",
+      "laterality": "left",
+      "linked_diagnoses": [
+        "Z48.89",
+        "M20.42"
+      ],
+      "units": 1,
+      "evidence_spans": [
+        "Left foot post-op X-ray: K-wire well-positioned across PIP joint, no hardware complications"
+      ],
+      "ama_validated": true,
+      "mue_validated": true,
+      "mue_limit": 2,
+      "code_source": "ai_confirmed",
+      "physician_code_note": null
     }
   ],
   "hcpcs_codes": [],
   "snomed_codes": [
     {
-      "concept_id": "133877004",
-      "description": "Surgical aftercare",
+      "concept_id": "133904001",
+      "description": "Encounter for surgical aftercare",
       "entity_text": "Encounter for other specified surgical aftercare",
       "category": "diagnosis",
       "confidence": 0.85,
       "is_root_concept": false
     },
     {
-      "concept_id": "29966007",
+      "concept_id": "33046001",
       "description": "Hammer toe",
-      "entity_text": "Hammer toe, left foot \u2013 post-operative status",
+      "entity_text": "Hammer toe, post-operative status, left 2nd digit",
       "category": "diagnosis",
       "confidence": 0.9,
       "is_root_concept": false
     },
     {
-      "concept_id": "278530000",
+      "concept_id": "722547001",
       "description": "Age-related osteoporosis",
       "entity_text": "Age-related osteoporosis without pathological fracture",
       "category": "diagnosis",
@@ -175,50 +203,41 @@
       "is_root_concept": false
     },
     {
-      "concept_id": "267038008",
-      "description": "Edema",
-      "entity_text": "Mild periarticular edema 2nd digit, left",
+      "concept_id": "271594007",
+      "description": "Postoperative swelling",
+      "entity_text": "mild residual swelling at incision site, left foot",
       "category": "finding",
+      "confidence": 0.8,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "274663001",
+      "description": "Postoperative pain",
+      "entity_text": "post-operative pain 3/10 at incision site",
+      "category": "finding",
+      "confidence": 0.9,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "65966004",
+      "description": "Foot structure, left",
+      "entity_text": "left foot",
+      "category": "anatomy",
       "confidence": 0.7,
       "is_root_concept": false
     },
     {
-      "concept_id": "22253000",
-      "description": "Pain",
-      "entity_text": "Incisional pain 3/10, left",
-      "category": "finding",
-      "confidence": 0.75,
-      "is_root_concept": false
-    },
-    {
-      "concept_id": "360002",
-      "description": "Joint structure of proximal interphalangeal joint of second toe",
-      "entity_text": "Proximal interphalangeal joint of 2nd toe, left",
+      "concept_id": "78258006",
+      "description": "Proximal interphalangeal joint of toe",
+      "entity_text": "PIP joint of 2nd toe, left",
       "category": "anatomy",
-      "confidence": 0.4,
-      "is_root_concept": true
-    },
-    {
-      "concept_id": "22335008",
-      "description": "Structure of left foot",
-      "entity_text": "Left foot",
-      "category": "anatomy",
-      "confidence": 0.85,
+      "confidence": 0.7,
       "is_root_concept": false
     }
   ],
-  "em_level_reasoning": "Patient is on Day 14 of a 90-day global period following left 2nd digit PIP arthroplasty for hammertoe correction. Per CMS rules, routine post-op follow-up within the global period is non-billable and is reported with CPT 99024. No separately identifiable problem was addressed. The post-op X-ray and prophylactic antibiotic prescription are included in the global surgical package. K-wire is still in place \u2014 no hardware removal performed today (scheduled at 4 weeks), so Z47.2 is NOT appropriate; Z48.89 remains the correct aftercare code. No modifier -25 or -57 applicable.",
+  "em_level_reasoning": "ESTABLISHED PATIENT post-operative follow-up day 14 after CPT 28285 (left 2nd digit PIP arthroplasty for hammertoe). CPT 28285 carries a 90-day global surgical period; this visit (day 14) falls within the global period and is for a reason related to the original procedure (incision check, K-wire monitoring, routine post-op wound care). Per CMS rules, post-op visits within the global period are not separately billable as E/M and are reported with 99024 (no charge). The post-op X-ray (73620-LT) is separately billable as it is not bundled into the surgical global package. Modifier -25 not applicable as 99024 is a non-billable tracking code. No procedures performed today; no modifier -57 needed.",
   "error_message": null,
-  "validation_issues": [
-    {
-      "severity": "INFO",
-      "code": "",
-      "category": "global_period",
-      "message": "Post-operative visit detected but could not determine days post-op or prior CPT. Verify this visit does not fall within a global surgical period.",
-      "recommendation": "Manually confirm global period status before submission",
-      "denial_risk": "MEDIUM"
-    }
-  ],
+  "validation_issues": [],
   "warnings": [],
   "encounter_integrity": {
     "encounter_issues": [],
@@ -231,7 +250,7 @@
         "code": "Z48.89",
         "description": "Encounter for other specified surgical aftercare",
         "documentation_support": [
-          "Rationale: Post-op day 14 follow-up after hammertoe correction. Aftercare Z-code is primary.",
+          "Rationale: Post-op day 14 follow-up after hammertoe correction; explicitly listed in Assessment. Z48.89 is primary for post-op aftercare visits where no device is removed today.",
           "Section: ASSESSMENT",
           "Supporting text: Encounter for other specified surgical aftercare"
         ],
@@ -242,7 +261,7 @@
         "code": "M20.42",
         "description": "Other hammer toe(s) (acquired), left foot",
         "documentation_support": [
-          "Rationale: Listed in Assessment: Hammer toe, left foot, post-operative status.",
+          "Rationale: Underlying condition for which surgery was performed; listed in Assessment.",
           "Section: ASSESSMENT",
           "Supporting text: Hammer toe(s), left foot \u2013 post-operative status"
         ],
@@ -253,7 +272,7 @@
         "code": "M81.0",
         "description": "Age-related osteoporosis without current pathological fracture",
         "documentation_support": [
-          "Rationale: Listed in Assessment as age-related osteoporosis without pathological fracture.",
+          "Rationale: Explicitly listed in Assessment.",
           "Section: ASSESSMENT",
           "Supporting text: Age-related osteoporosis without pathological fracture"
         ],
@@ -262,7 +281,7 @@
       },
       {
         "code": "99024",
-        "description": "Postoperative follow-up visit, normally included in the surgical package",
+        "description": "Postoperative follow-up visit, normally included in the surgical package, to indicate that an evaluation and management service was performed during a postoperative period for a reason(s) related to the original procedure",
         "documentation_support": [
           "Section: E/M",
           "MDM: n/a (P:0/D:0/R:0)",
@@ -270,69 +289,78 @@
         ],
         "documentation_gaps": [],
         "supported": true
+      },
+      {
+        "code": "73620",
+        "description": "Radiologic examination, foot; 2 views",
+        "documentation_support": [
+          "Section: imaging"
+        ],
+        "documentation_gaps": [],
+        "supported": true
       }
     ],
-    "total_codes": 4,
-    "fully_supported": 4,
+    "total_codes": 5,
+    "fully_supported": 5,
     "partially_supported": 0,
     "unsupported": 0,
     "codes_with_gaps": 0,
     "documentation_score": 1.0
   },
   "pre_submission_audit_findings": [],
-  "pre_submission_audit_score": 0.99,
+  "pre_submission_audit_score": 1.0,
   "auto_coding_tier": "AUTO",
-  "auto_coding_confidence": 0.89,
+  "auto_coding_confidence": 0.9,
   "auto_coding_review_reasons": [
-    "Retained Z48.89, M20.42, M81.0 \u2014 all protected Assessment anchors with verified DB descriptions.",
-    "Retained 99024 \u2014 appropriate for day 14 post-op visit within 90-day global; no separate billable service performed.",
-    "Removed SNOMED 271807003 (Eruption of skin) \u2014 incorrect mapping for 'incision well-approximated' (low confidence 0.3).",
-    "Flagged SNOMED 360002 as low-confidence anatomy concept for downstream review.",
-    "PMH conditions (GERD, hypothyroidism) correctly retained in supporting_conditions, not billed.",
-    "No image guidance, injection, or HCPCS items applicable.",
-    "No modifier -25 or -57 needed (no billable procedure or scheduled major surgery decision today)."
+    "Retained Z48.89 as primary post-op aftercare anchor \u2014 no hardware removed today",
+    "Retained M20.42 (left hammer toe) as underlying condition anchor",
+    "Retained M81.0 (age-related osteoporosis) as Assessment anchor",
+    "Retained 99024 \u2014 appropriate non-billable post-op visit code within 90-day global period of CPT 28285",
+    "Retained 73620-LT \u2014 left foot 2-view X-ray separately billable outside global package",
+    "PMH-only conditions (GERD, hypothyroidism) correctly maintained in supporting_conditions per Section O",
+    "Removed redundant low-confidence SNOMED concept 123950001 (Surgical wound site) \u2014 already represented by diagnosis concepts"
   ],
-  "auto_coding_summary": "Established post-op follow-up (Day 14 of 90-day global) after left 2nd toe PIP joint arthroplasty for hammertoe correction. Coded with Z48.89 (primary aftercare), M20.42 (left hammer toe), and M81.0 (age-related osteoporosis) \u2014 all Assessment anchors. CPT 99024 reports the non-billable global post-op visit. Post-op X-ray and prophylactic Cephalexin are bundled in the surgical global package. PMH GERD and hypothyroidism remain in supporting_conditions only. SNOMED set cleaned by removing an incorrect skin-eruption mapping; one low-confidence anatomy concept flagged for review. No additional CPT, HCPCS, or modifiers required.",
+  "auto_coding_summary": "Post-op day 14 follow-up after left 2nd digit PIP arthroplasty (CPT 28285, 90-day global). Code set is appropriate: Z48.89 (primary aftercare), M20.42 (left hammer toe), M81.0 (age-related osteoporosis), 99024 (non-billable post-op visit), and 73620-LT (separately billable post-op left foot X-ray). PMH conditions (GERD, hypothyroidism) correctly excluded from billable ICD list and held in supporting_conditions. No procedures, injections, or supplies dispensed today, so no -25, -57, J-codes, or HCPCS supply codes apply. Minor SNOMED cleanup performed.",
   "rag_context": {
     "entities_extracted": 22,
     "candidates_per_system": {
-      "icd10": 235,
-      "cpt": 43,
+      "icd10": 223,
+      "cpt": 45,
       "hcpcs": 15
     },
     "corrections_made": [
       {
         "type": "RETAINED",
         "code": "Z48.89",
-        "reason": "Protected anchor: post-op aftercare. No device removed today (K-wire removal scheduled at 4 weeks).",
-        "evidence": "Encounter for other specified surgical aftercare"
+        "reason": "Correct primary code for post-op aftercare visit; no device removal today (K-wire removal scheduled for week 4)",
+        "evidence": "K-wire removal scheduled at 4-week mark"
       },
       {
         "type": "RETAINED",
         "code": "M20.42",
-        "reason": "Protected anchor: hammer toe left foot post-op status",
+        "reason": "Underlying condition for which surgery was performed; explicitly listed in Assessment",
         "evidence": "Hammer toe(s), left foot \u2013 post-operative status"
       },
       {
         "type": "RETAINED",
         "code": "M81.0",
-        "reason": "Protected anchor: age-related osteoporosis listed in Assessment",
+        "reason": "Explicitly listed in Assessment as age-related osteoporosis",
         "evidence": "Age-related osteoporosis without pathological fracture"
       },
       {
         "type": "RETAINED",
         "code": "99024",
-        "reason": "Post-op visit on day 14 of 90-day global period; non-billable follow-up correctly coded as 99024.",
+        "reason": "Post-op visit day 14 within 90-day global period of CPT 28285; non-billable post-op visit code is correct",
         "evidence": "returning 14 days after left 2nd digit PIP joint arthroplasty"
       },
       {
-        "type": "FLAGGED",
-        "code": "271807003",
-        "reason": "Low-confidence SNOMED root/incorrect mapping (Eruption of skin) for 'incision well-approximated'. Flagged as needs review.",
-        "evidence": "Incision well-approximated"
+        "type": "RETAINED",
+        "code": "73620-LT",
+        "reason": "Left foot 2-view post-op X-ray; separately billable as it is not bundled into surgical global package",
+        "evidence": "Left foot post-op X-ray: K-wire well-positioned across PIP joint"
       }
     ],
-    "audit_notes": "All three Assessment anchors retained with correct codes. 99024 correctly reported for post-op global visit; no billable E/M. No procedures, injections, supplies, or HCPCS items dispensed today. Post-op X-ray bundled into global package \u2014 no separate CPT billed. PMH conditions (GERD, hypothyroidism) properly placed in supporting_conditions. SNOMED 271807003 (Eruption of skin) removed as incorrect mapping for well-approximated incision; low-confidence anatomy concept 360002 flagged as root concept for review. Removed duplicate/erroneous SNOMED entry.",
+    "audit_notes": "All 3 protected anchors present in icd10_codes (Z48.89, M20.42, M81.0). PMH conditions (GERD, hypothyroidism) correctly placed in supporting_conditions, not billable. 99024 correctly used for post-op visit within 90-day global period. Z47.2 NOT used because K-wire removal is scheduled for week 4, not performed today. 73620-LT correct for 2-view left foot X-ray with proper laterality modifier. No HCPCS supplies dispensed today. SNOMED set cleaned: removed low-confidence root-style concept 123950001 (Surgical wound site, conf 0.5) as redundant with diagnosis concepts. No injections, no -25 or J-codes applicable. No CAM walker, no orthotics, no BMI considerations.",
     "vision_context": {
       "note_category": "post_op_followup",
       "procedures_performed_today": [],
@@ -345,14 +373,14 @@
       "is_post_op_visit": true,
       "days_post_op": 14,
       "prior_surgery_description": "Left 2nd digit proximal interphalangeal (PIP) joint arthroplasty for hammertoe correction",
-      "prior_surgery_cpt": null
+      "prior_surgery_cpt": "28285"
     }
   },
   "model_source": "claude",
   "api_usage": {
-    "prompt_tokens": 37311,
-    "completion_tokens": 6231,
-    "total_tokens": 43542
+    "prompt_tokens": 37586,
+    "completion_tokens": 6971,
+    "total_tokens": 44557
   },
   "physician_documented_codes": [],
   "missing_physician_codes": [],
@@ -363,7 +391,7 @@
       "category": "diagnosis",
       "clinical_term": "Encounter for surgical aftercare following hammertoe correction",
       "laterality": "LEFT",
-      "specificity": "post-op follow-up",
+      "specificity": "post-operative follow-up",
       "source_section": "CC",
       "negated": false,
       "ner_source": "llm_only",
@@ -372,9 +400,9 @@
     {
       "text": "left 2nd digit proximal interphalangeal (PIP) joint arthroplasty for hammertoe correction",
       "category": "procedure",
-      "clinical_term": "PIP joint arthroplasty for hammertoe correction (prior surgery)",
+      "clinical_term": "PIP joint arthroplasty for hammertoe correction (prior surgery, 14 days ago)",
       "laterality": "LEFT",
-      "specificity": "2nd digit, performed 14 days prior",
+      "specificity": "2nd digit PIP joint",
       "source_section": "HPI",
       "negated": false,
       "ner_source": "llm_only",
@@ -383,7 +411,7 @@
     {
       "text": "mild residual swelling",
       "category": "finding",
-      "clinical_term": "Mild edema",
+      "clinical_term": "Residual edema",
       "laterality": "LEFT",
       "specificity": "incision site",
       "source_section": "HPI",
@@ -394,9 +422,9 @@
     {
       "text": "pain 3/10 at incision site",
       "category": "finding",
-      "clinical_term": "Incisional pain",
+      "clinical_term": "Post-operative pain",
       "laterality": "LEFT",
-      "specificity": "3/10",
+      "specificity": "3/10 at incision site",
       "source_section": "HPI",
       "negated": false,
       "ner_source": "llm_only",
@@ -405,7 +433,7 @@
     {
       "text": "Ambulating with surgical shoe without difficulty",
       "category": "finding",
-      "clinical_term": "Ambulating with surgical shoe",
+      "clinical_term": "Ambulation with surgical shoe",
       "laterality": null,
       "specificity": null,
       "source_section": "HPI",
@@ -462,7 +490,7 @@
       "category": "medication",
       "clinical_term": "Omeprazole",
       "laterality": null,
-      "specificity": "20 mg QD",
+      "specificity": "20 mg daily",
       "source_section": "PMH",
       "negated": false,
       "ner_source": "gliner_confirmed",
@@ -473,7 +501,7 @@
       "category": "medication",
       "clinical_term": "Levothyroxine",
       "laterality": null,
-      "specificity": "88 mcg QD",
+      "specificity": "88 mcg daily",
       "source_section": "PMH",
       "negated": false,
       "ner_source": "gliner_confirmed",
@@ -482,7 +510,7 @@
     {
       "text": "Incision well-approximated",
       "category": "finding",
-      "clinical_term": "Well-approximated surgical incision",
+      "clinical_term": "Surgical incision well-approximated",
       "laterality": "LEFT",
       "specificity": null,
       "source_section": "PE",
@@ -526,9 +554,9 @@
     {
       "text": "K-wire well-positioned across PIP joint",
       "category": "finding",
-      "clinical_term": "K-wire well-positioned",
+      "clinical_term": "K-wire properly positioned",
       "laterality": "LEFT",
-      "specificity": "PIP joint, 2nd digit",
+      "specificity": "across PIP joint of 2nd digit",
       "source_section": "IMAGING",
       "negated": false,
       "ner_source": "llm_only",
@@ -579,18 +607,7 @@
       "ner_confidence": 0.943
     },
     {
-      "text": "left 2nd digit proximal interphalangeal (PIP) joint",
-      "category": "body_structure",
-      "clinical_term": "Proximal interphalangeal joint of 2nd toe",
-      "laterality": "LEFT",
-      "specificity": "2nd digit PIP joint",
-      "source_section": "HPI",
-      "negated": false,
-      "ner_source": "llm_only",
-      "ner_confidence": 1.0
-    },
-    {
-      "text": "Left foot",
+      "text": "left foot",
       "category": "body_structure",
       "clinical_term": "Foot",
       "laterality": "LEFT",
@@ -599,6 +616,17 @@
       "negated": false,
       "ner_source": "gliner_confirmed",
       "ner_confidence": 0.91
+    },
+    {
+      "text": "2nd digit proximal interphalangeal (PIP) joint",
+      "category": "body_structure",
+      "clinical_term": "Proximal interphalangeal joint of 2nd toe",
+      "laterality": "LEFT",
+      "specificity": "PIP joint",
+      "source_section": "HPI",
+      "negated": false,
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
     }
   ]
 }

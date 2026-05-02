@@ -1,8 +1,8 @@
 {
   "document_id": "NOTE_01_Marcus_Thornton_Hallux_Valgus_New_Patient",
-  "timestamp": "2026-04-30T21:36:12.857276",
+  "timestamp": "2026-05-02T16:49:36.213118",
   "success": true,
-  "processing_time": 159.44,
+  "processing_time": 170.24,
   "patient_metadata": {
     "patient_name": "Marcus L. Thornton",
     "date_of_birth": "03/14/1968",
@@ -11,7 +11,7 @@
     "npi": "1234567890",
     "mrn": "AFR-001042",
     "insurance": "UnitedHealthcare | ID: UHC8842310 | Group: 77410",
-    "note_type": "NEW PATIENT \u2013 OFFICE VISIT"
+    "note_type": "PODIATRY CLINICAL NOTE \u2014 NEW PATIENT \u2013 OFFICE VISIT"
   },
   "note_sections": {
     "chief_complaint": "Right great toe pain and deformity for 6 months.",
@@ -28,14 +28,14 @@
       "description": "Hallux valgus (acquired), right foot",
       "type": "primary",
       "confidence": 0.98,
-      "rationale": "Listed in Assessment as primary diagnosis. Chief complaint and reason for visit. Right laterality.",
+      "rationale": "Listed in Assessment as primary diagnosis. Right foot laterality documented.",
       "supporting_text": "Hallux valgus (acquired), right foot",
       "laterality": "RIGHT",
       "source_section": "ASSESSMENT",
       "s3_validated": true,
       "needs_review": false,
       "review_reason": null,
-      "code_source": "ai_inferred",
+      "code_source": "ai_confirmed",
       "physician_code_note": null
     },
     {
@@ -43,7 +43,7 @@
       "description": "Type 2 diabetes mellitus without complications",
       "type": "secondary",
       "confidence": 0.95,
-      "rationale": "Listed in Assessment. DM influences surgical planning \u2014 peri-op glucose optimization, HbA1c, endocrinology referral.",
+      "rationale": "Listed in Assessment as T2DM without complications. A1C 6.8%. Relevant to peri-operative management (endocrinology referral).",
       "supporting_text": "Type 2 Diabetes Mellitus without complications",
       "laterality": null,
       "source_section": "ASSESSMENT",
@@ -58,7 +58,7 @@
       "description": "Essential (primary) hypertension",
       "type": "secondary",
       "confidence": 0.97,
-      "rationale": "Listed in Assessment as 'Essential (primary) hypertension'. Relevant to peri-operative risk.",
+      "rationale": "Listed in Assessment.",
       "supporting_text": "Essential (primary) hypertension",
       "laterality": null,
       "source_section": "ASSESSMENT",
@@ -75,46 +75,46 @@
       "description": "Hyperlipidemia, unspecified",
       "type": "advisory",
       "confidence": 0.9,
-      "rationale": "PMH condition with active medication (atorvastatin 40mg QD). Not addressed in today's Assessment.",
-      "supporting_text": "PMH: ...Hyperlipidemia. Medications: ...Atorvastatin 40 mg QD",
+      "rationale": "PMH condition with active medication (atorvastatin 40 mg QD). Not addressed in Assessment.",
+      "supporting_text": "PMH: Hyperlipidemia. Atorvastatin 40 mg QD",
       "source_section": "PMH",
       "billable_tier": "advisory",
       "needs_review": true,
-      "review_reason": "PMH condition with active medication, not in Assessment"
+      "review_reason": "PMH condition not listed in Assessment today"
     },
     {
       "code": "Z88.0",
       "description": "Allergy status to penicillin",
       "type": "advisory",
       "confidence": 0.95,
-      "rationale": "Penicillin allergy documented in Allergies section.",
+      "rationale": "Documented penicillin allergy with rash reaction.",
       "supporting_text": "Allergies: Penicillin (rash)",
-      "source_section": "PMH",
+      "source_section": "ALLERGIES",
       "billable_tier": "advisory",
       "needs_review": false,
-      "review_reason": "Drug allergy Z-code - advisory only"
+      "review_reason": "Drug allergy Z-code from allergies section"
     }
   ],
   "cpt_codes": [
     {
       "code": "99204",
-      "description": "Office or other outpatient visit, new patient, moderate MDM",
+      "description": "Office or other outpatient visit for the evaluation and management of a new patient, moderate level MDM",
       "confidence": 0.95,
       "modifiers": [
         "57"
       ],
       "modifier_reasoning": [
-        "Modifier -57: Decision for major surgery (28296 Austin/Chevron bunionectomy with osteotomy, 90-day global) made at this visit; surgery scheduled for future date"
+        "Modifier -57: Decision for major surgery (Austin/Chevron bunionectomy 28296, 90-day global) made at this visit; surgery scheduled for future date"
       ],
       "source": "E/M",
       "mdm_details": {
         "problems_score": 3,
         "data_score": 2,
         "risk_score": 4,
-        "mdm_level": "moderate",
-        "problems_rationale": "Hallux valgus (new problem with planned surgical intervention) plus stable chronic illnesses (T2DM, HTN) = moderate problems",
-        "data_rationale": "Independent review/interpretation of right foot X-ray; ordered pre-op labs (CBC, CMP, HbA1c, PT/INR); referral to endocrinology",
-        "risk_rationale": "Decision for elective major surgery (bunionectomy with osteotomy) with patient risk factors (T2DM, HTN) = moderate risk"
+        "mdm_level": "moderate-to-high",
+        "problems_rationale": "Moderate: New problem (hallux valgus) with surgical decision + 2 stable chronic illnesses",
+        "data_rationale": "Limited: Independent interpretation of right foot X-ray; pre-op labs ordered (CBC, CMP, HbA1c, PT/INR)",
+        "risk_rationale": "High: Decision for elective major surgery in patient with T2DM and HTN requiring endocrine peri-op optimization"
       },
       "procedure_status": "completed",
       "laterality": null,
@@ -126,7 +126,8 @@
       "units": 1,
       "evidence_spans": [
         "NEW PATIENT \u2013 OFFICE VISIT",
-        "Patient elects surgical correction. Scheduled for right Austin/Chevron bunionectomy with first metatarsal osteotomy"
+        "Patient elects surgical correction. Scheduled for right Austin/Chevron bunionectomy with first metatarsal osteotomy",
+        "Referral to endocrinology for peri-operative glucose optimization"
       ],
       "ama_validated": true,
       "mue_validated": true,
@@ -142,7 +143,7 @@
         "RT"
       ],
       "modifier_reasoning": [
-        "RT: Right foot X-ray performed"
+        "Modifier RT: right foot X-ray performed"
       ],
       "source": "Imaging",
       "mdm_details": {},
@@ -158,16 +159,16 @@
       "ama_validated": true,
       "mue_validated": true,
       "mue_limit": 3,
-      "code_source": "ai_inferred",
+      "code_source": "ai_confirmed",
       "physician_code_note": null
     }
   ],
   "hcpcs_codes": [],
   "snomed_codes": [
     {
-      "concept_id": "57195005",
-      "description": "Hallux valgus (acquired)",
-      "entity_text": "acquired hallux valgus, right foot",
+      "concept_id": "60658003",
+      "description": "Hallux valgus",
+      "entity_text": "Hallux valgus (acquired), right foot",
       "category": "diagnosis",
       "confidence": 0.9,
       "is_root_concept": false
@@ -197,98 +198,89 @@
       "is_root_concept": false
     },
     {
-      "concept_id": "91175000",
+      "concept_id": "53059001",
       "description": "Bunion",
-      "entity_text": "bunion prominence right",
+      "entity_text": "Bunion prominence right",
       "category": "finding",
       "confidence": 0.85,
       "is_root_concept": false
     },
     {
-      "concept_id": "37911000",
+      "concept_id": "27497000",
       "description": "Callus",
-      "entity_text": "mild callus right",
+      "entity_text": "mild callus formation",
+      "category": "finding",
+      "confidence": 0.85,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "21998009",
+      "description": "Erythema of skin",
+      "entity_text": "overlying erythema",
       "category": "finding",
       "confidence": 0.8,
       "is_root_concept": false
     },
     {
-      "concept_id": "70378000",
-      "description": "Erythema",
-      "entity_text": "erythema overlying bunion right",
-      "category": "finding",
-      "confidence": 0.85,
-      "is_root_concept": false
-    },
-    {
-      "concept_id": "22253000",
-      "description": "Pain",
-      "entity_text": "right great toe pain 7/10",
-      "category": "finding",
-      "confidence": 0.85,
-      "is_root_concept": false
-    },
-    {
-      "concept_id": "298335004",
+      "concept_id": "298362001",
       "description": "Limited range of motion",
-      "entity_text": "reduced ROM 1st MTP joint right",
+      "entity_text": "ROM of 1st MTP joint reduced to 30 degrees dorsiflexion",
       "category": "finding",
-      "confidence": 0.7,
+      "confidence": 0.75,
       "is_root_concept": false
     },
     {
-      "concept_id": "91707000",
-      "description": "Structure of hallux",
-      "entity_text": "right great toe",
-      "category": "anatomy",
+      "concept_id": "285387003",
+      "description": "Pain in great toe",
+      "entity_text": "right great toe pain",
+      "category": "finding",
       "confidence": 0.85,
       "is_root_concept": false
     },
     {
-      "concept_id": "53627009",
-      "description": "Structure of first metatarsophalangeal joint",
-      "entity_text": "1st MTP joint right",
-      "category": "anatomy",
-      "confidence": 0.85,
-      "is_root_concept": false
-    },
-    {
-      "concept_id": "8124009",
-      "description": "Structure of first metatarsal bone",
-      "entity_text": "first metatarsal right",
-      "category": "anatomy",
-      "confidence": 0.8,
-      "is_root_concept": false
-    },
-    {
-      "concept_id": "168858009",
-      "description": "Plain radiography of foot",
-      "entity_text": "right foot X-ray 3 views",
+      "concept_id": "168858000",
+      "description": "Plain X-ray of foot",
+      "entity_text": "Right foot X-ray (3 views)",
       "category": "procedure",
       "confidence": 0.85,
       "is_root_concept": false
     },
     {
+      "concept_id": "91707000",
+      "description": "Structure of great toe",
+      "entity_text": "right great toe",
+      "category": "body_structure",
+      "confidence": 0.85,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "5798000",
+      "description": "Structure of first metatarsophalangeal joint",
+      "entity_text": "1st MTP joint right",
+      "category": "body_structure",
+      "confidence": 0.8,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "91775009",
+      "description": "Structure of first metatarsal bone",
+      "entity_text": "first metatarsal right",
+      "category": "body_structure",
+      "confidence": 0.8,
+      "is_root_concept": false
+    },
+    {
       "concept_id": "294505008",
       "description": "Allergy to penicillin",
-      "entity_text": "penicillin allergy",
+      "entity_text": "Penicillin allergy (rash)",
       "category": "allergy",
       "confidence": 0.9,
       "is_root_concept": false
     }
   ],
-  "em_level_reasoning": "NEW patient (99202-99205 range). MDM: Problems = moderate (hallux valgus as new problem with planned surgical intervention plus 2 stable chronic illnesses: T2DM, HTN). Data = limited (independent review of X-ray, ordered pre-op labs). Risk = moderate (elective major surgery decision plus prescription drug management). 2-of-3 moderate \u2192 99204. Modifier -57 applied because patient elected and was scheduled for major surgery (28296, 90-day global) at this visit, with surgery to be performed on a future date. No -25 needed as only diagnostic imaging (73630) was performed today.",
+  "em_level_reasoning": "New patient (99202\u201399205). MDM: Problems = Moderate (new hallux valgus with surgical decision plus 2 stable chronic conditions); Data = Limited (independent X-ray interpretation; pre-op labs ordered); Risk = High (decision for elective major surgery in patient with T2DM/HTN requiring peri-operative endocrine optimization). 2-of-3 axes meet Moderate; Risk reaches High \u2192 99204. Modifier -57 applied because the decision for major surgery (28296, 90-day global) was made today and surgery is scheduled, not performed today. No same-day billable procedure performed (only diagnostic X-ray) \u2192 modifier -25 not required.",
   "error_message": null,
-  "validation_issues": [
-    {
-      "severity": "WARNING",
-      "code": "73630",
-      "category": "laterality_not_in_note",
-      "message": "73630 has laterality modifier ['RT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document.",
-      "recommendation": "Verify laterality is documented in the note before billing",
-      "denial_risk": "MEDIUM"
-    }
-  ],
+  "validation_issues": [],
   "warnings": [],
   "encounter_integrity": {
     "encounter_issues": [],
@@ -301,7 +293,7 @@
         "code": "M20.11",
         "description": "Hallux valgus (acquired), right foot",
         "documentation_support": [
-          "Rationale: Listed in Assessment as primary diagnosis. Chief complaint and reason for visit. Right laterality.",
+          "Rationale: Listed in Assessment as primary diagnosis. Right foot laterality documented.",
           "Section: ASSESSMENT",
           "Supporting text: Hallux valgus (acquired), right foot"
         ],
@@ -312,7 +304,7 @@
         "code": "E11.9",
         "description": "Type 2 diabetes mellitus without complications",
         "documentation_support": [
-          "Rationale: Listed in Assessment. DM influences surgical planning \u2014 peri-op glucose optimization, HbA1c, endocrinology referral.",
+          "Rationale: Listed in Assessment as T2DM without complications. A1C 6.8%. Relevant to peri-operative management (endocrinology referral).",
           "Section: ASSESSMENT",
           "Supporting text: Type 2 Diabetes Mellitus without complications"
         ],
@@ -323,7 +315,7 @@
         "code": "I10",
         "description": "Essential (primary) hypertension",
         "documentation_support": [
-          "Rationale: Listed in Assessment as 'Essential (primary) hypertension'. Relevant to peri-operative risk.",
+          "Rationale: Listed in Assessment.",
           "Section: ASSESSMENT",
           "Supporting text: Essential (primary) hypertension"
         ],
@@ -332,10 +324,10 @@
       },
       {
         "code": "99204",
-        "description": "Office or other outpatient visit, new patient, moderate MDM",
+        "description": "Office or other outpatient visit for the evaluation and management of a new patient, moderate level MDM",
         "documentation_support": [
           "Section: E/M",
-          "MDM: moderate (P:3/D:2/R:4)",
+          "MDM: moderate-to-high (P:3/D:2/R:4)",
           "Linked DX: M20.11, E11.9, I10"
         ],
         "documentation_gaps": [],
@@ -358,63 +350,60 @@
     "codes_with_gaps": 0,
     "documentation_score": 1.0
   },
-  "pre_submission_audit_findings": [
-    {
-      "severity": "WARNING",
-      "code": "73630",
-      "category": "laterality_not_in_note",
-      "message": "73630 has laterality modifier ['RT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document.",
-      "recommendation": "Verify laterality is documented in the note before billing",
-      "denial_risk": "MEDIUM"
-    }
-  ],
-  "pre_submission_audit_score": 0.95,
-  "auto_coding_tier": "REVIEW",
-  "auto_coding_confidence": 0.75,
+  "pre_submission_audit_findings": [],
+  "pre_submission_audit_score": 1.0,
+  "auto_coding_tier": "AUTO",
+  "auto_coding_confidence": 0.95,
   "auto_coding_review_reasons": [
-    "M20.11 retained \u2014 primary anchor diagnosis from Assessment.",
-    "E11.9 retained \u2014 listed in Assessment AND influences surgical planning (Section O exception: peri-op glucose optimization, HbA1c, endocrinology referral).",
-    "I10 retained \u2014 listed in Assessment, peri-operative relevance.",
-    "99204-57 retained \u2014 new patient moderate MDM with surgical decision today; -57 protects E/M from 90-day global of scheduled bunionectomy.",
-    "73630-RT retained \u2014 correct 3-view foot X-ray code for right foot imaging performed today.",
-    "Supporting conditions (E78.5, Z88.0) passed through unchanged.",
-    "[WARNING] 73630: 73630 has laterality modifier ['RT'] but this is AI-inferred (not explicitly stated in physician notes). If audited, must be defensible from the source document."
+    "Retained M20.11 \u2014 protected anchor for primary diagnosis hallux valgus right foot.",
+    "Retained E11.9 \u2014 listed in Assessment; no DM combination code present, so generic code permissible.",
+    "Retained I10 \u2014 protected anchor for essential hypertension (also listed in Assessment).",
+    "Retained 99204-57 \u2014 new patient moderate MDM; -57 required because decision for major surgery (28296, 90-day global) was made today.",
+    "Retained 73630-RT \u2014 correct CPT for complete 3-view right foot radiograph.",
+    "No -25 modifier added \u2014 only diagnostic imaging performed; no billable same-day procedure.",
+    "supporting_conditions (E78.5, Z88.0) passed through unchanged."
   ],
-  "auto_coding_summary": "New patient office visit for right hallux valgus with surgical decision made today for Austin/Chevron bunionectomy with first metatarsal osteotomy. Coded 99204-57 (decision for major surgery) and 73630-RT (3-view right foot X-ray performed today). ICD: M20.11 primary, with E11.9 and I10 as relevant secondary diagnoses influencing peri-operative planning. PMH hyperlipidemia and penicillin allergy retained as advisory supporting conditions. No procedures or supplies dispensed today; no HCPCS codes.",
+  "auto_coding_summary": "New patient podiatry visit for right hallux valgus with surgical decision made today. Coded M20.11 (primary), E11.9, and I10 in icd10_codes. CPT 99204-57 for new-patient E/M with decision for major surgery, and 73630-RT for the right foot 3-view X-ray performed. No procedures or supplies dispensed today. PMH hyperlipidemia and penicillin allergy retained as supporting_conditions. All protected anchors satisfied; no bundling, laterality, or modifier issues identified.",
   "rag_context": {
-    "entities_extracted": 29,
+    "entities_extracted": 30,
     "candidates_per_system": {
-      "icd10": 278,
-      "cpt": 49,
+      "icd10": 273,
+      "cpt": 54,
       "hcpcs": 15
     },
     "corrections_made": [
       {
-        "type": "REMOVED",
-        "code": "E11.9",
-        "reason": "Per Section M override and protected anchor rules: E11.9 is not protected when listed only as 'T2DM without complications' in PMH-style assessment. However, per outpatient guidelines, DM is billable as secondary when influencing podiatric surgical planning (peri-op glucose optimization, endocrinology referral). RETAINED instead.",
-        "evidence": "Referral to endocrinology for peri-operative glucose optimization."
+        "type": "RETAINED",
+        "code": "M20.11",
+        "reason": "Protected anchor \u2014 Hallux valgus, right foot listed in Assessment",
+        "evidence": "Hallux valgus (acquired), right foot"
+      },
+      {
+        "type": "RETAINED",
+        "code": "I10",
+        "reason": "Protected anchor \u2014 Essential hypertension listed in Assessment",
+        "evidence": "Essential (primary) hypertension"
       },
       {
         "type": "RETAINED",
         "code": "E11.9",
-        "reason": "DM influences surgical planning (endocrinology referral for peri-op glucose optimization, HbA1c ordered). Billable as secondary per Section O exception.",
-        "evidence": "Pre-op labs ordered: CBC, CMP, HbA1c, PT/INR. Referral to endocrinology for peri-operative glucose optimization."
+        "reason": "Listed in Assessment as T2DM without complications. No specific DM combination code present, so generic code is appropriate.",
+        "evidence": "Type 2 Diabetes Mellitus without complications"
       },
       {
         "type": "RETAINED",
         "code": "99204",
-        "reason": "Modifier -57 correctly applied for decision for major surgery (28296 bunionectomy with osteotomy, 90-day global). New patient with moderate MDM.",
-        "evidence": "Patient elects surgical correction. Scheduled for right Austin/Chevron bunionectomy with first metatarsal osteotomy."
+        "reason": "New patient E/M with moderate MDM; modifier -57 correctly applied for decision for major surgery (28296, 90-day global) made today.",
+        "evidence": "Patient elects surgical correction. Scheduled for right Austin/Chevron bunionectomy with first metatarsal osteotomy"
       },
       {
         "type": "RETAINED",
-        "code": "73630",
+        "code": "73630-RT",
         "reason": "Right foot 3-view X-ray performed today; correct code with RT modifier.",
-        "evidence": "Right foot X-ray (3 views): Hallux valgus angle 31 degrees; intermetatarsal angle 14 degrees."
+        "evidence": "Right foot X-ray (3 views)"
       }
     ],
-    "audit_notes": "Verified all 3 protected anchors (M20.11, E11.9, I10) present in icd10_codes. E11.9 retained as billable secondary per Section O exception (DM influences surgical planning \u2014 endocrinology referral, peri-op HbA1c). I10 retained \u2014 listed in Assessment. Modifier -57 correctly applied to 99204 for surgical decision today. 73630-RT correct for 3-view right foot X-ray. No injections, no HCPCS items dispensed today, no -25 needed (only imaging). Supporting conditions (E78.5, Z88.0) passed through unchanged. SNOMED set clean \u2014 no duplicates or root concepts requiring removal.",
+    "audit_notes": "All protected anchors coded (M20.11, E11.9, I10). Modifier -57 correctly applied to 99204 for decision-for-major-surgery. Right foot 3-view X-ray correctly coded as 73630-RT. No injections, no HCPCS supplies dispensed, no procedures performed today. PMH conditions (hyperlipidemia, penicillin allergy) properly placed in supporting_conditions. No NCCI conflicts. SNOMED set retained without duplicates or root-concept overrides.",
     "vision_context": {
       "note_category": "new_patient_visit",
       "procedures_performed_today": [],
@@ -432,9 +421,9 @@
   },
   "model_source": "claude",
   "api_usage": {
-    "prompt_tokens": 39478,
-    "completion_tokens": 7520,
-    "total_tokens": 46998
+    "prompt_tokens": 39143,
+    "completion_tokens": 7674,
+    "total_tokens": 46817
   },
   "physician_documented_codes": [],
   "missing_physician_codes": [],
@@ -443,7 +432,7 @@
     {
       "text": "Right great toe pain",
       "category": "finding",
-      "clinical_term": "pain of great toe",
+      "clinical_term": "pain in great toe",
       "laterality": "RIGHT",
       "specificity": "great toe",
       "source_section": "CC",
@@ -454,7 +443,7 @@
     {
       "text": "deformity",
       "category": "finding",
-      "clinical_term": "deformity of great toe",
+      "clinical_term": "toe deformity",
       "laterality": "RIGHT",
       "specificity": "great toe, 6 months",
       "source_section": "CC",
@@ -477,8 +466,8 @@
       "text": "pain rated 7/10",
       "category": "finding",
       "clinical_term": "pain severity 7/10",
-      "laterality": "RIGHT",
-      "specificity": "7/10",
+      "laterality": null,
+      "specificity": null,
       "source_section": "HPI",
       "negated": false,
       "ner_source": "llm_only",
@@ -489,7 +478,7 @@
       "category": "diagnosis",
       "clinical_term": "type 2 diabetes mellitus",
       "laterality": null,
-      "specificity": "A1C 6.8%",
+      "specificity": "A1C 6.8%, without complications",
       "source_section": "PMH",
       "negated": false,
       "ner_source": "gliner_confirmed",
@@ -566,7 +555,7 @@
       "category": "finding",
       "clinical_term": "hallux valgus angle 28 degrees clinical",
       "laterality": "RIGHT",
-      "specificity": "28 degrees clinical",
+      "specificity": "clinical assessment",
       "source_section": "PE",
       "negated": false,
       "ner_source": "llm_only",
@@ -588,7 +577,7 @@
       "category": "finding",
       "clinical_term": "erythema",
       "laterality": "RIGHT",
-      "specificity": "over bunion",
+      "specificity": "overlying bunion",
       "source_section": "PE",
       "negated": false,
       "ner_source": "gliner_confirmed",
@@ -608,7 +597,7 @@
     {
       "text": "ROM of 1st MTP joint reduced to 30 degrees dorsiflexion",
       "category": "finding",
-      "clinical_term": "reduced ROM 1st MTP joint",
+      "clinical_term": "reduced range of motion 1st MTP",
       "laterality": "RIGHT",
       "specificity": "30 degrees dorsiflexion",
       "source_section": "PE",
@@ -632,7 +621,7 @@
       "category": "finding",
       "clinical_term": "pedal pulses 2+",
       "laterality": "BILATERAL",
-      "specificity": "2+",
+      "specificity": null,
       "source_section": "PE",
       "negated": false,
       "ner_source": "llm_only",
@@ -643,7 +632,7 @@
       "category": "finding",
       "clinical_term": "capillary refill normal",
       "laterality": null,
-      "specificity": "<2 sec",
+      "specificity": "<2 seconds",
       "source_section": "PE",
       "negated": false,
       "ner_source": "llm_only",
@@ -652,7 +641,7 @@
     {
       "text": "Monofilament testing intact bilateral plantar surfaces",
       "category": "finding",
-      "clinical_term": "monofilament testing intact",
+      "clinical_term": "monofilament sensation intact",
       "laterality": "BILATERAL",
       "specificity": "plantar surfaces",
       "source_section": "PE",
@@ -676,7 +665,7 @@
       "category": "finding",
       "clinical_term": "hallux valgus angle 31 degrees",
       "laterality": "RIGHT",
-      "specificity": "31 degrees radiographic",
+      "specificity": "radiographic",
       "source_section": "IMAGING",
       "negated": false,
       "ner_source": "llm_only",
@@ -687,7 +676,7 @@
       "category": "finding",
       "clinical_term": "intermetatarsal angle 14 degrees",
       "laterality": "RIGHT",
-      "specificity": "14 degrees",
+      "specificity": null,
       "source_section": "IMAGING",
       "negated": false,
       "ner_source": "llm_only",
@@ -727,9 +716,9 @@
       "ner_confidence": 1.0
     },
     {
-      "text": "great toe",
+      "text": "right great toe",
       "category": "body_structure",
-      "clinical_term": "hallux",
+      "clinical_term": "great toe",
       "laterality": "RIGHT",
       "specificity": null,
       "source_section": "CC",
@@ -747,6 +736,17 @@
       "negated": false,
       "ner_source": "gliner_confirmed",
       "ner_confidence": 0.939
+    },
+    {
+      "text": "right foot",
+      "category": "body_structure",
+      "clinical_term": "foot",
+      "laterality": "RIGHT",
+      "specificity": null,
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.884
     },
     {
       "text": "first metatarsal",

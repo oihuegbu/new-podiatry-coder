@@ -7,7 +7,6 @@ from app.core.config import (
     LLM_PROVIDER,
     OPENAI_API_KEY,
     OPENAI_MODEL,
-    OPENAI_EMBEDDING_MODEL,
     ANTHROPIC_API_KEY,
     CLAUDE_MODEL,
 )
@@ -167,7 +166,14 @@ def _claude_chat_completion(
         model=model or CLAUDE_MODEL,
         max_tokens=effective_max_tokens,
         thinking={"type": "adaptive"},
-        system=system_prompt,
+        # xhigh effort → deepest reasoning, most consistent outputs, least hallucination
+        output_config={"effort": "xhigh"},
+        # Cache the stable system prompt — saves cost and latency on repeated coding calls
+        system=[{
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[{"role": "user", "content": full_user_prompt}],
     )
 
@@ -190,17 +196,3 @@ def _claude_chat_completion(
     return content, usage
 
 
-def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]:
-    # Anthropic has no embeddings API — always use OpenAI for embeddings
-    client = get_openai_client()
-    embed_model = model or OPENAI_EMBEDDING_MODEL
-
-    batch_size = 2048
-    all_embeddings: list[list[float]] = []
-
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i : i + batch_size]
-        response = client.embeddings.create(model=embed_model, input=batch)
-        all_embeddings.extend([item.embedding for item in response.data])
-
-    return all_embeddings

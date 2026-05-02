@@ -1,0 +1,12 @@
+.git/
+.env
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+data/qdrant_store/
+output/
+logs/
+*.log
+.venv/
+venv/

@@ -1,34 +1,34 @@
 {
   "document_id": "NOTE_EC_299_Madeupperson_PlantarMass",
-  "timestamp": "2026-04-30T21:51:56.157008",
+  "timestamp": "2026-05-02T18:37:15.316609",
   "success": true,
-  "processing_time": 144.86,
+  "processing_time": 152.54,
   "patient_metadata": {
     "patient_name": "Hyacinthe T. Madeupperson",
     "date_of_birth": "01/08/1968",
     "date_of_service": "October 13, 2026",
-    "provider": "V. Okonkwo-Bergmann DPM",
+    "provider": "V. Okonkwo-Bergmann, DPM",
     "npi": null,
     "mrn": "SYN-000299",
     "insurance": "Aetna PPO",
-    "note_type": "SYNTHETIC"
+    "note_type": "Podiatry Clinic Note"
   },
   "note_sections": {
     "chief_complaint": "Lump on bottom of foot, growing, painful",
     "hpi": "57F noted a \"lump\" on the plantar surface of her R forefoot about 4 months ago. Initially small, has been gradually growing. Now causes pain w/ walking, especially in shoes. Also notes some discolorat...",
     "pmh_medications_allergies": "PMH: hypothyroid, mild HTN\nMeds: levothyroxine, lisinopril\nNKDA\nFamily hx: father had melanoma (concerning)\nSocial: no tobacco, occasional alcohol",
-    "physical_examination": "R foot plantar surface:\n- Mass located at the plantar aspect of the R midfoot, slightly lateral to the central plantar surface\n- Size: approximately 2.5 cm x 2 cm x 1 cm (raised above the surrounding ...",
-    "imaging_diagnostics": "",
-    "assessment_diagnoses": "1. Soft tissue mass R plantar foot, growing, needs further workup to characterize\n2. Concerning features: deep, fixed, growing, firm consistency\n3. Not classic for any single benign diagnosis\n- WORKUP...",
+    "physical_examination": "Exam:\nR foot plantar surface:\n- Mass located at the plantar aspect of the R midfoot, slightly lateral to the central plantar surface\n- Size: approximately 2.5 cm x 2 cm x 1 cm (raised above the surrou...",
+    "imaging_diagnostics": "Diagnostic workup ordered:\n1. MRI of the R foot w/ and w/o contrast - the imaging modality of choice for soft tissue masses\n- Will help characterize the mass\n- Identify the tissue of origin\n- Look for...",
+    "assessment_diagnoses": "A:\n1. Soft tissue mass R plantar foot, growing, needs further workup to characterize\n2. Concerning features: deep, fixed, growing, firm consistency\n3. Not classic for any single benign diagnosis\n- WOR...",
     "plan": "This is NOT a case to \"just observe\" or \"shave it off\" - growing soft tissue masses on the foot need proper diagnostic workup to rule out malignancy.\n\nDiagnostic workup ordered:\n1. MRI of the R foot w..."
   },
   "icd_codes": [
     {
-      "code": "R22.41",
+      "code": "R22.31",
       "description": "Localized swelling, mass and lump, right lower limb",
       "type": "primary",
       "confidence": 0.92,
-      "rationale": "Primary diagnosis - undiagnosed plantar soft tissue mass on right foot pending MRI workup",
+      "rationale": "Undiagnosed soft tissue mass on right plantar foot is the chief complaint and primary assessment. No definitive diagnosis established yet \u2014 workup (MRI) pending. Per ICD-10-CM guidelines, code symptom/sign when definitive diagnosis not yet established.",
       "supporting_text": "Soft tissue mass R plantar foot, growing, needs further workup to characterize",
       "laterality": "RIGHT",
       "source_section": "ASSESSMENT",
@@ -43,10 +43,10 @@
       "description": "Pain in right foot",
       "type": "secondary",
       "confidence": 0.85,
-      "rationale": "Mass is painful with walking and tender on palpation",
-      "supporting_text": "pain w/ walking, especially in shoes; Mildly tender on palpation",
+      "rationale": "Patient reports painful mass on plantar R foot with pain on ambulation and tenderness on exam.",
+      "supporting_text": "Lump on bottom of foot, growing, painful ... pain w/ walking",
       "laterality": "RIGHT",
-      "source_section": "HPI/PE",
+      "source_section": "HPI",
       "s3_validated": true,
       "needs_review": false,
       "review_reason": null,
@@ -54,27 +54,12 @@
       "physician_code_note": null
     },
     {
-      "code": "L81.4",
-      "description": "Other melanin hyperpigmentation",
-      "type": "secondary",
-      "confidence": 0.7,
-      "rationale": "Skin overlying mass is hyperpigmented - documented physical finding",
-      "supporting_text": "Skin overlying the mass: mildly hyperpigmented",
-      "laterality": "RIGHT",
-      "source_section": "PE",
-      "s3_validated": true,
-      "needs_review": false,
-      "review_reason": null,
-      "code_source": "ai_confirmed",
-      "physician_code_note": null
-    },
-    {
       "code": "Z80.8",
       "description": "Family history of malignant neoplasm of other organs or systems",
       "type": "secondary",
-      "confidence": 0.8,
-      "rationale": "Family history of melanoma in father - relevant to current malignancy workup of growing mass",
-      "supporting_text": "father had melanoma (concerning)",
+      "confidence": 0.85,
+      "rationale": "Father had melanoma \u2014 explicitly noted as concerning factor influencing diagnostic workup.",
+      "supporting_text": "Family hx: father had melanoma (concerning)",
       "laterality": null,
       "source_section": "PMH",
       "s3_validated": true,
@@ -89,35 +74,36 @@
       "code": "E03.9",
       "description": "Hypothyroidism, unspecified",
       "type": "advisory",
-      "confidence": 0.0,
-      "rationale": "PMH only, not addressed at today's visit",
-      "supporting_text": "",
+      "confidence": 0.95,
+      "rationale": "PMH condition with active medication (levothyroxine). Not addressed today.",
+      "supporting_text": "PMH: hypothyroid ... Meds: levothyroxine",
       "source_section": "PMH",
       "billable_tier": "advisory",
       "needs_review": true,
-      "review_reason": null
+      "review_reason": "PMH condition not addressed at today's encounter"
     },
     {
       "code": "I10",
       "description": "Essential (primary) hypertension",
       "type": "advisory",
-      "confidence": 0.0,
-      "rationale": "PMH only (mild HTN), not addressed at today's visit",
-      "supporting_text": "",
+      "confidence": 0.95,
+      "rationale": "PMH of mild HTN with active medication (lisinopril). Not addressed today.",
+      "supporting_text": "PMH: ... mild HTN ... Meds: ... lisinopril",
       "source_section": "PMH",
       "billable_tier": "advisory",
       "needs_review": true,
-      "review_reason": null
+      "review_reason": "PMH condition not addressed at today's encounter"
     }
   ],
   "cpt_codes": [
     {
       "code": "99214",
-      "description": "Office or other outpatient visit, established patient, moderate MDM",
-      "confidence": 0.92,
+      "description": "Office or other outpatient visit for the evaluation and management of an established patient, moderate level MDM",
+      "confidence": 0.9,
       "modifiers": [],
       "modifier_reasoning": [
-        "No same-day procedure performed; MRI ordered only (not performed today). No modifier -25 or -57 warranted."
+        "No modifier -25: no procedure performed today.",
+        "No modifier -57: no major surgery scheduled."
       ],
       "source": "E/M",
       "mdm_details": {
@@ -125,16 +111,15 @@
         "data_score": 2,
         "risk_score": 3,
         "mdm_level": "moderate",
-        "problems_rationale": "New problem with uncertain prognosis - growing, deep, fixed plantar soft tissue mass with concerning features (firm, fixed to deep tissue, growing, family history of melanoma); requires workup to rule out malignancy.",
-        "data_rationale": "Ordered MRI of right foot with and without contrast (test ordering = limited data).",
-        "risk_rationale": "New diagnosis with uncertain prognosis requiring further diagnostic workup to rule out malignancy = moderate risk."
+        "problems_rationale": "New problem with uncertain prognosis \u2014 growing, deep, fixed plantar soft tissue mass; rule out sarcoma/malignancy; concerning family history of melanoma = MODERATE problems",
+        "data_rationale": "Ordered MRI of right foot with and without contrast (advanced imaging) = limited data",
+        "risk_rationale": "New undiagnosed problem with uncertain prognosis requiring workup to rule out malignancy = MODERATE risk"
       },
       "procedure_status": "completed",
       "laterality": null,
       "linked_diagnoses": [
-        "R22.41",
+        "R22.31",
         "M79.671",
-        "L81.4",
         "Z80.8"
       ],
       "units": 1,
@@ -156,13 +141,21 @@
     {
       "concept_id": "300848003",
       "description": "Mass of soft tissue",
-      "entity_text": "soft tissue mass R plantar foot",
+      "entity_text": "soft tissue mass right plantar foot",
       "category": "diagnosis",
-      "confidence": 0.85,
+      "confidence": 0.8,
       "is_root_concept": false
     },
     {
-      "concept_id": "43396009",
+      "concept_id": "30989003",
+      "description": "Pain in right foot",
+      "entity_text": "pain with ambulation right foot",
+      "category": "symptom",
+      "confidence": 0.8,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "43724002",
       "description": "Hyperpigmentation of skin",
       "entity_text": "skin hyperpigmentation overlying mass",
       "category": "finding",
@@ -170,11 +163,11 @@
       "is_root_concept": false
     },
     {
-      "concept_id": "40739000",
+      "concept_id": "40930008",
       "description": "Hypothyroidism",
       "entity_text": "hypothyroidism",
       "category": "diagnosis",
-      "confidence": 0.9,
+      "confidence": 0.95,
       "is_root_concept": false
     },
     {
@@ -186,39 +179,39 @@
       "is_root_concept": false
     },
     {
-      "concept_id": "429104009",
+      "concept_id": "429322004",
       "description": "Family history of malignant melanoma",
-      "entity_text": "father had melanoma",
-      "category": "finding",
+      "entity_text": "family history of melanoma (father)",
+      "category": "history",
       "confidence": 0.85,
       "is_root_concept": false
     },
     {
-      "concept_id": "301976004",
-      "description": "Tenderness of foot",
-      "entity_text": "tenderness to palpation right foot",
-      "category": "finding",
-      "confidence": 0.75,
-      "is_root_concept": false
-    },
-    {
-      "concept_id": "65801008",
-      "description": "Plantar surface of foot structure",
-      "entity_text": "plantar midfoot right",
-      "category": "anatomy",
+      "concept_id": "207086005",
+      "description": "Plantar fibromatosis",
+      "entity_text": "plantar fibroma (differential)",
+      "category": "diagnosis",
       "confidence": 0.6,
       "is_root_concept": false
     },
     {
-      "concept_id": "241615005",
+      "concept_id": "37893003",
+      "description": "Ganglion cyst",
+      "entity_text": "ganglion cyst (differential)",
+      "category": "diagnosis",
+      "confidence": 0.6,
+      "is_root_concept": false
+    },
+    {
+      "concept_id": "241622008",
       "description": "Magnetic resonance imaging of foot",
-      "entity_text": "MRI foot with and without contrast (ordered)",
-      "category": "procedure",
-      "confidence": 0.4,
-      "is_root_concept": true
+      "entity_text": "MRI right foot with and without contrast - ordered",
+      "category": "procedure_ordered",
+      "confidence": 0.75,
+      "is_root_concept": false
     }
   ],
-  "em_level_reasoning": "Established patient. PROBLEMS = Moderate (3): new problem with uncertain prognosis - growing plantar soft tissue mass with concerning features (deep, fixed, firm, family hx melanoma) requiring malignancy workup. DATA = Limited (2): ordered MRI right foot with and without contrast. RISK = Moderate (3): new diagnosis requiring diagnostic workup to rule out malignancy. 2 of 3 axes meet Moderate (Problems + Risk) - 99214. No procedure performed today (MRI ordered only). No major surgery scheduled - no -57. No same-day billable procedure - no -25.",
+  "em_level_reasoning": "Established patient. MDM: Problems = MODERATE (new problem with uncertain prognosis \u2014 growing plantar mass with concerning features, differential includes soft tissue sarcoma/malignancy). Data = LIMITED (MRI ordered). Risk = MODERATE (new undiagnosed problem with uncertain prognosis requiring further diagnostic workup). 2-of-3 axes at MODERATE \u2192 99214. No procedure performed today (MRI ordered, not performed) \u2192 no -25; no surgery scheduled \u2192 no -57.",
   "error_message": null,
   "validation_issues": [],
   "warnings": [],
@@ -230,10 +223,10 @@
   "documentation_audit": {
     "audit_entries": [
       {
-        "code": "R22.41",
+        "code": "R22.31",
         "description": "Localized swelling, mass and lump, right lower limb",
         "documentation_support": [
-          "Rationale: Primary diagnosis - undiagnosed plantar soft tissue mass on right foot pending MRI workup",
+          "Rationale: Undiagnosed soft tissue mass on right plantar foot is the chief complaint and primary assessment. No definitive diagnosis established yet \u2014 workup (MRI) pending. Per ICD-10-CM guidelines, code symptom/sign when definitive diagnosis not yet established.",
           "Section: ASSESSMENT",
           "Supporting text: Soft tissue mass R plantar foot, growing, needs further workup to characterize"
         ],
@@ -244,20 +237,9 @@
         "code": "M79.671",
         "description": "Pain in right foot",
         "documentation_support": [
-          "Rationale: Mass is painful with walking and tender on palpation",
-          "Section: HPI/PE",
-          "Supporting text: pain w/ walking, especially in shoes; Mildly tender on palpation"
-        ],
-        "documentation_gaps": [],
-        "supported": true
-      },
-      {
-        "code": "L81.4",
-        "description": "Other melanin hyperpigmentation",
-        "documentation_support": [
-          "Rationale: Skin overlying mass is hyperpigmented - documented physical finding",
-          "Section: PE",
-          "Supporting text: Skin overlying the mass: mildly hyperpigmented"
+          "Rationale: Patient reports painful mass on plantar R foot with pain on ambulation and tenderness on exam.",
+          "Section: HPI",
+          "Supporting text: Lump on bottom of foot, growing, painful ... pain w/ walking"
         ],
         "documentation_gaps": [],
         "supported": true
@@ -266,27 +248,27 @@
         "code": "Z80.8",
         "description": "Family history of malignant neoplasm of other organs or systems",
         "documentation_support": [
-          "Rationale: Family history of melanoma in father - relevant to current malignancy workup of growing mass",
+          "Rationale: Father had melanoma \u2014 explicitly noted as concerning factor influencing diagnostic workup.",
           "Section: PMH",
-          "Supporting text: father had melanoma (concerning)"
+          "Supporting text: Family hx: father had melanoma (concerning)"
         ],
         "documentation_gaps": [],
         "supported": true
       },
       {
         "code": "99214",
-        "description": "Office or other outpatient visit, established patient, moderate MDM",
+        "description": "Office or other outpatient visit for the evaluation and management of an established patient, moderate level MDM",
         "documentation_support": [
           "Section: E/M",
           "MDM: moderate (P:3/D:2/R:3)",
-          "Linked DX: R22.41, M79.671, L81.4, Z80.8"
+          "Linked DX: R22.31, M79.671, Z80.8"
         ],
         "documentation_gaps": [],
         "supported": true
       }
     ],
-    "total_codes": 5,
-    "fully_supported": 5,
+    "total_codes": 4,
+    "fully_supported": 4,
     "partially_supported": 0,
     "unsupported": 0,
     "codes_with_gaps": 0,
@@ -297,87 +279,48 @@
   "auto_coding_tier": "AUTO",
   "auto_coding_confidence": 0.85,
   "auto_coding_review_reasons": [
-    "M79.A21 removed - placeholder code, wrong clinical concept (compartment syndrome vs soft tissue mass)",
-    "R22.41 added as primary - matches plantar foot mass on right lower limb",
-    "M79.671 added - mass is painful with walking and tender on exam",
-    "L81.4 added - overlying skin hyperpigmentation documented on PE",
-    "Z80.8 added - family history of melanoma directly relevant to current malignancy workup",
-    "E03.9 and I10 moved to supporting_conditions - PMH only, not addressed in Assessment (Rule O)",
-    "SNOMED 29857009 (chest pain on walking) removed - incorrectly mapped to foot pain",
-    "SNOMED 40275004 (contact dermatitis) removed - incorrectly mapped to hyperpigmentation; correct concept 43396009 retained",
-    "99214 retained without modifier -25 or -57 (no same-day procedure, no surgery decision today)"
+    "R22.31 retained \u2014 correct primary code for undiagnosed plantar foot mass (per ICD-10 guidelines, code the symptom when no definitive diagnosis); db_description corrected to 'right lower limb' (authoritative).",
+    "M79.671 retained \u2014 pain in right foot supported by HPI and exam findings.",
+    "Z80.8 retained \u2014 family history of melanoma (father) influencing diagnostic decision-making.",
+    "E03.9 and I10 left in supporting_conditions per Rule 4 \u2014 PMH only, not addressed today.",
+    "No procedures/imaging/supplies performed today per vision extraction \u2192 no CPT/HCPCS additions, no -25 or -57 modifiers required.",
+    "SNOMED root concept 56459004 (Foot structure) removed as overly broad; differential diagnosis confidences lowered to \u22640.6 since they are not the established diagnosis."
   ],
-  "auto_coding_summary": "Established patient evaluation of a growing, painful, deep plantar soft tissue mass on the right foot with concerning features and family history of melanoma. Replaced the placeholder ICD M79.A21 with R22.41 (right lower limb mass) as primary, plus M79.671 (right foot pain), L81.4 (skin hyperpigmentation), and Z80.8 (family hx malignancy). Hypothyroidism and HTN moved to supporting_conditions per Rule O. 99214 retained as moderate MDM E/M (new problem, uncertain prognosis, MRI ordered). No procedures or imaging performed today; MRI is ordered for workup. SNOMED list cleaned of two miscoded findings.",
+  "auto_coding_summary": "Established patient evaluation for a growing, firm, fixed plantar soft tissue mass on the right foot with concerning features and a paternal melanoma family history. Coded R22.31 (primary) for the undiagnosed mass, M79.671 for foot pain, and Z80.8 for family history of malignancy. E/M 99214 reflects moderate MDM driven by a new problem with uncertain prognosis and an MRI w/wo contrast order. No procedures, imaging, or supplies were performed/dispensed today, so no procedure codes, modifiers (-25/-57), or HCPCS items are billed. PMH (hypothyroidism, HTN) remain in supporting_conditions per outpatient guidelines.",
   "rag_context": {
-    "entities_extracted": 20,
+    "entities_extracted": 22,
     "candidates_per_system": {
-      "icd10": 206,
-      "cpt": 29,
+      "icd10": 240,
+      "cpt": 31,
       "hcpcs": 15
     },
     "corrections_made": [
       {
-        "type": "REMOVED",
-        "code": "M79.A21",
-        "reason": "Placeholder code - Nontraumatic compartment syndrome of right lower extremity does not match clinical scenario of plantar soft tissue mass",
-        "evidence": "Assessment documents 'Soft tissue mass R plantar foot, growing' - not compartment syndrome"
+        "type": "CHANGED",
+        "code": "R22.31",
+        "reason": "Updated description to match authoritative DB description (right lower limb is correct per ICD-10-CM official tabular). Code itself is correct for plantar foot mass.",
+        "evidence": "Soft tissue mass R plantar foot, growing, needs further workup to characterize"
       },
       {
-        "type": "ADDED",
-        "code": "R22.41",
-        "reason": "Primary diagnosis for localized swelling, mass and lump, right lower limb - matches plantar foot soft tissue mass",
-        "evidence": "Assessment: 'Soft tissue mass R plantar foot, growing, needs further workup to characterize'"
-      },
-      {
-        "type": "ADDED",
+        "type": "RETAINED",
         "code": "M79.671",
-        "reason": "Pain in right foot - mass is mildly tender and causes pain with walking",
-        "evidence": "HPI: 'pain w/ walking, especially in shoes'; PE: 'Mildly tender on palpation'"
+        "reason": "Pain in right foot supported by HPI (pain w/ walking) and exam (mildly tender on palpation).",
+        "evidence": "pain w/ walking ... Mildly tender on palpation"
       },
       {
-        "type": "ADDED",
-        "code": "L81.4",
-        "reason": "Other melanin hyperpigmentation - skin overlying mass is hyperpigmented",
-        "evidence": "PE: 'Skin overlying the mass: mildly hyperpigmented'"
-      },
-      {
-        "type": "ADDED",
+        "type": "RETAINED",
         "code": "Z80.8",
-        "reason": "Family history of malignant neoplasm of other organs/systems - father with melanoma raises malignancy concern in workup",
-        "evidence": "PMH: 'father had melanoma (concerning)'"
+        "reason": "Family hx of melanoma (father) \u2014 coded as Z80.8 per ICD-10 (family hx of malignant neoplasm of other organs/systems covers melanoma).",
+        "evidence": "Family hx: father had melanoma (concerning)"
       },
       {
         "type": "RETAINED",
         "code": "99214",
-        "reason": "Established patient, moderate MDM (new problem with uncertain prognosis + ordered MRI + moderate risk). No same-day procedure, no surgery decision made today; no -25 or -57 needed.",
-        "evidence": "HPI + exam + MRI ordered for workup of soft tissue mass with concerning features"
-      },
-      {
-        "type": "FLAGGED",
-        "code": "supporting_conditions",
-        "reason": "Hypothyroidism (E03.9) and HTN (I10) are PMH only, not addressed in Assessment - moved to supporting_conditions per Rule O",
-        "evidence": "PMH lists 'hypothyroid, mild HTN' with active medications; not in Assessment"
-      },
-      {
-        "type": "REMOVED",
-        "code": "SNOMED 29857009",
-        "reason": "Wrong concept - 'Chest pain on walking' does not match foot pain with ambulation",
-        "evidence": "Entity text was 'pain with ambulation right foot'"
-      },
-      {
-        "type": "CHANGED",
-        "code": "SNOMED 40275004",
-        "reason": "Replaced contact dermatitis (incorrect) with hyperpigmentation concept already present (43396009) - removed duplicate/wrong",
-        "evidence": "Entity text was hyperpigmentation, not contact dermatitis"
-      },
-      {
-        "type": "RETAINED",
-        "code": "SNOMED 241615005",
-        "reason": "MRI ordered (not performed today) - kept as informational with low confidence",
-        "evidence": "Plan: MRI ordered, not performed today"
+        "reason": "Established patient with moderate MDM: new problem with uncertain prognosis (rule-out malignancy), MRI ordered, moderate risk. No procedure performed today \u2192 no -25; no major surgery scheduled \u2192 no -57.",
+        "evidence": "Soft tissue mass R plantar foot, growing, needs further workup to characterize ... MRI of the R foot w/ and w/o contrast"
       }
     ],
-    "audit_notes": "Removed placeholder M79.A21 (compartment syndrome - clinically wrong). Added R22.41 (primary - localized mass right lower limb), M79.671 (pain right foot), L81.4 (overlying skin hyperpigmentation), and Z80.8 (family hx malignancy - relevant to malignancy workup). Moved E03.9 and I10 to supporting_conditions per Rule O (PMH-only, not addressed today). Cleaned SNOMED: removed wrong concept 29857009 (chest pain on walking) and incorrect 40275004 (contact dermatitis). 99214 retained without modifiers (no same-day procedure, no surgery decision).",
+    "audit_notes": "All four protected anchors (soft tissue mass R plantar foot, concerning features, no single benign dx, workup required) are captured by R22.31 with secondary M79.671 (pain) and Z80.8 (family hx). PMH conditions (hypothyroid, HTN) correctly placed in supporting_conditions. No procedures, imaging, or supplies performed/dispensed today per vision context, so no CPT/HCPCS additions. E/M 99214 supported by moderate MDM. SNOMED root concept (foot structure 56459004) removed as overly broad body-structure root; differential dx confidences lowered. Foot structure removed since it adds no clinical value beyond the diagnosis concepts already present.",
     "vision_context": {
       "note_category": "new_patient_visit",
       "procedures_performed_today": [],
@@ -393,20 +336,20 @@
   },
   "model_source": "claude",
   "api_usage": {
-    "prompt_tokens": 34873,
-    "completion_tokens": 7817,
-    "total_tokens": 42690
+    "prompt_tokens": 38249,
+    "completion_tokens": 7278,
+    "total_tokens": 45527
   },
   "physician_documented_codes": [],
   "missing_physician_codes": [],
   "cached_result": false,
   "ner_entities": [
     {
-      "text": "Lump on bottom of foot",
+      "text": "Lump on bottom of foot, growing, painful",
       "category": "finding",
-      "clinical_term": "plantar foot mass",
-      "laterality": "RIGHT",
-      "specificity": "growing, painful",
+      "clinical_term": "painful plantar foot mass",
+      "laterality": null,
+      "specificity": "growing",
       "source_section": "CC",
       "negated": false,
       "ner_source": "llm_only",
@@ -417,7 +360,7 @@
       "category": "finding",
       "clinical_term": "plantar foot mass",
       "laterality": "RIGHT",
-      "specificity": "forefoot, present 4 months, gradually growing",
+      "specificity": "forefoot, 4 months duration",
       "source_section": "HPI",
       "negated": false,
       "ner_source": "llm_only",
@@ -428,7 +371,7 @@
       "category": "finding",
       "clinical_term": "pain with ambulation",
       "laterality": "RIGHT",
-      "specificity": "especially in shoes",
+      "specificity": null,
       "source_section": "HPI",
       "negated": false,
       "ner_source": "llm_only",
@@ -439,7 +382,7 @@
       "category": "finding",
       "clinical_term": "skin discoloration",
       "laterality": "RIGHT",
-      "specificity": "around plantar mass",
+      "specificity": "overlying mass",
       "source_section": "HPI",
       "negated": false,
       "ner_source": "llm_only",
@@ -454,7 +397,7 @@
       "source_section": "PMH",
       "negated": false,
       "ner_source": "gliner_confirmed",
-      "ner_confidence": 0.905
+      "ner_confidence": 0.872
     },
     {
       "text": "mild HTN",
@@ -465,7 +408,7 @@
       "source_section": "PMH",
       "negated": false,
       "ner_source": "gliner_confirmed",
-      "ner_confidence": 0.798
+      "ner_confidence": 0.782
     },
     {
       "text": "levothyroxine",
@@ -476,7 +419,7 @@
       "source_section": "PMH",
       "negated": false,
       "ner_source": "gliner_confirmed",
-      "ner_confidence": 0.993
+      "ner_confidence": 0.991
     },
     {
       "text": "lisinopril",
@@ -486,8 +429,8 @@
       "specificity": null,
       "source_section": "PMH",
       "negated": false,
-      "ner_source": "llm_only",
-      "ner_confidence": 1.0
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.936
     },
     {
       "text": "father had melanoma",
@@ -503,9 +446,9 @@
     {
       "text": "Mass located at the plantar aspect of the R midfoot",
       "category": "finding",
-      "clinical_term": "plantar midfoot mass",
+      "clinical_term": "plantar soft tissue mass",
       "laterality": "RIGHT",
-      "specificity": "slightly lateral to central plantar surface, 2.5 x 2 x 1 cm, raised",
+      "specificity": "midfoot, slightly lateral to central plantar surface, 2.5 x 2 x 1 cm",
       "source_section": "PE",
       "negated": false,
       "ner_source": "llm_only",
@@ -516,7 +459,7 @@
       "category": "finding",
       "clinical_term": "firm non-fluctuant mass",
       "laterality": "RIGHT",
-      "specificity": "not fluid-filled cyst feel",
+      "specificity": null,
       "source_section": "PE",
       "negated": false,
       "ner_source": "llm_only",
@@ -525,35 +468,24 @@
     {
       "text": "Mildly tender on palpation",
       "category": "finding",
-      "clinical_term": "tenderness to palpation",
+      "clinical_term": "tenderness on palpation",
       "laterality": "RIGHT",
       "specificity": "mild",
       "source_section": "PE",
       "negated": false,
-      "ner_source": "llm_only",
-      "ner_confidence": 1.0
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.498
     },
     {
       "text": "mildly hyperpigmented",
       "category": "finding",
       "clinical_term": "skin hyperpigmentation overlying mass",
       "laterality": "RIGHT",
-      "specificity": "not classic melanoma appearance",
+      "specificity": "overlying skin",
       "source_section": "PE",
       "negated": false,
       "ner_source": "gliner_confirmed",
-      "ner_confidence": 0.722
-    },
-    {
-      "text": "Not transilluminating",
-      "category": "finding",
-      "clinical_term": "non-transilluminating mass",
-      "laterality": "RIGHT",
-      "specificity": "suggests solid mass",
-      "source_section": "PE",
-      "negated": false,
-      "ner_source": "gliner_confirmed",
-      "ner_confidence": 0.532
+      "ner_confidence": 0.726
     },
     {
       "text": "Fixed to deeper tissue, not freely mobile",
@@ -574,8 +506,8 @@
       "specificity": null,
       "source_section": "PE",
       "negated": false,
-      "ner_source": "gliner_confirmed",
-      "ner_confidence": 0.478
+      "ner_source": "llm_only",
+      "ner_confidence": 1.0
     },
     {
       "text": "sensation intact",
@@ -589,31 +521,64 @@
       "ner_confidence": 1.0
     },
     {
-      "text": "plantar aspect of the R midfoot",
+      "text": "plantar surface",
       "category": "body_structure",
-      "clinical_term": "plantar midfoot",
+      "clinical_term": "plantar surface of foot",
       "laterality": "RIGHT",
-      "specificity": "slightly lateral to central plantar surface",
+      "specificity": "midfoot",
       "source_section": "PE",
       "negated": false,
-      "ner_source": "llm_only",
-      "ner_confidence": 1.0
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.482
+    },
+    {
+      "text": "plantar fascia",
+      "category": "body_structure",
+      "clinical_term": "plantar fascia",
+      "laterality": "RIGHT",
+      "specificity": null,
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.503
     },
     {
       "text": "Soft tissue mass R plantar foot",
       "category": "diagnosis",
       "clinical_term": "soft tissue mass of plantar foot",
       "laterality": "RIGHT",
-      "specificity": "growing, deep, fixed, firm; needs workup to rule out malignancy",
+      "specificity": "growing, deep, fixed, firm",
       "source_section": "ASSESSMENT",
       "negated": false,
       "ner_source": "llm_only",
       "ner_confidence": 1.0
     },
     {
+      "text": "Plantar fibroma",
+      "category": "diagnosis",
+      "clinical_term": "plantar fibroma (differential)",
+      "laterality": "RIGHT",
+      "specificity": "differential diagnosis",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.874
+    },
+    {
+      "text": "Ganglion cyst",
+      "category": "diagnosis",
+      "clinical_term": "ganglion cyst (differential)",
+      "laterality": "RIGHT",
+      "specificity": "differential, less likely",
+      "source_section": "PE",
+      "negated": false,
+      "ner_source": "gliner_confirmed",
+      "ner_confidence": 0.842
+    },
+    {
       "text": "MRI of the R foot w/ and w/o contrast",
       "category": "procedure",
-      "clinical_term": "MRI foot with and without contrast (ordered)",
+      "clinical_term": "MRI foot with and without contrast - ordered",
       "laterality": "RIGHT",
       "specificity": "ordered, not performed today",
       "source_section": "PLAN",
