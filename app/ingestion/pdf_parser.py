@@ -7,6 +7,7 @@ from io import BytesIO
 import anthropic
 
 from app.core.logger import get_logger
+from app.core.config import CLAUDE_MODEL, CLAUDE_EFFORT
 
 logger = get_logger(__name__)
 
@@ -129,10 +130,10 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
 
     client = anthropic.Anthropic()
     response = client.messages.create(
-        model="claude-opus-4-7",
+        model=CLAUDE_MODEL,
         max_tokens=8192,
         thinking={"type": "adaptive"},
-        output_config={"effort": "xhigh"},
+        output_config={"effort": CLAUDE_EFFORT},
         system=[{
             "type": "text",
             "text": EXTRACTION_SYSTEM_PROMPT,

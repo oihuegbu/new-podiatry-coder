@@ -12,6 +12,9 @@ from app.rag.vector_store import MedicalCodeVectorStore
 from app.rag.code_reference import CodeReferenceDB
 from app.coding.code_assigner import assign_codes
 from app.validation.validator import CodingValidator
+from app.compliance.datastore.store import ComplianceDataStore
+from app.compliance.engine import ClaimScrubber
+from app.compliance.agents import build_default_agents
 from app.models.schemas import CodingResult
 
 logger = get_logger(__name__)
@@ -25,6 +28,8 @@ class MedicalCodingPipeline:
         self.ref_db = CodeReferenceDB()
         self.retriever: CandidateRetriever | None = None
         self.validator: CodingValidator | None = None
+        self.compliance_store: ComplianceDataStore | None = None
+        self.scrubber: ClaimScrubber | None = None
         self._initialized = False
 
     def initialize(self, force_rebuild_index: bool = False) -> None:
@@ -40,6 +45,13 @@ class MedicalCodingPipeline:
 
         self.retriever = CandidateRetriever(self.vector_store)
         self.validator = CodingValidator(self.ref_db)
+
+        logger.info("Building/loading compliance data store + 12-filter scrubber...")
+        self.compliance_store = ComplianceDataStore()
+        self.compliance_store.build_or_load()
+        self.scrubber = ClaimScrubber(
+            self.compliance_store, agents=build_default_agents(self.compliance_store)
+        )
 
         self._initialized = True
         logger.info("Pipeline initialized successfully")
@@ -62,7 +74,13 @@ class MedicalCodingPipeline:
                 try:
                     r = CodingResult(**cached)
                     r.cached_result = True
+                    # Always re-run the (cheap, local, deterministic) compliance
+                    # scrubber so cached results still get the clean-claim gate and
+                    # reflect the latest compliance data.
+                    scrub = self.scrubber.scrub(r.model_dump())
+                    self._apply_scrub_verdict(r, scrub)
                     self._print_summary(r)
+                    logger.info(f"  [cache] VERDICT: {r.final_disposition} — {r.final_summary}")
                     return r
                 except Exception:
                     pass  # corrupt cache entry — reprocess
@@ -129,6 +147,7 @@ class MedicalCodingPipeline:
             prior_surgery_info=prior_surgery_info,
             db=self.ref_db,
             physician_documented_codes=physician_documented_codes,
+            store=self.compliance_store,
         )
 
         # Step 5: Validation
@@ -151,7 +170,7 @@ class MedicalCodingPipeline:
             success=True,
             processing_time=round(elapsed, 2),
             patient_metadata=metadata,
-            note_sections={k: v[:200] + "..." if len(v) > 200 else v
+            note_sections={k: (v[:200] + "..." if len(v) > 200 else v) if v is not None else ""
                            for k, v in sections.items() if k != "full_text"},
             icd_codes=[self._to_icd(c) for c in coding_result.get("icd10_codes", [])],
             supporting_conditions=[self._to_supporting(c) for c in coding_result.get("supporting_conditions", [])],
@@ -184,12 +203,44 @@ class MedicalCodingPipeline:
             ),
         )
 
+        # Step 6: 12-filter compliance scrubber — the authoritative clean-claim gate
+        logger.info("[6/6] Scrubbing claim through 12 compliance filters...")
+        scrub = self.scrubber.scrub(result.model_dump())
+        self._apply_scrub_verdict(result, scrub)
+        logger.info(f"  VERDICT: {result.final_disposition} — {result.final_summary}")
+
         # Fix 4 — Store to cache (only on success, so failed runs don't get cached)
         if use_cache and result.success:
             result_cache.store(pdf_path, result.model_dump())
 
         self._print_summary(result)
         return result
+
+    def _apply_scrub_verdict(self, result, scrub) -> None:
+        """Make the 12-filter scrubber the single authoritative verdict and
+        reconcile the legacy tier so the two can never contradict.
+
+        Per the clean-claim rule: CLEAN passes; anything failing any filter is
+        routed to REVIEW with the blocking reasons. The legacy AUTO/REVIEW/REJECT
+        tier is derived from this (REJECT collapses into REVIEW)."""
+        result.claim_scrub = scrub.model_dump()
+        result.final_disposition = scrub.disposition.value      # CLEAN | REVIEW
+        result.final_summary = scrub.summary
+
+        if scrub.clean:
+            result.auto_coding_tier = "AUTO"
+            result.auto_coding_summary = scrub.summary
+        else:
+            result.auto_coding_tier = "REVIEW"
+            result.auto_coding_summary = scrub.summary
+            # surface the scrubber's blocking findings as the review reasons
+            blocking = [
+                f"[{f.filter_id}/{f.denial_risk.value}] {', '.join(f.codes)}: {f.reason}"
+                for f in scrub.blocking_findings
+            ]
+            # keep any pre-existing reasons, then add the authoritative ones
+            existing = list(result.auto_coding_review_reasons or [])
+            result.auto_coding_review_reasons = existing + blocking
 
     def _merge_candidates(self, entity_cands: dict, note_cands: dict) -> dict:
         merged = {"icd10": [], "cpt": [], "hcpcs": []}

@@ -118,7 +118,10 @@ class CodeReferenceDB:
         try:
             with open(GLOBAL_PERIODS_FILE) as f:
                 data = json.load(f)
-            self.global_periods = {k: int(v) for k, v in data.get("codes", {}).items()}
+            self.global_periods = {
+                k: int(v.get("global_days_int", 0) if isinstance(v, dict) else v)
+                for k, v in data.get("codes", {}).items()
+            }
             # Load prefix-based defaults (skip the 'note' key)
             raw_defaults = data.get("default_by_prefix", {})
             self.global_period_defaults = {

@@ -1,0 +1,1280 @@
+{
+  "source": "AMA CPT Appendix E (modifier 51 exempt) and Appendix F (modifier 63 exempt)",
+  "note": "Merged from modifier_51_exempt.json and modifier_63_exempt.json -- zero code overlap between the two appendices, so this is a clean union keyed by code. Each record carries both flags so a single lookup tells you both exemption statuses for a given CPT code.",
+  "codes": [
+    {
+      "code": "20697",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "20974",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "20975",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "30540",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "30545",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "31520",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33502",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33503",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33505",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33506",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33509",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33610",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33611",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33619",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33647",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33670",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33690",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33694",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33730",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33732",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33735",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33736",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33741",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33750",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33755",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33762",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33778",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33786",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33922",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33946",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33947",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33948",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "33949",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "35600",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "36415",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "36420",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "36450",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "36456",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "36460",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "36510",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "36660",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "39503",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "43313",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "43314",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "43520",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "43831",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "44055",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "44126",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "44127",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "44128",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "44500",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "46070",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "46705",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "46715",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "46716",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "46730",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "46735",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "46740",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "46742",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "46744",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "47700",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "47701",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "49215",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "49491",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "49492",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "49495",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "49496",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "49600",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "49605",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "49606",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "49610",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "49611",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "53025",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "54000",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "54150",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "54160",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "61107",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "63700",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "63702",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "63704",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "63706",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "65820",
+      "modifier_51_exempt": false,
+      "modifier_63_exempt": true,
+      "description_51": null,
+      "description_63": "CPT Appendix F \u2014 exempt from modifier 63 (procedure performed on infants <4kg). Also identified in CPT 2026 with the parenthetical instruction \"(Do not report modifier 63 in conjunction with...)\".",
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "76017",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "76018",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "76019",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "92641",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "93600",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "93602",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "93603",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "93610",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "93612",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "93615",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "93616",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "93618",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "94610",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "95905",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "99151",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    },
+    {
+      "code": "99152",
+      "modifier_51_exempt": true,
+      "modifier_63_exempt": false,
+      "description_51": "CPT Appendix E \u2014 exempt from modifier 51 (multiple procedures). Typically performed with another procedure but may stand alone; relative values already account for this, so no multiple-procedure reduction applies.",
+      "description_63": null,
+      "metadata": {
+        "source_file": "AppendixE_F.pdf",
+        "source_release": "2026-Update-4",
+        "release_date": "2026-07-01",
+        "extraction_method": "AMA CPT Standard Data ZIP API -> bundled Appendix PDF -> OCR/visual verification (page 988)"
+      }
+    }
+  ]
+}

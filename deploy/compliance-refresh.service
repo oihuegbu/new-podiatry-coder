@@ -1,0 +1,13 @@
+[Unit]
+Description=Claim-scrubber compliance data refresh (CMS/AMA sources)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/podiatry-medical-coder
+# --all self-selects the sources due in the current calendar month
+ExecStart=/usr/bin/python3 run_refresh.py --all
+# keep clinical-data jobs least-privilege
+User=claimly
+Nice=10

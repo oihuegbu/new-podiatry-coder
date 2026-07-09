@@ -15,6 +15,9 @@ OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
 # --- Anthropic / Claude ---
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "claude-opus-4-7")
+# Reasoning effort. "xhigh" = deepest (Opus); Sonnet supports high/low/max/medium.
+# Default "high" works on every current model; override per model via env.
+CLAUDE_EFFORT: str = os.getenv("CLAUDE_EFFORT", "high")
 
 # --- Paths ---
 DATA_DIR = BASE_DIR / "data"
@@ -23,7 +26,7 @@ QDRANT_URL: str = os.getenv("QDRANT_URL", "")  # if set, connect to Qdrant serve
 OUTPUT_DIR = BASE_DIR / "output" / "results"
 LOGS_DIR = BASE_DIR / "logs"
 
-ATTACHMENTS_DIR = BASE_DIR.parent / "kachi203-attachments"
+ATTACHMENTS_DIR = BASE_DIR / "doctors_notes"
 
 # --- Code reference files — stored in data/codes/ inside the repo
 #     Override any filename via .env without touching code

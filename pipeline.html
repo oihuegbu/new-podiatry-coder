@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Podiatry Medical Coding — Pipeline</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0d0d0d;
+    --surface:   #161616;
+    --elevated:  #1e1e1e;
+    --border:    #2a2a2a;
+    --border2:   #333;
+    --text:      #e8e8e8;
+    --text2:     #999;
+    --text3:     #666;
+    --accent:    #4f8ef7;
+    --accent-bg: #1a2a4a;
+    --pass:      #3a7d44;
+    --pass-bg:   #0f2a16;
+    --warn:      #a07820;
+    --warn-bg:   #2a2010;
+    --font:      -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono:      "SF Mono", "Fira Code", monospace;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  /* ── layout ── */
+  .page { max-width: 1100px; margin: 0 auto; padding: 40px 24px 80px; }
+
+  .header { margin-bottom: 36px; }
+  .header h1 { font-size: 22px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+  .header p  { color: var(--text2); font-size: 13px; }
+
+  .main { display: grid; grid-template-columns: 260px 1fr; gap: 32px; align-items: start; }
+
+  /* ── pipeline DAG ── */
+  .dag-wrap { position: sticky; top: 24px; }
+  .dag-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--text3);
+    margin-bottom: 12px;
+  }
+
+  svg.dag { display: block; overflow: visible; }
+
+  .stage-node { cursor: pointer; }
+  .stage-node rect {
+    fill: var(--elevated);
+    stroke: var(--border2);
+    stroke-width: 1;
+    rx: 6;
+    transition: fill .15s, stroke .15s;
+  }
+  .stage-node.active rect  { fill: var(--accent); stroke: var(--accent); }
+  .stage-node:hover:not(.active) rect { stroke: var(--accent); }
+  .stage-node text {
+    fill: var(--text2);
+    font-family: var(--font);
+    font-size: 11.5px;
+    pointer-events: none;
+    transition: fill .15s;
+  }
+  .stage-node.active text { fill: #fff; font-weight: 600; }
+  .stage-node .step-badge {
+    fill: var(--border2);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .04em;
+  }
+  .stage-node.active .step-badge { fill: rgba(255,255,255,.25); }
+  .stage-node .step-badge-text { fill: var(--text3); font-size: 9px; }
+  .stage-node.active .step-badge-text { fill: rgba(255,255,255,.7); }
+
+  .connector { stroke: var(--border2); stroke-width: 1.5; fill: none; }
+  .connector-arrow { fill: var(--border2); }
+
+  /* ── detail panel ── */
+  .detail { min-width: 0; }
+
+  .detail-header { margin-bottom: 20px; }
+  .detail-step {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 4px;
+  }
+  .detail-title { font-size: 18px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
+  .detail-file {
+    display: inline-block;
+    background: var(--elevated);
+    border: 1px solid var(--border2);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text2);
+  }
+
+  .detail-desc { color: var(--text2); margin: 16px 0; font-size: 13px; line-height: 1.7; }
+
+  .io-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+  .io-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 14px;
+  }
+  .io-label { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--text3); margin-bottom: 4px; }
+  .io-val { font-size: 12px; color: var(--text2); line-height: 1.5; }
+
+  .tech-row { margin-bottom: 20px; }
+  .tech-label { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--text3); margin-bottom: 5px; }
+  .tech-val { font-size: 12px; color: var(--accent); font-family: var(--mono); }
+
+  .divider { height: 1px; background: var(--border); margin: 20px 0; }
+
+  .details-label { font-size: 11px; font-weight: 600; color: var(--text3); margin-bottom: 10px; text-transform: uppercase; letter-spacing: .06em; }
+  .detail-list { list-style: none; display: flex; flex-direction: column; gap: 7px; }
+  .detail-list li { display: flex; gap: 10px; align-items: baseline; font-size: 12.5px; color: var(--text2); }
+  .detail-list li::before { content: "—"; color: var(--accent); flex-shrink: 0; font-weight: 700; }
+
+  /* 4-pass table */
+  .pass-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
+  .pass-table th {
+    text-align: left;
+    padding: 7px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--text3);
+    border-bottom: 1px solid var(--border);
+  }
+  .pass-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text2);
+    vertical-align: top;
+  }
+  .pass-table tr:last-child td { border-bottom: none; }
+  .pass-table .pass-num { color: var(--accent); font-weight: 600; white-space: nowrap; font-family: var(--mono); }
+
+  /* compliance agents grid */
+  .agents-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+  .agent-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+  .agent-name { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 3px; }
+  .agent-desc { font-size: 11px; color: var(--text3); line-height: 1.4; }
+
+  /* ref files table */
+  .files-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
+  .files-table th {
+    text-align: left;
+    padding: 6px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--text3);
+    border-bottom: 1px solid var(--border);
+  }
+  .files-table td {
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text2);
+    vertical-align: top;
+  }
+  .files-table tr:last-child td { border-bottom: none; }
+  .files-table .fname { font-family: var(--mono); color: var(--text); font-size: 11px; white-space: nowrap; }
+
+  /* section below main grid */
+  .section { margin-top: 48px; }
+  .section-title { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+  .section-sub { font-size: 12px; color: var(--text3); margin-bottom: 16px; }
+
+  /* gate callout */
+  .gate-callout {
+    background: var(--accent-bg);
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 12px 16px;
+    font-size: 12.5px;
+    color: var(--text2);
+    margin-top: 16px;
+  }
+  .gate-callout strong { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="header">
+    <h1>Podiatry Medical Coding Pipeline</h1>
+    <p>End-to-end workflow from clinical note PDF to billable claim-line recommendation. Click a stage to explore its details.</p>
+  </div>
+
+  <div class="main">
+
+    <!-- DAG -->
+    <div class="dag-wrap">
+      <div class="dag-label">Pipeline stages</div>
+      <svg class="dag" id="dag" width="220" height="530" viewBox="0 0 220 530"></svg>
+    </div>
+
+    <!-- Detail panel -->
+    <div class="detail" id="detail-panel"></div>
+
+  </div><!-- /main -->
+
+  <!-- Compliance agents -->
+  <div class="section">
+    <div class="section-title">12 Compliance Agents</div>
+    <div class="section-sub">Each agent inspects the normalized Claim model and returns a Finding (PASS / WARN / FAIL). Any FAIL → disposition REVIEW.</div>
+    <div class="agents-grid" id="agents-grid"></div>
+    <div class="gate-callout">
+      <strong>Gate rule:</strong> <strong>CLEAN</strong> requires zero FAIL findings across all 12 agents.
+      One or more FAILs → <strong>REVIEW</strong> — human coder must resolve before submission.
+    </div>
+  </div>
+
+</div><!-- /page -->
+
+<script>
+const STAGES = [
+  {
+    id: "ingestion",
+    step: "Stage 1",
+    label: ["Clinical Note", "Span"],
+    title: "Clinical Note Span",
+    file: "app/ingestion/pdf_parser.py",
+    tech: "Claude Opus 4.7 Vision · pdf2image · Poppler",
+    input: "PDF file (1–2 pages, rendered at 300 DPI)",
+    output: "Structured JSON: metadata, sections, note_category, procedures_performed_today, physician_documented_codes",
+    desc: "PDF pages are rendered to images by pdf2image then base64-encoded and sent to Claude with adaptive thinking enabled. The model returns rich JSON covering patient metadata, all clinical sections (chief complaint, HPI, PE, assessment/plan), note category, procedures performed today, and any codes the physician already documented.",
+    details: [
+      "Pages rendered at 300 DPI via pdf2image / Poppler",
+      "Always uses Claude Vision — not affected by LLM_PROVIDER setting",
+      "System-prompt caching reduces token cost on repeated note batches",
+      "Reasoning effort configurable via CLAUDE_EFFORT (high / max / xhigh for Opus)",
+    ],
+  },
+  {
+    id: "ner",
+    step: "Stage 2",
+    label: ["GLiNER / LLM", "Entity Extraction"],
+    title: "GLiNER / LLM Entity Extraction",
+    file: "app/ner/entity_extractor.py",
+    tech: "GPT-4o / Claude (via LLM_PROVIDER) · GLiNER-BioMed",
+    input: "Clinical sections + vision context JSON",
+    output: "ClinicalEntity objects tagged by type and source (gliner_confirmed | llm)",
+    desc: "Named entity recognition runs in two passes: the LLM identifies candidate entities across all clinical sections; GLiNER-BioMed validates and confirms each one. Source tags carry forward as confidence signals for the downstream RAG queries.",
+    details: [
+      "LLM-first extraction scans all clinical sections in parallel",
+      "GLiNER-BioMed confirms biomedical NER annotations",
+      "Source tags: gliner_confirmed | llm",
+      "Entity types: diagnosis, procedure, finding, supply, imaging",
+      "Confirmed entities drive per-entity Qdrant queries in next stage",
+    ],
+  },
+  {
+    id: "rag",
+    step: "Stage 3",
+    label: ["Candidate Code", "Generation"],
+    title: "Candidate Code Generation",
+    file: "app/rag/vector_store.py · retriever.py · code_assigner.py",
+    tech: "Qdrant · FastEmbed bge-base-en-v1.5 (768-dim) · BM25 · RRF · 4-Pass LLM",
+    input: "Clinical entities + note sections",
+    output: "Ranked ICD-10-CM, CPT, HCPCS candidate codes + verified assignments",
+    desc: "Two-part stage: (1) hybrid RAG retrieval over Qdrant using dense + sparse vectors fused via Reciprocal Rank Fusion — run per-entity and per-section; (2) four-pass LLM code assignment where each pass targets a specific code system. A hard DB gate drops any code not found in the authoritative reference tables.",
+    details: [
+      "Dense: BAAI/bge-base-en-v1.5 (768-dim cosine) via FastEmbed",
+      "Sparse: Qdrant BM25 for exact-term matching",
+      "Fusion: Reciprocal Rank Fusion (RRF) with dual prefetch",
+      "Collections: icd10 · cpt · hcpcs",
+    ],
+    passes: [
+      { pass: "Pass 1", prompt: "ICD_SYSTEM_PROMPT", assigns: "ICD-10-CM billable codes + supporting_conditions", note: "supporting_conditions are advisory / non-billable" },
+      { pass: "Pass 2", prompt: "CPT_SYSTEM_PROMPT",  assigns: "CPT procedures, E/M level, imaging", note: "MDM documentation, modifiers -25 / -57, global period annotations" },
+      { pass: "Pass 3", prompt: "HCPCS_SNOMED_SYSTEM_PROMPT", assigns: "HCPCS supplies / DME / J-codes + SNOMED CT", note: "J-codes for injections; SNOMED enriches clinical specificity" },
+      { pass: "Pass 4", prompt: "VERIFICATION_SYSTEM_PROMPT", assigns: "Corrections, anchor protection, compliance fixes", note: "Anchor-and-audit self-verification; J-code enforcement" },
+    ],
+  },
+  {
+    id: "lookup",
+    step: "Stage 4",
+    label: ["Authoritative", "Source Lookup"],
+    title: "Authoritative Source Lookup",
+    file: "app/rag/code_reference.py",
+    tech: "In-memory JSON reference tables (loaded once at startup)",
+    input: "LLM-generated code candidates",
+    output: "Validated codes with authoritative descriptions, MUE limits, global periods, NCCI flags",
+    desc: "CodeReferenceDB loads authoritative JSON files at startup and provides existence validation plus rule lookups. The hard gate removes any hallucinated code; descriptions, MUE limits, global periods, and NCCI conflicts are all resolved here.",
+    details: [
+      "data/codes/icd10cm_codes.json — ICD-10-CM code set (FY2026)",
+      "data/codes/cpt_codes.json — CPT codes + descriptors",
+      "data/codes/hcpcs_codes.json — HCPCS Level II codes",
+      "data/codes/ncci_data.json — NCCI PTP edit pairs (Column 1 / Column 2)",
+      "data/codes/ncci_aoc_edits.json — NCCI Add-On Code edits (7,743 entries, V2026Q3)",
+      "data/codes/mue_practitioner.json — MUE unit caps with MAI (1=line, 2=absolute, 3=clinical)",
+      "data/codes/podiatry_lcd.json — LCD coverage policy (qualifying dx + governed CPTs)",
+      "data/codes/pos_codes.json — Place of Service set + facility / non-facility flags",
+      "data/codes/modifiers.json — Recognized modifier reference set",
+      "data/codes/modifier_exempt.json — AMA CPT Appendix E + F (mod-51 + mod-63 exempt, 2026 Update 4)",
+      "data/global_periods.json — Global surgical period table",
+      "data/snomed_root_concepts.json — SNOMED CT root concept set",
+    ],
+  },
+  {
+    id: "validation",
+    step: "Stage 5",
+    label: ["Policy / Edit", "Validation"],
+    title: "Policy / Edit Validation",
+    file: "app/validation/validator.py · app/compliance/engine.py",
+    tech: "~20 deterministic rules · Pydantic Claim model · 12 compliance agents",
+    input: "Code-assigned CodingResult",
+    output: "Validation issues, audit score, CLEAN / REVIEW disposition",
+    desc: "Two-layer validation: CodingValidator runs ~20 deterministic checks with auto-corrections (NCCI suppression, modifier -25/-57, HCPCS laterality, global period conflicts). ClaimScrubber then normalizes output to a canonical Claim model and runs all 12 compliance agents. The scrubber is the authoritative gate — any FAIL finding yields REVIEW.",
+    details: [
+      "NCCI conflict detection + auto-suppression of bundled CPT codes",
+      "MUE unit limit enforcement",
+      "LCD qualifying-DX check (routine foot care requires systemic DX)",
+      "Modifier -25 / -57 logic with auto-add / remove",
+      "Global surgical period conflict detection",
+      "HCPCS laterality auto-add (RT / LT on L-codes)",
+      "BMI Z-code completeness, DM redundancy, physician-code reconciliation",
+      "CLEAN = zero FAIL findings · REVIEW = one or more FAILs",
+    ],
+  },
+  {
+    id: "output",
+    step: "Stage 6",
+    label: ["Claim-Line", "Recommendation"],
+    title: "Claim-Line Recommendation",
+    file: "app/pipeline.py → output/results/",
+    tech: "Pydantic v2 · JSON · SHA-keyed result cache",
+    input: "CLEAN / REVIEW scrub result + all 12 agent findings",
+    output: "CodingResult JSON per note + aggregated all_results.json",
+    desc: "The final CodingResult JSON is written per-note and aggregated. Each record carries billable ICD-10, CPT, HCPCS, SNOMED codes with full provenance tags, a pre-submission audit score, all 12 compliance findings, and the authoritative CLEAN / REVIEW disposition.",
+    details: [
+      "icd_codes · cpt_codes · hcpcs_codes · snomed_codes",
+      "supporting_conditions (advisory, non-billable)",
+      "Code source: physician_documented | ai_confirmed | ai_replaced_physician | ai_inferred",
+      "pre_submission_audit_score (0.0 – 1.0)",
+      "claim_scrub with full 12-agent finding detail",
+      "final_disposition: CLEAN | REVIEW (authoritative)",
+      "final_summary narrative for human review queue",
+      "SHA-keyed result cache; compliance scrubber always re-runs on cache hit",
+    ],
+  },
+];
+
+const AGENTS = [
+  { name: "Specificity",       desc: "Code existence, active-for-DOS, unspecified-when-specific-exists" },
+  { name: "NCCI-PTP",          desc: "Column 1 / Column 2 edit pairs, modifier indicator 0 / 1 / 9" },
+  { name: "MUE",               desc: "Per-line unit limits with MAI awareness" },
+  { name: "Modifier",          desc: "Recognized set, X{EPSU}-over-59, RT/LT & 50 conflicts, E/M mod-25" },
+  { name: "Medical Necessity", desc: "LCD / NCD / Article ICD↔CPT coverage" },
+  { name: "Global Period",     desc: "E/M inside a prior surgery's window, +24/58/78/79" },
+  { name: "Frequency",         desc: "Per-day and lifetime limits, duplicate-line detection" },
+  { name: "Add-On",            desc: "Add-on code present without its required primary code" },
+  { name: "POS Eligibility",   desc: "POS validity + facility / non-facility rate applicability" },
+  { name: "Prior Auth",        desc: "Data-driven required-PA list; FHIR-ready" },
+  { name: "Benefits",          desc: "Stedi 270/271 real-time eligibility / coverage check" },
+  { name: "Documentation",     desc: "Code support + modifier justification audit" },
+];
+
+// ── Build DAG ────────────────────────────────────────────────────────────────
+const NW = 200, NH = 58, GAP = 30, PAD = 10;
+const totalH = STAGES.length * NH + (STAGES.length - 1) * GAP + PAD * 2;
+const svg = document.getElementById("dag");
+svg.setAttribute("height", totalH);
+svg.setAttribute("viewBox", `0 0 220 ${totalH}`);
+
+const nodePositions = {};
+STAGES.forEach((s, i) => {
+  const x = 10, y = PAD + i * (NH + GAP);
+  nodePositions[s.id] = { x, y };
+});
+
+// connectors
+STAGES.forEach((s, i) => {
+  if (i === STAGES.length - 1) return;
+  const cur = nodePositions[s.id];
+  const nxt = nodePositions[STAGES[i + 1].id];
+  const x1 = cur.x + NW / 2, y1 = cur.y + NH;
+  const x2 = nxt.x + NW / 2, y2 = nxt.y;
+  const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+  line.setAttribute("x1", x1); line.setAttribute("y1", y1);
+  line.setAttribute("x2", x2); line.setAttribute("y2", y2 - 7);
+  line.setAttribute("class", "connector");
+  svg.appendChild(line);
+  // arrowhead
+  const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+  poly.setAttribute("points", `${x2},${y2} ${x2 - 5},${y2 - 8} ${x2 + 5},${y2 - 8}`);
+  poly.setAttribute("class", "connector-arrow");
+  svg.appendChild(poly);
+});
+
+// nodes
+STAGES.forEach((s) => {
+  const { x, y } = nodePositions[s.id];
+  const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  g.setAttribute("class", "stage-node");
+  g.dataset.id = s.id;
+
+  const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  rect.setAttribute("x", x); rect.setAttribute("y", y);
+  rect.setAttribute("width", NW); rect.setAttribute("height", NH);
+  rect.setAttribute("rx", 6);
+  g.appendChild(rect);
+
+  // step badge
+  const badge = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  badge.setAttribute("x", x + 6); badge.setAttribute("y", y + 6);
+  badge.setAttribute("width", 34); badge.setAttribute("height", 14);
+  badge.setAttribute("rx", 3);
+  badge.setAttribute("class", "step-badge");
+  g.appendChild(badge);
+
+  const badgeText = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  badgeText.setAttribute("x", x + 23); badgeText.setAttribute("y", y + 17);
+  badgeText.setAttribute("text-anchor", "middle");
+  badgeText.setAttribute("class", "step-badge-text");
+  badgeText.textContent = s.step;
+  g.appendChild(badgeText);
+
+  // label lines
+  s.label.forEach((line, li) => {
+    const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    t.setAttribute("x", x + NW / 2 + 4);
+    t.setAttribute("y", s.label.length === 1 ? y + NH / 2 + 4 : y + (li === 0 ? NH / 2 - 5 : NH / 2 + 12));
+    t.setAttribute("text-anchor", "middle");
+    t.textContent = line;
+    g.appendChild(t);
+  });
+
+  g.addEventListener("click", () => selectStage(s.id));
+  svg.appendChild(g);
+});
+
+// ── Render detail panel ────────────────────────────────────────────────────
+function selectStage(id) {
+  // update active node
+  document.querySelectorAll(".stage-node").forEach(n => n.classList.toggle("active", n.dataset.id === id));
+
+  const s = STAGES.find(x => x.id === id);
+  const panel = document.getElementById("detail-panel");
+
+  let passesHtml = "";
+  if (s.passes) {
+    passesHtml = `
+      <div class="divider"></div>
+      <div class="details-label">4-Pass LLM Code Assignment</div>
+      <table class="pass-table">
+        <thead><tr><th>Pass</th><th>System Prompt</th><th>Assigns</th><th>Notes</th></tr></thead>
+        <tbody>
+          ${s.passes.map(p => `
+            <tr>
+              <td class="pass-num">${p.pass}</td>
+              <td style="font-family:var(--mono);font-size:11px;color:var(--text)">${p.prompt}</td>
+              <td>${p.assigns}</td>
+              <td style="color:var(--text3)">${p.note}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>`;
+  }
+
+  panel.innerHTML = `
+    <div class="detail-header">
+      <div class="detail-step">${s.step}</div>
+      <div class="detail-title">${s.title}</div>
+      <span class="detail-file">${s.file}</span>
+    </div>
+
+    <p class="detail-desc">${s.desc}</p>
+
+    <div class="io-grid">
+      <div class="io-box">
+        <div class="io-label">Input</div>
+        <div class="io-val">${s.input}</div>
+      </div>
+      <div class="io-box">
+        <div class="io-label">Output</div>
+        <div class="io-val">${s.output}</div>
+      </div>
+    </div>
+
+    <div class="tech-row">
+      <div class="tech-label">Technology</div>
+      <div class="tech-val">${s.tech}</div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="details-label">Key Details</div>
+    <ul class="detail-list">
+      ${s.details.map(d => `<li>${d}</li>`).join("")}
+    </ul>
+
+    ${passesHtml}
+  `;
+}
+
+// ── Render agents grid ─────────────────────────────────────────────────────
+const grid = document.getElementById("agents-grid");
+AGENTS.forEach(a => {
+  const card = document.createElement("div");
+  card.className = "agent-card";
+  card.innerHTML = `<div class="agent-name">${a.name}</div><div class="agent-desc">${a.desc}</div>`;
+  grid.appendChild(card);
+});
+
+// default selection
+selectStage("ingestion");
+</script>
+</body>
+</html>

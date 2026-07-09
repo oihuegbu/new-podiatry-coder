@@ -9,6 +9,7 @@ from app.core.config import (
     OPENAI_MODEL,
     ANTHROPIC_API_KEY,
     CLAUDE_MODEL,
+    CLAUDE_EFFORT,
 )
 from app.core.logger import get_logger
 
@@ -162,23 +163,26 @@ def _claude_chat_completion(
     # Ensure there is always enough headroom for the actual JSON output.
     effective_max_tokens = max(max_tokens * 3, 16384)
 
-    response = client.messages.create(
+    # Use streaming to support long-running requests (>10 min) required by the SDK
+    # for extended thinking on complex notes.
+    content = ""
+    input_tokens = 0
+    output_tokens = 0
+    with client.messages.stream(
         model=model or CLAUDE_MODEL,
         max_tokens=effective_max_tokens,
         thinking={"type": "adaptive"},
-        # xhigh effort → deepest reasoning, most consistent outputs, least hallucination
-        output_config={"effort": "xhigh"},
-        # Cache the stable system prompt — saves cost and latency on repeated coding calls
+        output_config={"effort": CLAUDE_EFFORT},
         system=[{
             "type": "text",
             "text": system_prompt,
             "cache_control": {"type": "ephemeral"},
         }],
         messages=[{"role": "user", "content": full_user_prompt}],
-    )
+    ) as stream:
+        response = stream.get_final_message()
 
     # Extract text from response content blocks (skip thinking blocks)
-    content = ""
     for block in response.content:
         if block.type == "text":
             content = block.text

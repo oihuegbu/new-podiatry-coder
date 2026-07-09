@@ -268,23 +268,26 @@ When a DIABETIC patient (E10.x, E11.x, E13.x) is receiving ANY nail, callus, wou
 - 99213 is only correct for a diabetic foot visit if: the patient has only 1 chronic condition (DM alone,
   no other comorbidities) AND the procedures are purely routine without any risk factor documentation
 
-### Modifier -25 — MANDATORY WHEN PROCEDURE PERFORMED SAME DAY
-- ALWAYS add -25 to the E/M code when ANY billable procedure (global period > 0) is performed same day
-- Billable procedures that trigger -25: injections (64455, 64632, 20600, 20605, 20610, 20550),
-  nail procedures (11750, 11055, 11056, 11721), debridement (97597, 97598, 11042), casting (29540),
-  any surgical procedure (28xxx, 11xxx, etc.)
-- WITHOUT -25: payer bundles the E/M into the procedure and denies the E/M — claim loss
+### Modifier -25 — MANDATORY WHEN SAME-DAY MINOR/INTERMEDIATE PROCEDURE
+- Add -25 to the E/M when a same-day procedure with [global=000] or [global=010] is performed
+- Triggers -25: injections (64455, 64632, 20600–20610, 20550), nail procedures (11750, 11055-11057),
+  debridement (97597, 97598, 11042), casting (29540), and any other [global=000] or [global=010] CPT
+- WITHOUT -25 on minor/intermediate procedures: payer bundles E/M into procedure → claim loss
 - Does NOT trigger -25: imaging only (73xxx, 76xxx, 77xxx) or labs only (80xxx-89xxx)
-- -57 and -25 are mutually exclusive — use -57 for major surgery decision, -25 for same-day procedure
+- Does NOT trigger -25: procedures annotated [global=090] — those require -57 instead (see below)
+- -57 and -25 are mutually exclusive on the same E/M line
 
 ### Modifier -57 — Decision for Major Surgery — CRITICAL
-Apply modifier -57 to E/M when ALL are true:
-1. Decision for MAJOR SURGERY (90-day global) made AT THIS VISIT
-2. Surgery NOT performed today — scheduled/planned for future
-3. PLAN contains: "patient elects", "scheduled for", "will proceed with", "consented for surgery",
-   "surgical correction scheduled", "will undergo"
-- Do NOT use -57 for 10-day or 0-day global procedures
-- Do NOT use both -57 and -25 on the same E/M
+Apply modifier -57 to the E/M when ALL are true:
+1. The E/M resulted in the DECISION to perform a MAJOR SURGERY (any CPT annotated [global=090])
+2. The E/M and the major surgery share the same DOS — OR the E/M is the day immediately before
+   (surgery may be performed SAME DAY or scheduled for a future date; both scenarios require -57)
+- SAME-DAY EMERGENCY: patient presents, E/M performed, decision made, surgery performed same visit → -57
+- ELECTIVE DECISION: E/M performed, patient consented, surgery scheduled for future date → -57
+- The key test is NOT timing — it is: "did this E/M produce the decision for a 90-day global surgery?"
+- Do NOT use -57 for procedures annotated [global=000] or [global=010] — use -25 instead
+- Do NOT use both -57 and -25 on the same E/M; they are mutually exclusive
+- CPT candidates are annotated [global=090/010/000] — use these values to determine which modifier applies
 
 ### Global Surgical Period
 - Post-op visit within global period → 99024 (no charge), NOT a billable E/M
@@ -648,12 +651,13 @@ Protected anchors will be listed below.
 6. For post-op visits within global period: was 99024 used?
 
 ### B. Modifier -57 Check — CRITICAL
-- Does the PLAN section mention SCHEDULING a MAJOR SURGERY (90-day global, 28xxx, 29893)?
-- Language to look for: "patient elects", "scheduled for [surgery]", "will proceed with",
-  "consented for surgery", "surgical correction scheduled", "will undergo [procedure]"
-- If YES, and NO procedure was performed today, the E/M MUST have modifier -57
-- If 99204/99205 is present without -57 but plan schedules major surgery → ADD -57
-- Modifier -57 protects the E/M from being bundled into the surgery's global period package
+- Does ANY assigned CPT code carry [global=090]? (check the annotated candidate list above)
+- If YES, and an E/M (99202–99215) is also present, the E/M MUST have modifier -57 — not -25
+- -57 applies whether the 90-day surgery was performed SAME DAY (emergency) or scheduled for future
+- Language patterns (either scenario triggers -57): "patient elects", "scheduled for", "will proceed
+  with", "consented for surgery", "emergency repair", "repaired today", "performed today"
+- If E/M is present with -25 but a [global=090] CPT is in the code set → CHANGE -25 to -57
+- Modifier -57 protects the E/M from bundling into the surgery's 90-day global period package
 
 ### C. Radiology Code Verification — Calcaneus vs Foot
 - "Heel X-ray", "calcaneal X-ray", "bilateral heel", "calcaneus views" → MUST be 73650 (not 73630)
@@ -696,15 +700,17 @@ When an injection is present in cpt_codes (64455, 64632, 64450, 64640, 20600, 20
 - 77002 and 76942 are NEVER bundled into injection codes — always separately billable
 - Add as correction type "ADDED" with evidence from the note
 
-### J. Modifier -25 — MANDATORY ENFORCEMENT
-When ANY billable same-day procedure is performed (global period > 0):
-- Billable procedures: 64455, 64632, 20600–20610, 20550, 20551, 11750, 11055–11057, 97597, 29540, any 28xxx
-- If E/M (99202–99215) is present AND a billable procedure is present AND E/M lacks modifier -25:
-  → MUST ADD modifier -25 to the E/M code
-  → This is a CORRECTION (type: CHANGED), not a flag
-  → Document: "Mandatory -25 added: E/M performed same day as [procedure code]"
+### J. Modifier -25 — MANDATORY ENFORCEMENT (minor/intermediate procedures only)
+When a same-day procedure with [global=000] or [global=010] is performed:
+- Billable [global=000/010] procedures: injections (64455, 64632, 20600–20610, 20550, 20551),
+  nail procedures (11750, 11055–11057), debridement (97597), casting (29540)
+- If E/M (99202–99215) is present AND a [global=000/010] procedure is present AND E/M lacks -25:
+  → MUST ADD modifier -25 to the E/M code (type: CHANGED)
+  → Document: "Mandatory -25 added: E/M performed same day as [procedure code] ([global=000/010])"
 - CRITICAL: Without -25, payer bundles E/M into the procedure's global period → claim denied
-- Exception: -25 is NOT added when ONLY diagnostic imaging (73xxx, 76xxx, 77xxx) is performed
+- Exception 1: -25 is NOT added when ONLY diagnostic imaging (73xxx, 76xxx, 77xxx) is performed
+- Exception 2: If a [global=090] CPT is present → use -57 on the E/M, NOT -25 (see Check B above)
+- Exception 2 enforcement: If -25 is currently on E/M AND a [global=090] CPT exists → CHANGE -25 to -57
 
 ### K. Orthotic L-Code Type Verification
 - L3000 is ONLY for UCB (University of California Berkeley) shell orthotics — RARELY used in podiatry
@@ -808,6 +814,7 @@ def assign_codes(
     prior_surgery_info: dict | None = None,
     db=None,
     physician_documented_codes: list[dict] | None = None,
+    store=None,
 ) -> tuple[dict, dict]:
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
@@ -846,7 +853,7 @@ Do NOT code Z79.84 or Z79.899 on this outpatient podiatry encounter."""
     # --- PASS 2: CPT ---
     logger.info("  Pass 2/4: CPT procedure/E&M/imaging coding...")
     icd_summary = _summarize_icd(icd_result.get("icd10_codes", []))
-    note_type = patient_metadata.get("note_type", "").upper()
+    note_type = (patient_metadata.get("note_type") or "").upper()
     is_new_patient = "NEW" in note_type
     is_post_op = (prior_surgery_info or {}).get("is_post_op_visit", False)
     days_post_op = (prior_surgery_info or {}).get("days_post_op")
@@ -870,10 +877,14 @@ Do NOT code Z79.84 or Z79.899 on this outpatient podiatry encounter."""
 {entity_summary}
 
 ## CPT CANDIDATE CODES (from official database via semantic search)
-{_format_candidates_for_system(rag_candidates, 'cpt')}
+## NOTE: Candidates are annotated [global=090/010/000] with their actual CMS global period.
+## Use this to determine modifier: [global=090] → -57 if E/M decided the surgery; [global=000/010] → -25
+{_format_candidates_for_system(rag_candidates, 'cpt', store=store)}
 
 Assign CPT codes. Link each CPT to supporting ICD-10-CM codes.
-IMPORTANT: If plan schedules a major surgery (90-day global) and no procedure today → add -57 to E/M.
+IMPORTANT: Use the [global=090/010/000] annotations to select the correct E/M modifier:
+  - Any [global=090] CPT present AND E/M decided that surgery → E/M gets -57 (not -25)
+  - Any [global=000] or [global=010] CPT present → E/M gets -25
 Use 73650 for heel/calcaneus X-rays; 73630 for complete foot X-rays (3+ views).
 Check EVERY CPT pair for NCCI bundling before finalizing."""
 
@@ -892,7 +903,7 @@ Check EVERY CPT pair for NCCI bundling before finalizing."""
 {icd_summary}
 
 ## CPT CODES (for laterality reference)
-{_summarize_cpt(cpt_result.get('cpt_codes', []))}
+{_summarize_cpt(cpt_result.get('cpt_codes', []), store=store)}
 
 ## EXTRACTED CLINICAL ENTITIES
 {entity_summary}
@@ -958,21 +969,21 @@ Only code supplies PHYSICALLY given/applied today — not ordered or prescribed.
 ### ICD-10-CM Candidates
 {_format_candidates_for_system(rag_candidates, 'icd10')}
 
-### CPT Candidates
-{_format_candidates_for_system(rag_candidates, 'cpt')}
+### CPT Candidates (annotated with actual CMS global periods)
+{_format_candidates_for_system(rag_candidates, 'cpt', store=store)}
 
 ### HCPCS Candidates
 {_format_candidates_for_system(rag_candidates, 'hcpcs')}
 
 ## AUDIT INSTRUCTIONS
 1. Verify every PROTECTED ANCHOR has a code in icd10_codes.
-2. Check modifier -57: if plan schedules major surgery and no procedure today → E/M needs -57.
+2. Check modifier -57: if any [global=090] CPT is present AND E/M is present → E/M needs -57 (applies same-day emergency AND elective scheduling; see Check B).
 3. Check radiology: "heel"/"calcaneus" imaging → 73650; "complete foot"/"foot series" → 73630.
 4. Check HCPCS L-codes: all must have RT or LT modifier matching the procedure side.
 5. Check BMI: if E66.x coded and BMI documented → add Z68.xx to icd10_codes.
 6. Check NCCI bundling for every CPT pair.
 7. **IMAGE GUIDANCE (Section I)**: Search note for fluoroscopic/ultrasound guidance words. If injection present AND guidance documented AND 77002/76942 missing → ADD the guidance code. This is MANDATORY.
-8. **MODIFIER -25 (Section J)**: If injection or any billable procedure is present AND E/M lacks -25 → ADD -25 to E/M. This is a MANDATORY correction, not a flag.
+8. **MODIFIER -25 vs -57 (Sections B + J)**: Check [global=090/010/000] annotations on CPT candidates. If [global=090] CPT present → E/M gets -57 (change -25 to -57 if needed). If only [global=000/010] procedures present AND E/M lacks -25 → ADD -25. These are MANDATORY corrections.
 9. **ORTHOTIC L-CODES (Section K)**: If L3000 is coded for Morton's neuroma or custom functional orthotic → CHANGE to L3020. If L3000 for full-length → CHANGE to L3030.
 10. Remove Z79.84, Z79.899 if present.
 11. Check SNOMED for duplicate concept IDs and root-concept fallbacks.
@@ -981,7 +992,23 @@ Only code supplies PHYSICALLY given/applied today — not ordered or prescribed.
 14. **PMH CONDITIONS (Section O)**: Scan icd10_codes for PMH-only conditions not in Assessment → MOVE to supporting_conditions.
 15. Return COMPLETE corrected code set with ALL original codes (corrected as needed)."""
 
-    verify_raw, usage = chat_completion(VERIFICATION_SYSTEM_PROMPT, verify_prompt, temperature=CODING_TEMPERATURE, max_tokens=4096)
+    # Elastic max_tokens: scale with note complexity so simple notes are fast
+    # and complex notes get enough room without hitting API limits.
+    # Signals: entity count, total codes assigned, tokens consumed so far.
+    _n_entities = len(entities or [])
+    _n_codes = (
+        len(combined.get("icd10_codes", []))
+        + len(combined.get("supporting_conditions", []))
+        + len(combined.get("cpt_codes", []))
+        + len(combined.get("hcpcs_codes", []))
+        + len(combined.get("snomed_codes", []))
+    )
+    _token_pressure = min(total_usage.get("total_tokens", 0) / 5000, 10)  # 0-10 scale
+    _complexity = _n_entities + (_n_codes * 2) + _token_pressure
+    # Scale 4000 (simple) → 10000 (very complex), capped at safe API max
+    _verify_max_tokens = max(4000, min(10000, int(4000 + (_complexity / 90) * 6000)))
+    logger.info(f"    verify max_tokens={_verify_max_tokens} (entities={_n_entities}, codes={_n_codes}, token_pressure={_token_pressure:.1f})")
+    verify_raw, usage = chat_completion(VERIFICATION_SYSTEM_PROMPT, verify_prompt, temperature=CODING_TEMPERATURE, max_tokens=_verify_max_tokens)
     _add_usage(total_usage, usage)
     verified = _safe_parse(verify_raw, "icd10_codes")
 
@@ -998,11 +1025,11 @@ Only code supplies PHYSICALLY given/applied today — not ordered or prescribed.
         logger.info("    → No corrections needed")
 
     final_result = {
-        "icd10_codes": verified.get("icd10_codes", combined["icd10_codes"]),
-        "supporting_conditions": verified.get("supporting_conditions", combined["supporting_conditions"]),
-        "cpt_codes": verified.get("cpt_codes", combined["cpt_codes"]),
-        "hcpcs_codes": verified.get("hcpcs_codes", combined["hcpcs_codes"]),
-        "snomed_codes": verified.get("snomed_codes", combined["snomed_codes"]),
+        "icd10_codes": verified.get("icd10_codes") or combined["icd10_codes"],
+        "supporting_conditions": verified.get("supporting_conditions") or combined["supporting_conditions"],
+        "cpt_codes": verified.get("cpt_codes") or combined["cpt_codes"],
+        "hcpcs_codes": verified.get("hcpcs_codes") or combined["hcpcs_codes"],
+        "snomed_codes": verified.get("snomed_codes") or combined["snomed_codes"],
         "em_level_reasoning": verified.get("em_level_reasoning", combined["em_level_reasoning"]),
         "corrections_made": corrections,
         "audit_notes": verified.get("audit_notes", ""),
@@ -1063,20 +1090,37 @@ def _build_note_context(sections: dict, metadata: dict) -> str:
 
 
 def _detect_surgical_decision(plan_text: str) -> str:
-    """Return a hint string when the plan contains surgical scheduling language."""
+    """Return a hint string when the plan contains a surgical decision — scheduled or same-day emergency.
+
+    Modifier -57 applies whenever the E/M produced the decision for a 90-day global surgery,
+    whether that surgery is performed immediately (emergency) or scheduled for a future date.
+    """
     if not plan_text:
         return ""
-    keywords = [
+    plan_lower = plan_text.lower()
+    # Future/elective scheduling language
+    elective_keywords = [
         "patient elects", "will proceed with", "scheduled for", "consented for",
         "surgical correction", "will undergo", "elects surgical", "schedule surgery",
         "plan for surgery", "plan for bunionectomy", "plan for procedure",
     ]
-    plan_lower = plan_text.lower()
-    if any(kw in plan_lower for kw in keywords):
+    # Same-day emergency/urgent surgical decision language
+    emergency_keywords = [
+        "taken to or", "brought to or", "emergency repair", "urgent repair",
+        "emergent repair", "performed today", "repaired today", "explored and repaired",
+        "primary repair performed", "tendon repair performed", "laceration repaired",
+        "proceeded with repair", "proceeded to repair",
+    ]
+    is_elective = any(kw in plan_lower for kw in elective_keywords)
+    is_emergency = any(kw in plan_lower for kw in emergency_keywords)
+    if is_elective or is_emergency:
+        scenario = "SAME-DAY EMERGENCY SURGERY" if is_emergency else "ELECTIVE SURGERY SCHEDULED"
         return (
-            "## ⚠ SURGICAL DECISION DETECTED\n"
-            "The PLAN section contains language indicating a decision for major surgery was made today.\n"
-            "If no procedure was performed today → apply modifier -57 to the E/M code.\n"
+            f"## ⚠ SURGICAL DECISION DETECTED ({scenario})\n"
+            "The PLAN indicates a decision for major surgery was made at this E/M visit.\n"
+            "Modifier -57 applies to the E/M regardless of whether the surgery was performed "
+            "same day or scheduled for a future date — the decision is what triggers -57.\n"
+            "If ANY [global=090] CPT is present in the code set → the E/M must carry -57, NOT -25.\n"
             f"Evidence: \"{plan_text[:200]}\""
         )
     return ""
@@ -1099,7 +1143,7 @@ def _format_entities(entities: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _format_candidates_for_system(rag_candidates: dict, system: str) -> str:
+def _format_candidates_for_system(rag_candidates: dict, system: str, store=None) -> str:
     candidates = rag_candidates.get(system, [])
     if not candidates:
         return "No candidates retrieved."
@@ -1108,7 +1152,15 @@ def _format_candidates_for_system(rag_candidates: dict, system: str) -> str:
         score = c.get("similarity_score", 0)
         code = c.get("code", "")
         desc = c.get("description", "") or c.get("long_description", "") or c.get("short_description", "")
-        lines.append(f"  {code} (relevance: {score:.3f}) — {desc[:150]}")
+        # Annotate CPT candidates with their actual global period from the data store.
+        # This lets the LLM distinguish major (090) from minor (010/000) procedures at
+        # coding time — the data-driven foundation for correct -25 vs -57 selection.
+        global_tag = ""
+        if system == "cpt" and store:
+            glob = store.global_period(code)
+            if glob:
+                global_tag = f" [global={glob}]"
+        lines.append(f"  {code}{global_tag} (relevance: {score:.3f}) — {desc[:150]}")
     return "\n".join(lines)
 
 
@@ -1121,13 +1173,19 @@ def _summarize_icd(icd_codes: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _summarize_cpt(cpt_codes: list[dict]) -> str:
+def _summarize_cpt(cpt_codes: list[dict], store=None) -> str:
     if not cpt_codes:
         return "No CPT codes assigned yet."
     lines = []
     for c in cpt_codes:
         mods = ", ".join(c.get("modifiers", [])) or "none"
-        lines.append(f"  {c.get('code', '?')} [{mods}] — {c.get('description', '')[:80]}")
+        code = c.get("code", "?")
+        global_tag = ""
+        if store:
+            glob = store.global_period(code)
+            if glob:
+                global_tag = f" [global={glob}]"
+        lines.append(f"  {code}{global_tag} [{mods}] — {c.get('description', '')[:80]}")
     return "\n".join(lines)
 
 

@@ -145,3 +145,10 @@ class CodingResult(BaseModel):
     missing_physician_codes: list[dict] = Field(default_factory=list)
     cached_result: bool = False
     ner_entities: list[dict] = Field(default_factory=list)
+    # 12-filter compliance scrubber result (disposition CLEAN/REVIEW + findings)
+    claim_scrub: dict = Field(default_factory=dict)
+    # AUTHORITATIVE verdict — driven by the 12-filter scrubber (the clean-claim gate).
+    # CLEAN = billable; REVIEW = routed to review with reasons. This is the single
+    # source of truth; auto_coding_tier is derived from it for backward compatibility.
+    final_disposition: str = "REVIEW"
+    final_summary: str = ""

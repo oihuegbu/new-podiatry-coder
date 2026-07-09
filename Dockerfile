@@ -11,9 +11,13 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# Install Python dependencies as a cached layer
+# Install Python dependencies as a cached layer.
+# torch CPU-only (~220 MB vs 532 MB for the default CUDA wheel) is installed
+# first from the PyTorch index; remaining deps come from PyPI.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --timeout 120 --retries 5 \
+        torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir --timeout 120 --retries 5 -r requirements.txt
 
 # Pre-download FastEmbed models so the first pipeline run doesn't need internet
 RUN python -c "\

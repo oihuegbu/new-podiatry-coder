@@ -1,0 +1,11 @@
+[Unit]
+Description=Run compliance data refresh daily (jobs self-select by cadence)
+
+[Timer]
+# Fire daily; run_refresh.py --all picks only the sources due this month
+# (weekly MCD effectively refreshes within the week; quarterly/annual fire on their months).
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

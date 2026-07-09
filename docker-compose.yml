@@ -6,28 +6,34 @@ services:
       - "6333:6333"
     volumes:
       - qdrant_data:/qdrant/storage
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:6333/readyz"]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-      start_period: 10s
 
   app:
     build: .
     depends_on:
-      qdrant:
-        condition: service_healthy
+      - qdrant
     env_file: .env
     environment:
       - QDRANT_URL=http://qdrant:6333
       - NOTES_DIR=/app/attachments
     volumes:
-      - ../kachi203-attachments:/app/attachments:ro
+      - ./doctors_notes:/app/attachments:ro
       - ./output:/app/output
       - ./logs:/app/logs
       - ./data/result_cache:/app/data/result_cache
-    command: python run.py --rebuild-index
+      - ./data/qdrant_store:/app/data/qdrant_store
+      - ./app:/app/app
+      - ./run.py:/app/run.py
+      - hf_cache:/root/.cache/huggingface
+    command: >
+      sh -c "
+        echo 'Waiting for Qdrant to be ready...';
+        until curl -sf http://qdrant:6333/readyz > /dev/null 2>&1; do
+          echo '  Qdrant not ready yet, retrying in 10s...'; sleep 10;
+        done;
+        echo 'Qdrant is ready.';
+        python run.py
+      "
 
 volumes:
   qdrant_data:
+  hf_cache:

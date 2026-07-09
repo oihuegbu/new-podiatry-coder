@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Podiatry Medical Coding System
-NER → RAG (Qdrant hybrid) → LLM (Claude Opus 4.7) → Validation Pipeline
+NER → RAG (Qdrant hybrid) → LLM (Claude Opus 5.0) → Validation Pipeline
 
 Usage:
     python run.py                     # Process all notes
@@ -51,7 +51,7 @@ def main():
             sys.exit(1)
         note_files = [note_path]
     else:
-        note_files = sorted(NOTES_DIR.glob("NOTE_*.pdf"))
+        note_files = sorted(NOTES_DIR.glob("*.pdf"))
 
     if not note_files:
         logger.error(f"No clinical notes found in {NOTES_DIR}")

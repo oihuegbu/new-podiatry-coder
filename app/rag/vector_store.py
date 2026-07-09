@@ -1,5 +1,8 @@
 import hashlib
 import json
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 from qdrant_client import QdrantClient
@@ -34,7 +37,7 @@ _CHECKSUM_FILE = QDRANT_DIR / "codes_checksum.txt"
 _CODE_SYSTEMS  = ["icd10", "cpt", "hcpcs"]
 _DENSE_MODEL   = "BAAI/bge-base-en-v1.5"   # 768-dim, strong on specialized text
 _DENSE_DIMS    = 768
-_UPSERT_BATCH  = 500
+_UPSERT_BATCH  = 30
 
 
 def _compute_checksum() -> str:
@@ -79,17 +82,7 @@ class MedicalCodeVectorStore:
         # Checksum dir must always exist regardless of Qdrant mode
         _CHECKSUM_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-        if QDRANT_URL:
-            logger.info(f"Connecting to Qdrant server at {QDRANT_URL}")
-            self._client = QdrantClient(url=QDRANT_URL)
-        else:
-            QDRANT_DIR.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Using local Qdrant store at {QDRANT_DIR}")
-            self._client = QdrantClient(path=str(QDRANT_DIR))
-
-        logger.info(f"Loading dense model ({_DENSE_MODEL}) and BM25 sparse model...")
-        self._dense_model  = TextEmbedding(_DENSE_MODEL)
-        self._sparse_model = SparseTextEmbedding("Qdrant/bm25")
+        self._open_client()
 
         current_checksum  = _compute_checksum()
         stored_checksum   = _CHECKSUM_FILE.read_text().strip() if _CHECKSUM_FILE.exists() else ""
@@ -106,10 +99,63 @@ class MedicalCodeVectorStore:
                 logger.info("Code files changed — rebuilding Qdrant collections...")
             else:
                 logger.info("Force rebuild requested — rebuilding Qdrant collections...")
-            self._build_all_collections()
+            self._rebuild_via_subprocesses()
             _CHECKSUM_FILE.write_text(current_checksum)
 
+        # Load the embedding models for query-time search (one query at a time is
+        # light — the memory-heavy part is the bulk index build, handled above in
+        # isolated subprocesses).
+        self._load_models()
         self._loaded = True
+
+    # ------------------------------------------------------------------
+    # Client / model lifecycle
+    # ------------------------------------------------------------------
+
+    def _open_client(self) -> None:
+        if self._client is not None:
+            return
+        if QDRANT_URL:
+            logger.info(f"Connecting to Qdrant server at {QDRANT_URL}")
+            self._client = QdrantClient(url=QDRANT_URL, timeout=3600)
+        else:
+            QDRANT_DIR.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Using local Qdrant store at {QDRANT_DIR}")
+            self._client = QdrantClient(path=str(QDRANT_DIR))
+
+    def _close_client(self) -> None:
+        """Release the client (and, for the local store, its on-disk lock)."""
+        if self._client is not None:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            self._client = None
+
+    def _load_models(self) -> None:
+        if self._dense_model is None or self._sparse_model is None:
+            logger.info(f"Loading dense model ({_DENSE_MODEL}) and BM25 sparse model...")
+            self._dense_model  = TextEmbedding(_DENSE_MODEL)
+            self._sparse_model = SparseTextEmbedding("Qdrant/bm25")
+
+    def build_one(self, name: str) -> None:
+        """Build a single collection end-to-end. Called inside a dedicated
+        subprocess (see app/rag/build_collection.py) so all memory — including
+        the onnxruntime arena — is returned to the OS when the process exits."""
+        self._open_client()
+        self._load_models()
+        self._build_collection(name, self._records_for(name))
+        self._close_client()
+
+    def _records_for(self, name: str) -> list[dict]:
+        loaders = {
+            "icd10": self._load_icd10_records,
+            "cpt":   self._load_cpt_records,
+            "hcpcs": self._load_hcpcs_records,
+        }
+        if name not in loaders:
+            raise ValueError(f"unknown collection '{name}' (expected one of {_CODE_SYSTEMS})")
+        return loaders[name]()
 
     def search(
         self,
@@ -179,12 +225,36 @@ class MedicalCodeVectorStore:
         existing = {c.name for c in self._client.get_collections().collections}
         return all(cs in existing for cs in _CODE_SYSTEMS)
 
-    def _build_all_collections(self) -> None:
-        logger.info("Building Qdrant hybrid collections — this may take a few minutes...")
-        self._build_collection("icd10", self._load_icd10_records())
-        self._build_collection("cpt",   self._load_cpt_records())
-        self._build_collection("hcpcs", self._load_hcpcs_records())
-        logger.info("All Qdrant collections built and persisted")
+    def _rebuild_via_subprocesses(self) -> None:
+        """Build each collection in its OWN subprocess.
+
+        Embedding 94K+ codes across three collections in a single process makes
+        the onnxruntime memory arena grow without ever returning memory to the OS,
+        which OOM-crashes lower-RAM / CPU-only machines. Running each collection
+        build as a separate process that fully exits forces the OS to reclaim ALL
+        of that memory (arena included) between collections, capping peak usage at
+        a single collection's worth.
+        """
+        logger.info("Building collections — each in its OWN subprocess so memory "
+                    "(incl. the onnxruntime arena) is fully reclaimed between collections...")
+        # Release the local-store lock so each build subprocess can open it.
+        self._close_client()
+        project_root = Path(__file__).resolve().parents[2]
+
+        for cs in _CODE_SYSTEMS:
+            logger.info(f"→ building '{cs}' in a fresh subprocess")
+            proc = subprocess.run(
+                [sys.executable, "-m", "app.rag.build_collection", cs],
+                cwd=str(project_root),
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"Collection build failed for '{cs}' (subprocess exit {proc.returncode})"
+                )
+
+        # Reopen for this (parent) process to use for querying.
+        self._open_client()
+        logger.info("All Qdrant collections built (memory-isolated, one process each)")
 
     def _build_collection(self, name: str, records: list[dict]) -> None:
         if not records:
@@ -235,7 +305,20 @@ class MedicalCodeVectorStore:
                 ))
                 point_id += 1
 
-            self._client.upsert(collection_name=name, points=points)
+            # Retry upsert up to 3 times — Qdrant's 5s REST keep-alive can
+            # close the connection between batches (embedding takes 5-8s each).
+            for _attempt in range(3):
+                try:
+                    self._client.upsert(collection_name=name, points=points, wait=True)
+                    break
+                except Exception as e:
+                    if _attempt < 2 and "disconnected" in str(e).lower():
+                        logger.warning(f"Qdrant disconnected on batch, reconnecting (attempt {_attempt+1}/3)...")
+                        time.sleep(1)
+                        self._close_client()
+                        self._open_client()
+                    else:
+                        raise
             logger.info(f"  {name.upper()}: {min(batch_start + _UPSERT_BATCH, len(records))}/{len(records)}")
 
         logger.info(f"  {name.upper()} collection built: {point_id} points")

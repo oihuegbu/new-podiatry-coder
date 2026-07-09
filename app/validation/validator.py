@@ -313,6 +313,23 @@ class CodingValidator:
         em_code = em_entry.get("code", "")
         mods = em_entry.setdefault("modifiers", [])
         has_mod25 = "25" in mods
+        has_mod57 = "57" in mods
+
+        # -57 and -25 are mutually exclusive: -57 applies when the E/M led to a
+        # decision for major surgery (global=090); -25 applies for minor/intermediate
+        # procedures (global=000/010).  If -57 is present, never touch -25.
+        if has_mod57:
+            if has_mod25:
+                mods.remove("25")
+                self._add(
+                    "INFO", em_code, "modifier_25_removed_57_present",
+                    f"AUTO-CORRECTED: Removed modifier -25 from {em_code} — modifier -57 is "
+                    f"present (major surgery decision). Modifier -25 and -57 are mutually "
+                    f"exclusive; -57 takes precedence for 90-day global procedures.",
+                    "Modifier -25 removed (superseded by -57)",
+                    denial_risk="LOW",
+                )
+            return  # Do not apply any -25 logic when -57 is in play
 
         if has_mod25 and not has_billable_procedure:
             mods.remove("25")
@@ -348,15 +365,10 @@ class CodingValidator:
         if not has_surgical_decision:
             return
 
-        # No -57 needed if a procedure was performed today (surgery happened at this visit)
-        has_same_day_procedure = any(
-            c.get("code", "") not in EM_CODES
-            and c.get("code", "") not in POST_OP_EM
-            and not c.get("code", "").startswith(IMAGING_PREFIXES)
-            for c in cpt
-        )
-        if has_same_day_procedure:
-            return
+        # -57 applies regardless of whether the surgery was performed same-day or
+        # scheduled for a later date.  Same-day emergency surgery (e.g. tendon repair
+        # at the same visit) is the archetypal -57 scenario per CMS Ch.12 §30.6.6.
+        # Do NOT skip -57 simply because a procedure code is present today.
 
         em_code = em_entry.get("code", "")
         has_mod57 = "57" in em_entry.get("modifiers", [])
