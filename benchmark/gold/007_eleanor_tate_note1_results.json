@@ -1,0 +1,32 @@
+{
+  "document_id": "007_eleanor_tate_note1",
+  "cpt_codes": [
+    {
+      "code": "11750",
+      "description": "Excision of nail and nail matrix, partial or complete (eg, ingrown or deformed nail), for permanent removal",
+      "modifiers": [
+        "T5"
+      ],
+      "units": 1
+    }
+  ],
+  "final_disposition": "CLEAN",
+  "hcpcs_codes": [],
+  "icd_codes": [
+    {
+      "code": "L60.0",
+      "description": "Ingrowing nail",
+      "type": "primary"
+    },
+    {
+      "code": "L60.3",
+      "description": "Nail dystrophy",
+      "type": "secondary"
+    }
+  ],
+  "gold_provenance": {
+    "verification": "auto",
+    "verified_by": "pipeline/consistency-gate",
+    "recorded_at": "2026-07-18T10:50:00+00:00"
+  }
+}

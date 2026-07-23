@@ -53,6 +53,20 @@ class NCCIPTPAgent(ComplianceAgent):
             if _is_em(col1_line.code) or _is_em(col2_line.code):
                 sep_modifiers |= _EM_SEPARATION_MODIFIERS
             has_sep = bool(mods_present & sep_modifiers)
+            # CMS's NCCI-associated modifiers also include the ANATOMIC set
+            # (RT/LT, FA/F1–F9, TA/T1–T9, E1–E4, coronary) — two lines whose
+            # anatomic modifiers DIFFER document distinct sites and bypass an
+            # indicator-1 edit exactly like 59/X{EPSU}. Both-sides-required
+            # and sets-must-differ: RT on both lines asserts the same side
+            # and separates nothing (observed live: 28297-RT vs 28285-RT,T6
+            # — right bunion vs right 2nd toe — was FAILed as unseparated
+            # even though T6 is precisely the CMS-sanctioned way to say
+            # 'different toe').
+            anatomic = self.store.anatomic_modifiers()
+            sites1 = {m.strip().upper() for m in col1_line.modifiers} & anatomic
+            sites2 = {m.strip().upper() for m in col2_line.modifiers} & anatomic
+            if sites1 and sites2 and sites1 != sites2:
+                has_sep = True
             src = f"NCCI PTP {pair} indicator={ind or '?'} (eff on DOS)"
 
             if ind == "0":

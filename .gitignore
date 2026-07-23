@@ -10,6 +10,7 @@ data/qdrant_store/
 # Runtime output
 logs/
 output/
+
 # OS / IDE
 .DS_Store
 *.egg-info/

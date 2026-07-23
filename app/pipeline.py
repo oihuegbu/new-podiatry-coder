@@ -13,11 +13,48 @@ from app.rag.code_reference import CodeReferenceDB
 from app.coding.code_assigner import assign_codes
 from app.validation.validator import CodingValidator
 from app.compliance.datastore.store import ComplianceDataStore
-from app.compliance.engine import ClaimScrubber
+from app.compliance.engine import ClaimScrubber, _parse_dos
 from app.compliance.agents import build_default_agents
 from app.models.schemas import CodingResult
 
 logger = get_logger(__name__)
+
+_VALID_MODIFIER_CLAIM_STATUSES = {"applied", "not_applicable"}
+
+
+def _sanitize_modifier_claims(raw) -> list[dict]:
+    """Defensively filter modifier_reasoning entries before Pydantic
+    validation. modifier_reasoning is now a structured list[ModifierClaim]
+    (see schemas.py) instead of free-text strings — if the LLM doesn't
+    follow the schema (a malformed entry, or a regression to the old
+    string format), constructing CPTCode(**data)/HCPCSCode(**data)
+    directly would raise a Pydantic ValidationError and crash the whole
+    note's processing. Drop anything that isn't a well-formed
+    {modifier, status, reason} dict rather than crash — only case-
+    normalizes `status`, never guesses an unrecognized value's meaning
+    (that guessing is exactly the fragile regex-heuristic problem this
+    schema change replaces)."""
+    if not isinstance(raw, list):
+        return []
+    clean = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            logger.warning(f"    [MODIFIER CLAIM] dropped non-dict modifier_reasoning entry: {entry!r}")
+            continue
+        # Uppercased to match how real modifier codes are always stored in
+        # the "modifiers" array — without this, a lowercase claim (e.g.
+        # the LLM writing "rt" instead of "RT") would persist in
+        # modifier_reasoning with different casing than modifiers, even
+        # though validator.py's own comparison already uppercases before
+        # matching (so the auto-correction itself is unaffected — this is
+        # about keeping the persisted audit trail internally consistent).
+        modifier = str(entry.get("modifier", "")).strip().upper()
+        status = str(entry.get("status", "")).strip().lower()
+        if not modifier or status not in _VALID_MODIFIER_CLAIM_STATUSES:
+            logger.warning(f"    [MODIFIER CLAIM] dropped malformed modifier_reasoning entry: {entry!r}")
+            continue
+        clean.append({"modifier": modifier, "status": status, "reason": str(entry.get("reason", ""))})
+    return clean
 
 
 class MedicalCodingPipeline:
@@ -44,14 +81,18 @@ class MedicalCodingPipeline:
         self.vector_store.build_or_load(force_rebuild=force_rebuild_index)
 
         self.retriever = CandidateRetriever(self.vector_store)
-        self.validator = CodingValidator(self.ref_db)
 
-        logger.info("Building/loading compliance data store + 12-filter scrubber...")
+        logger.info("Building/loading compliance data store + 13-filter scrubber...")
         self.compliance_store = ComplianceDataStore()
         self.compliance_store.build_or_load()
         self.scrubber = ClaimScrubber(
             self.compliance_store, agents=build_default_agents(self.compliance_store)
         )
+
+        # CodingValidator needs the compliance store for authoritative global-period
+        # lookups (e.g. distinguishing a diagnostic test from an actual procedure for
+        # modifier -25 purposes) — built after compliance_store so it can be passed in.
+        self.validator = CodingValidator(self.ref_db, self.compliance_store)
 
         self._initialized = True
         logger.info("Pipeline initialized successfully")
@@ -72,12 +113,19 @@ class MedicalCodingPipeline:
             cached = result_cache.get_cached(pdf_path)
             if cached is not None:
                 try:
+                    # note_text rides alongside the CodingResult in the cache
+                    # entry (the model itself only keeps truncated sections) so
+                    # the re-scrub below sees the full note. Entries written
+                    # before this key existed just scrub without it.
+                    cached_note_text = cached.pop("note_text", "")
                     r = CodingResult(**cached)
                     r.cached_result = True
                     # Always re-run the (cheap, local, deterministic) compliance
                     # scrubber so cached results still get the clean-claim gate and
                     # reflect the latest compliance data.
-                    scrub = self.scrubber.scrub(r.model_dump())
+                    scrub_payload = r.model_dump()
+                    scrub_payload["note_text"] = cached_note_text
+                    scrub = self.scrubber.scrub(scrub_payload)
                     self._apply_scrub_verdict(r, scrub)
                     self._print_summary(r)
                     logger.info(f"  [cache] VERDICT: {r.final_disposition} — {r.final_summary}")
@@ -123,6 +171,13 @@ class MedicalCodingPipeline:
         note_candidates = self.retriever.retrieve_for_full_note(sections)
 
         merged = self._merge_candidates(entity_candidates, note_candidates)
+        # Deleted/not-yet-effective codes must never be OFFERED to the coding
+        # model in the first place — the vector index carries the full code
+        # history, and a discontinued code that reaches the prompt can come
+        # back as an assignment (observed live: G0456, deleted 2015, assigned
+        # to a 2026 NPWT encounter and only caught post-hoc by validation).
+        dos_for_filter = _parse_dos(metadata)
+        merged = self._drop_inactive_candidates(merged, dos_for_filter)
         for cs, cands in merged.items():
             logger.info(f"  {cs.upper()}: {len(cands)} candidates retrieved")
 
@@ -137,6 +192,18 @@ class MedicalCodingPipeline:
             "supplies_dispensed_today": supplies_today,
         }
 
+        # Verified-claim exemplars from the finalized-claims registry:
+        # shadow mode records what would be injected (calibration), live
+        # mode (auto above the registry-size threshold) injects worked
+        # examples into the coding prompts. Deterministic per registry
+        # state, so it adds no run-to-run variance to the consistency gate.
+        from app.coding import exemplars as _exemplars
+        exemplar_block, exemplar_info = _exemplars.for_note(
+            document_id=pdf_path.stem,
+            note_category=note_category,
+            note_sections=sections,
+        )
+
         coding_result, usage = assign_codes(
             note_text=sections.get("full_text", ""),
             note_sections=sections,
@@ -148,18 +215,35 @@ class MedicalCodingPipeline:
             db=self.ref_db,
             physician_documented_codes=physician_documented_codes,
             store=self.compliance_store,
+            exemplar_block=exemplar_block,
         )
 
         # Step 5: Validation
         logger.info("[5/5] Validating codes...")
         plan_text = sections.get("plan", "")
         full_text = sections.get("full_text", "")
+        # Payer context for payer-gated deterministic checks (MUE-0
+        # suppression): resolved from the note's own insurance field by the
+        # same registry the claim scrubber uses, so the validator and the
+        # compliance agents always see the same payer identity.
+        from app.compliance.payer_registry import parse_insurance_text
+        parsed_payer = parse_insurance_text(str(metadata.get("insurance") or ""))
         validation = self.validator.validate(
             coding_result,
-            prior_surgery_info=prior_surgery_info,
             note_plan_text=plan_text,
             note_full_text=full_text,
             physician_documented_codes=physician_documented_codes,
+            dos=_parse_dos(metadata),
+            note_category=note_category,
+            patient_dob=str(metadata.get("date_of_birth") or ""),
+            payer_follows_medicare_coverage=parsed_payer.follows_medicare_coverage,
+            # Billability anchor for the marginal-secondary demotion: the
+            # sections whose contents the ICD prompt itself defines as
+            # billable (assessment/diagnoses + imaging findings).
+            note_assessment_text=" \n".join(
+                s for s in (sections.get("assessment_diagnoses", ""),
+                            sections.get("imaging_diagnostics", ""),
+                            sections.get("chief_complaint", "")) if s),
         )
 
         elapsed = time.time() - start
@@ -185,6 +269,12 @@ class MedicalCodingPipeline:
                 "audit_notes": coding_result.get("audit_notes", ""),
                 "vision_context": vision_context,
                 "prior_surgery_info": prior_surgery_info,
+                "exemplars": exemplar_info,
+                # Full note text rides in every saved artifact (including the
+                # per-run consistency dumps) — the flip-actuation pipeline
+                # replays the validator against stored runs, and a replay
+                # without the note text can't evaluate note-evidence rules.
+                "note_full_text": full_text,
             },
             model_source=LLM_PROVIDER,
             api_usage=usage,
@@ -202,30 +292,108 @@ class MedicalCodingPipeline:
                 or validation.get("auto_coding_summary", "")
             ),
         )
+        # warnings existed on the schema but was never populated — consumers
+        # reading result.warnings (instead of walking validation_issues) saw
+        # an always-empty list. Mirror WARNING-severity issues into it.
+        result.warnings = [
+            f"[{i.category}] {i.code}: {i.message}"
+            for i in result.validation_issues
+            if getattr(i, "severity", "") == "WARNING"
+        ]
 
-        # Step 6: 12-filter compliance scrubber — the authoritative clean-claim gate
-        logger.info("[6/6] Scrubbing claim through 12 compliance filters...")
-        scrub = self.scrubber.scrub(result.model_dump())
+        # Step 6: 13-filter compliance scrubber — the authoritative clean-claim gate
+        logger.info("[6/6] Scrubbing claim through 14 compliance filters...")
+        # CodingResult stores note_sections TRUNCATED (200 chars, full_text
+        # dropped) for output size, so a bare model_dump() gave the scrubber
+        # an empty claim.note_text — DocumentationAgent's distinct-modifier
+        # language check could never fire, and letterhead-based state
+        # inference (MAC jurisdiction scoping) had nothing to read. Hand the
+        # scrubber the real note text explicitly.
+        scrub_payload = result.model_dump()
+        scrub_payload["note_text"] = full_text
+        scrub = self.scrubber.scrub(scrub_payload)
         self._apply_scrub_verdict(result, scrub)
         logger.info(f"  VERDICT: {result.final_disposition} — {result.final_summary}")
 
-        # Fix 4 — Store to cache (only on success, so failed runs don't get cached)
+        # Fix 4 — Store to cache (only on success, so failed runs don't get
+        # cached). note_text is stored alongside the model dump so cache-hit
+        # re-scrubs see the full note (see the cache-read path above).
         if use_cache and result.success:
-            result_cache.store(pdf_path, result.model_dump())
+            cache_payload = result.model_dump()
+            cache_payload["note_text"] = full_text
+            result_cache.store(pdf_path, cache_payload)
 
         self._print_summary(result)
         return result
 
+    # Review-reason marker for a scrub-CLEAN claim held back pending the
+    # clinical-correctness audit — the audit's uphold verdict removes
+    # exactly this marker and promotes the claim to CLEAN.
+    AUDIT_PENDING_MARKER = "[clinical_audit/pending]"
+
     def _apply_scrub_verdict(self, result, scrub) -> None:
-        """Make the 12-filter scrubber the single authoritative verdict and
+        """Make the 13-filter scrubber the single authoritative verdict and
         reconcile the legacy tier so the two can never contradict.
 
         Per the clean-claim rule: CLEAN passes; anything failing any filter is
         routed to REVIEW with the blocking reasons. The legacy AUTO/REVIEW/REJECT
-        tier is derived from this (REJECT collapses into REVIEW)."""
-        result.claim_scrub = scrub.model_dump()
+        tier is derived from this (REJECT collapses into REVIEW).
+
+        One gate sits above the scrubber's CLEAN: NO claim is CLEAN until
+        the clinical-correctness review (tools/clinical_auditor.py) upholds
+        it — a whole-claim expert review plus a verdict on every
+        interpretive layer correction (self-reported and diff-derived).
+        The universal hold exists because the absence of recorded
+        corrections is exactly what an unreported mutation looks like
+        (measured live, routine_00003: a demotion layer moved a coverage
+        diagnosis off the claim without reporting it, and the
+        corrections-scoped audit vacuously upheld the claim). The claim is
+        held at REVIEW with the pending marker; the post-batch audit
+        promotes it to CLEAN on an upheld verdict and demotes it to
+        genuine REVIEW on a dispute. Fail closed: no audit -> never
+        CLEAN."""
+        # mode="json": every downstream reader of the record contract
+        # (observables' signature(), record_coherence, replay gates) speaks
+        # the saved-file string shape — a bare model_dump() would leave
+        # Status/DenialRisk enum members in the in-memory record (see the
+        # matching fix in tools/replay_reconcile._rebuild_run).
+        result.claim_scrub = scrub.model_dump(mode="json")
         result.final_disposition = scrub.disposition.value      # CLEAN | REVIEW
         result.final_summary = scrub.summary
+
+        interpretive = [m for m in (result.material_corrections or [])
+                        if isinstance(m, dict) and m.get("interpretive")]
+        audit = getattr(result, "clinical_audit", None) or {}
+        # A stored "upheld" only releases the hold while it still describes
+        # THIS claim — corrections or claim shape changed means the verdict
+        # is stale and the claim must be re-reviewed (fail closed).
+        audit_current = False
+        if audit.get("verdict") == "upheld":
+            try:
+                from tools.clinical_auditor import corrections_fingerprint
+                audit_current = (audit.get("fingerprint")
+                                 == corrections_fingerprint(
+                                     result.model_dump()))
+            except Exception:
+                audit_current = False
+        if scrub.clean and not audit_current:
+            result.final_disposition = "REVIEW"
+            result.auto_coding_tier = "REVIEW"
+            reason = (f"{self.AUDIT_PENDING_MARKER} claim awaits the "
+                      f"clinical-correctness review "
+                      f"({len(interpretive)} interpretive layer "
+                      f"correction(s) to verdict + whole-claim review) — "
+                      f"scrub verdict is CLEAN and will be restored on an "
+                      f"upheld audit")
+            existing = list(result.auto_coding_review_reasons or [])
+            if not any(self.AUDIT_PENDING_MARKER in r for r in existing):
+                result.auto_coding_review_reasons = existing + [reason]
+            result.final_summary = (
+                f"Scrub CLEAN, held for clinical audit: {scrub.summary}")
+            result.auto_coding_summary = result.final_summary
+            result.auto_coding_confidence = min(
+                result.auto_coding_confidence, 0.84)
+            return
 
         if scrub.clean:
             result.auto_coding_tier = "AUTO"
@@ -241,6 +409,22 @@ class MedicalCodingPipeline:
             # keep any pre-existing reasons, then add the authoritative ones
             existing = list(result.auto_coding_review_reasons or [])
             result.auto_coding_review_reasons = existing + blocking
+
+        # auto_coding_confidence is computed by validator.py's _compute_tier
+        # BEFORE the scrubber runs, clamped to match validator.py's own
+        # LOCAL tier (e.g. AUTO -> floored at 0.85). The scrubber's verdict
+        # above can override the tier in either direction — a claim
+        # validator.py found no issues with can still be blocked by a
+        # 13-filter FAIL (e.g. medical necessity), and vice versa — so the
+        # confidence number must be re-clamped to the FINAL tier here too,
+        # or a REVIEW-routed claim can carry a stale >=0.85 "AUTO" score
+        # (observed live: tier=REVIEW, confidence=0.86 — a scrubber-only
+        # MEDICAL_NECESSITY finding with zero validator.py issues), which
+        # would mislead anyone scanning a review queue by confidence.
+        if scrub.clean:
+            result.auto_coding_confidence = max(result.auto_coding_confidence, 0.85)
+        else:
+            result.auto_coding_confidence = min(result.auto_coding_confidence, 0.84)
 
     def _merge_candidates(self, entity_cands: dict, note_cands: dict) -> dict:
         merged = {"icd10": [], "cpt": [], "hcpcs": []}
@@ -266,6 +450,26 @@ class MedicalCodingPipeline:
 
         return merged
 
+    def _drop_inactive_candidates(self, merged: dict, dos) -> dict:
+        """Filter RAG candidates down to codes effective on the DOS, using the
+        reference DB's own per-code effective ranges. Codes unknown to the
+        reference DB are kept (the existence check downstream owns that
+        question); only positively-dated-out codes are dropped."""
+        out = {}
+        for cs, cands in merged.items():
+            kept = []
+            for c in cands:
+                code = c.get("code", "")
+                entry = {"icd10": self.ref_db.icd10, "cpt": self.ref_db.cpt,
+                         "hcpcs": self.ref_db.hcpcs}.get(cs, {}).get(code)
+                if entry is not None and not self.ref_db.is_active_for_dos(cs, code, dos):
+                    logger.info(f"  [candidate filter] {cs.upper()} {code} dropped — not "
+                                f"effective on DOS ({entry['effective_from']}..{entry['effective_to']})")
+                    continue
+                kept.append(c)
+            out[cs] = kept
+        return out
+
     def _to_icd(self, raw: dict):
         from app.models.schemas import ICDCode
         return ICDCode(**{k: v for k, v in raw.items() if k in ICDCode.model_fields})
@@ -279,11 +483,14 @@ class MedicalCodingPipeline:
         data = {k: v for k, v in raw.items() if k in CPTCode.model_fields}
         if data.get("mdm_details") is None:
             data["mdm_details"] = {}
+        data["modifier_reasoning"] = _sanitize_modifier_claims(data.get("modifier_reasoning"))
         return CPTCode(**data)
 
     def _to_hcpcs(self, raw: dict):
         from app.models.schemas import HCPCSCode
-        return HCPCSCode(**{k: v for k, v in raw.items() if k in HCPCSCode.model_fields})
+        data = {k: v for k, v in raw.items() if k in HCPCSCode.model_fields}
+        data["modifier_reasoning"] = _sanitize_modifier_claims(data.get("modifier_reasoning"))
+        return HCPCSCode(**data)
 
     def _to_snomed(self, raw: dict):
         from app.models.schemas import SNOMEDCode

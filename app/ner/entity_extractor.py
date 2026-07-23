@@ -1,10 +1,22 @@
 import json
+import re
+
 from app.core.llm_client import chat_completion
 from app.models.schemas import ClinicalEntity
 from app.ner.biomed_ner import enrich_entities
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Deterministic negation backstop for the LLM's negated flag: the entity's
+# own verbatim `text` span BEGINNING with an explicit negation cue ("no
+# erythema", "denies fever", "negative for drainage") is unambiguous — the
+# quoted evidence itself states the absence. Scope is deliberately narrow
+# (leading cue in the span only, never a scan of surrounding note text) so
+# it can't misfire on mentions like "not improving with rest".
+_NEGATION_CUE = re.compile(
+    r"^\s*(?:no|denies|denied|without|negative\s+for|absent|free\s+of)\b", re.IGNORECASE
+)
 
 NER_SYSTEM_PROMPT = """You are an expert clinical NLP system for PODIATRY medical coding.
 
@@ -99,6 +111,13 @@ def extract_entities(note_sections: dict) -> list[ClinicalEntity]:
     for item in entities_data:
         try:
             entity = ClinicalEntity(**item)
+            if not entity.negated and _NEGATION_CUE.match(entity.text or ""):
+                # LLM missed its own negation flag but quoted a span that
+                # states the absence verbatim — treat as negated so denied/
+                # absent findings can't seed diagnosis candidates downstream.
+                logger.info(f"  negation backstop: dropping '{entity.text}' "
+                            f"(span itself is a negation)")
+                entity.negated = True
             if not entity.negated:
                 entities.append(entity)
         except Exception as e:

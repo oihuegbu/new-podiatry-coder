@@ -1,0 +1,40 @@
+{
+  "document_id": "001_margaret_holloway_note1",
+  "cpt_codes": [
+    {
+      "code": "99214",
+      "description": "Office or other outpatient visit for the evaluation and management of an established patient, which requires a medically appropriate history and/or examination and moderate level of medical decision making. When using total time on the date of the encounter for code selection, 30 minutes must be met or exceeded.",
+      "modifiers": [
+        "25"
+      ],
+      "units": 1
+    },
+    {
+      "code": "11750",
+      "description": "Excision of nail and nail matrix, partial or complete (eg, ingrown or deformed nail), for permanent removal",
+      "modifiers": [
+        "TA"
+      ],
+      "units": 1
+    }
+  ],
+  "final_disposition": "CLEAN",
+  "hcpcs_codes": [],
+  "icd_codes": [
+    {
+      "code": "L60.0",
+      "description": "Ingrowing nail",
+      "type": "primary"
+    },
+    {
+      "code": "L03.032",
+      "description": "Cellulitis of left toe",
+      "type": "secondary"
+    }
+  ],
+  "gold_provenance": {
+    "verification": "auto",
+    "verified_by": "pipeline/consistency-gate",
+    "recorded_at": "2026-07-18T10:50:00+00:00"
+  }
+}

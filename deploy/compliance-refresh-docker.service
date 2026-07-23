@@ -1,0 +1,22 @@
+[Unit]
+Description=Claim-scrubber compliance data refresh (CMS/AMA sources) — Docker deployment
+# Docker-layout variant of compliance-refresh.service: the EC2 deployment runs
+# the app exclusively in containers at /opt/app (no host venv, no claimly
+# user), so the refresh must execute inside the app image where the Python
+# deps live. compliance.db sits in the app_data named volume; the container
+# writes it in place and the store's per-source fingerprint check keeps every
+# other consumer consistent with it.
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/app
+# --all self-selects the sources due in the current calendar month
+# (weekly MCD articles always; NCCI/MUE/PFS on quarter months; manual
+# sources are skipped with an explicit notice, never a failure).
+ExecStart=/usr/bin/docker compose run --rm app python run_refresh.py --all
+# Quarter-month runs ingest the full NCCI PTP file — allow time for it.
+TimeoutStartSec=2h
+Nice=10

@@ -2,6 +2,7 @@ services:
 
   qdrant:
     image: qdrant/qdrant:latest
+    restart: unless-stopped
     ports:
       - "6333:6333"
     volumes:
@@ -19,21 +20,81 @@ services:
       - ./doctors_notes:/app/attachments:ro
       - ./output:/app/output
       - ./logs:/app/logs
-      - ./data/result_cache:/app/data/result_cache
-      - ./data/qdrant_store:/app/data/qdrant_store
+      # Named volume (not a bind mount) so it auto-populates from the image's
+      # baked-in data/ (codes/, global_periods.json, etc.) on first run, then
+      # persists everything written back — critically compliance.db, which
+      # otherwise silently rebuilds from scratch (~15-20 min) on every
+      # container recreation since it isn't under result_cache/qdrant_store.
+      - app_data:/app/data
+      # Separate volume, deliberately NOT part of app_data, mounted at a more
+      # specific nested path (takes precedence over the app_data mount above).
+      # This holds ONLY codes_checksum.txt — the file that tells the app
+      # whether Qdrant's collections are already built and current. It must
+      # never share a lifecycle with app_data: wiping app_data to refresh
+      # compliance.db/reference data (cheap, ~12s) would also wipe this
+      # checksum, making the app think Qdrant needs a full rebuild (~60-90
+      # min) even though the actual index is untouched in Qdrant's own
+      # qdrant_data volume. Learned this the expensive way — see git history.
+      - qdrant_checksum:/app/data/qdrant_store
+      # Denial-feedback registry + CARC map: bind-mounted (more specific than
+      # the app_data volume, so it takes precedence) because denials are
+      # ingested/waived by humans on the HOST — a named volume would hide the
+      # registry from them and split state between host and container.
+      - ./data/feedback:/app/data/feedback
+      # Finalized-claims registry: append-only ledger of verified claims
+      # (tools/claims_registry.py). Bind-mounted for the same reason as
+      # feedback/ — humans record/inspect it on the HOST, and it must
+      # survive volume wipes; it is the source of truth for gold re-freezes.
+      - ./data/registry:/app/data/registry
+      # Policy corpus (tools/policy_corpus.py): the authoritative prose
+      # sources quote verification runs against. Bind-mounted because a
+      # named-volume wipe (routine for refreshing compliance.db) would
+      # silently drop the corpus and downgrade every new adjudication's
+      # attestation to 'unverified' — the protection would turn itself
+      # off with no error. On the host it is also human-inspectable
+      # provenance (manifest.json + *.meta.json).
+      - ./data/policy:/app/data/policy
+      # Gold-standard benchmark set (tools/benchmark_ab.py, populated by
+      # claims_registry.py export-gold). Bind-mounted: without this, an
+      # export inside `docker compose run` writes to the container's
+      # ephemeral filesystem and evaporates with it (observed live).
+      - ./benchmark:/app/benchmark
+      # Declarative validator rule pack: bind-mounted (more specific than the
+      # app_data volume) because rules are authored and reviewed on the HOST
+      # as versioned config — a named volume would pin the pack at whatever
+      # state existed when the volume was first created.
+      - ./data/rules:/app/data/rules
       - ./app:/app/app
       - ./run.py:/app/run.py
+      # tools/ is imported by run.py's denial-feedback gate (and used for
+      # audits/benchmarks); without this mount the container would run the
+      # image's stale baked-in copy.
+      - ./tools:/app/tools
+      # tests/ for the same reason: `docker compose run app python -m
+      # unittest` is the canonical way to run the suite on the host, and
+      # without the mount it silently exercises the image's stale baked-in
+      # tests against the mounted (current) app code (observed live).
+      - ./tests:/app/tests
       - hf_cache:/root/.cache/huggingface
-    command: >
-      sh -c "
-        echo 'Waiting for Qdrant to be ready...';
+    # entrypoint (not command) so the Qdrant-readiness wait always runs even
+    # when `docker compose run app <override>` replaces the command — e.g.
+    # `docker compose run --rm app python run.py --setup-only`.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        echo 'Waiting for Qdrant to be ready...'
         until curl -sf http://qdrant:6333/readyz > /dev/null 2>&1; do
-          echo '  Qdrant not ready yet, retrying in 10s...'; sleep 10;
-        done;
-        echo 'Qdrant is ready.';
-        python run.py
-      "
+          echo '  Qdrant not ready yet, retrying in 10s...'
+          sleep 10
+        done
+        echo 'Qdrant is ready.'
+        exec "$@"
+      - --
+    command: ["python", "run.py"]
 
 volumes:
   qdrant_data:
   hf_cache:
+  app_data:
+  qdrant_checksum:

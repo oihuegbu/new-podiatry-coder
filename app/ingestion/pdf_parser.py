@@ -1,10 +1,10 @@
 import base64
 import json
 import re
+import time
 from pathlib import Path
 from pdf2image import convert_from_path
 from io import BytesIO
-import anthropic
 
 from app.core.logger import get_logger
 from app.core.config import CLAUDE_MODEL, CLAUDE_EFFORT
@@ -56,7 +56,8 @@ This extracted data feeds a medical billing pipeline where a single misread char
     "npi": "number or null",
     "mrn": "number or null",
     "insurance": "full insurance line or null",
-    "note_type": "e.g., NEW PATIENT – OFFICE VISIT"
+    "note_type": "e.g., NEW PATIENT – OFFICE VISIT",
+    "place_of_service": "2-digit CMS POS code if stated or clearly inferable from the note's own setting language (office/clinic letterhead → 11, hospital → 21/22, ASC → 24, patient's home → 12, SNF → 31), else null — never guess between settings"
   },
   "sections": {
     "chief_complaint": "exact verbatim text",
@@ -128,42 +129,116 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
             "source": {"type": "base64", "media_type": "image/png", "data": b64},
         })
 
-    client = anthropic.Anthropic()
-    response = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=8192,
-        thinking={"type": "adaptive"},
-        output_config={"effort": CLAUDE_EFFORT},
-        system=[{
-            "type": "text",
-            "text": EXTRACTION_SYSTEM_PROMPT,
-            "cache_control": {"type": "ephemeral"},
-        }],
-        messages=[{
-            "role": "user",
-            "content": [
-                # Images first — improves OCR accuracy on Opus 4.7
-                *image_blocks,
-                {"type": "text", "text": "Extract all information from this clinical note into the required JSON structure. Take your time to read every character carefully, especially medical codes and laterality."},
-            ],
-        }],
-    )
+    # Shared client from llm_client: hard request timeout + our own retry
+    # loop below. A bare anthropic.Anthropic() here had NO timeout and NO
+    # retry — a single wedged socket on this one call froze an entire
+    # consistency batch for hours (all workers asleep on the same read),
+    # and a single transient overload aborted the whole note.
+    #
+    # Parse/truncation failures are retried inside the same loop, and the
+    # FINAL failure raises instead of returning empty dicts: an empty
+    # extraction used to flow silently through the whole pipeline and
+    # produce a garbage claim, which is far worse than one loudly FAILED
+    # note (observed live before this fix).
+    from app.core.llm_client import (
+        get_anthropic_client, _claude_message_via_batch, _RETRYABLE_MARKERS)
+    from app.core.config import ANTHROPIC_USE_BATCH
+    client = get_anthropic_client()
+    max_tokens = 8192
+    result = None
+    response = None
+    last_err = "unknown"
+    for attempt in range(1, 4):
+        try:
+            body = {
+                "model": CLAUDE_MODEL,
+                "max_tokens": max_tokens,
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": CLAUDE_EFFORT},
+                "system": [{
+                    "type": "text",
+                    "text": EXTRACTION_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        # Images first — improves OCR accuracy on Opus 4.7
+                        *image_blocks,
+                        # cache_control on the final block caches the whole
+                        # prefix including the images — the 3 consistency
+                        # runs of one note send identical pages, so runs 2/3
+                        # read the OCR-heavy prefix at 10% of input price.
+                        {"type": "text",
+                         "text": "Extract all information from this clinical note into the required JSON structure. Take your time to read every character carefully, especially medical codes and laterality.",
+                         "cache_control": {"type": "ephemeral"}},
+                    ],
+                }],
+            }
+            if ANTHROPIC_USE_BATCH:
+                response = _claude_message_via_batch(client, body)
+            else:
+                response = client.messages.create(**body)
+        except Exception as exc:
+            msg = f"{type(exc).__name__} {exc}".lower()
+            if not any(m in msg for m in _RETRYABLE_MARKERS) or attempt == 3:
+                raise
+            delay = 10.0 * attempt
+            logger.warning(f"  Vision extraction attempt {attempt} failed "
+                           f"({str(exc)[:120]}) — retrying in {delay:.0f}s")
+            time.sleep(delay)
+            continue
 
-    raw = next(block.text for block in response.content if block.type == "text")
-    # Strip markdown code fences if present
-    raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
-    raw = re.sub(r"\s*```$", "", raw.strip())
+        # Truncation: a response cut off at max_tokens is a broken JSON
+        # prefix (or, cut mid-thinking, has no text block at all). Retry
+        # with a doubled budget, mirroring chat_completion.
+        if response.stop_reason == "max_tokens":
+            last_err = f"truncated at {max_tokens} tokens"
+            max_tokens *= 2
+            logger.warning(f"  Vision extraction {last_err} — retrying "
+                           f"with doubled budget")
+            continue
+
+        raw = next((b.text for b in response.content if b.type == "text"), None)
+        if raw is None:
+            last_err = "response contained no text block"
+            logger.warning(f"  Vision extraction attempt {attempt}: {last_err} — retrying")
+            continue
+
+        # Strip markdown code fences if present
+        raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+        raw = re.sub(r"\s*```$", "", raw.strip())
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            last_err = f"invalid JSON ({exc})"
+            logger.warning(f"  Vision extraction attempt {attempt}: {last_err} — retrying")
+            continue
+
+        # Valid-but-empty JSON is the same failure as unparseable JSON: a
+        # note with no metadata and no sections produces a garbage claim
+        # downstream (observed live: 'category=?, procedures=[]' run).
+        if not parsed.get("patient_metadata") and not parsed.get("sections"):
+            last_err = "valid JSON but empty extraction (no metadata, no sections)"
+            logger.warning(f"  Vision extraction attempt {attempt}: {last_err} — retrying")
+            continue
+
+        result = parsed
+        break
+
+    if result is None:
+        raise RuntimeError(
+            f"Vision extraction failed for {pdf_path.name} after 3 attempts: {last_err}")
+
     usage = {
         "prompt_tokens": response.usage.input_tokens,
         "completion_tokens": response.usage.output_tokens,
         "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
+        "cache_read_tokens": getattr(
+            response.usage, "cache_read_input_tokens", 0) or 0,
+        "cache_write_tokens": getattr(
+            response.usage, "cache_creation_input_tokens", 0) or 0,
     }
-
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.error("Failed to parse vision extraction response")
-        result = {"patient_metadata": {}, "sections": {}}
 
     metadata = result.get("patient_metadata", {})
     sections = result.get("sections", {})

@@ -89,10 +89,23 @@ class Provider(BaseModel):
 
 
 class Payer(BaseModel):
-    name: str = "Medicare"
-    payer_id: str | None = None
+    # "Unknown"/False, not "Medicare"/True — a bare Payer() (e.g. a future
+    # call site or test that omits explicit args) must never silently claim
+    # Medicare for a claim whose payer was never actually identified. This
+    # exact bug was already found and fixed once at the one real call site
+    # (engine.py's build_claim, which always passes explicit values derived
+    # from payer_registry.parse_insurance_text) — these defaults matched it
+    # until now, which meant they'd resurrect the same bug the moment
+    # anything constructed a bare Payer().
+    name: str = "Unknown"
+    payer_id: str | None = None       # internal key — payers.json / prior_auth_required
+    stedi_trading_partner_id: str | None = None  # Stedi's own payer ID — eligibility (270/271) calls only
     plan: str | None = None
-    is_medicare: bool = True
+    is_medicare: bool = False         # ORIGINAL (FFS) Medicare only — never Medicare Advantage
+    kind: str = "unknown"             # medicare_ffs | medicare_advantage | commercial | medicaid | tricare | workers_comp | unknown
+    # Bound to Original Medicare's coverage floor (FFS, and MA per 42 CFR
+    # 422.101). Coverage-derived checks key off this instead of is_medicare.
+    follows_medicare_coverage: bool = False
 
 
 class Subscriber(BaseModel):
@@ -109,6 +122,10 @@ class Claim(BaseModel):
     document_id: str = ""
     date_of_service: date | None = None
     place_of_service: str | None = None
+    # USPS state of the encounter (from insurance text / letterhead), used to
+    # scope MAC-local coverage policies (LCDs/Articles) to their jurisdiction.
+    # None = unknown → jurisdiction scoping stays conservative (no filtering).
+    state: str | None = None
     provider: Provider = Field(default_factory=Provider)
     payer: Payer = Field(default_factory=Payer)
     subscriber: Subscriber = Field(default_factory=Subscriber)
@@ -132,6 +149,14 @@ class ScrubResult(BaseModel):
     document_id: str = ""
     disposition: Disposition = Disposition.REVIEW
     findings: list[Finding] = Field(default_factory=list)
+    # Per-filter execution trail: one entry per agent that ran, including
+    # silent passes ({filter_id, filter_name, status, findings}). Without
+    # this, a filter that stopped firing after a rule/data fix was
+    # indistinguishable from one that was skipped or crashed — reviewers
+    # reading two runs of the same note couldn't tell "checked and passed"
+    # from "not checked" (raised on note 031 when a fixed false FAIL simply
+    # vanished between runs).
+    filter_results: list[dict] = Field(default_factory=list)
     clean: bool = False
     summary: str = ""
 
@@ -143,14 +168,15 @@ class ScrubResult(BaseModel):
     def warnings(self) -> list[Finding]:
         return [f for f in self.findings if f.status == Status.WARN]
 
-    def finalize(self) -> "ScrubResult":
+    def finalize(self, filter_count: int | None = None) -> "ScrubResult":
         blocking = self.blocking_findings
         self.clean = len(blocking) == 0
         self.disposition = Disposition.CLEAN if self.clean else Disposition.REVIEW
         if self.clean:
             n = len(self.warnings)
+            count_phrase = f"all {filter_count}" if filter_count is not None else "all"
             self.summary = (
-                "Clean claim — passed all 12 compliance filters."
+                f"Clean claim — passed {count_phrase} compliance filters."
                 if n == 0
                 else f"Clean claim — passed all filters with {n} advisory note(s)."
             )

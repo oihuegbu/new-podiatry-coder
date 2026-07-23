@@ -1,0 +1,40 @@
+{
+  "document_id": "006_harriet_simmons_note2",
+  "cpt_codes": [
+    {
+      "code": "99213",
+      "description": "Office or other outpatient visit for the evaluation and management of an established patient, which requires a medically appropriate history and/or examination and low level of medical decision making. When using total time on the date of the encounter for code selection, 20 minutes must be met or exceeded.",
+      "modifiers": [
+        "25"
+      ],
+      "units": 1
+    },
+    {
+      "code": "11730",
+      "description": "Avulsion of nail plate, partial or complete, simple; single",
+      "modifiers": [
+        "TA"
+      ],
+      "units": 1
+    }
+  ],
+  "final_disposition": "CLEAN",
+  "hcpcs_codes": [],
+  "icd_codes": [
+    {
+      "code": "S90.112A",
+      "description": "Contusion of left great toe without damage to nail, initial encounter",
+      "type": "primary"
+    },
+    {
+      "code": "L60.1",
+      "description": "Onycholysis",
+      "type": "secondary"
+    }
+  ],
+  "gold_provenance": {
+    "verification": "auto",
+    "verified_by": "pipeline/consistency-gate",
+    "recorded_at": "2026-07-18T11:53:26+00:00"
+  }
+}

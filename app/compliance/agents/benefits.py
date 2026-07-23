@@ -27,7 +27,11 @@ class BenefitsAgent(ComplianceAgent):
 
     def check(self, claim: Claim) -> list[Finding]:
         sub = claim.subscriber
-        if not (sub.member_id and claim.payer.payer_id):
+        # stedi_trading_partner_id, not payer_id — Stedi's eligibility API needs
+        # its own payer ID namespace (e.g. "BCBSF"), not this system's internal
+        # payer_id ("bcbs_fl"); they're resolved together in payers.json but are
+        # different ID systems. See payer_registry.py.
+        if not (sub.member_id and claim.payer.stedi_trading_partner_id):
             return []  # not enough identifiers to run a 270 at this stage
 
         if not self.adapter.is_configured():
@@ -40,7 +44,7 @@ class BenefitsAgent(ComplianceAgent):
 
         dob = (sub.date_of_birth or "")
         res = self.adapter.check_eligibility(
-            payer_id=claim.payer.payer_id, member_id=sub.member_id,
+            payer_id=claim.payer.stedi_trading_partner_id, member_id=sub.member_id,
             first_name=sub.first_name, last_name=sub.last_name,
             date_of_birth=dob, npi=claim.provider.npi,
         )

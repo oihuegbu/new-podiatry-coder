@@ -6,7 +6,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 # --- LLM Provider ("openai" or "claude") ---
-LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai").lower()
+# Default "claude", matching .env.example's recommendation — the previous
+# "openai" default meant a missing/partial .env silently ran coding on a
+# different provider than every documented setup path configures. Note the
+# Anthropic key is required EITHER WAY: PDF extraction always uses Claude
+# Vision regardless of which provider does the coding passes.
+LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "claude").lower()
 
 # --- OpenAI ---
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
@@ -14,10 +19,41 @@ OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
 
 # --- Anthropic / Claude ---
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
-CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "claude-opus-4-7")
+# Default matches .env.example's verified model — the previous default
+# (an Opus slug) diverged from every documented configuration.
+CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 # Reasoning effort. "xhigh" = deepest (Opus); Sonnet supports high/low/max/medium.
 # Default "high" works on every current model; override per model via env.
 CLAUDE_EFFORT: str = os.getenv("CLAUDE_EFFORT", "high")
+
+# --- Verification-pass tiering (escalation) ---
+# Pass 4 re-audits everything with the full rule context injected — it's where
+# judgment errors concentrate, and it's one call per note. Optionally run it
+# on a stronger model/effort than passes 1-3 (e.g. claude-opus-4-8 / xhigh).
+# Empty = same model/effort as the other passes. Claude-provider only.
+CLAUDE_VERIFY_MODEL: str = os.getenv("CLAUDE_VERIFY_MODEL", "")
+CLAUDE_VERIFY_EFFORT: str = os.getenv("CLAUDE_VERIFY_EFFORT", "")
+
+# --- Anthropic Message Batches API (50% discount) ---
+# When enabled, every Claude call is submitted through the Batches API —
+# identical model, identical prompts, identical output distribution; the
+# discount buys Anthropic scheduling flexibility, so the only trade is
+# latency (calls typically complete in minutes, worst case longer). Set to
+# "0" for latency-sensitive interactive runs.
+ANTHROPIC_USE_BATCH: bool = os.getenv("ANTHROPIC_USE_BATCH", "1") != "0"
+# Give up on a batch request after this long and let the caller's retry
+# logic resubmit. Batches can queue up to 24h in the worst case; 2h is a
+# pragmatic ceiling for a pipeline that runs on a schedule.
+ANTHROPIC_BATCH_MAX_WAIT_S: float = float(
+    os.getenv("ANTHROPIC_BATCH_MAX_WAIT_S", "7200"))
+
+# --- Structured outputs ---
+# When enabled, the coding passes send a strict JSON Schema via the provider's
+# structured-output API (Anthropic output_config.format / OpenAI json_schema
+# response_format), eliminating the malformed-JSON error class (bare strings
+# in code arrays, string corrections, dropped required keys) at the source.
+# The downstream normalizers stay as a backstop. Set to "0" to disable.
+STRUCTURED_OUTPUTS: bool = os.getenv("STRUCTURED_OUTPUTS", "1") != "0"
 
 # --- Paths ---
 DATA_DIR = BASE_DIR / "data"
@@ -53,6 +89,24 @@ RAG_SIMILARITY_THRESHOLD: float = 0.35
 # --- Coding engine ---
 CODING_TEMPERATURE: float = 0.0
 CODING_MAX_TOKENS: int = 4096
+
+# --- Verified-claim exemplars (few-shot from the finalized-claims registry) ---
+# Mode:
+#   auto    (default) shadow until the registry holds more than
+#           EXEMPLAR_LIVE_THRESHOLD verified claims, then live
+#   shadow  retrieve similar verified encounters and record what WOULD be
+#           injected (rag_context.exemplars) — prompts unchanged
+#   live    inject the rendered exemplar block into the coding prompts
+#   off     disabled entirely
+EXEMPLAR_MODE: str = os.getenv("EXEMPLAR_MODE", "auto").lower()
+# auto flips shadow → live above this many verified claims: enough registry
+# coverage that a same-scenario neighbor usually exists, so exemplars anchor
+# rather than mislead.
+EXEMPLAR_LIVE_THRESHOLD: int = int(os.getenv("EXEMPLAR_LIVE_THRESHOLD", "500"))
+# How many exemplars to retrieve, and the minimum similarity for a verified
+# claim to qualify as a neighbor at all (Jaccard over distinctive terms).
+EXEMPLAR_TOP_K: int = int(os.getenv("EXEMPLAR_TOP_K", "3"))
+EXEMPLAR_MIN_SIM: float = float(os.getenv("EXEMPLAR_MIN_SIM", "0.2"))
 
 # --- Logging ---
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

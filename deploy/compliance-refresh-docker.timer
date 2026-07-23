@@ -1,0 +1,15 @@
+[Unit]
+Description=Run compliance data refresh daily (jobs self-select by cadence) — Docker deployment
+
+[Timer]
+# Fire daily; run_refresh.py --all picks only the sources due this month
+# (weekly MCD effectively refreshes within the week; quarterly/annual fire
+# on their months). Persistent=true catches up after instance stop/start —
+# important on a stop-when-idle EC2 box.
+OnCalendar=*-*-* 02:30:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=compliance-refresh-docker.service
+
+[Install]
+WantedBy=timers.target

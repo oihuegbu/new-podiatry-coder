@@ -5,15 +5,39 @@ if the linked diagnosis isn't on the policy's covered list. CMS publishes NCDs
 (national) and MACs publish LCDs/Billing & Coding Articles listing which ICD-10
 codes justify a given CPT.
 
-This agent is fully data-driven off the `coverage_cpt` / `coverage_icd` tables.
-Today they hold the routine-foot-care policy (L36199, generalized out of the old
-hardcoded check); the same tables are populated from MCD Articles via
-`store.load_coverage_articles(...)` with no change to this logic.
+This agent is fully data-driven off the `coverage_cpt` / `coverage_icd` tables,
+populated from the full CMS Coverage API dataset (hundreds of LCDs/Articles
+across every specialty) via `store.load_coverage_articles(...)`.
+
+E/M codes are excluded from the coverage-policy check even when a real LCD/
+Article happens to mention one (e.g. "Cognitive Assessment and Care Plan
+Service" bills using a standard E/M code) — an E/M visit's medical necessity
+is established by its documented MDM, not by LCD code-pairing, which is a
+procedure/DME/supply concept. Without this, any E/M code incidentally named
+in an unrelated specialty's billing article would false-positive here.
 """
 from __future__ import annotations
 
 from app.compliance.agents.base import ComplianceAgent
 from app.compliance.models import Claim, DenialRisk, Finding, Status
+
+# CPT section boundary (code-system grammar, not a medical-rule list — same
+# pattern as _EM_SECTION in modifiers.py/global_period.py/ncci_ptp.py).
+_EM_SECTION = range(99202, 99500)
+
+# Medicare routine-foot-care class-findings modifiers (Q7 = one class A
+# finding, Q8 = two class B, Q9 = one class B + two class C) and the ABN/
+# noncovered routing modifiers that legitimately replace them. Modifier
+# references are structural (allowed per the no-hardcoding guard); WHICH
+# CPT codes need them is derived from the governing policy's own CMS title
+# ("routine foot care") — never a hardcoded procedure list.
+_CLASS_FINDINGS_MODIFIERS = {"Q7", "Q8", "Q9"}
+_ABN_ROUTING_MODIFIERS = {"GA", "GX", "GY", "GZ"}
+_ROUTINE_FOOT_CARE_TITLE = "routine foot care"
+
+
+def _is_em(code: str) -> bool:
+    return code.isdigit() and int(code) in _EM_SECTION
 
 
 class MedicalNecessityAgent(ComplianceAgent):
@@ -43,25 +67,209 @@ class MedicalNecessityAgent(ComplianceAgent):
             ))
 
         for line in claim.lines:
-            policies = self.store.coverage_policies_for_cpt(line.code)
-            if not policies:
-                continue  # no coverage policy governs this code
+            if _is_em(line.code):
+                continue  # E/M necessity is an MDM question, not LCD code-pairing
+            all_policies = self.store.coverage_policies_for_cpt(line.code)
 
-            for policy_id in policies:
-                # the dx that can justify this line = its linked dx, else all claim dx
-                candidate_dx = line.linked_diagnoses or claim_dx
-                covered = any(
-                    self.store.coverage_icd_covered(policy_id, dx) for dx in candidate_dx
+            # LCDs/Articles are LOCAL policies — each governs only the states
+            # its issuing MAC adjudicates. Without this filter, a CGS (KY/OH)
+            # LCD gated Florida claims; verified live on note 031, where all
+            # eight policies cited against CPT 29445 came from non-Florida
+            # MACs. Unknown claim state or unknown contractor stays
+            # conservative (policy kept).
+            policies = [p for p in all_policies
+                        if self.store.policy_applies_in_state(p, claim.state)]
+            excluded = [p for p in all_policies if p not in policies]
+            if not policies:
+                if excluded:
+                    # A previous run may have FAILed this exact line against
+                    # these policies (pre-jurisdiction-scoping) — leave an
+                    # explicit "checked and passed, here's why" trail so the
+                    # disappearance of that FAIL reads as a rule decision,
+                    # not a skipped or flaky check.
+                    findings.append(self.finding(
+                        status=Status.PASS, codes=[line.code], denial_risk=DenialRisk.NONE,
+                        reason=f"{len(excluded)} coverage polic"
+                               f"{'y' if len(excluded) == 1 else 'ies'} "
+                               f"({', '.join(excluded)}) govern{'s' if len(excluded) == 1 else ''} "
+                               f"{line.code} nationally, but none is issued by the MAC serving "
+                               f"{claim.state} — out-of-jurisdiction policies do not gate this "
+                               f"claim.",
+                        recommendation="No action needed. If the servicing state is wrong, "
+                                       "correct the note's location/insurance details.",
+                        source_rule="MAC jurisdiction scoping (CMS 'Who are the MACs' / "
+                                    "mac_jurisdictions.json)",
+                    ))
+                continue  # no coverage policy governs this code in this jurisdiction
+
+            # Policies that publish no covered-ICD list (e.g. broad PT/OT
+            # billing articles) impose documentation rules, not a diagnosis
+            # gate — an empty list must read as "no ICD restriction", not
+            # "no diagnosis can ever satisfy this". Only policies WITH a
+            # published list can participate in the coverage decision.
+            restrictive = [p for p in policies
+                           if self.store.coverage_policy_has_dx_rules(p)]
+
+            # A code can legitimately be governed by multiple LCDs/Articles for
+            # different clinical indications (e.g. a debridement code covered
+            # under both a routine-foot-care policy and a separate wound-care
+            # policy). The claim only needs to satisfy the ONE policy relevant
+            # to this encounter, not all of them simultaneously — so check
+            # coverage across all governing policies together, and only FAIL
+            # if none of them are satisfied.
+            linked_dx = line.linked_diagnoses or claim_dx
+            satisfied = any(
+                self.store.coverage_icd_covered(policy_id, dx)
+                for policy_id in restrictive for dx in linked_dx
+            )
+            # Group-N mirror list: a policy can also (or ONLY) publish
+            # diagnoses that explicitly do NOT support medical necessity —
+            # the one diagnosis signal available for policies without a
+            # covered list. Only consulted when no policy is satisfied.
+            noncov = None if satisfied else next(
+                ((policy_id, dx) for policy_id in policies for dx in linked_dx
+                 if self.store.coverage_icd_explicitly_noncovered(policy_id, dx)),
+                None,
+            )
+            covered = satisfied or (not restrictive and not noncov)
+            # CMS-1500 pointer scope: any claim diagnosis can support any
+            # line — a covered dx that exists on the claim but wasn't POINTED
+            # at this line is a fixable linkage problem, not absent medical
+            # necessity. Without this, note 031's covered E11.42 (on the
+            # claim, unlinked) couldn't rescue 29445 from a FAIL.
+            repoint_dx = None
+            if not covered:
+                repoint_dx = next(
+                    (dx for policy_id in restrictive for dx in claim_dx
+                     if dx not in linked_dx
+                     and self.store.coverage_icd_covered(policy_id, dx)),
+                    None,
                 )
-                if covered:
-                    continue
+            if covered or repoint_dx:
+                if covered and not restrictive:
+                    # Same "checked and passed" trail as the jurisdiction
+                    # exclusion above: the governing policies publish no
+                    # covered-ICD list, so there is no diagnosis gate to fail.
+                    findings.append(self.finding(
+                        status=Status.PASS, codes=[line.code], denial_risk=DenialRisk.NONE,
+                        reason=f"Coverage polic{'y' if len(policies) == 1 else 'ies'} "
+                               f"{', '.join(policies)} govern{'s' if len(policies) == 1 else ''} "
+                               f"{line.code} but publish{'es' if len(policies) == 1 else ''} no "
+                               f"covered-diagnosis list — documentation polic"
+                               f"{'y' if len(policies) == 1 else 'ies'}, not a diagnosis gate.",
+                        recommendation="No diagnosis action needed; ensure the policy's "
+                                       "documentation requirements are met.",
+                        source_rule=f"Coverage polic{'y' if len(policies) == 1 else 'ies'} "
+                                    f"{', '.join(policies)} (no published ICD list)",
+                    ))
+                if repoint_dx:
+                    findings.append(self.finding(
+                        status=Status.WARN, codes=[line.code], denial_risk=DenialRisk.MEDIUM,
+                        reason=f"{line.code}'s linked diagnoses "
+                               f"({', '.join(linked_dx) or 'none'}) do not satisfy the "
+                               f"governing coverage polic{'y' if len(restrictive) == 1 else 'ies'} "
+                               f"({', '.join(restrictive)}), but {repoint_dx} — already on this "
+                               f"claim — does. Point {line.code} at {repoint_dx}.",
+                        recommendation=f"Add {repoint_dx} to {line.code}'s diagnosis pointers "
+                                       f"before submission.",
+                        source_rule="LCD/Article ICD↔CPT list + CMS-1500 diagnosis-pointer scope",
+                        auto_fixable=True,
+                        suggested_fix={"action": "link_diagnosis", "code": line.code,
+                                       "diagnosis": repoint_dx},
+                    ))
+                # Routine foot care (identified by the governing policy's own
+                # CMS title, not a hardcoded CPT list) additionally requires a
+                # class-findings modifier (Q7/Q8/Q9) — or ABN/noncovered
+                # routing (GA/GX/GY/GZ) — on Medicare claims even when a
+                # qualifying diagnosis is present. WARN, not FAIL: the
+                # documentation may support the findings without the modifier
+                # having been appended yet, and non-Medicare payers vary.
+                rfc_policies = self.store.policies_titled(policies, _ROUTINE_FOOT_CARE_TITLE)
+                mods = {m.strip().upper() for m in line.modifiers}
+                if (
+                    rfc_policies
+                    # follows_medicare_coverage, not is_medicare: MA plans are
+                    # bound to Original Medicare's coverage rules (42 CFR
+                    # 422.101), so routine-foot-care class findings apply to
+                    # both FFS and Medicare Advantage claims.
+                    and claim.payer.follows_medicare_coverage
+                    and not (mods & (_CLASS_FINDINGS_MODIFIERS | _ABN_ROUTING_MODIFIERS))
+                ):
+                    findings.append(self.finding(
+                        status=Status.WARN, codes=[line.code], denial_risk=DenialRisk.HIGH,
+                        reason=f"{line.code} is governed by routine-foot-care polic"
+                               f"{'y' if len(rfc_policies) == 1 else 'ies'} "
+                               f"{', '.join(rfc_policies)} and billed to Medicare without a "
+                               f"class-findings modifier (Q7/Q8/Q9) or ABN routing modifier — "
+                               f"routine foot care denies without documented class findings.",
+                        recommendation="Append Q7 (one class A), Q8 (two class B), or Q9 (one class B "
+                                       "+ two class C) if the exam documents the findings; otherwise "
+                                       "obtain an ABN (GA/GX) or do not bill as covered.",
+                        source_rule=f"Routine foot care coverage policy "
+                                    f"({', '.join(rfc_policies)}) — class-findings requirement",
+                    ))
+                continue
+            gating = restrictive or [noncov[0]]
+            policy_list = ", ".join(gating)
+            plural = "y" if len(gating) == 1 else "ies"
+            if noncov and not restrictive:
+                # no covered list anywhere, but a linked dx is explicitly on a
+                # Group-N "does not support medical necessity" list
+                mismatch = (f"{line.code}'s diagnosis {noncov[1]} is explicitly listed as NOT "
+                            f"supporting medical necessity under polic{plural} {policy_list}")
+            else:
+                mismatch = (f"{line.code} is governed by coverage polic{plural} {policy_list}, "
+                            f"but none of the claim's diagnoses satisfy any of them")
+            # Jurisdiction-unverifiable denial predictions must not hard-FAIL:
+            # when the claim's state is UNKNOWN, jurisdiction-scoped policies
+            # are kept conservatively (see policy_applies_in_state) — but if
+            # EVERY unsatisfied policy is scoped to a known, limited MAC
+            # service area, the claim's actual state may well be outside all
+            # of them, making "will deny" an unverifiable claim, not a fact.
+            # (Observed live: 76942 FAILed against 15 policies from assorted
+            # MACs on a claim whose note carried no state signal at all.)
+            # A policy whose service area CAN'T be resolved (None) may be
+            # national — those still FAIL.
+            jurisdiction_unverifiable = claim.state is None and all(
+                self.store.coverage_policy_states(p) is not None for p in gating
+            )
+            if jurisdiction_unverifiable and claim.payer.follows_medicare_coverage:
+                findings.append(self.finding(
+                    status=Status.FAIL, codes=[line.code], denial_risk=DenialRisk.MEDIUM,
+                    reason=f"{mismatch} — however, every governing policy is a LOCAL coverage "
+                           f"policy scoped to a specific MAC service area, and this claim's "
+                           f"servicing state could not be determined from the note. If the "
+                           f"practice is outside those jurisdictions, none of these policies "
+                           f"apply — coverage cannot be verified either way without the state.",
+                    recommendation="Determine the servicing state (letterhead/facility address) "
+                                   "and re-verify; if a governing policy does apply, add a "
+                                   "qualifying covered diagnosis or do not bill the line.",
+                    source_rule=f"Coverage polic{plural} {policy_list} — jurisdiction "
+                                f"unverifiable (claim state unknown)",
+                ))
+            elif claim.payer.follows_medicare_coverage:
                 findings.append(self.finding(
                     status=Status.FAIL, codes=[line.code], denial_risk=DenialRisk.HIGH,
-                    reason=f"{line.code} is governed by coverage policy {policy_id}, but none of the "
-                           f"claim's diagnoses are on its covered list — will deny as not medically "
-                           f"necessary.",
-                    recommendation=f"Add a qualifying diagnosis covered under {policy_id} (and document "
-                                   f"it), or do not bill {line.code}.",
-                    source_rule=f"Coverage policy {policy_id} (LCD/NCD/Article ICD↔CPT list)",
+                    reason=f"{mismatch} — will deny as not medically necessary.",
+                    recommendation=f"Add a qualifying diagnosis covered under one of {policy_list} "
+                                   f"(and document it), or do not bill {line.code}.",
+                    source_rule=f"Coverage polic{plural} {policy_list} "
+                               f"(LCD/NCD/Article ICD↔CPT list)",
+                ))
+            else:
+                # LCDs/Articles are MEDICARE coverage policies — they bind FFS
+                # Medicare and MA plans (42 CFR 422.101), not Medicaid or
+                # commercial payers, who publish their own coverage criteria.
+                # For those payers a Medicare-policy mismatch is a heads-up to
+                # verify the actual payer's policy, never a denial prediction.
+                findings.append(self.finding(
+                    status=Status.WARN, codes=[line.code], denial_risk=DenialRisk.LOW,
+                    reason=f"{mismatch} (Medicare coverage rule). This claim's payer "
+                           f"({claim.payer.name}) is not bound by Medicare LCDs — advisory only; "
+                           f"verify against the payer's own medical policy.",
+                    recommendation=f"Check {claim.payer.name}'s coverage criteria for {line.code}; "
+                                   f"no action needed if its policy covers the documented indication.",
+                    source_rule=f"Medicare coverage polic{plural} {policy_list} "
+                               f"(advisory for non-Medicare payer)",
                 ))
         return findings

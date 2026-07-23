@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+set -euo pipefail
+exec > >(tee /var/log/app-bootstrap.log) 2>&1
+
+echo "==> Installing Docker"
+dnf update -y
+dnf install -y docker unzip jq inotify-tools
+systemctl enable --now docker
+usermod -aG docker ec2-user
+
+# AL2023's bundled docker package has no compose/buildx plugins, and
+# `docker compose build` requires buildx >=0.17. Docker's own docker-ce repo
+# doesn't resolve on AL2023's $releasever, so pull versioned plugin binaries
+# directly (resolving "latest" via the GitHub API — buildx's asset filename
+# embeds the version tag, so a static "latest/download" URL doesn't work for it).
+mkdir -p /usr/local/lib/docker/cli-plugins
+
+COMPOSE_TAG=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | jq -r .tag_name)
+curl -fsSL "https://github.com/docker/compose/releases/download/$${COMPOSE_TAG}/docker-compose-linux-x86_64" \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+BUILDX_TAG=$(curl -s https://api.github.com/repos/docker/buildx/releases/latest | jq -r .tag_name)
+curl -fsSL "https://github.com/docker/buildx/releases/download/$${BUILDX_TAG}/buildx-$${BUILDX_TAG}.linux-amd64" \
+  -o /usr/local/lib/docker/cli-plugins/docker-buildx
+chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+
+echo "==> Fetching app source from S3"
+mkdir -p /opt/app
+aws s3 cp "s3://${bucket}/${key}" /tmp/app-source.zip --region "${region}"
+unzip -q -o /tmp/app-source.zip -d /opt/app
+rm -f /tmp/app-source.zip
+
+# SSM Session Manager lands in ssm-agent's own cwd by default, not the app
+# dir. ssm-user is pre-provisioned by the AMI's amazon-ssm-agent package, so
+# this is safe to write here regardless of whether anyone's used SSM yet.
+grep -qF "cd /opt/app" /home/ssm-user/.bashrc 2>/dev/null || echo "cd /opt/app" >> /home/ssm-user/.bashrc
+
+echo "==> Fetching runtime secrets"
+aws secretsmanager get-secret-value \
+  --secret-id "${secret_arn}" \
+  --region "${region}" \
+  --query SecretString --output text \
+  | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /opt/app/.env
+chmod 600 /opt/app/.env
+
+echo "==> Installing Claude Code CLI"
+dnf install -y nodejs
+npm install -g @anthropic-ai/claude-code
+
+# Non-interactive auth: write the key once to an ec2-user-owned file rather
+# than having .bashrc call `sudo` at shell-start (unreliable without a tty in
+# non-interactive SSH exec contexts) or re-hitting Secrets Manager per login.
+ANTHROPIC_KEY=$(grep "^ANTHROPIC_API_KEY=" /opt/app/.env | cut -d= -f2-)
+printf 'export ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_KEY" > /home/ec2-user/.claude-code-env
+chown ec2-user:ec2-user /home/ec2-user/.claude-code-env
+chmod 600 /home/ec2-user/.claude-code-env
+grep -qF '.claude-code-env' /home/ec2-user/.bashrc || \
+  echo '[ -f ~/.claude-code-env ] && source ~/.claude-code-env' >> /home/ec2-user/.bashrc
+
+echo "==> Phase 1: bringing up Qdrant + building the app image"
+cd /opt/app
+docker compose up -d qdrant
+docker compose build app
+
+echo "==> Phase 1: loading dependencies (GLiNER, embeddings, Qdrant collections, compliance.db)"
+docker compose run --rm app python run.py --setup-only
+# This state now lives in the app_data/hf_cache/qdrant_data named volumes and
+# survives container recreation — later note-processing runs skip straight
+# to the fast path instead of repeating this ~15-20 min build.
+
+echo "==> Installing secrets-refresh helper"
+cat > /opt/app/refresh-secrets.sh <<'SCRIPT'
+#!/usr/bin/env bash
+# Re-fetches the runtime .env from Secrets Manager. user_data only fetches
+# secrets once at first boot (it's frozen via lifecycle.ignore_changes so
+# routine code deploys don't replace the instance), so a secret rotation
+# needs this to reach the running instance instead of a hand-edited .env.
+set -euo pipefail
+aws secretsmanager get-secret-value \
+  --secret-id "${secret_arn}" \
+  --region "${region}" \
+  --query SecretString --output text \
+  | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /opt/app/.env
+chmod 600 /opt/app/.env
+echo "Refreshed /opt/app/.env from Secrets Manager. Existing long-running containers (e.g. a batch started with 'docker compose run -d') keep their old env — recreate them to pick up the new value. New 'docker compose run' invocations pick it up automatically."
+SCRIPT
+chmod +x /opt/app/refresh-secrets.sh
+
+echo "==> Installing process-notes helper for Phase 2"
+cat > /opt/app/process-notes.sh <<'SCRIPT'
+#!/usr/bin/env bash
+# Phase 2: process notes against the already-loaded dependencies from Phase 1.
+# Usage: ./process-notes.sh [--note FILE.pdf] [--no-cache]
+cd /opt/app
+docker compose run --rm app python run.py "$@"
+SCRIPT
+chmod +x /opt/app/process-notes.sh
+
+echo "==> Installing auto-trigger: new PDFs in doctors_notes/ run Phase 2 automatically"
+cat > /opt/app/watch-notes.sh <<'SCRIPT'
+#!/usr/bin/env bash
+# Watches doctors_notes/ for new PDFs and runs process-notes.sh once uploads
+# go quiet (debounced, so an scp of several files triggers one run, not one
+# per file). Never runs Phase 1 — only ever calls process-notes.sh.
+set -uo pipefail
+WATCH_DIR=/opt/app/doctors_notes
+LOCK_FILE=/tmp/process-notes.lock
+DEBOUNCE_SECONDS=15
+EVENT_STAMP=/tmp/.last-note-event
+LOG=/var/log/process-notes-auto.log
+
+inotifywait -m -e close_write -e moved_to --format '%f' "$WATCH_DIR" 2>>"$LOG" |
+while read -r file; do
+  case "$file" in
+    *.pdf|*.PDF)
+      echo "$(date '+%F %T') detected new note: $file" >> "$LOG"
+      date +%s > "$EVENT_STAMP"
+      ;;
+  esac
+done &
+
+while true; do
+  sleep 5
+  if [ -f "$EVENT_STAMP" ]; then
+    last=$(cat "$EVENT_STAMP")
+    now=$(date +%s)
+    if [ $((now - last)) -ge $DEBOUNCE_SECONDS ]; then
+      rm -f "$EVENT_STAMP"
+      echo "$(date '+%F %T') debounce elapsed — running Phase 2" >> "$LOG"
+      flock "$LOCK_FILE" /opt/app/process-notes.sh >> "$LOG" 2>&1
+      echo "$(date '+%F %T') Phase 2 run finished" >> "$LOG"
+    fi
+  fi
+done
+SCRIPT
+chmod +x /opt/app/watch-notes.sh
+
+cat > /etc/systemd/system/note-watcher.service <<'UNIT'
+[Unit]
+Description=Watch doctors_notes/ and auto-run Phase 2 on new PDFs
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/opt/app/watch-notes.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now note-watcher.service
+
+echo "==> Installing idle watchdog: auto-stop after 1h with nothing processing"
+cat > /opt/app/idle-watchdog.sh <<'SCRIPT'
+#!/usr/bin/env bash
+# Stops the instance after IDLE_MINUTES with no work. "Work" is any of:
+#   1. a docker container other than the long-lived qdrant service (pipeline
+#      runs, convergence loops, and note processing all run as containers);
+#   2. an established SSH connection or an active SSM session (someone is
+#      working on the box interactively);
+#   3. 5-min load average >= 1.0 (backstop for host-side work that isn't a
+#      container in `docker ps`, e.g. an in-daemon `docker compose build`).
+# Runs every 5 min from idle-watchdog.timer. The last-active stamp lives on
+# tmpfs, so every boot restarts the idle clock from zero. The instance has
+# instance_initiated_shutdown_behavior=stop, so poweroff stops (not
+# terminates) it and only EBS storage bills until the next start.
+set -uo pipefail
+IDLE_MINUTES=60
+# Test/override hook: `echo IDLE_MINUTES=5 > /etc/default/idle-watchdog`
+[ -f /etc/default/idle-watchdog ] && . /etc/default/idle-watchdog
+STAMP=/run/idle-watchdog.stamp
+LOG=/var/log/idle-watchdog.log
+
+active=""
+containers=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -vi qdrant || true)
+[ -n "$containers" ] && active="containers: $(echo "$containers" | tr '\n' ' ')"
+
+if [ -z "$active" ]; then
+  ssh_count=$(ss -tn state established '( sport = :22 )' 2>/dev/null | tail -n +2 | wc -l)
+  pgrep -f ssm-session-worker >/dev/null 2>&1 && ssh_count=$((ssh_count + 1))
+  [ "$ssh_count" -gt 0 ] && active="ssh/ssm sessions: $ssh_count"
+fi
+
+if [ -z "$active" ]; then
+  load5=$(cut -d' ' -f2 /proc/loadavg)
+  awk -v l="$load5" 'BEGIN{exit !(l >= 1.0)}' && active="load5: $load5"
+fi
+
+now=$(date +%s)
+if [ -n "$active" ]; then
+  echo "$now" > "$STAMP"
+  exit 0
+fi
+
+# First idle observation after boot (or after activity) starts the clock.
+[ -f "$STAMP" ] || { echo "$now" > "$STAMP"; exit 0; }
+
+idle_min=$(( (now - $(cat "$STAMP")) / 60 ))
+if [ "$idle_min" -ge "$IDLE_MINUTES" ]; then
+  echo "$(date '+%F %T') idle for $idle_min min (limit $IDLE_MINUTES) — stopping instance" >> "$LOG"
+  systemctl poweroff
+fi
+SCRIPT
+chmod +x /opt/app/idle-watchdog.sh
+
+cat > /etc/systemd/system/idle-watchdog.service <<'UNIT'
+[Unit]
+Description=Stop the instance when idle for 1h (no containers, sessions, or load)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/app/idle-watchdog.sh
+UNIT
+
+cat > /etc/systemd/system/idle-watchdog.timer <<'UNIT'
+[Unit]
+Description=Run idle-watchdog every 5 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now idle-watchdog.timer
+
+echo "==> Bootstrap complete (Phase 1 done — note-watcher.service auto-runs Phase 2 on new PDF uploads; /opt/app/process-notes.sh also available manually; idle-watchdog stops the instance after 1h idle)"

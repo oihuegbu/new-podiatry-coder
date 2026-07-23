@@ -30,7 +30,25 @@ class MUEAgent(ComplianceAgent):
                 continue  # no MUE published for this code
             cap = mue["mue_value"]
             mai = mue.get("mai") or ""
-            if cap <= 0 or line.units <= cap:
+            if cap == 0:
+                # MUE of 0 = CMS pays ZERO units of this code on this claim
+                # type, ever — the practitioner MUE file assigns 0 to items
+                # payable only through other channels (e.g. DMEPOS supplies
+                # on a professional claim). The old `cap <= 0: continue`
+                # skipped these entirely, so the scrub verdict came back
+                # CLEAN and overrode the validator's own MUE-0 ERROR
+                # (observed live: A4570 lines shipping AUTO).
+                findings.append(self.finding(
+                    status=Status.FAIL, codes=[line.code], denial_risk=DenialRisk.HIGH,
+                    reason=f"{line.code}: MUE is 0 on this claim type — CMS pays zero "
+                           f"units of this code on a professional claim, at any quantity.",
+                    recommendation="Remove the line. If the supply/service is real, bill it "
+                                   "through its payable channel (e.g. DMEPOS/DME MAC) or the "
+                                   "payable equivalent code the documentation supports.",
+                    source_rule=f"NCCI MUE {line.code_system} cap=0 MAI={mai or '?'} (eff on DOS)",
+                ))
+                continue
+            if line.units <= cap:
                 continue  # within the cap — fine
 
             src = f"NCCI MUE {line.code_system} cap={cap} MAI={mai or '?'} (eff on DOS)"
