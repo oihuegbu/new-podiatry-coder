@@ -24,6 +24,31 @@ class SpecificityAgent(ComplianceAgent):
         findings: list[Finding] = []
         dos = claim.date_of_service
 
+        # --- DOS sanity: every effective-date check below is anchored to the
+        # DOS, and the store's date helpers fall back to *today* when it's
+        # missing — meaning an unparseable DOS silently validated codes
+        # against today's code vintages instead of the visit's. Surface that
+        # explicitly rather than letting it pass as if verified. A future DOS
+        # is almost always an extraction error (claims can't precede care).
+        from datetime import date as _date
+        if dos is None:
+            findings.append(self.finding(
+                status=Status.WARN, denial_risk=DenialRisk.MEDIUM,
+                reason="Date of service is missing or unparseable — all effective-date "
+                       "checks below ran against TODAY's code sets, not the visit date.",
+                recommendation="Verify the note's date of service; re-scrub once it parses.",
+                source_rule="claim date-of-service anchor",
+            ))
+        elif dos > _date.today():
+            findings.append(self.finding(
+                status=Status.WARN, denial_risk=DenialRisk.MEDIUM,
+                reason=f"Date of service {dos.isoformat()} is in the future — almost "
+                       f"certainly an extraction/transcription error (claims cannot "
+                       f"precede the care they bill).",
+                recommendation="Verify the date of service against the note header.",
+                source_rule="claim date-of-service anchor",
+            ))
+
         # --- existence + active-for-DOS for every code on the claim ---
         for dx in claim.diagnoses:
             self._check_existence(findings, "ICD10", dx.code, "ICD-10-CM diagnosis", dos)

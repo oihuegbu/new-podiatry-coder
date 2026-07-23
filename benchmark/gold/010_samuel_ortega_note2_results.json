@@ -1,0 +1,50 @@
+{
+  "document_id": "010_samuel_ortega_note2",
+  "cpt_codes": [
+    {
+      "code": "99215",
+      "description": "Office or other outpatient visit for the evaluation and management of an established patient, which requires a medically appropriate history and/or examination and high level of medical decision making. When using total time on the date of the encounter for code selection, 40 minutes must be met or exceeded.",
+      "modifiers": [
+        "57"
+      ],
+      "units": 1
+    },
+    {
+      "code": "28124",
+      "description": "Partial excision (craterization, saucerization, sequestrectomy, or diaphysectomy) bone (eg, osteomyelitis or bossing); phalanx of toe",
+      "modifiers": [
+        "TA"
+      ],
+      "units": 1
+    }
+  ],
+  "final_disposition": "CLEAN",
+  "hcpcs_codes": [],
+  "icd_codes": [
+    {
+      "code": "M86.9",
+      "description": "Osteomyelitis, unspecified",
+      "type": "primary"
+    },
+    {
+      "code": "B95.62",
+      "description": "Methicillin resistant Staphylococcus aureus infection as the cause of diseases classified elsewhere",
+      "type": "secondary"
+    },
+    {
+      "code": "R78.81",
+      "description": "Bacteremia",
+      "type": "secondary"
+    },
+    {
+      "code": "I70.262",
+      "description": "Atherosclerosis of native arteries of extremities with gangrene, left leg",
+      "type": "secondary"
+    }
+  ],
+  "gold_provenance": {
+    "verification": "auto",
+    "verified_by": "pipeline/consistency-gate",
+    "recorded_at": "2026-07-18T14:59:06+00:00"
+  }
+}

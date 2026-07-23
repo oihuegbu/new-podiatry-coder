@@ -1,0 +1,113 @@
+{
+  "_meta": {
+    "description": "X12 Claim Adjustment Reason Code (CARC) -> pipeline check-family mapping. CARCs are administrative codes from the X12 external code list (maintained at x12.org/codes), not medical codes. Each denial ingested from an 835 remittance is classified by its CARC into the check families that should have caught it pre-submission; the gap report then verifies whether the stored result actually flagged the denied code under one of those families. check_families tokens are matched case-insensitively as substrings against claim_scrub filter_ids and validator issue categories.",
+    "source": "X12 CARC list (https://x12.org/codes/claim-adjustment-reason-codes)",
+    "updated": "2026-07-14"
+  },
+  "carcs": {
+    "4": {
+      "label": "Procedure code inconsistent with the modifier used",
+      "check_families": ["modifier"]
+    },
+    "5": {
+      "label": "Procedure code inconsistent with the place of service",
+      "check_families": ["pos_eligibility", "pos"]
+    },
+    "6": {
+      "label": "Procedure/revenue code inconsistent with the patient's age",
+      "check_families": ["age", "mce"]
+    },
+    "7": {
+      "label": "Procedure/revenue code inconsistent with the patient's gender",
+      "check_families": ["sex", "mce"]
+    },
+    "9": {
+      "label": "Diagnosis inconsistent with the patient",
+      "check_families": ["mce", "dx"]
+    },
+    "11": {
+      "label": "Diagnosis inconsistent with the procedure",
+      "check_families": ["cpt_dx_linkage", "medical_necessity", "dx_pointer"]
+    },
+    "16": {
+      "label": "Claim/service lacks information or has submission/billing error",
+      "check_families": ["documentation", "specificity", "dx_pointer"]
+    },
+    "18": {
+      "label": "Exact duplicate claim/service",
+      "check_families": ["duplicate"]
+    },
+    "26": {
+      "label": "Expenses incurred prior to coverage",
+      "check_families": ["benefits"]
+    },
+    "27": {
+      "label": "Expenses incurred after coverage terminated",
+      "check_families": ["benefits"]
+    },
+    "50": {
+      "label": "Not deemed a medical necessity by the payer",
+      "check_families": ["medical_necessity"]
+    },
+    "96": {
+      "label": "Non-covered charge(s)",
+      "check_families": ["benefits", "coverage", "billability"]
+    },
+    "97": {
+      "label": "Included in the payment/allowance for another service (bundled)",
+      "check_families": ["ncci", "global_period", "addon"]
+    },
+    "119": {
+      "label": "Benefit maximum for this time period has been reached",
+      "check_families": ["benefits", "frequency"]
+    },
+    "146": {
+      "label": "Diagnosis was invalid for the date(s) of service reported",
+      "check_families": ["icd", "specificity", "code_validity"]
+    },
+    "151": {
+      "label": "Payment adjusted: information does not support this many/frequency of services",
+      "check_families": ["mue", "frequency"]
+    },
+    "167": {
+      "label": "Diagnosis(es) not covered",
+      "check_families": ["medical_necessity"]
+    },
+    "170": {
+      "label": "Payment denied when performed by this type of provider",
+      "check_families": ["pos_eligibility", "benefits"]
+    },
+    "181": {
+      "label": "Procedure code was invalid on the date of service",
+      "check_families": ["code_validity", "specificity", "billability"]
+    },
+    "182": {
+      "label": "Procedure modifier was invalid on the date of service",
+      "check_families": ["modifier"]
+    },
+    "197": {
+      "label": "Precertification/authorization/notification absent",
+      "check_families": ["prior_auth"]
+    },
+    "198": {
+      "label": "Precertification/authorization exceeded",
+      "check_families": ["prior_auth"]
+    },
+    "234": {
+      "label": "Procedure not paid separately",
+      "check_families": ["ncci", "addon", "billability"]
+    },
+    "236": {
+      "label": "Procedure(s) combination not compatible per coding guidelines (NCCI)",
+      "check_families": ["ncci"]
+    },
+    "B15": {
+      "label": "Service lacks a required qualifying service/procedure (add-on without primary)",
+      "check_families": ["addon"]
+    },
+    "B7": {
+      "label": "Provider not certified/eligible to be paid for this procedure on this date",
+      "check_families": ["benefits", "pos_eligibility"]
+    }
+  }
+}

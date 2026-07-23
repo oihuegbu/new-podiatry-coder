@@ -1,60 +1,1529 @@
 {
-  "description": "Recognized CPT/HCPCS modifiers with category. Reference table (swappable).",
-  "source": "AMA CPT Appendix A + CMS HCPCS modifiers + NCCI-associated modifiers",
-  "note": "CMS prefers the X{EPSU} subset over 59. Category drives modifier-validity logic.",
-  "modifiers": {
-    "22": "increased_procedural_services",
-    "24": "global_unrelated_em",
-    "25": "significant_separate_em",
-    "26": "professional_component",
-    "47": "anesthesia_by_surgeon",
-    "50": "bilateral",
-    "51": "multiple_procedures",
-    "52": "reduced_services",
-    "53": "discontinued_procedure",
-    "54": "surgical_care_only",
-    "55": "postoperative_management_only",
-    "56": "preoperative_management_only",
-    "57": "decision_for_surgery",
-    "58": "global_staged_related",
-    "59": "distinct_procedural_service",
-    "62": "two_surgeons",
-    "76": "repeat_by_same_physician",
-    "77": "repeat_by_other_physician",
-    "78": "global_return_to_or_complication",
-    "79": "global_unrelated_procedure",
-    "80": "assistant_surgeon",
-    "81": "minimum_assistant_surgeon",
-    "82": "assistant_surgeon_no_resident",
-    "91": "repeat_clinical_lab",
-    "99": "multiple_modifiers",
-    "AS": "pa_np_cns_assistant",
-    "GA": "waiver_of_liability_abn",
-    "GX": "notice_of_liability_voluntary",
-    "GY": "statutorily_excluded",
-    "GZ": "expected_denial_no_abn",
-    "KX": "requirements_met",
-    "LT": "left_side",
-    "RT": "right_side",
-    "Q7": "class_a_finding",
-    "Q8": "class_b_finding",
-    "Q9": "class_c_finding",
-    "QW": "clia_waived_test",
-    "TC": "technical_component",
-    "TA": "left_foot_great_toe",
-    "T1": "left_foot_second_digit",
-    "T2": "left_foot_third_digit",
-    "T3": "left_foot_fourth_digit",
-    "T4": "left_foot_fifth_digit",
-    "T5": "right_foot_great_toe",
-    "T6": "right_foot_second_digit",
-    "T7": "right_foot_third_digit",
-    "T8": "right_foot_fourth_digit",
-    "T9": "right_foot_fifth_digit",
-    "XE": "separate_encounter",
-    "XS": "separate_structure",
-    "XP": "separate_practitioner",
-    "XU": "unusual_separate_service"
+  "description": "Recognized CPT/HCPCS modifiers, merged from two authoritative sources: AMA CPT Appendix A + cross-listed HCPCS Level II modifiers (Modifiers.txt, AMA CPT Standard Data ZIP API), plus CMS's own HCPCS Level II Alpha-Numeric file for the modifiers AMA's cross-reference doesn't include (notably Q7/Q8/Q9, the routine-foot-care Class A/B/C finding modifiers, plus GA/GX/GY/GZ/KX/AS/QW/TC).",
+  "sources": [
+    {
+      "name": "AMA CPT Standard Data ZIP API -- Modifiers.txt",
+      "url": "https://api-platform.ama-assn.org/cpt-zip/1.0.0/files",
+      "release": "2026-Update-4",
+      "covers": [
+        "1P",
+        "22",
+        "23",
+        "24",
+        "25",
+        "26",
+        "27",
+        "2P",
+        "32",
+        "33",
+        "3P",
+        "47",
+        "50",
+        "51",
+        "52",
+        "53",
+        "54",
+        "55",
+        "56",
+        "57",
+        "58",
+        "59",
+        "62",
+        "63",
+        "66",
+        "73",
+        "74",
+        "76",
+        "77",
+        "78",
+        "79",
+        "80",
+        "81",
+        "82",
+        "8P",
+        "90",
+        "91",
+        "92",
+        "93",
+        "95",
+        "96",
+        "97",
+        "99",
+        "E1",
+        "E2",
+        "E3",
+        "E4",
+        "F1",
+        "F2",
+        "F3",
+        "F4",
+        "F5",
+        "F6",
+        "F7",
+        "F8",
+        "F9",
+        "FA",
+        "GG",
+        "GH",
+        "LC",
+        "LD",
+        "LM",
+        "LT",
+        "P1",
+        "P2",
+        "P3",
+        "P4",
+        "P5",
+        "P6",
+        "QM",
+        "QN",
+        "RC",
+        "RI",
+        "RT",
+        "T1",
+        "T2",
+        "T3",
+        "T4",
+        "T5",
+        "T6",
+        "T7",
+        "T8",
+        "T9",
+        "TA",
+        "XE",
+        "XP",
+        "XS",
+        "XU"
+      ]
+    },
+    {
+      "name": "CMS HCPCS Level II Alpha-Numeric File",
+      "url": "https://www.cms.gov/files/zip/april-2026-alpha-numeric-hcpcs-file.zip",
+      "release": "April 2026",
+      "covers": [
+        "AS",
+        "GA",
+        "GX",
+        "GY",
+        "GZ",
+        "KX",
+        "Q7",
+        "Q8",
+        "Q9",
+        "QW",
+        "TC"
+      ]
+    }
+  ],
+  "note": "CMS prefers the X{EPSU} subset (XE/XS/XP/XU) over generic 59 whenever a more specific modifier applies -- see MLN1783722. 'level'/'system' fields come directly from each source's own classification, not inferred.",
+  "prefer_x_over_59": [
+    "XE",
+    "XS",
+    "XP",
+    "XU"
+  ],
+  "counts": {
+    "total": 99,
+    "cpt_level_i": 49,
+    "hcpcs_level_ii": 50
   },
-  "prefer_x_over_59": ["XE", "XS", "XP", "XU"]
+  "modifiers": {
+    "1P": {
+      "name": "Performance Measure Exclusion Modifier due to Medical Reasons",
+      "description": "Reasons include: Not indicated (absence of organ/limb, already received/performed, other) Contraindicated (patient allergic history, potential adverse drug interaction, other) Other medical reasons",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Category II Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021517",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "22": {
+      "name": "Increased Procedural Services",
+      "description": "When the work required to provide a service is substantially greater than typically required, it may be identified by adding modifier 22 to the usual procedure code. Documentation must support the substantial additional work and the reason for the additional work (ie, increased intensity, time, technical difficulty of procedure, severity of patient's condition, physical and mental effort required). Note: This modifier should not be appended to an E/M service.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021440",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "23": {
+      "name": "Unusual Anesthesia",
+      "description": "Occasionally, a procedure, which usually requires either no anesthesia or local anesthesia, because of unusual circumstances must be done under general anesthesia. This circumstance may be reported by adding modifier 23 to the procedure code of the basic service.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021441",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "24": {
+      "name": "Unrelated Evaluation and Management Service by the Same Physician or Other Qualified Health Care Professional During a Postoperative Period",
+      "description": "The physician or other qualified health care professional may need to indicate that an evaluation and management service was performed during a postoperative period for a reason(s) unrelated to the original procedure. This circumstance may be reported by adding modifier 24 to the appropriate level of E/M service.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021442",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "25": {
+      "name": "Significant, Separately Identifiable Evaluation and Management Service by the Same Physician or Other Qualified Health Care Professional on the Same Day of the Procedure or Other Service",
+      "description": "It may be necessary to indicate that on the day a procedure or service identified by a CPT code was performed, the patient's condition required a significant, separately identifiable E/M service above and beyond the other service provided or beyond the usual preoperative and postoperative care associated with the procedure that was performed. A significant, separately identifiable E/M service is defined or substantiated by documentation that satisfies the relevant criteria for the respective E/M service to be reported (see Evaluation and Management Services Guidelines for instructions on determining level of E/M service). The E/M service may be prompted by the symptom or condition for which the procedure and/or service was provided. As such, different diagnoses are not required for reporting of the E/M services on the same date. This circumstance may be reported by adding modifier 25 to the appropriate level of E/M service. Note: This modifier is not used to report an E/M service that resulted in a decision to perform surgery. See modifier 57. For significant, separately identifiable non-E/M services, see modifier 59.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers/Modifiers Approved for Ambulatory Surgery Center (ASC) Hospital Outpatient Use",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021443",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "26": {
+      "name": "Professional Component",
+      "description": "Certain procedures are a combination of a physician or other qualified health care professional component and a technical component. When the physician or other qualified health care professional component is reported separately, the service may be identified by adding modifier 26 to the usual procedure number.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021444",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "27": {
+      "name": "Multiple Outpatient Hospital E/M Encounters on the Same Date",
+      "description": "For hospital outpatient reporting purposes, utilization of hospital resources related to separate and distinct E/M encounters performed in multiple outpatient hospital settings on the same date may be reported by adding modifier 27 to each appropriate level outpatient and/or emergency department E/M code(s). This modifier provides a means of reporting circumstances involving evaluation and management services provided by physician(s) in more than one (multiple) outpatient hospital setting(s) (eg, hospital emergency department, clinic). Note: This modifier is not to be used for physician reporting of multiple E/M services performed by the same physician on the same date. For physician reporting of all outpatient evaluation and management services provided by the same physician on the same date and performed in multiple outpatient setting(s) (eg, hospital emergency department, clinic), see Evaluation and Management, Emergency Department, or Preventive Medicine Services codes.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers Approved for Ambulatory Surgery Center (ASC) Hospital Outpatient Use/CPT Level I Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021472",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "2P": {
+      "name": "Performance Measure Exclusion Modifier due to Patient Reasons",
+      "description": "Reasons include: Patient declined Economic, social, or religious reasons Other patient reasons",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Category II Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021518",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "32": {
+      "name": "Mandated Services",
+      "description": "Services related to mandated consultation and/or related services (eg, third party payer, governmental, legislative or regulatory requirement) may be identified by adding modifier 32 to the basic procedure.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021445",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "33": {
+      "name": "Preventive Services",
+      "description": "When the primary purpose of the service is the delivery of an evidence-based service in accordance with a US Preventive Services Task Force A or B rating in effect or is another preventive service identified in preventive services mandates (legislative or regulatory), the service may be identified by adding modifier 33 to the procedure. For separately reported services specifically identified as preventive, the modifier should not be used.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers/Modifiers Approved for Ambulatory Surgery Center (ASC) Hospital Outpatient Use",
+      "effective_date": "20260101",
+      "metadata": {
+        "concept_id": "1021446",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "3P": {
+      "name": "Performance Measure Exclusion Modifier due to System Reasons",
+      "description": "Reasons include: Resources to perform the services not available Insurance coverage/payor-related limitations Other reasons attributable to health care delivery system",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Category II Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021519",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "47": {
+      "name": "Anesthesia by Surgeon",
+      "description": "Regional or general anesthesia provided by the surgeon may be reported by adding modifier 47 to the basic service. (This does not include local anesthesia.) Note: Modifier 47 would not be used as a modifier for the anesthesia procedures.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021447",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "50": {
+      "name": "Bilateral Procedure",
+      "description": "Unless otherwise identified in the listings, bilateral procedures that are performed at the same session should be identified by adding modifier 50 to the appropriate 5 digit code. Note: This modifier should not be appended to designated \"add-on\" codes (see Appendix D).",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers/Modifiers Approved for Ambulatory Surgery Center (ASC) Hospital Outpatient Use",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021448",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "51": {
+      "name": "Multiple Procedures",
+      "description": "When multiple procedures, other than E/M services, Physical Medicine and Rehabilitation services or provision of supplies (eg, vaccines), are performed at the same session by the same individual, the primary procedure or service may be reported as listed. The additional procedure(s) or service(s) may be identified by appending modifier 51 to the additional procedure or service code(s). Note: This modifier should not be appended to designated \"add-on\" codes (see Appendix D).",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021449",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "52": {
+      "name": "Reduced Services",
+      "description": "Under certain circumstances a service or procedure is partially reduced or eliminated at the discretion of the physician or other qualified health care professional. Under these circumstances the service provided can be identified by its usual procedure number and the addition of modifier 52, signifying that the service is reduced. This provides a means of reporting reduced services without disturbing the identification of the basic service. Note: For hospital outpatient reporting of a previously scheduled procedure/service that is partially reduced or cancelled as a result of extenuating circumstances or those that threaten the well-being of the patient prior to or after administration of anesthesia, see modifiers 73 and 74 (see modifiers approved for ASC hospital outpatient use).",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers/Modifiers Approved for Ambulatory Surgery Center (ASC) Hospital Outpatient Use",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021450",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "53": {
+      "name": "Discontinued Procedure",
+      "description": "Under certain circumstances, the physician or other qualified health care professional may elect to terminate a surgical or diagnostic procedure. Due to extenuating circumstances or those that threaten the well being of the patient, it may be necessary to indicate that a surgical or diagnostic procedure was started but discontinued. This circumstance may be reported by adding modifier 53 to the code reported by the individual for the discontinued procedure. Note: This modifier is not used to report the elective cancellation of a procedure prior to the patient's anesthesia induction and/or surgical preparation in the operating suite. For outpatient hospital/ambulatory surgery center (ASC) reporting of a previously scheduled procedure/service that is partially reduced or cancelled as a result of extenuating circumstances or those that threaten the well being of the patient prior to or after administration of anesthesia, see modifiers 73 and 74 (see modifiers approved for ASC hospital outpatient use).",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021451",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "54": {
+      "name": "Surgical Care Only",
+      "description": "When 1 physician or other qualified health care professional performs a surgical procedure and another provides preoperative and/or postoperative management, surgical services may be identified by adding modifier 54 to the usual procedure number.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021452",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "55": {
+      "name": "Postoperative Management Only",
+      "description": "When 1 physician or other qualified health care professional performed the postoperative management and another performed the surgical procedure, the postoperative component may be identified by adding modifier 55 to the usual procedure number.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021453",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "56": {
+      "name": "Preoperative Management Only",
+      "description": "When 1 physician or other qualified health care professional performed the preoperative care and evaluation and another performed the surgical procedure, the preoperative component may be identified by adding modifier 56 to the usual procedure number.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021454",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "57": {
+      "name": "Decision for Surgery",
+      "description": "An evaluation and management service that resulted in the initial decision to perform the surgery may be identified by adding modifier 57 to the appropriate level of E/M service.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021455",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "58": {
+      "name": "Staged or Related Procedure or Service by the Same Physician or Other Qualified Health Care Professional During the Postoperative Period",
+      "description": "It may be necessary to indicate that the performance of a procedure or service during the postoperative period was: (a) planned or anticipated (staged); (b) more extensive than the original procedure; or (c) for therapy following a surgical procedure. This circumstance may be reported by adding modifier 58 to the staged or related procedure. Note: For treatment of a problem that requires a return to the operating/procedure room (eg, unanticipated clinical condition), see modifier 78.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers/Modifiers Approved for Ambulatory Surgery Center (ASC) Hospital Outpatient Use",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021456",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "59": {
+      "name": "Distinct Procedural Service",
+      "description": "Under certain circumstances, it may be necessary to indicate that a procedure or service was distinct or independent from other non-E/M services performed on the same day. Modifier 59 is used to identify procedures/services, other than E/M services, that are not normally reported together, but are appropriate under the circumstances. Documentation must support a different session, different procedure or surgery, different site or organ system, separate incision/excision, separate lesion, or separate injury (or area of injury in extensive injuries) not ordinarily encountered or performed on the same day by the same individual. However, when another already established modifier is appropriate it should be used rather than modifier 59. Only if no more descriptive modifier is available, and the use of modifier 59 best explains the circumstances, should modifier 59 be used. Note: Modifier 59 should not be appended to an E/M service. To report a separate and distinct E/M service with a non-E/M service performed on the same date, see modifier 25.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers/Modifiers Approved for Ambulatory Surgery Center (ASC) Hospital Outpatient Use",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021457",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "62": {
+      "name": "Two Surgeons",
+      "description": "When 2 surgeons work together as primary surgeons performing distinct part(s) of a procedure, each surgeon should report his/her distinct operative work by adding modifier 62 to the procedure code and any associated add-on code(s) for that procedure as long as both surgeons continue to work together as primary surgeons. Each surgeon should report the co-surgery once using the same procedure code. If additional procedure(s) (including add-on procedure[s]) are performed during the same surgical session, separate code(s) may also be reported with modifier 62 added. Note: If a co-surgeon acts as an assistant in the performance of additional procedure(s), other than those reported with the modifier 62, during the same surgical session, those services may be reported using separate procedure code(s) with modifier 80 or modifier 82 added, as appropriate.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021458",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "63": {
+      "name": "Procedure Performed on Infants less than 4 kg",
+      "description": "Procedures performed on neonates and infants up to a present body weight of 4 kg may involve significantly increased complexity and physician or other qualified health care professional work commonly associated with these patients. This circumstance may be reported by adding modifier 63 to the procedure number. Note: Unless otherwise designated, this modifier may only be appended to procedures/services listed in the 20100-69990 code series and 92920, 92928, 92953, 92960, 92986, 92987, 92990, 92997, 92998, 93312, 93313, 93314, 93315, 93316, 93317, 93318, 93452, 93505, 93563, 93564, 93568, 93569, 93573, 93574, 93575, 93580, 93581, 93582, 93590, 93591, 93592, 93593, 93594, 93595, 93596, 93597, 93598, 93615, 93616 from the Medicine/Cardiovascular section. Modifier 63 should not be appended to any CPT codes listed in the Evaluation and Management Services, Anesthesia, Radiology, Pathology and Laboratory, or Medicine sections (other than those identified above from the Medicine/Cardiovascular section).",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": "20230101",
+      "metadata": {
+        "concept_id": "1021459",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "66": {
+      "name": "Surgical Team",
+      "description": "Under some circumstances, highly complex procedures (requiring the concomitant services of several physicians or other qualified health care professionals, often of different specialties, plus other highly skilled, specially trained personnel, various types of complex equipment) are carried out under the \"surgical team\" concept. Such circumstances may be identified by each participating individual with the addition of modifier 66 to the basic procedure number used for reporting services.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021460",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "73": {
+      "name": "Discontinued Out-Patient Hospital/Ambulatory Surgery Center (ASC) Procedure Prior to the Administration of Anesthesia",
+      "description": "Due to extenuating circumstances or those that threaten the well being of the patient, the physician may cancel a surgical or diagnostic procedure subsequent to the patient's surgical preparation (including sedation when provided, and being taken to the room where the procedure is to be performed), but prior to the administration of anesthesia (local, regional block(s) or general). Under these circumstances, the intended service that is prepared for but cancelled can be reported by its usual procedure number and the addition of modifier 73. Note: The elective cancellation of a service prior to the administration of anesthesia and/or surgical preparation of the patient should not be reported. For physician reporting of a discontinued procedure, see modifier 53.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers Approved for Ambulatory Surgery Center (ASC) Hospital Outpatient Use/CPT Level I Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021473",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "74": {
+      "name": "Discontinued Out-Patient Hospital/Ambulatory Surgery Center (ASC) Procedure After Administration of Anesthesia",
+      "description": "Due to extenuating circumstances or those that threaten the well being of the patient, the physician may terminate a surgical or diagnostic procedure after the administration of anesthesia (local, regional block(s), general) or after the procedure was started (incision made, intubation started, scope inserted, etc). Under these circumstances, the procedure started but terminated can be reported by its usual procedure number and the addition of modifier 74. Note: The elective cancellation of a service prior to the administration of anesthesia and/or surgical preparation of the patient should not be reported. For physician reporting of a discontinued procedure, see modifier 53.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers Approved for Ambulatory Surgery Center (ASC) Hospital Outpatient Use/CPT Level I Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021474",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "76": {
+      "name": "Repeat Procedure or Service by Same Physician or Other Qualified Health Care Professional",
+      "description": "It may be necessary to indicate that a procedure or service was repeated by the same physician or other qualified health care professional subsequent to the original procedure or service. This circumstance may be reported by adding modifier 76 to the repeated procedure or service. Note: This modifier should not be appended to an E/M service.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers/Modifiers Approved for Ambulatory Surgery Center (ASC) Hospital Outpatient Use",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021461",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "77": {
+      "name": "Repeat Procedure by Another Physician or Other Qualified Health Care Professional",
+      "description": "It may be necessary to indicate that a basic procedure or service was repeated by another physician or other qualified health care professional subsequent to the original procedure or service. This circumstance may be reported by adding modifier 77 to the repeated procedure or service. Note: This modifier should not be appended to an E/M service.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers/Modifiers Approved for Ambulatory Surgery Center (ASC) Hospital Outpatient Use",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021462",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "78": {
+      "name": "Unplanned Return to the Operating/Procedure Room by the Same Physician or Other Qualified Health Care Professional Following Initial Procedure for a Related Procedure During the Postoperative Period",
+      "description": "It may be necessary to indicate that another procedure was performed during the postoperative period of the initial procedure (unplanned procedure following initial procedure). When this procedure is related to the first, and requires the use of an operating/procedure room, it may be reported by adding modifier 78 to the related procedure. (For repeat procedures, see modifier 76.)",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers/Modifiers Approved for Ambulatory Surgery Center (ASC) Hospital Outpatient Use",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021463",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "79": {
+      "name": "Unrelated Procedure or Service by the Same Physician or Other Qualified Health Care Professional During the Postoperative Period",
+      "description": "The individual may need to indicate that the performance of a procedure or service during the postoperative period was unrelated to the original procedure. This circumstance may be reported by using modifier 79. (For repeat procedures on the same day, see modifier 76.)",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers/Modifiers Approved for Ambulatory Surgery Center (ASC) Hospital Outpatient Use",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021464",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "80": {
+      "name": "Assistant Surgeon",
+      "description": "Surgical assistant services may be identified by adding modifier 80 to the usual procedure number(s).",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021465",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "81": {
+      "name": "Minimum Assistant Surgeon",
+      "description": "Minimum surgical assistant services are identified by adding modifier 81 to the usual procedure number.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021466",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "82": {
+      "name": "Assistant Surgeon (when qualified resident surgeon not available)",
+      "description": "The unavailability of a qualified resident surgeon is a prerequisite for use of modifier 82 appended to the usual procedure code number(s).",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021467",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "8P": {
+      "name": "Performance measure reporting modifier-action not performed, reason not otherwise specified",
+      "description": "Performance measure reporting modifier-action not performed, reason not otherwise specified",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Category II Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021520",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "90": {
+      "name": "Reference (Outside) Laboratory",
+      "description": "When laboratory procedures are performed by a party other than the treating or reporting physician or other qualified health care professional, the procedure may be identified by adding modifier 90 to the usual procedure number.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021468",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "91": {
+      "name": "Repeat Clinical Diagnostic Laboratory Test",
+      "description": "In the course of treatment of the patient, it may be necessary to repeat the same laboratory test on the same day to obtain subsequent (multiple) test results. Under these circumstances, the laboratory test performed can be identified by its usual procedure number and the addition of modifier 91. Note: This modifier may not be used when tests are rerun to confirm initial results; due to testing problems with specimens or equipment; or for any other reason when a normal, one-time, reportable result is all that is required. This modifier may not be used when other code(s) describe a series of test results (eg, glucose tolerance tests, evocative/suppression testing). This modifier may only be used for laboratory test(s) performed more than once on the same day on the same patient.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers/Modifiers Approved for Ambulatory Surgery Center (ASC) Hospital Outpatient Use",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021469",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "92": {
+      "name": "Alternative Laboratory Platform Testing",
+      "description": "When laboratory testing is being performed using a kit or transportable instrument that wholly or in part consists of a single use, disposable analytical chamber, the service may be identified by adding modifier 92 to the usual laboratory procedure code (HIV testing 86701-86703, and 87389). The test does not require permanent dedicated space, hence by its design may be hand carried or transported to the vicinity of the patient for immediate testing at that site, although location of the testing is not in itself determinative of the use of this modifier.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021470",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "93": {
+      "name": "Synchronous Telemedicine Service Rendered Via Telephone or Other Real-Time Interactive Audio-Only Telecommunications System",
+      "description": "Synchronous telemedicine service is defined as a real-time interaction between a physician or other qualified health care professional and a patient who is located away at a distant site from the physician or other qualified health care professional. The totality of the communication of information exchanged between the physician or other qualified health care professional and the patient during the course of the synchronous telemedicine service must be of an amount and nature that is sufficient to meet the key components and/or requirements of the same service when rendered via a face-to-face interaction.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": "20220101",
+      "metadata": {
+        "concept_id": "1037226",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "95": {
+      "name": "Synchronous Telemedicine Service Rendered Via a Real-Time Interactive Audio and Video Telecommunications System",
+      "description": "Synchronous telemedicine service is defined as a real-time interaction between a physician or other qualified health care professional and a patient who is located at a distant site from the physician or other qualified health care professional. The totality of the communication of information exchanged between the physician or other qualified health care professional and the patient during the course of the synchronous telemedicine service must be of an amount and nature that would be sufficient to meet the key components and/or requirements of the same service when rendered via a face-to-face interaction. Modifier 95 may only be appended to the services listed in Appendix P. Appendix P is the list of CPT codes for services that are typically performed face-to-face, but may be rendered via a real-time (synchronous) interactive audio and video telecommunications system.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1029681",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "96": {
+      "name": "Habilitative Services",
+      "description": "When a service or procedure that may be either habilitative or rehabilitative in nature is provided for habilitative purposes, the physician or other qualified health care professional may add modifier 96 to the service or procedure code to indicate that the service or procedure provided was a habilitative service. Habilitative services help an individual learn skills and functioning for daily living that the individual has not yet developed, and then keep and/or improve those learned skills. Habilitative services also help an individual keep, learn, or improve skills and functioning for daily living.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1031026",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "97": {
+      "name": "Rehabilitative Services",
+      "description": "When a service or procedure that may be either habilitative or rehabilitative in nature is provided for rehabilitative purposes, the physician or other qualified health care professional may add modifier 97 to the service or procedure code to indicate that the service or procedure provided was a rehabilitative service. Rehabilitative services help an individual keep, get back, or improve skills and functioning for daily living that have been lost or impaired because the individual was sick, hurt, or disabled.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1031027",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "99": {
+      "name": "Multiple Modifiers",
+      "description": "Under certain circumstances 2 or more modifiers may be necessary to completely delineate a service. In such situations modifier 99 should be added to the basic procedure, and other applicable modifiers may be listed as part of the description of the service.",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021471",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "AS": {
+      "name": "Assistant at surgery service",
+      "description": "Physician assistant, nurse practitioner, or clinical nurse specialist services for assistant at surgery",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": "1988-01-01",
+      "metadata": {
+        "concept_id": null,
+        "source_file": "HCPC2026_APR_ANWEB.xlsx",
+        "source_release": "April 2026",
+        "source": "CMS HCPCS Level II Alpha-Numeric File",
+        "coverage_code": "C"
+      }
+    },
+    "E1": {
+      "name": "Upper left, eyelid",
+      "description": "Upper left, eyelid",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021475",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "E2": {
+      "name": "Lower left, eyelid",
+      "description": "Lower left, eyelid",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021476",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "E3": {
+      "name": "Upper right, eyelid",
+      "description": "Upper right, eyelid",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021477",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "E4": {
+      "name": "Lower right, eyelid",
+      "description": "Lower right, eyelid",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021478",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "F1": {
+      "name": "Left hand, second digit",
+      "description": "Left hand, second digit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021479",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "F2": {
+      "name": "Left hand, third digit",
+      "description": "Left hand, third digit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021480",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "F3": {
+      "name": "Left hand, fourth digit",
+      "description": "Left hand, fourth digit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021481",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "F4": {
+      "name": "Left hand, fifth digit",
+      "description": "Left hand, fifth digit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021482",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "F5": {
+      "name": "Right hand, thumb",
+      "description": "Right hand, thumb",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021483",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "F6": {
+      "name": "Right hand, second digit",
+      "description": "Right hand, second digit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021484",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "F7": {
+      "name": "Right hand, third digit",
+      "description": "Right hand, third digit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021485",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "F8": {
+      "name": "Right hand, fourth digit",
+      "description": "Right hand, fourth digit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021486",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "F9": {
+      "name": "Right hand, fifth digit",
+      "description": "Right hand, fifth digit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021487",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "FA": {
+      "name": "Left hand, thumb",
+      "description": "Left hand, thumb",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021488",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "GA": {
+      "name": "Liability waiver ind case",
+      "description": "Waiver of liability statement issued as required by payer policy, individual case",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": "1995-01-01",
+      "metadata": {
+        "concept_id": null,
+        "source_file": "HCPC2026_APR_ANWEB.xlsx",
+        "source_release": "April 2026",
+        "source": "CMS HCPCS Level II Alpha-Numeric File",
+        "coverage_code": "C"
+      }
+    },
+    "GG": {
+      "name": "Performance and payment of a screening mammogram and diagnostic mammogram on the same patient, same day",
+      "description": "Performance and payment of a screening mammogram and diagnostic mammogram on the same patient, same day",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021489",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "GH": {
+      "name": "Diagnostic mammogram converted from screening mammogram on same day",
+      "description": "Diagnostic mammogram converted from screening mammogram on same day",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021490",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "GX": {
+      "name": "Voluntary liability notice",
+      "description": "Notice of liability issued, voluntary under payer policy",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": "2010-04-01",
+      "metadata": {
+        "concept_id": null,
+        "source_file": "HCPC2026_APR_ANWEB.xlsx",
+        "source_release": "April 2026",
+        "source": "CMS HCPCS Level II Alpha-Numeric File",
+        "coverage_code": "C"
+      }
+    },
+    "GY": {
+      "name": "Statutorily excluded",
+      "description": "Item or service statutorily excluded, does not meet the definition of any medicare benefit or, for non-medicare insurers, is not a contract benefit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": "2002-01-01",
+      "metadata": {
+        "concept_id": null,
+        "source_file": "HCPC2026_APR_ANWEB.xlsx",
+        "source_release": "April 2026",
+        "source": "CMS HCPCS Level II Alpha-Numeric File",
+        "coverage_code": "S"
+      }
+    },
+    "GZ": {
+      "name": "Not reasonable and necessary",
+      "description": "Item or service expected to be denied as not reasonable and necessary",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": "2002-01-01",
+      "metadata": {
+        "concept_id": null,
+        "source_file": "HCPC2026_APR_ANWEB.xlsx",
+        "source_release": "April 2026",
+        "source": "CMS HCPCS Level II Alpha-Numeric File",
+        "coverage_code": "M"
+      }
+    },
+    "KX": {
+      "name": "Documentation on file",
+      "description": "Requirements specified in the medical policy have been met",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": "2002-07-01",
+      "metadata": {
+        "concept_id": null,
+        "source_file": "HCPC2026_APR_ANWEB.xlsx",
+        "source_release": "April 2026",
+        "source": "CMS HCPCS Level II Alpha-Numeric File",
+        "coverage_code": "C"
+      }
+    },
+    "LC": {
+      "name": "Left circumflex coronary artery",
+      "description": "Left circumflex coronary artery",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021491",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "LD": {
+      "name": "Left anterior descending coronary artery",
+      "description": "Left anterior descending coronary artery",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021492",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "LM": {
+      "name": "Left main coronary artery",
+      "description": "Left main coronary artery",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021493",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "LT": {
+      "name": "Left side (used to identify procedures performed on the left side of the body)",
+      "description": "Left side (used to identify procedures performed on the left side of the body)",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021494",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "P1": {
+      "name": "A normal healthy patient",
+      "description": "A normal healthy patient",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Anesthesia Physical Status Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021510",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "P2": {
+      "name": "A patient with mild systemic disease",
+      "description": "A patient with mild systemic disease",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Anesthesia Physical Status Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021511",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "P3": {
+      "name": "A patient with severe systemic disease",
+      "description": "A patient with severe systemic disease",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Anesthesia Physical Status Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021512",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "P4": {
+      "name": "A patient with severe systemic disease that is a constant threat to life",
+      "description": "A patient with severe systemic disease that is a constant threat to life",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Anesthesia Physical Status Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021513",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "P5": {
+      "name": "A moribund patient who is not expected to survive without the operation",
+      "description": "A moribund patient who is not expected to survive without the operation",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Anesthesia Physical Status Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021514",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "P6": {
+      "name": "A declared brain-dead patient whose organs are being removed for donor purposes",
+      "description": "A declared brain-dead patient whose organs are being removed for donor purposes",
+      "level": "CPT (Level I)",
+      "system": "CPT",
+      "section": "Anesthesia Physical Status Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021515",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "Q7": {
+      "name": "One class a finding",
+      "description": "One class a finding",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": "1995-01-01",
+      "metadata": {
+        "concept_id": null,
+        "source_file": "HCPC2026_APR_ANWEB.xlsx",
+        "source_release": "April 2026",
+        "source": "CMS HCPCS Level II Alpha-Numeric File",
+        "coverage_code": "C"
+      }
+    },
+    "Q8": {
+      "name": "Two class b findings",
+      "description": "Two class b findings",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": "1995-01-01",
+      "metadata": {
+        "concept_id": null,
+        "source_file": "HCPC2026_APR_ANWEB.xlsx",
+        "source_release": "April 2026",
+        "source": "CMS HCPCS Level II Alpha-Numeric File",
+        "coverage_code": "C"
+      }
+    },
+    "Q9": {
+      "name": "1 class b & 2 class c fndngs",
+      "description": "One class b and two class c findings",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": "1995-01-01",
+      "metadata": {
+        "concept_id": null,
+        "source_file": "HCPC2026_APR_ANWEB.xlsx",
+        "source_release": "April 2026",
+        "source": "CMS HCPCS Level II Alpha-Numeric File",
+        "coverage_code": "C"
+      }
+    },
+    "QM": {
+      "name": "Ambulance service provided under arrangement by a provider of services",
+      "description": "Ambulance service provided under arrangement by a provider of services",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021495",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "QN": {
+      "name": "Ambulance service furnished directly by a provider of services",
+      "description": "Ambulance service furnished directly by a provider of services",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021496",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "QW": {
+      "name": "Clia waived test",
+      "description": "Clia waived test",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": "1996-01-01",
+      "metadata": {
+        "concept_id": null,
+        "source_file": "HCPC2026_APR_ANWEB.xlsx",
+        "source_release": "April 2026",
+        "source": "CMS HCPCS Level II Alpha-Numeric File",
+        "coverage_code": "C"
+      }
+    },
+    "RC": {
+      "name": "Right coronary artery",
+      "description": "Right coronary artery",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021497",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "RI": {
+      "name": "Ramus intermedius coronary artery",
+      "description": "Ramus intermedius coronary artery",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021498",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "RT": {
+      "name": "Right side (used to identify procedures performed on the right side of the body)",
+      "description": "Right side (used to identify procedures performed on the right side of the body)",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021499",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "T1": {
+      "name": "Left foot, second digit",
+      "description": "Left foot, second digit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021500",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "T2": {
+      "name": "Left foot, third digit",
+      "description": "Left foot, third digit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021501",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "T3": {
+      "name": "Left foot, fourth digit",
+      "description": "Left foot, fourth digit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021502",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "T4": {
+      "name": "Left foot, fifth digit",
+      "description": "Left foot, fifth digit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021503",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "T5": {
+      "name": "Right foot, great toe",
+      "description": "Right foot, great toe",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021504",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "T6": {
+      "name": "Right foot, second digit",
+      "description": "Right foot, second digit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021505",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "T7": {
+      "name": "Right foot, third digit",
+      "description": "Right foot, third digit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021506",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "T8": {
+      "name": "Right foot, fourth digit",
+      "description": "Right foot, fourth digit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021507",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "T9": {
+      "name": "Right foot, fifth digit",
+      "description": "Right foot, fifth digit",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021508",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "TA": {
+      "name": "Left foot, great toe",
+      "description": "Left foot, great toe",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1021509",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "TC": {
+      "name": "Technical component",
+      "description": "Technical component; under certain circumstances, a charge may be made for the technical component alone;  under those circumstances the technical component charge is identified by adding modifier 'tc' to the usual procedure number; technical component charges are institutional charges and not billed separately by physicians; however, portable x-ray suppliers only bill for technical component and should utilize modifier tc; the charge data from portable x-ray suppliers will then be used to build customary and prevailing profiles",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": "1984-01-01",
+      "metadata": {
+        "concept_id": null,
+        "source_file": "HCPC2026_APR_ANWEB.xlsx",
+        "source_release": "April 2026",
+        "source": "CMS HCPCS Level II Alpha-Numeric File",
+        "coverage_code": "C"
+      }
+    },
+    "XE": {
+      "name": "Separate Encounter *",
+      "description": "Separate Encounter *",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1027660",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "XP": {
+      "name": "Separate Practitioner *",
+      "description": "Separate Practitioner *",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1027662",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "XS": {
+      "name": "Separate Structure *",
+      "description": "Separate Structure *",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1027661",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    },
+    "XU": {
+      "name": "Unusual Non-Overlapping Service *",
+      "description": "Unusual Non-Overlapping Service *",
+      "level": "HCPCS/National (Level II)",
+      "system": "HCPCS",
+      "section": "Level II (HCPCS/National) Modifiers",
+      "effective_date": null,
+      "metadata": {
+        "concept_id": "1027663",
+        "source_file": "Modifiers.txt",
+        "source_release": "2026-Update-4",
+        "source": "AMA CPT Standard Data ZIP API"
+      }
+    }
+  }
 }

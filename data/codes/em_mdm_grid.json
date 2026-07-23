@@ -1,0 +1,279 @@
+{
+  "source": "AMA CPT E/M Medical Decision Making table (licensed CPT content)",
+  "note": "Structured form of the MDM level-selection table from the CPT E/M guidelines. Contains level definitions only — no CPT codes; the level a given E/M code requires is read from that code's own descriptor ('... LOW level of medical decision making ...'), so this file stays valid across code-set updates.",
+  "selection_rule": "The level of MDM is met when 2 of the 3 elements (problems addressed, data reviewed and analyzed, risk of management) are met or exceeded.",
+  "time_rule": "Total time on the date of the encounter may be used for code selection instead of MDM only when the total time is documented in the note; the minute threshold is stated in each code's own descriptor.",
+  "revisions": [
+    {
+      "effective_from": "2021-01-01",
+      "effective_to": "2022-12-31",
+      "scope": "Office or other outpatient services",
+      "levels": {
+        "straightforward": {
+          "problems_addressed": [
+            "1 self-limited or minor problem"
+          ],
+          "data_reviewed_analyzed": {
+            "label": "Minimal or none",
+            "categories": []
+          },
+          "risk_of_management": {
+            "label": "Minimal risk of morbidity from additional diagnostic testing or treatment",
+            "examples": []
+          }
+        },
+        "low": {
+          "problems_addressed": [
+            "2 or more self-limited or minor problems",
+            "1 stable, chronic illness",
+            "1 acute, uncomplicated illness or injury"
+          ],
+          "data_reviewed_analyzed": {
+            "label": "Limited — must meet the requirements of at least 1 of 2 categories",
+            "categories": [
+              {
+                "name": "Category 1: Tests and documents",
+                "requirement": "Any combination of 2 from the following",
+                "items": [
+                  "Review of prior external note(s) from each unique source",
+                  "Review of the result(s) of each unique test",
+                  "Ordering of each unique test"
+                ]
+              },
+              {
+                "name": "Category 2: Assessment requiring an independent historian(s)",
+                "requirement": "Assessment requiring an independent historian",
+                "items": []
+              }
+            ]
+          },
+          "risk_of_management": {
+            "label": "Low risk of morbidity from additional diagnostic testing or treatment",
+            "examples": []
+          }
+        },
+        "moderate": {
+          "problems_addressed": [
+            "1 or more chronic illnesses with exacerbation, progression, or side effects of treatment",
+            "2 or more stable, chronic illnesses",
+            "1 undiagnosed new problem with uncertain prognosis",
+            "1 acute illness with systemic symptoms",
+            "1 acute, complicated injury"
+          ],
+          "data_reviewed_analyzed": {
+            "label": "Moderate — must meet the requirements of at least 1 of 3 categories",
+            "categories": [
+              {
+                "name": "Category 1: Tests, documents, or independent historian(s)",
+                "requirement": "Any combination of 3 from the following",
+                "items": [
+                  "Review of prior external note(s) from each unique source",
+                  "Review of the result(s) of each unique test",
+                  "Ordering of each unique test",
+                  "Assessment requiring an independent historian"
+                ]
+              },
+              {
+                "name": "Category 2: Independent interpretation of tests",
+                "requirement": "Independent interpretation of a test performed by another physician/other qualified health care professional (not separately reported)",
+                "items": []
+              },
+              {
+                "name": "Category 3: Discussion of management or test interpretation",
+                "requirement": "Discussion of management or test interpretation with external physician/other qualified health care professional/appropriate source (not separately reported)",
+                "items": []
+              }
+            ]
+          },
+          "risk_of_management": {
+            "label": "Moderate risk of morbidity from additional diagnostic testing or treatment",
+            "examples": [
+              "Prescription drug management",
+              "Decision regarding minor surgery with identified patient or procedure risk factors",
+              "Decision regarding elective major surgery without identified patient or procedure risk factors",
+              "Diagnosis or treatment significantly limited by social determinants of health"
+            ]
+          }
+        },
+        "high": {
+          "problems_addressed": [
+            "1 or more chronic illnesses with severe exacerbation, progression, or side effects of treatment",
+            "1 acute or chronic illness or injury that poses a threat to life or bodily function"
+          ],
+          "data_reviewed_analyzed": {
+            "label": "Extensive — must meet the requirements of at least 2 of 3 categories",
+            "categories": [
+              {
+                "name": "Category 1: Tests, documents, or independent historian(s)",
+                "requirement": "Any combination of 3 from the following",
+                "items": [
+                  "Review of prior external note(s) from each unique source",
+                  "Review of the result(s) of each unique test",
+                  "Ordering of each unique test",
+                  "Assessment requiring an independent historian"
+                ]
+              },
+              {
+                "name": "Category 2: Independent interpretation of tests",
+                "requirement": "Independent interpretation of a test performed by another physician/other qualified health care professional (not separately reported)",
+                "items": []
+              },
+              {
+                "name": "Category 3: Discussion of management or test interpretation",
+                "requirement": "Discussion of management or test interpretation with external physician/other qualified health care professional/appropriate source (not separately reported)",
+                "items": []
+              }
+            ]
+          },
+          "risk_of_management": {
+            "label": "High risk of morbidity from additional diagnostic testing or treatment",
+            "examples": [
+              "Drug therapy requiring intensive monitoring for toxicity",
+              "Decision regarding elective major surgery with identified patient or procedure risk factors",
+              "Decision regarding emergency major surgery",
+              "Decision regarding hospitalization",
+              "Decision not to resuscitate or to de-escalate care because of poor prognosis"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "effective_from": "2023-01-01",
+      "effective_to": "9999-12-31",
+      "scope": "All E/M services leveled by MDM (2023 revision unified the table across settings)",
+      "levels": {
+        "straightforward": {
+          "problems_addressed": [
+            "1 self-limited or minor problem"
+          ],
+          "data_reviewed_analyzed": {
+            "label": "Minimal or none",
+            "categories": []
+          },
+          "risk_of_management": {
+            "label": "Minimal risk of morbidity from additional diagnostic testing or treatment",
+            "examples": []
+          }
+        },
+        "low": {
+          "problems_addressed": [
+            "2 or more self-limited or minor problems",
+            "1 stable, chronic illness",
+            "1 acute, uncomplicated illness or injury",
+            "1 stable, acute illness",
+            "1 acute, uncomplicated illness or injury requiring hospital inpatient or observation level of care"
+          ],
+          "data_reviewed_analyzed": {
+            "label": "Limited — must meet the requirements of at least 1 of 2 categories",
+            "categories": [
+              {
+                "name": "Category 1: Tests and documents",
+                "requirement": "Any combination of 2 from the following",
+                "items": [
+                  "Review of prior external note(s) from each unique source",
+                  "Review of the result(s) of each unique test",
+                  "Ordering of each unique test"
+                ]
+              },
+              {
+                "name": "Category 2: Assessment requiring an independent historian(s)",
+                "requirement": "Assessment requiring an independent historian",
+                "items": []
+              }
+            ]
+          },
+          "risk_of_management": {
+            "label": "Low risk of morbidity from additional diagnostic testing or treatment",
+            "examples": []
+          }
+        },
+        "moderate": {
+          "problems_addressed": [
+            "1 or more chronic illnesses with exacerbation, progression, or side effects of treatment",
+            "2 or more stable, chronic illnesses",
+            "1 undiagnosed new problem with uncertain prognosis",
+            "1 acute illness with systemic symptoms",
+            "1 acute, complicated injury"
+          ],
+          "data_reviewed_analyzed": {
+            "label": "Moderate — must meet the requirements of at least 1 of 3 categories",
+            "categories": [
+              {
+                "name": "Category 1: Tests, documents, or independent historian(s)",
+                "requirement": "Any combination of 3 from the following",
+                "items": [
+                  "Review of prior external note(s) from each unique source",
+                  "Review of the result(s) of each unique test",
+                  "Ordering of each unique test",
+                  "Assessment requiring an independent historian"
+                ]
+              },
+              {
+                "name": "Category 2: Independent interpretation of tests",
+                "requirement": "Independent interpretation of a test performed by another physician/other qualified health care professional (not separately reported)",
+                "items": []
+              },
+              {
+                "name": "Category 3: Discussion of management or test interpretation",
+                "requirement": "Discussion of management or test interpretation with external physician/other qualified health care professional/appropriate source (not separately reported)",
+                "items": []
+              }
+            ]
+          },
+          "risk_of_management": {
+            "label": "Moderate risk of morbidity from additional diagnostic testing or treatment",
+            "examples": [
+              "Prescription drug management",
+              "Decision regarding minor surgery with identified patient or procedure risk factors",
+              "Decision regarding elective major surgery without identified patient or procedure risk factors",
+              "Diagnosis or treatment significantly limited by social determinants of health"
+            ]
+          }
+        },
+        "high": {
+          "problems_addressed": [
+            "1 or more chronic illnesses with severe exacerbation, progression, or side effects of treatment",
+            "1 acute or chronic illness or injury that poses a threat to life or bodily function"
+          ],
+          "data_reviewed_analyzed": {
+            "label": "Extensive — must meet the requirements of at least 2 of 3 categories",
+            "categories": [
+              {
+                "name": "Category 1: Tests, documents, or independent historian(s)",
+                "requirement": "Any combination of 3 from the following",
+                "items": [
+                  "Review of prior external note(s) from each unique source",
+                  "Review of the result(s) of each unique test",
+                  "Ordering of each unique test",
+                  "Assessment requiring an independent historian"
+                ]
+              },
+              {
+                "name": "Category 2: Independent interpretation of tests",
+                "requirement": "Independent interpretation of a test performed by another physician/other qualified health care professional (not separately reported)",
+                "items": []
+              },
+              {
+                "name": "Category 3: Discussion of management or test interpretation",
+                "requirement": "Discussion of management or test interpretation with external physician/other qualified health care professional/appropriate source (not separately reported)",
+                "items": []
+              }
+            ]
+          },
+          "risk_of_management": {
+            "label": "High risk of morbidity from additional diagnostic testing or treatment",
+            "examples": [
+              "Drug therapy requiring intensive monitoring for toxicity",
+              "Decision regarding elective major surgery with identified patient or procedure risk factors",
+              "Decision regarding emergency major surgery",
+              "Decision regarding hospitalization or escalation of hospital-level care",
+              "Decision not to resuscitate or to de-escalate care because of poor prognosis",
+              "Parenteral controlled substances"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

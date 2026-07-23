@@ -61,6 +61,90 @@ mcd_csv = (
 arts = P.parse_mcd_articles(mcd_csv, "2026-06-01")
 check("groups into one article with 2 cpt + 2 icd", len(arts) == 1 and len(arts[0]["cpt_codes"]) == 2)
 
+# --- covered-ICD group grammar (roles + scope) --------------------------------
+print("\n[group role grammar]")
+# Form 1 — self-describing trailing label (CGS A57193): the role is the
+# paragraph's own tail label, not keyword presence (both groups share body text)
+_body = ("For treatment of mycotic nails, ICD-10 CM code B35.1 or ICD-10-CM "
+         "L60.1-L60.5 respectively, must be reported as primary, with the "
+         "diagnosis representing the patient's symptom reported as the "
+         "secondary ICD-10-CM code. ")
+role, scope = P.group_role_from_paragraph(_body + "Primary Diagnosis :")
+check("tail label 'Primary Diagnosis:' → primary_eligible", role == "primary_eligible")
+check("ICD mentions (B35.1, L60.1-L60.5) never leak into CPT scope", scope == [])
+role, _ = P.group_role_from_paragraph(_body + "Secondary Diagnosis:")
+check("tail label 'Secondary Diagnosis:' → required_secondary", role == "required_secondary")
+# Form 2 — cross-reference (NGS A57759): the referring group holds the primary
+# codes; the referred-to group holds the named (secondary) role
+_xref = {2: "Refer to Group 3 for the secondary ICD-10-CM codes required for "
+            "coverage for codes 11719, 11720, 11721 and G0127.",
+         3: "Treatment of mycotic nails may be covered when the patient has a "
+            "qualifying systemic condition."}
+_r = P.resolve_group_roles(_xref)
+check("xref: referring group → primary_eligible", _r[2][0] == "primary_eligible")
+check("xref: referred group → required_secondary", _r[3][0] == "required_secondary")
+check("xref: inline 'codes 11719, ... and G0127' → CPT scope",
+      _r[2][1] == ["11719", "11720", "11721", "G0127"])
+# Form 3 — conjunction (WPS A56232): both named groups required together
+_conj = {2: "Codes 11720 and 11721 billed without a Q modifier require a code "
+            "from group 2 (clinical evidence of mycosis of the nail) and a "
+            "code from group 3 (pain or secondary infection).",
+         3: "Codes 11720 and 11721 billed without a Q modifier require a code "
+            "from group 2 (clinical evidence of mycosis of the nail) and a "
+            "code from group 3 (pain or secondary infection)."}
+_r = P.resolve_group_roles(_conj)
+check("conjunction: first named group → primary_eligible", _r[2][0] == "primary_eligible")
+check("conjunction: second named group → required_secondary", _r[3][0] == "required_secondary")
+# Unreadable grammar stays standalone — the conservative pre-group behavior
+_r = P.resolve_group_roles({1: "The ICD-10-CM codes below represent covered diagnoses."})
+check("unreadable paragraph → unspecified (standalone)", _r[1][0] == "unspecified")
+# Self-described labels always win over a cross-reference pointing elsewhere
+_r = P.resolve_group_roles({
+    1: _body + "Primary Diagnosis :",
+    2: "Refer to Group 1 for the secondary ICD-10-CM codes required for coverage.",
+})
+check("self-described label wins over conflicting xref", _r[1][0] == "primary_eligible")
+
+# --- coverage ingest: states column + related-LCD supersession ----------------
+print("\n[coverage states + LCD supersession]")
+for _pid in ("ATESTR1", "LTESTR1"):
+    _STORE.conn.execute("DELETE FROM coverage_cpt WHERE policy_id=?", (_pid,))
+    _STORE.conn.execute("DELETE FROM coverage_icd WHERE policy_id=?", (_pid,))
+    _STORE.conn.execute("DELETE FROM coverage_group WHERE policy_id=?", (_pid,))
+    _STORE.conn.execute("DELETE FROM coverage_policy WHERE policy_id=?", (_pid,))
+    _STORE.conn.execute("DELETE FROM lcd_qualifying WHERE lcd_id=?", (_pid,))
+_STORE.load_coverage_articles([
+    # flat seed-era LCD entry (the pre-Cures shape: article codes flattened in)
+    {"policy_id": "LTESTR1", "title": "Test LCD", "contractor": "",
+     "cpt_codes": ["97810"], "covered_icd": ["I10", "R51.9"]},
+    # its grammar-carrying billing article, naming the LCD as its parent
+    {"policy_id": "ATESTR1", "title": "Billing and Coding: Test", "contractor": "",
+     "states": ["FL", "GA"], "related_lcds": ["LTESTR1"],
+     "cpt_codes": ["97810"], "covered_icd": ["I10", "R51.9"],
+     "covered_icd_groups": [
+         {"group": 1, "role": "primary_eligible", "cpt_scope": [],
+          "paragraph": "test", "codes": ["I10"]},
+         {"group": 2, "role": "required_secondary", "cpt_scope": [],
+          "paragraph": "test", "codes": ["R51.9"]},
+     ]},
+])
+check("article's states column round-trips through coverage_policy_states",
+      _STORE.coverage_policy_states("ATESTR1") == {"FL", "GA"})
+check("superseded LCD's flat covered list retired (dx gate moves to the article)",
+      not _STORE.coverage_policy_has_dx_rules("LTESTR1"))
+check("superseded LCD keeps its CPT rows (still governs the code)",
+      "LTESTR1" in _STORE.coverage_policies_for_cpt("97810"))
+check("article's group grammar ingested with roles",
+      {g["role"] for g in _STORE.coverage_groups("ATESTR1")}
+      == {"primary_eligible", "required_secondary"})
+for _pid in ("ATESTR1", "LTESTR1"):
+    _STORE.conn.execute("DELETE FROM coverage_cpt WHERE policy_id=?", (_pid,))
+    _STORE.conn.execute("DELETE FROM coverage_icd WHERE policy_id=?", (_pid,))
+    _STORE.conn.execute("DELETE FROM coverage_group WHERE policy_id=?", (_pid,))
+    _STORE.conn.execute("DELETE FROM coverage_policy WHERE policy_id=?", (_pid,))
+    _STORE.conn.execute("DELETE FROM lcd_qualifying WHERE lcd_id=?", (_pid,))
+_STORE.conn.commit()
+
 # --- history-retentive ingestion ---------------------------------------------
 print("\n[history retention]")
 # ingest an MUE snapshot for an old quarter, then a new one — both retained

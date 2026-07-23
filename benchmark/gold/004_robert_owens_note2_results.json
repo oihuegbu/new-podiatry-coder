@@ -1,0 +1,60 @@
+{
+  "document_id": "004_robert_owens_note2",
+  "cpt_codes": [
+    {
+      "code": "99214",
+      "description": "Office or other outpatient visit for the evaluation and management of an established patient, which requires a medically appropriate history and/or examination and moderate level of medical decision making. When using total time on the date of the encounter for code selection, 30 minutes must be met or exceeded.",
+      "modifiers": [
+        "25"
+      ],
+      "units": 1
+    },
+    {
+      "code": "97597",
+      "description": "Debridement (eg, high pressure waterjet with/without suction, sharp selective debridement with scissors, scalpel and forceps), open wound, (eg, fibrin, devitalized epidermis and/or dermis, exudate, debris, biofilm), including topical application(s), wound assessment, use of a whirlpool, when performed and instruction(s) for ongoing care, per session, total wound(s) surface area; first 20 sq cm or less",
+      "modifiers": [
+        "RT"
+      ],
+      "units": 1
+    }
+  ],
+  "final_disposition": "CLEAN",
+  "hcpcs_codes": [],
+  "icd_codes": [
+    {
+      "code": "L60.2",
+      "description": "Onychogryphosis",
+      "type": "secondary"
+    },
+    {
+      "code": "L97.511",
+      "description": "Non-pressure chronic ulcer of other part of right foot limited to breakdown of skin",
+      "type": "secondary"
+    },
+    {
+      "code": "E11.40",
+      "description": "Type 2 diabetes mellitus with diabetic neuropathy, unspecified",
+      "type": "secondary"
+    },
+    {
+      "code": "Z79.4",
+      "description": "Long term (current) use of insulin",
+      "type": "secondary"
+    },
+    {
+      "code": "Z79.84",
+      "description": "Long term (current) use of oral hypoglycemic drugs",
+      "type": "secondary"
+    },
+    {
+      "code": "E11.621",
+      "description": "Type 2 diabetes mellitus with foot ulcer",
+      "type": "primary"
+    }
+  ],
+  "gold_provenance": {
+    "verification": "auto",
+    "verified_by": "pipeline/consistency-gate",
+    "recorded_at": "2026-07-18T14:21:36+00:00"
+  }
+}

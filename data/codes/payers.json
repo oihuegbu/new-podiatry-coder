@@ -1,0 +1,201 @@
+{
+  "description": "Canonical payer registry \u2014 maps free-text insurance strings (as extracted from clinical notes) to a stable payer_id used to key prior_auth_required / eligibility checks. Aliases are matched case-insensitively as substrings against the note's insurance field; when multiple payers' aliases match, the LONGEST matching alias wins (most specific), so 'humana medicare advantage' resolves to the Medicare Advantage entry, never bare Medicare.",
+  "field_notes": {
+    "kind": "medicare_ffs | medicare_advantage | commercial | medicaid | tricare | workers_comp \u2014 machine-readable payer class for rule routing.",
+    "is_medicare": "TRUE ONLY for Original (fee-for-service) Medicare. Medicare Advantage is deliberately false \u2014 MA plans have their own prior-auth, claims routing, and contractor rules; applying FFS-specific logic to them was a real misclassification bug.",
+    "follows_medicare_coverage": "True where the payer is bound to Original Medicare's coverage floor (FFS itself, and MA plans per 42 CFR 422.101). Coverage-derived checks (LCD medical necessity, routine-foot-care class findings, not-valid-for-Medicare status codes) key off this, NOT is_medicare."
+  },
+  "stedi_trading_partner_note": "stedi_trading_partner_id is a DIFFERENT namespace from payer_id \u2014 it's Stedi's own primaryPayerId, required as tradingPartnerServiceId in eligibility (270/271) API calls. Resolved live via GET https://payers.us.stedi.com/2024-04-01/payers/search?query=<name> (top match), retrieved 2026-07-10. Tricare is region-split by Stedi (East=99727, West=99726) with no single ID for 'Tricare' generically \u2014 West was chosen because the prior-auth source document (prior_auth_tricare.json) is from TriWest Healthcare Alliance, the West-region administrator. Verify this matches the practice's actual TRICARE region before relying on it for real eligibility checks. Entries without a stedi_trading_partner_id have not been resolved yet \u2014 eligibility checks are skipped for them.",
+  "payers": [
+    {
+      "payer_id": "medicare",
+      "canonical_name": "Medicare",
+      "kind": "medicare_ffs",
+      "is_medicare": true,
+      "follows_medicare_coverage": true,
+      "stedi_trading_partner_id": "CMS",
+      "stedi_display_name": "National Centers for Medicare & Medicaid Services",
+      "aliases": [
+        "medicare part b",
+        "medicare part a",
+        "medicare ffs",
+        "medicare fee-for-service",
+        "original medicare",
+        "medicare"
+      ]
+    },
+    {
+      "payer_id": "medicare_advantage",
+      "canonical_name": "Medicare Advantage",
+      "kind": "medicare_advantage",
+      "is_medicare": false,
+      "follows_medicare_coverage": true,
+      "stedi_trading_partner_id": null,
+      "stedi_note": "MA claims/eligibility go to the specific plan (Humana, UHC, Aetna...), not CMS \u2014 resolve the plan's own Stedi ID before running eligibility. Listed generically here so MA is at least classified correctly instead of falling through to FFS Medicare.",
+      "aliases": [
+        "medicare advantage",
+        "medicare part c",
+        "medicare hmo",
+        "medicare ppo",
+        "humana medicare",
+        "humana gold plus",
+        "humana gold choice",
+        "aetna medicare",
+        "cigna medicare",
+        "uhc medicare",
+        "unitedhealthcare medicare",
+        "united healthcare medicare",
+        "aarp medicare advantage",
+        "bcbs medicare advantage",
+        "wellcare",
+        "devoted health"
+      ]
+    },
+    {
+      "payer_id": "tricare",
+      "canonical_name": "Tricare",
+      "kind": "tricare",
+      "is_medicare": false,
+      "follows_medicare_coverage": false,
+      "stedi_trading_partner_id": "99726",
+      "stedi_display_name": "TRICARE West Region",
+      "stedi_note": "Region-specific \u2014 see stedi_trading_partner_note above",
+      "aliases": [
+        "tricare prime",
+        "tricare select",
+        "tricare for life",
+        "triwest",
+        "tricare"
+      ]
+    },
+    {
+      "payer_id": "bcbs_fl",
+      "canonical_name": "Blue Cross Blue Shield of Florida",
+      "kind": "commercial",
+      "is_medicare": false,
+      "follows_medicare_coverage": false,
+      "stedi_trading_partner_id": "BCBSF",
+      "stedi_display_name": "Florida Blue",
+      "aliases": [
+        "blue cross blue shield of florida",
+        "bcbs florida",
+        "bcbsfl",
+        "florida blue"
+      ]
+    },
+    {
+      "payer_id": "medicaid_fl",
+      "canonical_name": "Florida Medicaid",
+      "kind": "medicaid",
+      "is_medicare": false,
+      "follows_medicare_coverage": false,
+      "stedi_trading_partner_id": "77027",
+      "stedi_display_name": "Medicaid Florida",
+      "aliases": [
+        "medicaid florida",
+        "florida medicaid",
+        "fl medicaid"
+      ]
+    },
+    {
+      "payer_id": "sunshine_health_fl",
+      "canonical_name": "Sunshine Health (Florida Medicaid)",
+      "kind": "medicaid",
+      "is_medicare": false,
+      "follows_medicare_coverage": false,
+      "stedi_trading_partner_id": null,
+      "stedi_note": "Centene's Florida Medicaid managed-care plan (Statewide Medicaid Managed Care). Classified as medicaid so Medicaid-class rules apply instead of the claim falling through as an unknown payer (observed live: 3 corpus notes with 'Sunshine Health (Centene)' resolved to kind=unknown, skipping every payer-keyed check).",
+      "aliases": [
+        "sunshine health (centene)",
+        "sunshine health",
+        "centene florida",
+        "sunshine state health plan"
+      ]
+    },
+    {
+      "payer_id": "oscar",
+      "canonical_name": "Oscar Health",
+      "kind": "commercial",
+      "is_medicare": false,
+      "follows_medicare_coverage": false,
+      "stedi_trading_partner_id": null,
+      "aliases": [
+        "oscar health",
+        "oscar insurance",
+        "oscar"
+      ]
+    },
+    {
+      "payer_id": "aetna",
+      "canonical_name": "Aetna",
+      "kind": "commercial",
+      "is_medicare": false,
+      "follows_medicare_coverage": false,
+      "stedi_trading_partner_id": "60054",
+      "aliases": [
+        "aetna ppo",
+        "aetna hmo",
+        "aetna"
+      ]
+    },
+    {
+      "payer_id": "cigna",
+      "canonical_name": "Cigna",
+      "kind": "commercial",
+      "is_medicare": false,
+      "follows_medicare_coverage": false,
+      "stedi_trading_partner_id": "62308",
+      "aliases": [
+        "cigna healthcare",
+        "cigna ppo",
+        "cigna hmo",
+        "cigna"
+      ]
+    },
+    {
+      "payer_id": "uhc",
+      "canonical_name": "UnitedHealthcare",
+      "kind": "commercial",
+      "is_medicare": false,
+      "follows_medicare_coverage": false,
+      "stedi_trading_partner_id": "87726",
+      "aliases": [
+        "unitedhealthcare",
+        "united healthcare",
+        "uhc ppo",
+        "uhc hmo",
+        "optum"
+      ]
+    },
+    {
+      "payer_id": "humana",
+      "canonical_name": "Humana",
+      "kind": "commercial",
+      "is_medicare": false,
+      "follows_medicare_coverage": false,
+      "stedi_trading_partner_id": "61101",
+      "aliases": [
+        "humana commercial",
+        "humana ppo",
+        "humana hmo",
+        "humana"
+      ]
+    },
+    {
+      "payer_id": "workers_comp",
+      "canonical_name": "Workers' Compensation",
+      "kind": "workers_comp",
+      "is_medicare": false,
+      "follows_medicare_coverage": false,
+      "stedi_trading_partner_id": null,
+      "stedi_note": "State-specific carriers/TPAs \u2014 eligibility and fee schedules vary by jurisdiction; classified generically so WC claims are at least not treated as commercial/Medicare.",
+      "aliases": [
+        "workers comp",
+        "workers' comp",
+        "workers compensation",
+        "work comp",
+        "wc claim"
+      ]
+    }
+  ]
+}

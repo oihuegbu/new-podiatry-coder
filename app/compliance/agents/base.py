@@ -1,6 +1,6 @@
 """Base class for all compliance agents.
 
-An agent encapsulates ONE of the 12 filters. It is pure logic: it reads rules
+An agent encapsulates ONE compliance filter. It is pure logic: it reads rules
 from the ComplianceDataStore and inspects the canonical Claim — it must never
 contain hardcoded code lists. Each agent returns a list of Findings.
 """

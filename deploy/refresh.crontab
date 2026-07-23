@@ -19,14 +19,15 @@ SHELL=/bin/bash
 0 3 2 1,4,7,10 *   cd $APP_DIR && $PYTHON run_refresh.py --source mue        >> logs/refresh.log 2>&1
 0 3 2 1,4,7,10 *   cd $APP_DIR && $PYTHON run_refresh.py --source pfs_global  >> logs/refresh.log 2>&1
 
-# HCPCS Level II — QUARTERLY.
-30 3 2 1,4,7,10 *   cd $APP_DIR && $PYTHON run_refresh.py --source hcpcs      >> logs/refresh.log 2>&1
-
-# ICD-10-CM — ANNUAL (effective Oct 1; load mid-September), 15th 04:00.
-0 4 15 9 *   cd $APP_DIR && $PYTHON run_refresh.py --source icd10cm           >> logs/refresh.log 2>&1
-
-# CPT — ANNUAL (effective Jan 1; AMA-licensed file), Dec 20th 04:00.
-0 4 20 12 *   cd $APP_DIR && $PYTHON run_refresh.py --source cpt              >> logs/refresh.log 2>&1
+# HCPCS Level II / ICD-10-CM / CPT — MANUAL sources (no automated parser yet;
+# see app/compliance/refresh/sources.py). Update data/codes/{hcpcs,icd10cm,cpt}_codes.json
+# by hand on the CMS/AMA release cadence — compliance.db detects the changed
+# file and re-ingests it automatically on next start (store fingerprint check).
+# Deliberately NOT scheduled: cron entries for these only produced guaranteed
+# "no parser" failures every cycle while looking like automated coverage.
+# 30 3 2 1,4,7,10 *   cd $APP_DIR && $PYTHON run_refresh.py --source hcpcs    >> logs/refresh.log 2>&1
+# 0 4 15 9 *          cd $APP_DIR && $PYTHON run_refresh.py --source icd10cm  >> logs/refresh.log 2>&1
+# 0 4 20 12 *         cd $APP_DIR && $PYTHON run_refresh.py --source cpt      >> logs/refresh.log 2>&1
 
 # POS code set — ANNUAL refresh, Jan 5th.
 0 4 5 1 *   cd $APP_DIR && $PYTHON run_refresh.py --source pos                >> logs/refresh.log 2>&1

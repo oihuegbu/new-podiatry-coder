@@ -1,0 +1,101 @@
+{
+  "config_version": 1,
+  "_comment": "Practice envelope for claim submission (837P). EVERYTHING here is dynamic: the submitter re-reads this file (mtime-cached) on every run, so edits take effect immediately without a code change or restart. Fields marked REQUIRED block submission (fail closed, per claim, with a precise reason) when missing — they never crash the pipeline.",
+
+  "billing_provider": {
+    "_comment": "REQUIRED. The practice entity that gets paid (837P loop 2010AA).",
+    "organization_name": "Example Podiatry Group PLLC",
+    "npi": "1999999984",
+    "tax_id": "000000000",
+    "taxonomy_code": "213E00000X",
+    "address": {
+      "address1": "123 Example Street, Suite 100",
+      "city": "Exampleville",
+      "state": "FL",
+      "postal_code": "33101"
+    },
+    "contact_name": "Billing Office",
+    "phone": "5555550100"
+  },
+
+  "rendering_providers": {
+    "_comment": "Rendering provider resolution, in order: (1) an entry here whose 'match' matches the note's provider name (case-insensitive substring); (2) the note's own extracted NPI if it is a valid 10-digit number; (3) 'default' below; else the claim BLOCKS. Add providers as the practice roster changes — nothing else to update.",
+    "providers": [
+      {
+        "match": ["yvonne baptiste"],
+        "first_name": "Yvonne",
+        "last_name": "Baptiste",
+        "npi": "1999999984",
+        "taxonomy_code": "213E00000X"
+      }
+    ],
+    "trust_note_npi": true,
+    "default": null
+  },
+
+  "service_facility": {
+    "_comment": "Optional (837P loop 2310C). Used when the note's place of service is a facility (POS facility indicator from the CMS POS code set); omit or null to bill without a separate facility loop.",
+    "organization_name": null,
+    "npi": null,
+    "address": null
+  },
+
+  "submitter": {
+    "_comment": "REQUIRED. 837P 1000A submitter block.",
+    "organization_name": "Example Podiatry Group PLLC",
+    "contact_name": "Billing Office",
+    "phone": "5555550100",
+    "email": "billing@example-podiatry.example"
+  },
+
+  "fee_schedule": {
+    "_comment": "REQUIRED per billed code: charge per unit in USD. A claim line whose code is absent BLOCKS the claim (policy below) — the system never invents a charge. Keep this in sync with the practice's charge master.",
+    "charges": {
+      "99202": 120.0, "99203": 175.0, "99204": 260.0, "99205": 340.0,
+      "99212": 75.0, "99213": 120.0, "99214": 175.0, "99215": 245.0,
+      "11055": 65.0, "11056": 85.0, "11057": 105.0,
+      "11719": 40.0, "11720": 55.0, "11721": 75.0,
+      "11730": 145.0, "11750": 320.0,
+      "17110": 130.0,
+      "20550": 110.0, "20600": 95.0, "20605": 105.0,
+      "27654": 1050.0,
+      "28118": 850.0,
+      "64455": 125.0, "64632": 210.0,
+      "73620": 45.0, "73630": 55.0, "76882": 120.0,
+      "97597": 145.0, "97760": 95.0,
+      "A4570": 45.0, "A6545": 60.0,
+      "L3000": 285.0, "L4396": 190.0,
+      "Q4038": 95.0
+    },
+    "missing_code_policy": "block"
+  },
+
+  "claim_defaults": {
+    "_comment": "837P claim-level indicators. claim_filing_code is resolved per payer: payer_overrides (by payer_id from data/codes/payers.json), then by_kind, then 'default'.",
+    "place_of_service_default": "11",
+    "claim_frequency_code": "1",
+    "signature_indicator": "Y",
+    "plan_participation_code": "A",
+    "release_information_code": "Y",
+    "benefits_assignment_certification_indicator": "Y",
+    "patient_gender_default": "U",
+    "claim_filing_code": {
+      "by_kind": {
+        "medicare_ffs": "MB",
+        "medicare_advantage": "16",
+        "medicaid": "MC",
+        "commercial": "CI",
+        "tricare": "CH",
+        "workers_comp": "WC"
+      },
+      "default": "CI"
+    },
+    "payer_overrides": {}
+  },
+
+  "submission_policy": {
+    "_comment": "Which verified claims may transmit. verification_tiers: registry tiers allowed to submit. require_clean_disposition should stay true.",
+    "verification_tiers": ["auto", "adjudicated", "human"],
+    "require_clean_disposition": true
+  }
+}

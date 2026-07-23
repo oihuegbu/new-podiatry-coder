@@ -1,0 +1,437 @@
+{
+ "scan": {
+  "pack_hash": "412decca4dee8407",
+  "corpus_hash": "8f524a5d577186e1",
+  "scanned_at": "2026-07-23T08:44:03+00:00",
+  "rules": {
+   "achilles-repair-rupture-documentation": {
+    "load_bearing_on": []
+   },
+   "vascular-physiologic-study-documentation": {
+    "load_bearing_on": []
+   },
+   "residual-nail-disorder-secondary-anchor": {
+    "load_bearing_on": []
+   },
+   "gait-difficulty-nec-secondary-demotion": {
+    "load_bearing_on": []
+   },
+   "bunionette-ostectomy-documentation": {
+    "load_bearing_on": []
+   },
+   "metatarsal-head-ostectomy-site-documentation": {
+    "load_bearing_on": []
+   },
+   "calcaneal-spur-ostectomy-documentation": {
+    "load_bearing_on": []
+   },
+   "metatarsal-osteotomy-extent": {
+    "load_bearing_on": []
+   },
+   "venous-disease-ulcer-code-first-sequencing": {
+    "load_bearing_on": []
+   },
+   "traumatic-wound-nec-ulcer-arbitration": {
+    "load_bearing_on": []
+   },
+   "ptp-bypass-modifier-arbitration-59x": {
+    "load_bearing_on": []
+   },
+   "timed-multiextremity-bilateral-modifier": {
+    "load_bearing_on": []
+   },
+   "peroneal-dislocation-repair-documentation": {
+    "load_bearing_on": []
+   },
+   "acquired-flexion-deformity-documentation-arbitration": {
+    "load_bearing_on": []
+   },
+   "office-visit-mdm-level-arbitration": {
+    "load_bearing_on": []
+   },
+   "uncertain-plantar-fascia-diagnosis-iv-h": {
+    "load_bearing_on": []
+   },
+   "percutaneous-metatarsal-fixation-manipulation-documentation": {
+    "load_bearing_on": []
+   },
+   "em-visit-modifier-without-same-day-procedure": {
+    "load_bearing_on": []
+   },
+   "spontaneous-flexor-rupture-undocumented": {
+    "load_bearing_on": []
+   },
+   "peroneal-tendinitis-documentation-arbitration": {
+    "load_bearing_on": []
+   },
+   "peroneal-tendinitis-undocumented-axis-demotion": {
+    "load_bearing_on": []
+   },
+   "direct-formed-foot-insert-documentation-arbitration": {
+    "load_bearing_on": []
+   },
+   "spontaneous-other-tendon-rupture-undocumented": {
+    "load_bearing_on": []
+   },
+   "ipj-capsulotomy-separate-procedure-documentation": {
+    "load_bearing_on": []
+   },
+   "miscellaneous-nos-dme-supply-documentation": {
+    "load_bearing_on": []
+   },
+   "em-visit-with-same-day-minor-procedure": {
+    "load_bearing_on": []
+   },
+   "posterior-heel-encounter-reason-primary": {
+    "load_bearing_on": []
+   },
+   "residual-acquired-deformity-unspecified-undocumented": {
+    "load_bearing_on": []
+   },
+   "paring-benign-hyperkeratotic-lesion-documentation": {
+    "load_bearing_on": []
+   },
+   "nonelastic-gradient-compression-wrap-documentation": {
+    "load_bearing_on": []
+   },
+   "venous-hypertension-axis-undocumented-demotion": {
+    "load_bearing_on": []
+   },
+   "posterior-heel-primary-flag-assessment-order": {
+    "load_bearing_on": []
+   },
+   "operative-workup-radiograph-recitation-gate": {
+    "load_bearing_on": []
+   },
+   "achilles-secondary-repair-revision-documentation-r2": {
+    "load_bearing_on": []
+   },
+   "tobacco-use-lifestyle-documentation-arbitration": {
+    "load_bearing_on": []
+   },
+   "implantable-device-c-code-surgical-package-suppression": {
+    "load_bearing_on": []
+   },
+   "podiatry-laterality-side-arbitration": {
+    "load_bearing_on": []
+   },
+   "other-specified-enthesopathy-undocumented-axis": {
+    "load_bearing_on": []
+   },
+   "routine-foot-care-class-findings-arbitration": {
+    "load_bearing_on": []
+   },
+   "onycholysis-nail-finding-documentation-arbitration-r2": {
+    "load_bearing_on": []
+   },
+   "onychogryphosis-documentation-arbitration-r2": {
+    "load_bearing_on": []
+   },
+   "mycotic-nail-debridement-coverage-evidence": {
+    "load_bearing_on": [
+     "routine_podiatry_00003_farrington_alma_mycotic_nail_debridement"
+    ]
+   },
+   "long-term-drug-therapy-advisory-suppression": {
+    "load_bearing_on": []
+   },
+   "anticoagulant-long-term-therapy-status-advisory-suppression": {
+    "load_bearing_on": []
+   },
+   "nail-dystrophy-documentation-arbitration": {
+    "load_bearing_on": []
+   },
+   "nail-dystrophy-documentation-advisory-suppression": {
+    "load_bearing_on": []
+   }
+  }
+ },
+ "declined_merges": [
+  {
+   "family": "e9f6cfff00657a58",
+   "rule_ids": [
+    "acquired-flexion-deformity-documentation-arbitration",
+    "onychogryphosis-documentation-arbitration-r2",
+    "onycholysis-nail-finding-documentation-arbitration-r2",
+    "peroneal-tendinitis-documentation-arbitration",
+    "tobacco-use-lifestyle-documentation-arbitration"
+   ],
+   "pack_hash": "bb8ac6b33d2d8c27",
+   "why": "These five rules govern five disjoint code families (M21 flexion deformity, L60 onychogryphosis, L60 onycholysis, M76 peroneal tendinitis, Z72 tobacco use) with distinct authorities, distinct severities (WARNING vs INFO), distinct categories, and mutually-referencing exclude/require vocabularies (e.g. the onychogryphosis rule's descriptor_excludes intentionally omits 'hypertrophy' while the onycholysis rule excludes 'onychogryphosis' terms) that encode genuinely different clinical policies rather than a single unionable descriptor grammar. A single family/evidence block cannot represent five different code_regex + descriptor_requires_any + descriptor_excludes + condition_stems + exclusions combinations without either losing per-rule specificity or allowing cross-family firing that never occurred in any original, so byte-identical replay cannot be guaranteed.",
+   "at": "2026-07-22T21:11:43+00:00"
+  },
+  {
+   "family": "6432e931de4005ec",
+   "rule_ids": [
+    "achilles-repair-rupture-documentation",
+    "achilles-secondary-repair-revision-documentation-r2",
+    "bunionette-ostectomy-documentation",
+    "calcaneal-spur-ostectomy-documentation",
+    "direct-formed-foot-insert-documentation-arbitration",
+    "implantable-device-c-code-surgical-package-suppression",
+    "ipj-capsulotomy-separate-procedure-documentation",
+    "metatarsal-head-ostectomy-site-documentation",
+    "miscellaneous-nos-dme-supply-documentation",
+    "nonelastic-gradient-compression-wrap-documentation",
+    "paring-benign-hyperkeratotic-lesion-documentation",
+    "percutaneous-metatarsal-fixation-manipulation-documentation",
+    "peroneal-dislocation-repair-documentation",
+    "vascular-physiologic-study-documentation"
+   ],
+   "pack_hash": "bb8ac6b33d2d8c27",
+   "why": "These 13 rules target distinct clinical fact patterns (different anatomic axes, pathology definitions, code ranges, exclusion regexes, and message semantics) with non-unionable evidence grammars \u2014 e.g. the two Achilles rules require opposite descriptor axes (rupture vs secondary) on overlapping code ranges, and a union family/evidence set would cause cross-firing (one rule's stems/exclusions would wrongly satisfy or suppress another's family) that no single documented_service_completion config can reproduce byte-identically.",
+   "at": "2026-07-22T21:11:47+00:00"
+  },
+  {
+   "family": "585748efac57f576",
+   "rule_ids": [
+    "posterior-heel-encounter-reason-primary",
+    "posterior-heel-primary-flag-assessment-order"
+   ],
+   "pack_hash": "bb8ac6b33d2d8c27",
+   "why": "The two rules target the exact same applies_to/family/assessment/exclusion configuration (near-identical trigger space), yet emit different action.category, message, and recommendation text; both would fire simultaneously on the same matched line, producing two distinct advisory emissions that a single merged rule (one action per arbitration decision) cannot reproduce, so the merge would not be byte-identical on replay.",
+   "at": "2026-07-22T21:12:01+00:00"
+  },
+  {
+   "family": "e9f6cfff00657a58",
+   "rule_ids": [
+    "acquired-flexion-deformity-documentation-arbitration",
+    "onychogryphosis-documentation-arbitration-r2",
+    "onycholysis-nail-finding-documentation-arbitration-r2",
+    "peroneal-tendinitis-documentation-arbitration",
+    "tobacco-use-lifestyle-documentation-arbitration"
+   ],
+   "pack_hash": "883853581063d317",
+   "why": "These five rules target entirely different code families (M21, L60.2, L60.1, M76, Z72) with distinct clinical policies, condition_stems, exclusions, and severities/categories; a single family-gated rule cannot reproduce five independent code_regex/descriptor arbitrations without risking cross-family firing or losing per-rule message/severity distinctions.",
+   "at": "2026-07-22T22:27:44+00:00"
+  },
+  {
+   "family": "6432e931de4005ec",
+   "rule_ids": [
+    "achilles-repair-rupture-documentation",
+    "achilles-secondary-repair-revision-documentation-r2",
+    "bunionette-ostectomy-documentation",
+    "calcaneal-spur-ostectomy-documentation",
+    "direct-formed-foot-insert-documentation-arbitration",
+    "implantable-device-c-code-surgical-package-suppression",
+    "ipj-capsulotomy-separate-procedure-documentation",
+    "metatarsal-head-ostectomy-site-documentation",
+    "miscellaneous-nos-dme-supply-documentation",
+    "nonelastic-gradient-compression-wrap-documentation",
+    "paring-benign-hyperkeratotic-lesion-documentation",
+    "percutaneous-metatarsal-fixation-manipulation-documentation",
+    "peroneal-dislocation-repair-documentation",
+    "vascular-physiologic-study-documentation"
+   ],
+   "pack_hash": "883853581063d317",
+   "why": "These 13 rules target distinct clinical policies (different anatomic sites, pathology axes, code ranges, descriptor grammars, evidence lexicons, and exclusion regexes) that are not unionable into one config without risking cross-firing \u2014 e.g. shared stems like 'sublux'/'dislocat' or 'ostectom' across families would fire on the wrong family's codes, or a merged descriptor_requires_any/excludes union could match codes none of the originals matched. Each rule also carries a distinct achilles/bunionette/calcaneal/etc. authority and message set keyed to its own family's applies_to regex; merging would require per-rule conditional logic beyond a single shared template config, which cannot be verified byte-identical on replay.",
+   "at": "2026-07-22T22:27:49+00:00"
+  },
+  {
+   "family": "585748efac57f576",
+   "rule_ids": [
+    "posterior-heel-encounter-reason-primary",
+    "posterior-heel-primary-flag-assessment-order"
+   ],
+   "pack_hash": "883853581063d317",
+   "why": "Both rules share essentially identical applies_to, assessment/plan/procedure regexes, family definitions, and exclusion contexts (matching the same M-code lines in the same documents), yet they emit different action categories, message templates, and recommendation text (and even show subtly different tie-break wording in the family rationale). Since the trigger logic is not distinguishable between the two originals, a single merged rule could not deterministically choose which of the two message/category outputs to emit for a given firing, so byte-identical replay of both rules' distinct advisories cannot be guaranteed -- this is a policy/output divergence, not a config-only difference, so merging is declined.",
+   "at": "2026-07-22T22:28:26+00:00"
+  },
+  {
+   "family": "514d1cf26943446f",
+   "rule_ids": [
+    "gait-difficulty-nec-secondary-demotion",
+    "residual-nail-disorder-secondary-anchor"
+   ],
+   "pack_hash": "883853581063d317",
+   "why": "The two rules encode different clinical policies: one always demotes NEC codes lacking an assessment anchor (category marginal_secondary_demoted, unconditional demotion message), while the other conditionally keeps or demotes based on anchor presence with a different category/message (residual_secondary_confirmed_or_decided) and a different residual_markers set ('other' vs 'not elsewhere classified') and applies_to scoping. A union would change behavior (e.g. firing the 'confirm' semantics on gait-difficulty cases or vice versa), so it cannot be merged without risking non-identical replay.",
+   "at": "2026-07-22T23:28:31+00:00"
+  },
+  {
+   "family": "7ac38e5b31055b9c",
+   "rule_ids": [
+    "other-specified-enthesopathy-undocumented-axis",
+    "peroneal-tendinitis-undocumented-axis-demotion",
+    "residual-acquired-deformity-unspecified-undocumented",
+    "spontaneous-flexor-rupture-undocumented",
+    "spontaneous-other-tendon-rupture-undocumented",
+    "venous-hypertension-axis-undocumented-demotion"
+   ],
+   "pack_hash": "883853581063d317",
+   "why": "Each rule targets a distinct descriptor axis, condition-stem vocabulary, exclusion contexts, promotion drop-words, and message text tailored to its own clinical entity and documents; a single merged rule's descriptor/condition_stems fields would either fail to select all seven residual code families correctly or would cross-match one rule's stems/excludes against another's descriptor, causing unions to fire (or fail to fire) differently than the originals, and the distinct per-rule messages/recommendations cannot be collapsed into one template instance without per-context branching the template doesn't support.",
+   "at": "2026-07-22T23:28:34+00:00"
+  },
+  {
+   "family": "8081fb4929eb2bee",
+   "rule_ids": [
+    "anticoagulant-long-term-therapy-status-advisory-suppression",
+    "long-term-drug-therapy-advisory-suppression"
+   ],
+   "pack_hash": "d2ce3c7527df9268",
+   "why": "The two rules set contradictory values for the gating field require_leaf_descriptor_missing (false vs true) and use non-identical evidence regexes/thresholds, so a single rule instance cannot reproduce both selection conditions without either widening or narrowing firing scope on at least one original's cases \u2014 no unionable config exists that preserves byte-identical replay.",
+   "at": "2026-07-23T01:45:34+00:00"
+  },
+  {
+   "family": "e9f6cfff00657a58",
+   "rule_ids": [
+    "acquired-flexion-deformity-documentation-arbitration",
+    "onychogryphosis-documentation-arbitration-r2",
+    "onycholysis-nail-finding-documentation-arbitration-r2",
+    "peroneal-tendinitis-documentation-arbitration",
+    "tobacco-use-lifestyle-documentation-arbitration"
+   ],
+   "pack_hash": "d2ce3c7527df9268",
+   "why": "These five rules target entirely different code families (M21, L60.2, L60.1, M76, Z72), each with distinct code_regex gates, condition_stems, exclusion contexts, and clinical policies (e.g. I.B.5 integral-manifestation logic for onycholysis vs. IV.J/I.C.21.c lifestyle-code logic for tobacco); a single family block cannot express disjoint code_regex/descriptor_requires_any sets simultaneously, and unioning them risks cross-firing (e.g. onycholysis exclusions referencing onychogryphosis, or M21 vs M76 prefixes colliding) which would change behavior on the corpus.",
+   "at": "2026-07-23T01:45:38+00:00"
+  },
+  {
+   "family": "6432e931de4005ec",
+   "rule_ids": [
+    "achilles-repair-rupture-documentation",
+    "achilles-secondary-repair-revision-documentation-r2",
+    "bunionette-ostectomy-documentation",
+    "calcaneal-spur-ostectomy-documentation",
+    "direct-formed-foot-insert-documentation-arbitration",
+    "implantable-device-c-code-surgical-package-suppression",
+    "ipj-capsulotomy-separate-procedure-documentation",
+    "metatarsal-head-ostectomy-site-documentation",
+    "miscellaneous-nos-dme-supply-documentation",
+    "nonelastic-gradient-compression-wrap-documentation",
+    "paring-benign-hyperkeratotic-lesion-documentation",
+    "percutaneous-metatarsal-fixation-manipulation-documentation",
+    "peroneal-dislocation-repair-documentation",
+    "vascular-physiologic-study-documentation"
+   ],
+   "pack_hash": "d2ce3c7527df9268",
+   "why": "These 13 rules encode distinct clinical policies (different anatomic sites, code ranges, descriptor grammars, lexicons, and exclusion logic tuned to specific pathology contrasts like rupture-vs-chronic, ostectomy-vs-osteotomy, MTP-vs-IP joint, etc.); unioning their family/evidence configs into one rule would let each rule's evidence lexicon and exclusions cross-fire on the others' code ranges and descriptor prefixes, producing different add/suppress outcomes than the originals, so byte-identical replay cannot be guaranteed.",
+   "at": "2026-07-23T01:45:42+00:00"
+  },
+  {
+   "family": "585748efac57f576",
+   "rule_ids": [
+    "posterior-heel-encounter-reason-primary",
+    "posterior-heel-primary-flag-assessment-order"
+   ],
+   "pack_hash": "d2ce3c7527df9268",
+   "why": "The two rules are near-duplicates targeting the same document/flip but differ in descriptor-term regex breadth (\"deformity\" vs \"deformit\"), category names, message wording, and recommendation text; since both are enabled and would independently fire on the same matched line, a single merged rule can only emit one message/category, which cannot reproduce two distinct advisory emissions and could also change match scope, so byte-identical replay cannot be guaranteed.",
+   "at": "2026-07-23T02:39:48+00:00"
+  },
+  {
+   "family": "514d1cf26943446f",
+   "rule_ids": [
+    "gait-difficulty-nec-secondary-demotion",
+    "residual-nail-disorder-secondary-anchor"
+   ],
+   "pack_hash": "d2ce3c7527df9268",
+   "why": "The two rules differ in applies_to scope (unrestricted vs. icd_codes-only), residual_markers sets (one includes 'not elsewhere classified', the other 'other'), and action semantics (pure demotion vs. confirm-or-demote with distinct categories/messages tied to different anchor entities/codes) \u2014 a union would broaden marker matching and could fire differently than either original, so exact replay cannot be guaranteed.",
+   "at": "2026-07-23T02:39:59+00:00"
+  },
+  {
+   "family": "7ac38e5b31055b9c",
+   "rule_ids": [
+    "other-specified-enthesopathy-undocumented-axis",
+    "peroneal-tendinitis-undocumented-axis-demotion",
+    "residual-acquired-deformity-unspecified-undocumented",
+    "spontaneous-flexor-rupture-undocumented",
+    "spontaneous-other-tendon-rupture-undocumented",
+    "venous-hypertension-axis-undocumented-demotion"
+   ],
+   "pack_hash": "d2ce3c7527df9268",
+   "why": "Each rule targets a distinct descriptor family, condition-stem vocabulary, exclusion-context set, and message text tailored to its own clinical scenario; a single merged rule (one descriptor/condition_stems/action set) cannot reproduce each rule's distinct per-context matching and messages without risking cross-firing (e.g. one rule's stems rescuing another's descriptor match) or losing per-rule message fidelity, so byte-identical replay cannot be guaranteed.",
+   "at": "2026-07-23T02:40:02+00:00"
+  },
+  {
+   "family": "8081fb4929eb2bee",
+   "rule_ids": [
+    "anticoagulant-long-term-therapy-status-advisory-suppression",
+    "long-term-drug-therapy-advisory-suppression"
+   ],
+   "pack_hash": "41dac8b674bf405c",
+   "why": "The two rules differ in a load-bearing gate (require_leaf_descriptor_missing: false vs true) and carry distinct evidence-class regexes, contradiction lists, and message templates targeting the same document/code; a single merged rule cannot reproduce both the descriptor-present and descriptor-missing selection semantics and the two distinct note texts without risking either an over-broad union firing or divergent advisory emission text, so byte-identical replay cannot be guaranteed.",
+   "at": "2026-07-23T07:36:32+00:00"
+  },
+  {
+   "family": "d3b44780dcac37b3",
+   "rule_ids": [
+    "acquired-flexion-deformity-documentation-arbitration",
+    "nail-dystrophy-documentation-arbitration",
+    "onychogryphosis-documentation-arbitration-r2",
+    "onycholysis-nail-finding-documentation-arbitration-r2",
+    "peroneal-tendinitis-documentation-arbitration",
+    "tobacco-use-lifestyle-documentation-arbitration"
+   ],
+   "pack_hash": "41dac8b674bf405c",
+   "why": "These seven rules govern six clinically distinct diagnostic axes across unrelated ICD-10-CM categories (M21 flexion deformity, L60 dystrophy/onychogryphosis/onycholysis, M76 peroneal tendinitis, Z72 tobacco use), each with its own descriptor grammar, condition-stem vocabulary, exclusion contexts, message text, severity, and denial-risk policy. A single merged rule instance of this template has only one family/evidence/action block, so it cannot simultaneously encode these disjoint code_regex gates and mutually-exclusion-dependent evidence sets without either losing per-family message/severity distinctions or letting one family's evidence rescue another's code \u2014 a real risk given several rules explicitly exclude each other's vocabulary (e.g. onycholysis excludes dystrophy/onychogryphosis terms, flexion-deformity excludes varus/valgus). This is a set of independent clinical policies, not a unionable lexicon, so merging cannot be guaranteed byte-identical on replay.",
+   "at": "2026-07-23T07:36:42+00:00"
+  },
+  {
+   "family": "6432e931de4005ec",
+   "rule_ids": [
+    "achilles-repair-rupture-documentation",
+    "achilles-secondary-repair-revision-documentation-r2",
+    "bunionette-ostectomy-documentation",
+    "calcaneal-spur-ostectomy-documentation",
+    "direct-formed-foot-insert-documentation-arbitration",
+    "implantable-device-c-code-surgical-package-suppression",
+    "ipj-capsulotomy-separate-procedure-documentation",
+    "metatarsal-head-ostectomy-site-documentation",
+    "miscellaneous-nos-dme-supply-documentation",
+    "nonelastic-gradient-compression-wrap-documentation",
+    "paring-benign-hyperkeratotic-lesion-documentation",
+    "percutaneous-metatarsal-fixation-manipulation-documentation",
+    "peroneal-dislocation-repair-documentation",
+    "vascular-physiologic-study-documentation"
+   ],
+   "pack_hash": "41dac8b674bf405c",
+   "why": "These 13 rules target distinct clinical policies (different anatomic sites, descriptor axes, and code ranges such as 27xxx Achilles vs 28xxx metatarsal/calcaneal vs A/Q-code supplies vs C-code devices vs 93xxx vascular studies) with non-overlapping but structurally similar family/evidence grammars; a single merged rule's applies_to and family gates would either fail to distinguish these mutually exclusive policies or would create a union where descriptor/evidence matching from one rule's context could wrongly satisfy another's requirement, risking non-identical replay behavior. Each rule also has its own bespoke exclusion regexes and messages tied to a specific pathology axis, so no single template instantiation can reproduce all outputs byte-identically without effectively hardcoding disjoint branches per rule, which is not genuine unification.",
+   "at": "2026-07-23T07:36:47+00:00"
+  },
+  {
+   "family": "086d04feb7108637",
+   "rule_ids": [
+    "anticoagulant-long-term-therapy-status-advisory-suppression",
+    "long-term-drug-therapy-advisory-suppression",
+    "nail-dystrophy-documentation-advisory-suppression"
+   ],
+   "pack_hash": "412decca4dee8407",
+   "why": "The three rules encode genuinely different clinical policies (companion-condition prerequisite dispute for Z79.01 long-term drug-therapy vs. missing-supporting-text dispute for L60.3 nail dystrophy) with distinct category_title_requires_any values, evidence_classes, exclusion_contexts, require_leaf_descriptor_missing settings (false vs true across the two drug-therapy rules), and non-parametric message wording that cannot be losslessly unified into one note/evidence_classes/category_title field set without either narrowing behavior for one rule or broadening firing conditions for another.",
+   "at": "2026-07-23T08:45:04+00:00"
+  },
+  {
+   "family": "d3b44780dcac37b3",
+   "rule_ids": [
+    "acquired-flexion-deformity-documentation-arbitration",
+    "nail-dystrophy-documentation-arbitration",
+    "onychogryphosis-documentation-arbitration-r2",
+    "onycholysis-nail-finding-documentation-arbitration-r2",
+    "peroneal-tendinitis-documentation-arbitration",
+    "tobacco-use-lifestyle-documentation-arbitration"
+   ],
+   "pack_hash": "412decca4dee8407",
+   "why": "These seven rules target disjoint code families (M21, three distinct L60 sub-axes, M76, Z72) with materially different descriptor grammars, evidence exclusion logic (e.g. the onycholysis rule's unique I.B.5 integral-manifestation exclusion), min_descriptor_tokens, severities (WARNING vs INFO), categories, and message templates; the template's single family/evidence/action block cannot express all of these simultaneously without either losing a rule's specific policy or letting the union fire in contexts where no original rule fired.",
+   "at": "2026-07-23T08:45:15+00:00"
+  },
+  {
+   "family": "6432e931de4005ec",
+   "rule_ids": [
+    "achilles-repair-rupture-documentation",
+    "achilles-secondary-repair-revision-documentation-r2",
+    "bunionette-ostectomy-documentation",
+    "calcaneal-spur-ostectomy-documentation",
+    "direct-formed-foot-insert-documentation-arbitration",
+    "implantable-device-c-code-surgical-package-suppression",
+    "ipj-capsulotomy-separate-procedure-documentation",
+    "metatarsal-head-ostectomy-site-documentation",
+    "miscellaneous-nos-dme-supply-documentation",
+    "nonelastic-gradient-compression-wrap-documentation",
+    "paring-benign-hyperkeratotic-lesion-documentation",
+    "percutaneous-metatarsal-fixation-manipulation-documentation",
+    "peroneal-dislocation-repair-documentation",
+    "vascular-physiologic-study-documentation"
+   ],
+   "pack_hash": "412decca4dee8407",
+   "why": "These 13 rules target distinct clinical fact patterns (different anatomic sites, pathology axes, code ranges, and evidence grammars) with materially different family/evidence/exclusion configs; unioning descriptor_requires_any, service_stems, and exclusions across them would let evidence from one rule's context satisfy another's family gate (or vice versa), changing which lines fire on the shared corpus. Each rule also carries distinct message/rationale/recommendation semantics keyed to its specific pathology narrative, which a single merged config cannot reproduce without risking non-identical replay output.",
+   "at": "2026-07-23T08:45:20+00:00"
+  }
+ ]
+}

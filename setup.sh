@@ -296,6 +296,13 @@ run_native() {
     fi
     # shellcheck disable=SC2086
     env $RUN_ENV python run.py $args
+  elif [ "$REBUILD" = "1" ]; then
+    # --rebuild without --start used to be a silent no-op — the flag only
+    # applied when the pipeline was also being started. Honor it by running
+    # the rebuild through setup-only mode (initialize + exit, no notes).
+    # shellcheck disable=SC2086
+    env $RUN_ENV python run.py --rebuild-index --setup-only
+    ok "index rebuilt — run with: source .venv/bin/activate && python run.py"
   else
     ok "setup complete — run with: source .venv/bin/activate && python run.py"
   fi

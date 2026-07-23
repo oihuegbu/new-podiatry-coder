@@ -1,0 +1,58 @@
+{
+  "document_id": "009_gloria_watkins_note1",
+  "cpt_codes": [
+    {
+      "code": "99215",
+      "description": "Office or other outpatient visit for the evaluation and management of an established patient, which requires a medically appropriate history and/or examination and high level of medical decision making. When using total time on the date of the encounter for code selection, 40 minutes must be met or exceeded.",
+      "modifiers": [
+        "25"
+      ],
+      "units": 1
+    },
+    {
+      "code": "97597",
+      "description": "Debridement (eg, high pressure waterjet with/without suction, sharp selective debridement with scissors, scalpel and forceps), open wound, (eg, fibrin, devitalized epidermis and/or dermis, exudate, debris, biofilm), including topical application(s), wound assessment, use of a whirlpool, when performed and instruction(s) for ongoing care, per session, total wound(s) surface area; first 20 sq cm or less",
+      "modifiers": [
+        "LT"
+      ],
+      "units": 1
+    },
+    {
+      "code": "20240",
+      "description": "Biopsy, bone, open; superficial (eg, sternum, spinous process, rib, patella, olecranon process, calcaneus, tarsal, metatarsal, carpal, metacarpal, phalanx)",
+      "modifiers": [
+        "TA"
+      ],
+      "units": 1
+    }
+  ],
+  "final_disposition": "CLEAN",
+  "hcpcs_codes": [],
+  "icd_codes": [
+    {
+      "code": "E11.621",
+      "description": "Type 2 diabetes mellitus with foot ulcer",
+      "type": "primary"
+    },
+    {
+      "code": "L97.526",
+      "description": "Non-pressure chronic ulcer of other part of left foot with bone involvement without evidence of necrosis",
+      "type": "secondary"
+    },
+    {
+      "code": "M86.9",
+      "description": "Osteomyelitis, unspecified",
+      "type": "secondary"
+    },
+    {
+      "code": "Z79.4",
+      "description": "Long term (current) use of insulin",
+      "type": "secondary"
+    }
+  ],
+  "gold_provenance": {
+    "verification": "auto",
+    "verified_by": "pipeline/consistency-gate",
+    "recorded_at": "2026-07-18T11:32:01+00:00"
+  }
+}

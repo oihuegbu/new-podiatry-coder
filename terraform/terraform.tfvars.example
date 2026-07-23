@@ -1,0 +1,11 @@
+aws_region       = "us-east-1"
+ssh_allowed_cidr = "YOUR.IP.ADDR.ESS/32"
+
+anthropic_api_key = "sk-ant-..."
+openai_api_key    = ""
+stedi_api_key     = ""
+
+# Non-secret overrides (defaults already match .env)
+# instance_type = "r6i.xlarge"
+# claude_model  = "claude-sonnet-5"
+# claude_effort = "high"

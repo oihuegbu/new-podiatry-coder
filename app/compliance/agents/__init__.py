@@ -19,6 +19,9 @@ def build_default_agents(store: ComplianceDataStore) -> list[ComplianceAgent]:
     from app.compliance.agents.prior_auth import PriorAuthAgent           # #10
     from app.compliance.agents.benefits import BenefitsAgent              # #11
     from app.compliance.agents.documentation import DocumentationAgent    # #12
+    from app.compliance.agents.billability import BillabilityAgent        # #13
+    from app.compliance.agents.mce import MCEAgent                        # #14
+    from app.compliance.agents.surgical_package import SurgicalPackageAgent  # #15
 
     agents: list[ComplianceAgent] = [
         SpecificityAgent(store),       # 1
@@ -33,5 +36,8 @@ def build_default_agents(store: ComplianceDataStore) -> list[ComplianceAgent]:
         PriorAuthAgent(store),         # 10
         BenefitsAgent(store),          # 11
         DocumentationAgent(store),     # 12
+        BillabilityAgent(store),       # 13
+        MCEAgent(store),               # 14
+        SurgicalPackageAgent(store),   # 15
     ]
     return agents

@@ -24,6 +24,13 @@ class Source:
     url: str
     license: str = "Free"
     notes: str = ""
+    # True = updated by hand (no automated fetch/parse path exists yet).
+    # Manual sources are excluded from due_sources()/cron scheduling and the
+    # runner reports them as skipped-manual instead of failing with
+    # "no parser" — previously these were SCHEDULED in the crontab and
+    # silently error-logged every cycle, which read as automated coverage
+    # that didn't actually exist.
+    manual: bool = False
 
 
 # Cadence → months it fires on (quarterly = Jan/Apr/Jul/Oct).
@@ -64,19 +71,49 @@ SOURCES: list[Source] = [
         id="hcpcs", layer="CODE_SET", publisher="CMS", cadence="quarterly",
         fmt="zip-csv", target_table="code_set", parser="parse_hcpcs",
         url="https://www.cms.gov/medicare/coding-billing/healthcare-common-procedure-system",
+        manual=True,
+        notes="parse_hcpcs not implemented yet — data/codes/hcpcs_codes.json is refreshed "
+              "manually from the CMS quarterly alpha-numeric file; compliance.db re-ingests "
+              "it automatically on file change (store fingerprint check).",
     ),
+    Source(
+        id="prior_auth_medicare", layer="PRIOR_AUTH", publisher="CMS", cadence="quarterly",
+        fmt="html", target_table="prior_auth_required", parser="parse_prior_auth_medicare",
+        url="https://www.cms.gov/research-statistics-data-and-systems/monitoring-programs/"
+            "medicare-ffs-compliance-programs/dmepos/downloads/dmepos_pa_required-prior-authorization-list.pdf",
+        manual=True,
+        notes="DMEPOS Required Prior Authorization List — exact HCPCS codes. Source PDF blocks "
+              "automated fetching (403); data/codes/prior_auth_medicare.json is currently a "
+              "manually-verified partial list (7 of ~74 items), not yet wired to this refresh "
+              "cadence. parse_prior_auth_medicare doesn't exist yet — add it when the fetch-block "
+              "is resolved (e.g. a browser-rendered fetch) rather than scraping around it.",
+    ),
+    # Commercial/other-federal payers (Tricare, BCBS Florida, Florida Medicaid) are
+    # NOT registered here — unlike CMS's sources, they don't publish at a stable
+    # URL/cadence: Tricare's list is a TriWest-issued PDF with no versioned API,
+    # BCBS Florida's list is provider-portal-gated (no public URL at all), and
+    # Florida Medicaid fragments across per-MCO plans (Sunshine Health, Humana
+    # Healthy Horizons, etc.) with no single authoritative list. Their
+    # data/codes/prior_auth_<payer>.json files are manually sourced/updated —
+    # same trust tier as modifiers.json/podiatry_lcd.json, not an automated feed.
     Source(
         id="icd10cm", layer="CODE_SET", publisher="CMS+CDC", cadence="annual",
         fmt="zip-txt", target_table="code_set", parser="parse_icd10",
         url="https://www.cms.gov/medicare/coding-billing/icd-10-codes",
-        notes="Annual (Oct) + possible April update.",
+        manual=True,
+        notes="Annual (Oct) + possible April update. parse_icd10 not implemented yet — "
+              "data/codes/icd10cm_codes.json is refreshed manually from the CMS/CDC annual "
+              "release; compliance.db re-ingests it automatically on file change.",
     ),
     Source(
         id="cpt", layer="CODE_SET", publisher="AMA", cadence="annual",
         fmt="csv", target_table="code_set", parser="parse_cpt",
         url="https://www.ama-assn.org/practice-management/cpt",
         license="LICENSED (AMA data agreement)",
-        notes="Descriptors require the AMA license — client holds it.",
+        manual=True,
+        notes="Descriptors require the AMA license — client holds it. parse_cpt not "
+              "implemented yet — data/codes/cpt_codes.json is refreshed manually from the "
+              "licensed file; compliance.db re-ingests it automatically on file change.",
     ),
 ]
 
@@ -84,9 +121,14 @@ SOURCES_BY_ID = {s.id: s for s in SOURCES}
 
 
 def due_sources(month: int) -> list[Source]:
-    """Sources whose cadence fires for the given calendar month."""
+    """Sources whose cadence fires for the given calendar month.
+
+    Manual sources are excluded — they have no fetch/parse path, so
+    scheduling them only produces guaranteed failures in the refresh log."""
     out = []
     for s in SOURCES:
+        if s.manual:
+            continue
         if s.cadence == "weekly":
             out.append(s)
         elif s.cadence == "quarterly" and month in QUARTER_MONTHS:

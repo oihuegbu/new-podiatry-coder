@@ -1,26 +1,61 @@
 import json
+import sqlite3
+from datetime import date
 from app.core.config import (
-    ICD10_FILE, CPT_FILE, HCPCS_FILE, NCCI_FILE, MUE_FILE, LCD_FILE,
-    GLOBAL_PERIODS_FILE, SNOMED_ROOTS_FILE,
+    ICD10_FILE, CPT_FILE, HCPCS_FILE, MUE_FILE,
+    SNOMED_ROOTS_FILE, DATA_DIR,
 )
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
+_COMPLIANCE_DB_PATH = DATA_DIR / "compliance.db"
+_OPEN = "9999-12-31"
+
+
+def _norm(code: str) -> str:
+    return (code or "").replace(".", "").strip().upper()
+
+
+def _clean_date(val) -> str:
+    """Normalize a date-ish value to 'YYYY-MM-DD'; empty/None -> wide-open
+    start. Also accepts CMS's compact 'YYYYMMDD' form (cpt_codes.json's own
+    effective_date field, e.g. '20240101')."""
+    import re
+    if not val:
+        return "1900-01-01"
+    s = str(val).strip()
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+        return s
+    if re.match(r"^\d{8}$", s):
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    return "1900-01-01"
+
 
 class CodeReferenceDB:
-    """In-memory lookup tables for code validation (existence, NCCI, MUE, LCD, global periods, SNOMED roots)."""
+    """In-memory lookup tables for code validation (existence, MUE, SNOMED roots).
+
+    LCD/Article medical-necessity coverage lives entirely in ComplianceDataStore's
+    coverage_cpt/coverage_icd tables (MedicalNecessityAgent) — not duplicated here.
+
+    NCCI pairs are the one exception: at 1.7M+ rows they're queried from the
+    SQLite compliance.db (built by ComplianceDataStore) instead of being held
+    in memory here — see check_ncci().
+
+    Global period data (glob_days, billing_status, bilat_surg) lives entirely
+    in ComplianceDataStore's global_period table (store.global_period() /
+    store.billing_status() / store.bilat_surg()) — not duplicated here. A
+    prior in-memory copy (get_global_period()) collapsed XXX/YYY/ZZZ/MMM and
+    "code not found" to the same 0 value, making "no global period" and
+    "unknown code" indistinguishable; removed in favor of the single
+    real-data source already used everywhere else in the codebase.
+    """
 
     def __init__(self):
         self.icd10: dict[str, dict] = {}
         self.cpt: dict[str, dict] = {}
         self.hcpcs: dict[str, dict] = {}
-        self.ncci: dict[str, dict] = {}
         self.mue: dict[str, dict] = {}
-        self.lcd_qualifying_dx: list[str] = []
-        self.lcd_id: str = ""
-        self.global_periods: dict[str, int] = {}
-        self.global_period_defaults: dict[str, int] = {}
         self.snomed_roots: dict[str, str] = {}
         self.snomed_root_confidence_cap: float = 0.4
 
@@ -30,8 +65,6 @@ class CodeReferenceDB:
         self._load_hcpcs()
         self._load_ncci()
         self._load_mue()
-        self._load_lcd()
-        self._load_global_periods()
         self._load_snomed_roots()
 
     def _load_icd10(self) -> None:
@@ -44,6 +77,8 @@ class CodeReferenceDB:
                     "code": code,
                     "description": entry.get("description", ""),
                     "status": entry.get("status", "active"),
+                    "effective_from": _clean_date(entry.get("effective_from")),
+                    "effective_to": _clean_date(entry.get("effective_to")) if entry.get("effective_to") else _OPEN,
                 }
         logger.info(f"Loaded {len(self.icd10)} ICD-10-CM codes")
 
@@ -54,10 +89,26 @@ class CodeReferenceDB:
         for entry in codes_list:
             code = entry.get("code", "").strip()
             if code:
+                # CPT's effective_date is NOT a code-introduction date —
+                # verified empirically: 99202/99213/99214 (decades-old,
+                # unquestionably not new codes) all carry effective_date
+                # 2024-01-01, and the full distribution of populated values
+                # clusters on Jan 1/Jul 1 across 2020-2026 — a periodic
+                # descriptor-revision cycle marker, not a lifecycle date.
+                # Using it as an activation gate would flag huge numbers of
+                # long-standing, merely-reworded codes (e.g. any E/M code
+                # touched by the 2021 guideline overhaul) as "not active"
+                # for any older, perfectly valid date of service. No
+                # reliable introduction/retirement signal exists in this
+                # source for CPT, so — unlike ICD-10 and HCPCS, both
+                # verified against real add/discontinue signals — CPT stays
+                # always-open rather than approximating with the wrong field.
                 self.cpt[code] = {
                     "code": code,
                     "short_description": entry.get("short_description", ""),
                     "long_description": entry.get("long_description", ""),
+                    "effective_from": "1900-01-01",
+                    "effective_to": _OPEN,
                 }
         logger.info(f"Loaded {len(self.cpt)} CPT codes")
 
@@ -69,34 +120,31 @@ class CodeReferenceDB:
             if len(raw_code) >= 5:
                 code = raw_code[:5]
                 if code[0].isalpha() and code[1:].isdigit():
+                    # add_date, not effective_from — see store.py's
+                    # _ingest_hcpcs for the same fix and why (effective_from
+                    # shifts on every quarterly revision cycle even for
+                    # decades-old codes; add_date stays stable at the
+                    # code's true origin). effective_to stays reliable for
+                    # discontinuation (action_code='D' entries).
+                    eff_to = entry.get("effective_to")
                     self.hcpcs[code] = {
                         "code": code,
                         "description": raw_code[5:].strip() or entry.get("short_description", ""),
+                        # The full CMS descriptor carries the billing-unit
+                        # denomination for drugs ("..., 10 mg" = one unit per
+                        # 10 mg) that the truncated short description loses —
+                        # needed by the validator's J-code units cross-check.
+                        "long_description": entry.get("long_description", ""),
+                        "effective_from": _clean_date(entry.get("add_date")),
+                        "effective_to": _clean_date(eff_to) if eff_to else _OPEN,
                     }
         logger.info(f"Loaded {len(self.hcpcs)} HCPCS codes")
 
     def _load_ncci(self) -> None:
-        with open(NCCI_FILE) as f:
-            data = json.load(f)
-        for entry in data:
-            c1 = entry.get("code1", "").strip()
-            c2 = entry.get("code2", "").strip()
-            if not c1 or not c2 or len(c1) > 7 or len(c2) > 7:
-                continue
-            if not any(ch.isdigit() for ch in c1):
-                continue
-            # The modifier indicator may be in 'modifier' or 'description' field
-            # depending on the source file format. '0'=no modifier allowed,
-            # '1'=modifier allowed, '9'=concept does not apply.
-            mod_raw = entry.get("modifier", "") or entry.get("description", "")
-            mod_indicator = str(mod_raw).strip()
-            self.ncci[f"{c1}|{c2}"] = {
-                "code1": c1,
-                "code2": c2,
-                "edit_type": entry.get("edit_type", "PTP"),
-                "modifier": mod_indicator,
-            }
-        logger.info(f"Loaded {len(self.ncci)} NCCI edit pairs")
+        # NCCI pairs (1.7M+ rows) are queried from the SQLite compliance.db
+        # built by ComplianceDataStore instead of being duplicated here as an
+        # in-memory dict (~700MB) — see check_ncci().
+        logger.info("NCCI edit pairs: served from compliance.db (no in-memory duplicate)")
 
     def _load_mue(self) -> None:
         with open(MUE_FILE) as f:
@@ -106,31 +154,6 @@ class CodeReferenceDB:
             if code:
                 self.mue[code] = {"mue_value": entry.get("mue_value", 0)}
         logger.info(f"Loaded {len(self.mue)} MUE entries")
-
-    def _load_lcd(self) -> None:
-        with open(LCD_FILE) as f:
-            data = json.load(f)
-        self.lcd_qualifying_dx = data.get("qualifying_dx", [])
-        self.lcd_id = data.get("lcd_id", "L36199")
-        logger.info(f"Loaded {len(self.lcd_qualifying_dx)} LCD qualifying DX codes")
-
-    def _load_global_periods(self) -> None:
-        try:
-            with open(GLOBAL_PERIODS_FILE) as f:
-                data = json.load(f)
-            self.global_periods = {
-                k: int(v.get("global_days_int", 0) if isinstance(v, dict) else v)
-                for k, v in data.get("codes", {}).items()
-            }
-            # Load prefix-based defaults (skip the 'note' key)
-            raw_defaults = data.get("default_by_prefix", {})
-            self.global_period_defaults = {
-                k: int(v) for k, v in raw_defaults.items()
-                if k != "note" and str(v).isdigit()
-            }
-            logger.info(f"Loaded {len(self.global_periods)} global period entries")
-        except Exception as e:
-            logger.warning(f"Could not load global periods file: {e}")
 
     def _load_snomed_roots(self) -> None:
         try:
@@ -145,6 +168,12 @@ class CodeReferenceDB:
     # --- Lookup helpers ---
 
     def validate_icd10(self, code: str) -> dict | None:
+        """Existence at any point in time (no date dimension) — unchanged
+        behavior, still the right check for callers asking "is this a real
+        code at all" (e.g. hallucination detection) rather than "was it
+        valid on this specific date." See is_active_for_dos() for the
+        date-gated check, mirroring ComplianceDataStore's own
+        code_exists(dos) vs code_active_any_date() split."""
         return self.icd10.get(code.replace(".", "").strip())
 
     def validate_cpt(self, code: str) -> dict | None:
@@ -153,27 +182,60 @@ class CodeReferenceDB:
     def validate_hcpcs(self, code: str) -> dict | None:
         return self.hcpcs.get(code.strip())
 
+    def is_active_for_dos(self, system: str, code: str, dos=None) -> bool:
+        """True if `code` was effective on `dos` (defaults to today).
+        Previously validate_icd10/cpt/hcpcs had no date dimension at all —
+        a not-yet-effective or already-discontinued code validated as
+        existing regardless of the claim's actual date of service. Real
+        effective_from/effective_to are now stored per entry (see
+        _load_icd10/_load_cpt/_load_hcpcs); this is the date-gated
+        companion to validate_*()'s existence-only check."""
+        table = {"icd10": self.icd10, "cpt": self.cpt, "hcpcs": self.hcpcs}.get(system)
+        if table is None:
+            return False
+        norm = code.replace(".", "").strip() if system == "icd10" else code.strip()
+        entry = table.get(norm)
+        if entry is None:
+            return False
+        d = dos if isinstance(dos, str) else (dos.isoformat() if dos else date.today().isoformat())
+        return entry["effective_from"] <= d <= entry["effective_to"]
+
     def check_ncci(self, code1: str, code2: str) -> dict | None:
-        return self.ncci.get(f"{code1}|{code2}") or self.ncci.get(f"{code2}|{code1}")
+        """Look up an NCCI PTP edit pair, any direction, ignoring effective dates
+        (matches the historical no-in-memory-dict behavior this replaced)."""
+        c1, c2 = _norm(code1), _norm(code2)
+        conn = sqlite3.connect(f"file:{_COMPLIANCE_DB_PATH}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT col1, col2, modifier_indicator FROM ncci_ptp "
+                "WHERE (col1=? AND col2=?) OR (col1=? AND col2=?) LIMIT 1",
+                (c1, c2, c2, c1),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return None
+        row_c1, row_c2, modifier = row
+        return {"code1": row_c1, "code2": row_c2, "edit_type": "PTP", "modifier": modifier}
 
     def get_mue(self, code: str) -> int | None:
         entry = self.mue.get(code.strip())
         return entry["mue_value"] if entry else None
 
-    def is_lcd_qualifying(self, code: str) -> bool:
-        clean = code.replace(".", "").strip()
-        return clean in self.lcd_qualifying_dx or code in self.lcd_qualifying_dx
-
-    def get_global_period(self, cpt_code: str) -> int:
-        """Return the global period (days) for a CPT code. Returns 0 if unknown."""
-        code = cpt_code.strip()
-        if code in self.global_periods:
-            return self.global_periods[code]
-        # Fallback: prefix-based default
-        for prefix, days in self.global_period_defaults.items():
-            if code.startswith(prefix):
-                return days
-        return 0
+    def icd10_siblings(self, prefix: str) -> list[tuple[str, str]]:
+        """Every real ICD-10-CM code sharing the given category prefix
+        (e.g. "Z88" -> all 10 Z88.x drug-allergy-category codes), with
+        descriptions — the ICD-10 equivalent of a CPT code family. Unlike
+        CPT (which shares a literal descriptor stem before a semicolon),
+        ICD-10 siblings share only a numeric/alpha category prefix; each
+        sibling's full description differs entirely (e.g. Z88.5 "Allergy
+        status to narcotic agent" vs Z88.6 "...analgesic agent")."""
+        norm_prefix = prefix.replace(".", "").strip().upper()
+        return sorted(
+            (code, entry["description"])
+            for code, entry in self.icd10.items()
+            if code.startswith(norm_prefix)
+        )
 
     def is_snomed_root(self, concept_id: str) -> bool:
         """Return True if the SNOMED concept ID is a generic root/parent concept."""

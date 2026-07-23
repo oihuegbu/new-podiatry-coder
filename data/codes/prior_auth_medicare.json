@@ -1,0 +1,20 @@
+{
+  "payer_id": "medicare",
+  "payer_name": "Medicare",
+  "source": "CMS DMEPOS Required Prior Authorization List",
+  "source_urls": [
+    "https://www.ossur.com/en-us/professionals/ossur-rr/cmsupdatespriorauthorization-list",
+    "https://www.cbsmedicalbilling.com/cms-expands-prior-authorization-requirements-for-dmepos-april-13th-2026/"
+  ],
+  "status": "PARTIAL — 7 of ~74 total items on the full CMS Required Prior Authorization List (updated 2026-01-13, effective 2026-04-13, per https://www.cms.gov/research-statistics-data-and-systems/monitoring-programs/medicare-ffs-compliance-programs/dmepos/downloads/dmepos_pa_required-prior-authorization-list.pdf). That source PDF blocks automated fetching — these 7 are the newly-added codes, cross-verified from two independent secondary sources citing the same CMS update. The remaining ~67 items (including 10 pre-existing orthotic codes, power wheelchairs, and other DME categories) are NOT yet loaded. Do not treat this as a complete Medicare PA list.",
+  "retrieved": "2026-07-10",
+  "codes": [
+    {"code": "L0651", "description": "Lumbar-sacral orthosis", "effective_date": "2026-04-13"},
+    {"code": "L1844", "description": "Custom fabricated knee orthosis, single upright", "effective_date": "2026-04-13"},
+    {"code": "L1846", "description": "Custom fabricated knee orthosis, double upright", "effective_date": "2026-04-13"},
+    {"code": "L1852", "description": "Prefabricated knee orthosis", "effective_date": "2026-04-13"},
+    {"code": "L1932", "description": "Carbon fiber ankle-foot orthosis (AFO)", "effective_date": "2026-04-13"},
+    {"code": "E0651", "description": "Pneumatic compression device, non-calibrated", "effective_date": "2026-04-13"},
+    {"code": "E0652", "description": "Pneumatic compression device, calibrated", "effective_date": "2026-04-13"}
+  ]
+}
