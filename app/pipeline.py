@@ -265,6 +265,22 @@ class MedicalCodingPipeline:
             rag_context={
                 "entities_extracted": len(entities),
                 "candidates_per_system": {cs: len(cands) for cs, cands in merged.items()},
+                # The actual candidate CODES offered to the coder, in the
+                # rank order it saw them (deduped + similarity-sorted by
+                # _merge_candidates, DOS-filtered by _drop_inactive_
+                # candidates). Persisted so consistency-run variance can be
+                # characterized post hoc: when a minority run lacks a
+                # load-bearing code, this decides whether it was ABSENT from
+                # that run's candidate set (a retrieval-recall gap) or
+                # PRESENT-but-not-chosen (a generation disagreement) — the
+                # split that determines whether a fix belongs in RAG or in
+                # the coder. Codes only (no descriptors/scores) to keep the
+                # per-run artifact small; rank order preserved because "at
+                # what rank was 28118 offered" is part of the signal.
+                "candidate_codes_per_system": {
+                    cs: [str(c.get("code") or "").strip() for c in cands
+                         if str(c.get("code") or "").strip()]
+                    for cs, cands in merged.items()},
                 "corrections_made": coding_result.get("corrections_made", []),
                 "audit_notes": coding_result.get("audit_notes", ""),
                 "vision_context": vision_context,
