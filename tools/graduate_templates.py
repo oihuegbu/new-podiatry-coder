@@ -119,15 +119,22 @@ def _reopened_classes(rule_ids: set[str]) -> list[str]:
 def eligibility(template: str, path: Path,
                 results_dir: Path = DEFAULT_RESULTS) -> dict:
     """Every criterion with its measured value; 'eligible' iff all hold."""
-    from app.validation.auto_templates import validate_template_source
+    from app.validation.auto_templates import (
+        validate_template_clause_tagging, validate_template_source)
 
     enabled, disabled = _rules_of(template)
     since = _live_since(template, path, enabled)
     age_days = (datetime.now(timezone.utc) - since).total_seconds() / 86400
     docs = _docs_processed_since(since, results_dir)
     reopened = _reopened_classes({r.get("id") for r in enabled + disabled})
-    static_problems = validate_template_source(
-        path.read_text(encoding="utf-8"))
+    src = path.read_text(encoding="utf-8")
+    static_problems = validate_template_source(src)
+    # Graduation is where a sandboxed template becomes permanent ordinary
+    # Python. An untagged emission site promoted here would outlive the
+    # migration, so clause tagging gates promotion — never loading. A
+    # template that fails this stays installed and keeps running; it just
+    # waits in the sandbox until its _add sites name their clauses.
+    clause_problems = validate_template_clause_tagging(src)
 
     checks = {
         "age": {"ok": age_days >= MIN_DAYS,
@@ -140,6 +147,8 @@ def eligibility(template: str, path: Path,
         "held": {"ok": not reopened, "reopened_classes": reopened},
         "static": {"ok": not static_problems,
                    "problems": static_problems[:4]},
+        "clause_tagging": {"ok": not clause_problems,
+                           "problems": clause_problems[:4]},
     }
     return {"template": template, "live_since": since.isoformat(),
             "eligible": all(c["ok"] for c in checks.values()),

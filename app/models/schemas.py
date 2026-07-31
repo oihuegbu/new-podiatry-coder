@@ -122,6 +122,15 @@ class ValidationIssue(BaseModel):
     message: str = ""
     recommendation: str = ""
     denial_risk: str | None = None
+    # WHICH assertion this issue makes about `code` — the same dimension
+    # compliance findings carry (Finding.clause). One category can host
+    # several distinct assertions about one code; advisory suppression must
+    # be able to retire exactly one of them without retiring its siblings
+    # (the routine_00003 inversion). "" means untagged: matched only by an
+    # unscoped suppression directive, never by a clause-scoped one. The
+    # migration to universal tagging is ratcheted by
+    # tests/check_clause_coverage.py.
+    clause: str = ""
 
 
 class DocumentationAudit(BaseModel):

@@ -978,10 +978,13 @@ def main():
     ]
     v._scrub_advisory_suppressions = []
     v._advisory_suppression_corrections = []
+    # UNSCOPED directive (no clause): retains the pre-migration blunt reach
+    # over every issue on (category, code), tagged or not. Every live rule
+    # in the pack is this shape, which is why adding `clause` to
+    # ValidationIssue is a no-op on today's behavior.
     v.suppress_scrub_advisory(
         "DOCUMENTATION", "Z79.01", rule_id="test-rule",
         authority="ICD-10-CM I.C.21.c.3", note="test",
-        clause="documentation_prerequisite",
         validator_categories=["unjustified_zcode"])
     v._apply_validator_advisory_suppressions()
     remaining = {(i.severity, i.code, i.category) for i in v.issues}
@@ -997,11 +1000,60 @@ def main():
           any(c.get("category") == "validator_advisory_suppressed"
               and c.get("code") == "Z79.01"
               for c in v._advisory_suppression_corrections))
-    check("suppression directive carries clause + validator_categories",
-          v._scrub_advisory_suppressions[0].get("clause")
-          == "documentation_prerequisite"
-          and v._scrub_advisory_suppressions[0].get("validator_categories")
+    check("suppression directive carries validator_categories",
+          v._scrub_advisory_suppressions[0].get("validator_categories")
           == ["unjustified_zcode"])
+    v.issues = []
+    v._scrub_advisory_suppressions = []
+    v._advisory_suppression_corrections = []
+
+    print("\n[clause-scoped suppression cannot retire sibling assertions]")
+    # The routine_00003 inversion: one filter emits several distinct
+    # assertions about one code, and a rule verified against ONE of them
+    # must not retire the others. The engine half enforces this at
+    # engine._apply_advisory_suppressions; these cases pin the validator
+    # half, whose fallback direction is the thing that must never invert.
+    def _suppress(directive_clause, issue_clause):
+        v.issues = [ValidationIssue(
+            severity="WARNING", code="Z79.01",
+            category="unjustified_zcode", message="advisory",
+            clause=issue_clause)]
+        v._scrub_advisory_suppressions = []
+        v._advisory_suppression_corrections = []
+        v.suppress_scrub_advisory(
+            "DOCUMENTATION", "Z79.01", rule_id="test-rule",
+            authority="ICD-10-CM I.C.21.c.3", note="test",
+            clause=directive_clause,
+            validator_categories=["unjustified_zcode"])
+        v._apply_validator_advisory_suppressions()
+        return not v.issues  # True == the advisory was suppressed
+
+    check("clause-scoped directive retires the SAME clause",
+          _suppress("documentation_prerequisite",
+                    "documentation_prerequisite"))
+    check("clause-scoped directive does NOT retire a sibling clause",
+          not _suppress("documentation_prerequisite",
+                        "coverage_composition"))
+    # THE TRAP. If this ever passes, the fallback has inverted: untagged
+    # issues would become suppressible by directives verified against an
+    # assertion those issues may not even make — strictly worse than the
+    # blunt (category, code) matching this migration exists to retire.
+    check("clause-scoped directive does NOT retire an UNTAGGED issue",
+          not _suppress("documentation_prerequisite", ""))
+    # The migration ramp, in both directions.
+    check("unscoped directive still retires an untagged issue",
+          _suppress("", ""))
+    check("unscoped directive still retires a tagged issue",
+          _suppress("", "documentation_prerequisite"))
+    check("correction records HOW the directive matched",
+          _suppress("documentation_prerequisite",
+                    "documentation_prerequisite")
+          and v._advisory_suppression_corrections[0].get("match_scope")
+          == "clause")
+    check("category-wide match is recorded as such, not as clause-exact",
+          _suppress("", "")
+          and v._advisory_suppression_corrections[0].get("match_scope")
+          == "category")
     v.issues = []
     v._scrub_advisory_suppressions = []
     v._advisory_suppression_corrections = []

@@ -7063,7 +7063,21 @@ class CodingValidator:
                 })
         return recorded + derived
 
-    def _add(self, severity, code, category, message, recommendation, denial_risk=None):
+    def _add(self, severity, code, category, message, recommendation,
+             denial_risk=None, clause=""):
+        """The single ValidationIssue construction point in the codebase —
+        reached from this file, rule_engine.py, and every auto/graduated
+        template module (they hold the validator as `v`).
+
+        clause: WHICH assertion about `code` this issue makes, when the
+        category hosts more than one. It is the validator-side twin of
+        Finding.clause and exists for the same reason: advisory
+        suppression must be able to retire one assertion without retiring
+        its siblings. Untagged ("") issues are matched only by suppression
+        directives that are themselves unscoped — never by a clause-scoped
+        one, which would be strictly worse than today's blunt matching.
+        Coverage is ratcheted by tests/check_clause_coverage.py.
+        """
         self.issues.append(ValidationIssue(
             severity=severity,
             code=str(code),
@@ -7071,6 +7085,7 @@ class CodingValidator:
             message=message,
             recommendation=recommendation,
             denial_risk=denial_risk,
+            clause=str(clause or "").strip(),
         ))
 
     def suppress_scrub_advisory(self, filter_id: str, code: str,
@@ -7123,9 +7138,18 @@ class CodingValidator:
 
     def _apply_validator_advisory_suppressions(self) -> None:
         """Remove validator WARNING issues that a recorded advisory
-        suppression declares to be the same adjudicated defect (matched on
-        category ∈ validator_categories AND same code) — the source-level
-        half of advisory suppression. Runs BEFORE _compute_tier and the
+        suppression declares to be the same adjudicated defect — the
+        source-level half of advisory suppression.
+
+        MATCHING. A directive naming a clause matches (category ∈
+        validator_categories, code, clause) exactly. A directive with no
+        clause falls back to (category, code), which is the pre-migration
+        behavior and the reason this change ships as a no-op. See the
+        block comment below for why the fallback survives only in that
+        direction, and tests/check_clause_coverage.py for the counter that
+        ends it.
+
+        Runs BEFORE _compute_tier and the
         report build, so every downstream mirror (validation_issues,
         warnings, pre_submission_audit_findings, auto_coding_review_
         reasons) is consistent by construction instead of annotated after
@@ -7137,23 +7161,107 @@ class CodingValidator:
                       if s.get("validator_categories")]
         if not directives or not self.issues:
             return
-        keyed = {}
+        # Two indexes, because the two directive shapes have deliberately
+        # different reach during the tagging migration:
+        #
+        #   scoped[(cat, code, clause)]  a directive that NAMES a clause
+        #       reaches only issues carrying that exact clause. It can
+        #       never retire a sibling assertion, and — critically — can
+        #       never retire an UNTAGGED issue, whose assertion is by
+        #       definition unknown.
+        #   unscoped[(cat, code)]        a directive with no clause keeps
+        #       today's blunt reach over every issue on that (category,
+        #       code). This is the migration ramp: it makes the change a
+        #       no-op while 141 emission sites are still untagged.
+        #
+        # The asymmetry is load-bearing and only survives in this
+        # direction. Inverted — letting an untagged ISSUE be matched by a
+        # clause-scoped directive — untagged issues would become
+        # suppressible by rules verified against an assertion they may not
+        # even make, which is strictly worse than the blunt matching this
+        # migration exists to retire.
+        #
+        # NOTE this is NOT the engine's rule. engine._apply_advisory_
+        # suppressions is both-null-exact: a directive with no clause
+        # matches only findings that carry none. The two halves therefore
+        # run different null semantics FOR THE DURATION OF THE MIGRATION
+        # ONLY. tests/check_clause_coverage.py counts the remaining
+        # untagged sites; at zero, delete the unscoped index below and the
+        # two halves converge.
+        scoped: dict[tuple[str, str, str], dict] = {}
+        unscoped: dict[tuple[str, str], dict] = {}
         for s in directives:
+            clause = str(s.get("clause") or "").strip()
             for cat in s["validator_categories"]:
-                keyed[(cat, s["code"])] = s
+                if clause:
+                    scoped[(cat, s["code"], clause)] = s
+                else:
+                    unscoped[(cat, s["code"])] = s
+        # (category, code) pairs a CLAUSE-SCOPED directive wants to reach.
+        # Used only to make the transitional dead zone audible: while a
+        # category's emission sites are untagged, a clause-scoped directive
+        # correctly matches nothing there. That is the safe direction, but
+        # it is also indistinguishable from "the rule silently stopped
+        # working" unless it says so — which is the F8 failure mode
+        # (advisory suppressed in one place, active in another) wearing the
+        # opposite sign. Log it; never widen the match to fix it.
+        scoped_pairs = {(cat, code) for cat, code, _ in scoped}
         kept = []
         for issue in self.issues:
-            s = (keyed.get((issue.category,
-                            str(issue.code or "").strip().upper()))
-                 if issue.severity == "WARNING" else None)
+            s = None
+            # Initialized outside the severity branch on purpose: the
+            # correction block below reads it, and only reaches that read
+            # via a WARNING match today. Binding it unconditionally keeps
+            # that true if the severity gate ever widens.
+            i_clause = ""
+            if issue.severity == "WARNING":
+                key2 = (issue.category,
+                        str(issue.code or "").strip().upper())
+                i_clause = str(getattr(issue, "clause", "") or "").strip()
+                if i_clause:
+                    s = scoped.get(key2 + (i_clause,))
+                if s is None:
+                    s = unscoped.get(key2)
+                if s is None and not i_clause and key2 in scoped_pairs:
+                    logger.warning(
+                        f"  Advisory '{issue.category}' on {issue.code} "
+                        f"NOT suppressed: a clause-scoped directive names "
+                        f"this (category, code) but the issue is untagged, "
+                        f"so its assertion cannot be compared. Tag this "
+                        f"_add(...) site with clause= — widening the match "
+                        f"instead would let a rule verified against one "
+                        f"assertion retire the others.")
             if s is None:
                 kept.append(issue)
                 continue
+            # Record HOW the directive reached this issue, not just that it
+            # did. A removal via the unscoped ramp is a weaker claim than a
+            # clause-exact match — the clinical audit reviewing this
+            # correction needs to see which one it was, or the migration's
+            # remaining blunt matches are invisible in the record.
+            d_clause = str(s.get("clause") or "").strip()
+            scope = (f"clause {i_clause!r}" if i_clause and d_clause
+                     else "category-wide (directive carries no clause; "
+                          "issue not yet clause-tagged)")
             self._advisory_suppression_corrections.append({
                 "category": "validator_advisory_suppressed",
                 "code": issue.code,
                 "action": "advisory_removed",
                 "interpretive": False,
+                "clause": i_clause,
+                "match_scope": "clause" if (i_clause and d_clause)
+                               else "category",
+                # `message` is deliberately BYTE-IDENTICAL to the
+                # pre-clause version. tools/replay_reconcile._mkey
+                # fingerprints corrections on (category, code, action,
+                # message) to dedupe a fresh pass against a prior one —
+                # appending the match scope here would change every
+                # fingerprint, so a record saved before this change and
+                # replayed after it would carry its old correction
+                # alongside the new one as a phantom duplicate. The scope
+                # is structured data; it belongs in match_scope/clause
+                # above (and in the log line below), never in the prose a
+                # fingerprint is computed over.
                 "message": (f"Validator advisory '{issue.category}' on "
                             f"{issue.code} removed by rule "
                             f"{s.get('rule_id') or '(unnamed)'} — same "
@@ -7163,5 +7271,5 @@ class CodingValidator:
             })
             logger.info(f"  Validator advisory '{issue.category}' on "
                         f"{issue.code} suppressed at source by rule "
-                        f"{s.get('rule_id')!r}")
+                        f"{s.get('rule_id')!r} ({scope})")
         self.issues[:] = kept

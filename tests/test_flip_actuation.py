@@ -818,7 +818,8 @@ def execute(engine, rule, icd, cpt, hcpcs, coding_result,
     act = rule.get("action") or {}
     for e in sorted(cpt, key=lambda x: str(x.get("code") or "")):
         engine.v._add("INFO", e.get("code", ""),
-                      act.get("category", "auto"), "marker", "none")
+                      act.get("category", "auto"), "marker", "none",
+                      clause="test_marker")
 '''
 
 
@@ -1285,7 +1286,8 @@ class GraduationTest(unittest.TestCase):
             "def execute(engine, rule, icd, cpt, hcpcs, coding_result,\n"
             "            note_full_text, note_assessment_text):\n"
             "    if re.search(r'ulcer', note_full_text or ''):\n"
-            "        engine.v._add('INFO', 'X', 'rx', 'm', 'r')\n")
+            "        engine.v._add('INFO', 'X', 'rx', 'm', 'r',\n"
+            "                      clause='test_marker')\n")
         self._install()
         (self.at.AUTO_TEMPLATES_DIR / "m.py").write_text(src)
         self.at._cache.clear()

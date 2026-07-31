@@ -1701,12 +1701,20 @@ def _gate_template_pair(code: str, rule: dict, cls: dict, queue: list[dict],
     (failure_reason, replay_detail, installed_path_or_None)."""
     from app.validation.auto_templates import (
         AUTO_TEMPLATES_DIR, load_auto_templates, template_name_of,
-        validate_template_source)
+        validate_template_clause_tagging, validate_template_source)
 
     problems = validate_template_source(code)
     if problems:
         return ("template source rejected: " + "; ".join(problems[:6]),
                 {}, None)
+    # Admission-time only (see validate_template_clause_tagging): newly
+    # synthesized source may not add untagged emission sites to the
+    # surface tests/check_clause_coverage.py is draining. Already-
+    # installed templates are untouched — this gate never runs at load.
+    clause_problems = validate_template_clause_tagging(code)
+    if clause_problems:
+        return ("template source rejected (clause tagging): "
+                + "; ".join(clause_problems[:6]), {}, None)
     name = template_name_of(code)
     if name in BUILTIN_TEMPLATES:
         return (f"TEMPLATE_NAME {name!r} collides with a built-in "

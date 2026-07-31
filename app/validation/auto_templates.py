@@ -236,6 +236,76 @@ def validate_template_source(src: str) -> list[str]:
     return problems
 
 
+def validate_template_clause_tagging(src: str) -> list[str]:
+    """Every validator issue a template emits must name its CLAUSE.
+
+    Deliberately NOT part of validate_template_source, and this separation
+    is the whole design. validate_template_source runs at LOAD time
+    (load_auto_templates), where any returned problem means the module is
+    skipped and every rule referencing it goes dark. Folding a new
+    requirement into it would silently disable all 14 currently-installed
+    templates on the next load — the 20 emission sites they hold are
+    untagged today. A gate that retroactively fails already-live code is
+    not a contract, it is an outage.
+
+    So this runs only where NEW source is ADMITTED:
+
+      * tools/auto_actuate.py  — a synthesized template is accepted, and
+      * tools/graduate_templates.py — a sandboxed template is promoted
+        into app/validation/graduated/, where it becomes ordinary Python
+        and leaves the sandbox permanently.
+
+    Both are forward gates: nothing already running changes behavior, and
+    the untagged surface can only shrink. Existing templates stay loaded
+    and stay eligible for everything except graduation until tagged, which
+    is the intended pressure — graduation is exactly the moment an
+    untagged emission site would become permanent.
+
+    `clause` distinguishes WHICH assertion a template makes about a code
+    when its category hosts several, so advisory suppression can retire
+    one without retiring its siblings. A template is precisely the code
+    most likely to make several: one mechanic, many rules, one category.
+    See CodingValidator._add and tests/check_clause_coverage.py.
+    """
+    problems: list[str] = []
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as exc:
+        return [f"syntax error: {exc}"]
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (isinstance(fn, ast.Attribute) and fn.attr == "_add"):
+            continue
+        kw = {k.arg: k.value for k in node.keywords}
+        if "clause" not in kw:
+            # A **kwargs spread cannot be proven to carry a clause, and is
+            # rejected for the same reason the ratchet counts it untagged:
+            # an unprovable claim must not read as a satisfied one.
+            problems.append(
+                f"line {node.lineno}: _add(...) without clause= — every "
+                f"issue a template emits must name the assertion it makes "
+                f"about the code, so advisory suppression can retire it "
+                f"without retiring the category's other assertions")
+            continue
+        val = kw["clause"]
+        if isinstance(val, ast.Constant):
+            if not (isinstance(val.value, str) and val.value.strip()):
+                problems.append(
+                    f"line {node.lineno}: clause= must be a non-empty "
+                    f"string; an empty clause is indistinguishable from "
+                    f"untagged and is reachable by unscoped suppression")
+            elif not re.fullmatch(r"[a-z][a-z0-9_]{2,60}", val.value):
+                problems.append(
+                    f"line {node.lineno}: clause {val.value!r} must be "
+                    f"snake_case (3-61 chars) — clauses are matched "
+                    f"exactly against Finding.clause, so free-form text "
+                    f"silently fails to match")
+    return problems
+
+
 def template_name_of(src: str) -> str:
     """The module's TEMPLATE_NAME constant, or '' — for callers that need
     the name before installing the file (the synthesizer's gates)."""
