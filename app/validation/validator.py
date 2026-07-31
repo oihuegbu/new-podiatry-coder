@@ -718,7 +718,11 @@ class CodingValidator:
             # HCPCS coverage code I/M/S — the alpha-numeric HCPCS file's own
             # Medicare non-coverage verdict (S-codes etc. never appear on
             # the PFS, so the billing-status check above can't see them).
-            # Payer-gated exactly like the MUE-0 suppression: on a
+            # Payer-gated, and here the gate is CORRECT (unlike the MUE-0
+            # bar above, which is claim-type and therefore payer-robust):
+            # coverage code I/M/S is a MEDICARE COVERAGE verdict, so a
+            # commercial payer genuinely may reimburse the same code on the
+            # same professional claim under its own policy. On a
             # Medicare-bound payer (FFS + MA per 42 CFR 422.101) the line
             # denies in any circumstance, so it is deterministically
             # suppressed — measured live (note 004, Humana MA), S8450
@@ -775,46 +779,53 @@ class CodingValidator:
             if mue is None:
                 continue
             if mue == 0:
-                # An MUE of 0 is CMS's "no units are ever payable" value —
-                # every unit denies on a Medicare-bound claim. Found live:
-                # 90389 (tetanus immune globulin) billed at 1 unit and slipping
-                # through because this check only compared units when mue > 0.
+                # An MUE of 0 in the CMS Practitioner MUE file is a CLAIM-TYPE
+                # bar, NOT a coverage judgment: the file assigns 0 to codes
+                # that are never payable on a professional (CMS-1500) claim at
+                # any quantity because they belong to a different billing
+                # channel — DMEPOS supplies billed to the DME MAC (A4570 splint,
+                # A6545 gradient wrap, L1940 AFO), CLFS lab codes, etc. That is
+                # a property of the code x claim-type, not of the payer: a
+                # DMEPOS supply does not become billable on a professional
+                # claim just because the payer is commercial. So the line is
+                # suppressed on EVERY payer, and the supply is redirected to
+                # its payable channel rather than kept on a form that cannot
+                # pay it.
                 #
-                # Payer-gated enforcement: for a payer bound to Medicare's
-                # coverage floor the line denies at ANY quantity, so it is
-                # auto-suppressed (same mechanism as NCCI/status-P
-                # suppression) — this deterministically enacts the exact
-                # recommendation the MUE agent was already issuing, and ends
-                # the measured run-to-run flapping (A4570/A6545/L1940 supply
-                # lines present in 2/3 independent runs of the same notes;
-                # a never-payable line's presence should not be a coin
-                # flip). Commercial/unrecognized payers may reimburse under
-                # their own policy, so those claims keep the flag-and-review
-                # behavior instead.
-                if getattr(self, "_payer_follows_medicare", False):
-                    self._non_billable_codes_to_suppress.add(code)
-                    self._add(
-                        "INFO", code, "mue_limit",
-                        f"AUTO-CORRECTED: Removed {code} — its MUE is 0 on a "
-                        f"professional claim (CMS pays zero units in any "
-                        f"circumstance) and this claim's payer follows Medicare "
-                        f"coverage rules. If the supply/service is real, it belongs "
-                        f"on its payable channel (e.g. DMEPOS/DME MAC) or the "
-                        f"payable equivalent code the documentation supports.",
-                        f"{code} suppressed per its own MUE of 0",
-                        denial_risk="LOW",
-                    )
-                else:
-                    self._add(
-                        "ERROR", code, "mue_limit",
-                        f"{code} carries an MUE of 0 — CMS pays zero units of this code "
-                        f"in any circumstance; all {units} unit(s) will deny on a "
-                        f"Medicare-bound claim.",
-                        f"Verify payer: remove {code} for Medicare, or confirm the payer "
-                        f"reimburses it under its own policy",
-                        denial_risk="HIGH",
-                    )
-                    entry["needs_review"] = True
+                # This was previously payer-gated — auto-removed only for
+                # Medicare-following payers, flagged-for-review otherwise, on
+                # the rationale that a commercial payer "may reimburse under
+                # its own policy." That conflated "payable through another
+                # channel" with "payable on THIS claim": a commercial payer may
+                # indeed pay the splint — on a DME claim, not this professional
+                # one — so the line still comes off this claim regardless of
+                # payer. The gate also disagreed with the compliance scrubber's
+                # MUE_MAI filter, which already FAILs cap==0 on ANY payer
+                # (app/compliance/agents/mue_mai.py); the two authorities now
+                # agree, and the validator strikes the line before the scrubber
+                # ever sees it. Measured live: A4570 (splint) rode a UHC
+                # commercial surgical claim to REVIEW with a stale
+                # documentation_audit still asserting it fully supported,
+                # because this removal never fired off-Medicare.
+                #
+                # Found live originally: 90389 (tetanus immune globulin) at 1
+                # unit slipped through when this branch only compared units for
+                # mue > 0; and A4570/A6545/L1940 supply lines flapped
+                # present-in-2-of-3 independent runs of the same note — a
+                # never-payable line's presence must not be a coin flip.
+                self._non_billable_codes_to_suppress.add(code)
+                self._add(
+                    "INFO", code, "mue_limit",
+                    f"AUTO-CORRECTED: Removed {code} — its MUE is 0 on a "
+                    f"professional claim, so it is not billable on this claim "
+                    f"type at any quantity, on any payer (a claim-type bar, not "
+                    f"a Medicare coverage judgment). If the supply/service is "
+                    f"real, bill it on its payable channel (e.g. DMEPOS/DME MAC) "
+                    f"or the payable equivalent code the documentation supports.",
+                    f"{code} suppressed per its own MUE of 0 (not billable on a "
+                    f"professional claim, any payer)",
+                    denial_risk="LOW",
+                )
             elif units > mue:
                 self._add(
                     "ERROR", code, "mue_limit",
@@ -1170,9 +1181,11 @@ class CodingValidator:
         suppressed = (getattr(self, "_non_billable_codes_to_suppress", set())
                       | getattr(self, "_bundled_codes_to_suppress", set()))
 
-        # Medical-necessity arm (payer-gated like the MUE-0 suppression:
+        # Medical-necessity arm (payer-gated because it is a COVERAGE rule:
         # LCD/Article coverage lists bind Original Medicare and MA per
-        # 42 CFR 422.101). When the payer's own coverage policies for the
+        # 42 CFR 422.101, and a commercial payer has its own coverage
+        # policies — unlike the MUE-0 bar, which is claim-type and therefore
+        # payer-robust, this genuinely depends on the payer). When the payer's own coverage policies for the
         # claim's procedure codes mark exactly one billed diagnosis as
         # qualifying — after collapsing a manifestation onto its billed
         # codeFirst etiology — that diagnosis IS the condition chiefly

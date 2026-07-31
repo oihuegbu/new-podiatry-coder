@@ -59,7 +59,7 @@ SCAN_TREES: tuple[tuple[str, Path, str], ...] = (
 # 0 means the migration is complete: delete the fallback in
 # _apply_validator_advisory_suppressions and drop this guard to a
 # simple "must stay 0" assertion.
-BASELINE_UNTAGGED = 141
+BASELINE_UNTAGGED = 140
 
 
 def _untagged_sites(src: str, filename: str) -> list[tuple[int, str]]:

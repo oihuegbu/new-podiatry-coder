@@ -713,33 +713,40 @@ def main():
     check("valid pointers untouched, no finding",
           cpt_pi[0]["linked_diagnoses"] == ["M79.671"] and not v.issues)
 
-    print("\n[MUE of 0 — zero units payable, payer-gated enforcement]")
-    # 90389 (tetanus immune globulin) carries MUE 0: CMS pays no units ever.
+    print("\n[MUE of 0 — claim-type bar, payer-robust removal]")
+    # 90389 (tetanus immune globulin) carries MUE 0: not billable on a
+    # professional claim at any quantity, on any payer (it belongs to a
+    # different billing channel). An MUE of 0 is a claim-type bar, not a
+    # Medicare coverage judgment, so the line is suppressed regardless of
+    # payer — matching the scrubber's MUE_MAI filter, which already FAILs
+    # cap==0 ungated. Measured live: A4570 rode a UHC commercial claim to
+    # REVIEW because this removal used to be Medicare-only.
     if db.get_mue("90389") == 0:
-        # Medicare-coverage payer → line auto-suppressed (deterministic
-        # enactment of the MUE agent's own recommendation; measured live as
-        # the biggest run-to-run presence-flap class: A4570/A6545/L1940).
+        # Medicare-following payer → suppressed with INFO (unchanged).
         v.issues = []
         v._non_billable_codes_to_suppress = set()
         v._payer_follows_medicare = True
         entry_mue = {"code": "90389", "units": 1}
         v._check_mue([entry_mue])
-        check("Medicare-coverage payer: MUE-0 line auto-suppressed with INFO",
+        check("Medicare-following payer: MUE-0 line auto-suppressed with INFO",
               "90389" in v._non_billable_codes_to_suppress
               and any(i.category == "mue_limit" and i.severity == "INFO"
                       for i in v.issues))
-        # Commercial/unrecognized payer → flag-and-review, never removed
+        # Commercial payer → ALSO suppressed: the claim-type bar is payer-
+        # robust. This is the corrected contract (was flag-and-review).
         v.issues = []
         v._non_billable_codes_to_suppress = set()
         v._payer_follows_medicare = False
         entry_mue2 = {"code": "90389", "units": 1}
         v._check_mue([entry_mue2])
-        check("commercial payer: MUE-0 flagged ERROR, not suppressed",
-              "90389" not in v._non_billable_codes_to_suppress
-              and any(i.category == "mue_limit" and i.severity == "ERROR"
+        check("commercial payer: MUE-0 line ALSO suppressed (payer-robust)",
+              "90389" in v._non_billable_codes_to_suppress
+              and any(i.category == "mue_limit" and i.severity == "INFO"
                       and i.code == "90389" for i in v.issues))
-        check("commercial payer: MUE-0 line routed to review",
-              entry_mue2.get("needs_review") is True)
+        check("commercial payer: MUE-0 emits no ERROR / no review flag",
+              not any(i.category == "mue_limit" and i.severity == "ERROR"
+                      for i in v.issues)
+              and entry_mue2.get("needs_review") is not True)
         v._payer_follows_medicare = False
     else:
         check("SKIP: 90389 MUE is not 0 in this dataset", True)
