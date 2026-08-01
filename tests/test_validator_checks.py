@@ -3234,6 +3234,142 @@ def main():
     else:
         check("SKIP: E11.621 carries no Z79-family use-additional ref", True)
 
+    print("\n[completeness invariant — documented work accounted for]")
+    from app.models.schemas import ValidationIssue
+    exostectomy = "Retrocalcaneal exostectomy (Haglund resection), right heel"
+    achilles = ("Achilles tendon debridement and reattachment with two "
+                "5.5 mm suture anchors, right heel")
+    bursa = "Excision of retrocalcaneal bursa, right heel"
+    # The billed Achilles code (27654) carries the note's own words as
+    # evidence — the documented Achilles work is accounted for by them.
+    ach_code = {"code": "27654", "evidence_spans": [achilles,
+                "Achilles tendon thickened at the insertion with spurring"]}
+    procs = [exostectomy, achilles, bursa]
+
+    # DROP: only the Achilles is billed. The exostectomy and bursa are
+    # documented but neither billed nor recorded as excluded -> both flag.
+    v.issues = []
+    v._check_procedure_completeness([ach_code], [], procs)
+    flags = [i.message for i in v.issues
+             if i.category == "documented_work_unaccounted"]
+    check("dropped exostectomy flags as documented_work_unaccounted",
+          any("exostectomy" in m or "Haglund" in m for m in flags))
+    check("Achilles (billed, evidence-span match) does NOT flag",
+          not any("Achilles" in m for m in flags))
+
+    # VOCABULARY BRIDGE: the ostectomy CPT descriptor ('Ostectomy,
+    # calcaneus') shares no distinctive token with the surgeon's wording
+    # ('exostectomy', 'Haglund'). Billed WITHOUT its note-quote, the
+    # descriptor alone cannot account for it -> it flags (this is the gap a
+    # descriptor-only check leaves). Billed WITH the note-quote as evidence,
+    # the surgeon's own words account for it -> silent. No synonym table.
+    ost_desc_only = {"code": "28118", "evidence_spans": []}
+    v.issues = []
+    v._check_procedure_completeness([ost_desc_only, ach_code], [], procs)
+    check("ostectomy billed but descriptor-only still flags (vocab gap)",
+          any("exostectomy" in i.message or "Haglund" in i.message
+              for i in v.issues
+              if i.category == "documented_work_unaccounted"))
+    ost_with_span = {"code": "28118", "evidence_spans": [
+        "Retrocalcaneal exostectomy performed, Haglund deformity resected"]}
+    v.issues = []
+    v._check_procedure_completeness([ost_with_span, ach_code], [], procs)
+    check("ostectomy billed WITH note-quote span accounts for it (silent)",
+          not any("exostectomy" in i.message or "Haglund" in i.message
+                  for i in v.issues
+                  if i.category == "documented_work_unaccounted"))
+
+    # LEGITIMATE EXCLUSION: a validator exclusion-category issue naming the
+    # bursa accounts for it (integral/bundled) -> no flag for the bursa.
+    v.issues = [ValidationIssue(severity="INFO", code="X",
+                category="surgical_package",
+                message="retrocalcaneal bursa excision integral exposure")]
+    v._check_procedure_completeness([ach_code], [], [bursa])
+    check("bursa recorded as integral (validator exclusion) does NOT flag",
+          not any(i.category == "documented_work_unaccounted"
+                  for i in v.issues))
+
+    # CROSS-PROCEDURE BLEED regression: an exclusion issue about ONE
+    # procedure must not account for a DIFFERENT documented procedure whose
+    # name merely appears in that sentence. An 'integral to the exostectomy'
+    # note about the BURSA must not make the dropped exostectomy look
+    # excluded.
+    v.issues = [ValidationIssue(severity="INFO", code="X",
+                category="surgical_package",
+                message="bursa excision integral exposure step of the "
+                        "exostectomy")]
+    v._check_procedure_completeness([ach_code], [], [exostectomy])
+    check("exostectomy still flags despite bursa's 'integral...exostectomy'",
+          any(i.category == "documented_work_unaccounted" for i in v.issues))
+
+    # No documented procedures -> no-op (cannot flag what isn't provided).
+    v.issues = []
+    v._check_procedure_completeness([ach_code], [], None)
+    check("no procedures_performed -> silent no-op", not v.issues)
+
+    print("\n[evidence-span verbatim integrity]")
+    note_e = ("Retrocalcaneal exostectomy performed. The Achilles tendon was "
+              "thickened at the insertion. Two 5.5 mm suture anchors placed.")
+    v.issues = []
+    cpt_e = [{"code": "27654", "evidence_spans": [
+        "Achilles tendon debridement and reattachment with two 5.5 mm "
+        "suture anchors, right heel",                        # spliced quote
+        "The Achilles tendon was thickened at the insertion"]}]  # verbatim
+    v._check_evidence_span_grounding(cpt_e, [], [], note_e)
+    check("fabricated splice stripped from record",
+          not any("debridement and reattachment" in s
+                  for s in cpt_e[0]["evidence_spans"]))
+    check("verbatim span kept", any("thickened at the insertion" in s
+                                    for s in cpt_e[0]["evidence_spans"]))
+    check("evidence_span_integrity flagged",
+          "evidence_span_integrity" in cats(v))
+    v.issues = []
+    cpt_clean = [{"code": "28118",
+                  "evidence_spans": ["Retrocalcaneal exostectomy performed"]}]
+    v._check_evidence_span_grounding(cpt_clean, [], [], note_e)
+    check("clean verbatim entry untouched + silent",
+          cpt_clean[0]["evidence_spans"] == ["Retrocalcaneal exostectomy "
+          "performed"] and not v.issues)
+    v.issues = []
+    v._check_evidence_span_grounding(
+        [{"code": "X", "evidence_spans": ["anything at all here"]}], [], [], "")
+    check("no note text -> never strips (fail-open)", not v.issues)
+
+    print("\n[linkage backfill covers auto-added codes]")
+    v.issues = []
+    icd_l = [{"code": "M21.6X1", "type": "primary"},
+             {"code": "M76.61", "type": "secondary"}]
+    cpt_l = [{"code": "27654", "linked_diagnoses": []}]  # auto-added, empty 24E
+    v._check_cpt_dx_linkage(cpt_l, icd_l)
+    check("empty box 24E backfilled from the claim's diagnoses",
+          bool(cpt_l[0].get("linked_diagnoses")))
+
+    print("\n[indication primary anchor — converges, never mis-sequences]")
+
+    def _anchor(icd, cpt, assess):
+        v.issues = []
+        v._check_indication_primary_anchor(icd, cpt, assess)
+        return [c["code"] for c in icd if c.get("type") == "primary"]
+    check("clear case converges to grounded procedure-linked dx",
+          _anchor([{"code": "M76.61", "type": "primary"},
+                   {"code": "M77.31", "type": "secondary"}],
+                  [{"code": "28118", "linked_diagnoses": ["M77.31"]},
+                   {"code": "27654", "linked_diagnoses": ["M76.61"]}],
+                  "Calcaneal spur of the right heel with Achilles tendinitis")
+          == ["M77.31"])
+    check("comorbidity (not procedure-linked) never becomes primary",
+          _anchor([{"code": "M77.31", "type": "primary"},
+                   {"code": "I48.91", "type": "secondary"}],
+                  [{"code": "28118", "linked_diagnoses": ["M77.31"]}],
+                  "Atrial fibrillation, stable. Calcaneal spur for exostectomy")
+          == ["M77.31"])
+    check("eponym-only assessment (ungroundable) defers",
+          _anchor([{"code": "M76.61", "type": "primary"},
+                   {"code": "M21.6X1", "type": "secondary"}],
+                  [{"code": "28118", "linked_diagnoses": ["M21.6X1"]},
+                   {"code": "27654", "linked_diagnoses": ["M76.61"]}],
+                  "Haglund deformity of the right heel") == ["M76.61"])
+
     print("\n[negation backstop]")
     from app.ner.entity_extractor import _NEGATION_CUE
     check("leading cues match",

@@ -158,6 +158,28 @@ def coherence_violations(result: dict,
                  f"{len(primaries)} marked primary "
                  f"({primaries or 'none'}) — exactly one first-listed "
                  f"diagnosis is required")
+
+    # 9. Completeness invariant vs claim: the validator's completeness check
+    # (CodingValidator._check_procedure_completeness) flags every documented
+    # procedure that the final claim neither bills nor records as
+    # integral/bundled/not-separately-billable. A record carrying that flag
+    # describes documented surgical work missing from the claim — the exact
+    # silent-drop failure (a primary procedure vanishing when its wrong
+    # sibling code is struck and never substituted) that no code-by-code
+    # scrubber filter can see, because the scrubber only reasons about codes
+    # that ARE present. Enforced HERE, unconditionally, so it blocks the
+    # clinical-audit CLEAN promotion (which evaluates the record while it is
+    # still held at REVIEW) — the same reason checks 5–8 do not gate on
+    # `clean`. Read off the already-emitted issue; not recomputed.
+    for i in (result.get("validation_issues") or []):
+        cat = i.get("category") if isinstance(i, dict) else getattr(
+            i, "category", "")
+        if cat == "documented_work_unaccounted":
+            msg = (i.get("message") if isinstance(i, dict)
+                   else getattr(i, "message", "")) or ""
+            v.append(f"documented procedure not accounted for on the claim "
+                     f"— documented surgical work may be uncoded "
+                     f"({str(msg)[:140]})")
     return v
 
 

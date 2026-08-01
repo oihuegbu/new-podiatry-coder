@@ -1129,6 +1129,56 @@ This is your final audit pass. Remove any code that lacks explicit verbatim evid
 CRITICAL: Return ONLY valid JSON. No markdown, no code blocks."""
 
 
+_EVIDENCE_MIN_LEN = 14
+
+
+def _evidence_norm(text: str) -> str:
+    """Whitespace/case/punctuation-normalized text for verbatim matching —
+    the same normalization the validator's downstream check uses, so the two
+    agree on what 'verbatim' means."""
+    return re.sub(r"\s+", " ",
+                  re.sub(r"[^a-z0-9 ]+", " ", str(text or "").lower())).strip()
+
+
+def _strip_nonverbatim_spans(result: dict, note_text: str) -> None:
+    """Strip cited quotes that do not actually appear in the note, in place.
+    Each evidence_spans entry / supporting_text must be a CONTIGUOUS substring
+    of the note (a space-stripped fallback tolerates a line break inside a
+    real quote but not a splice, whose fragments are far apart). A short
+    fragment is left alone (too small to judge). Fail-open on missing/short
+    note text — never strip when the source cannot be verified."""
+    if not note_text or len(note_text) < 40:
+        return
+    note_n = _evidence_norm(note_text)
+    note_ns = note_n.replace(" ", "")
+
+    def _verbatim(sp) -> bool:
+        sn = _evidence_norm(sp)
+        return (len(sn) < _EVIDENCE_MIN_LEN or sn in note_n
+                or sn.replace(" ", "") in note_ns)
+
+    stripped = 0
+    for arr_key, field, is_list in (("cpt_codes", "evidence_spans", True),
+                                    ("hcpcs_codes", "evidence_spans", True),
+                                    ("icd10_codes", "supporting_text", False)):
+        for e in result.get(arr_key, []) or []:
+            if not isinstance(e, dict):
+                continue
+            raw = e.get(field)
+            if is_list:
+                spans = raw if isinstance(raw, list) else []
+                kept = [s for s in spans if _verbatim(s)]
+                if len(kept) != len(spans):
+                    stripped += len(spans) - len(kept)
+                    e[field] = kept
+            elif raw and not _verbatim(raw):
+                stripped += 1
+                e[field] = ""
+    if stripped:
+        logger.info(f"  Evidence gate: stripped {stripped} non-verbatim "
+                    f"citation(s) from coder output (not found in the note)")
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -1519,6 +1569,15 @@ Only code supplies PHYSICALLY given/applied today — not ordered or prescribed.
     # so a fabricated descriptor can never survive into the returned data
     # regardless of what Pass 4 wrote.
     _enforce_real_descriptions(final_result, db)
+
+    # SOURCE-side verbatim gate: the coder is INSTRUCTED to quote the note
+    # verbatim in evidence_spans/supporting_text, but the model demonstrably
+    # splices/paraphrases (measured: the 27654 evidence splice). Strip any
+    # citation that is not a contiguous substring of the note BEFORE the
+    # result is persisted, so a fabricated citation never enters the record.
+    # The validator's identical downstream check remains as the net for
+    # codes ADDED after coding (rule adds, adjudication) and for replay.
+    _strip_nonverbatim_spans(final_result, note_text)
 
     # Fix 1 — Tag every code with its provenance and detect physician code replacements
     final_result = _tag_code_sources(final_result, physician_documented_codes or [], entities)

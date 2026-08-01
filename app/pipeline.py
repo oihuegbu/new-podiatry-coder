@@ -244,6 +244,10 @@ class MedicalCodingPipeline:
                 s for s in (sections.get("assessment_diagnoses", ""),
                             sections.get("imaging_diagnostics", ""),
                             sections.get("chief_complaint", "")) if s),
+            # Completeness invariant: the vision-extracted list of procedures
+            # actually performed this encounter — each must be accounted for
+            # on the final claim (coded or legitimately excluded).
+            procedures_performed=procedures_today,
         )
 
         elapsed = time.time() - start
@@ -297,6 +301,10 @@ class MedicalCodingPipeline:
             physician_documented_codes=physician_documented_codes,
             missing_physician_codes=coding_result.get("missing_physician_codes", []),
             ner_entities=entity_dicts,
+            # Persist the documented procedures so the completeness invariant
+            # can re-run when this claim is re-validated on replay/reconcile
+            # (the replayer reads it back from the stored payload).
+            procedures_performed_today=procedures_today,
             **{k: v for k, v in validation.items()
                if k not in ("auto_coding_review_reasons", "auto_coding_summary")},
             auto_coding_review_reasons=(

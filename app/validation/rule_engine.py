@@ -103,7 +103,7 @@ class RuleEngine:
                         rid, icd, coding_result, note_assessment_text)
                 elif template == "documented_service_completion":
                     self.documented_service_completion(
-                        rid, entries, note_full_text)
+                        rid, entries, note_full_text, icd)
                 elif template == "documented_diagnosis_completion":
                     self.documented_diagnosis_completion(
                         rid, icd, coding_result, note_full_text)
@@ -504,7 +504,7 @@ class RuleEngine:
     _SVC_FAMILY_CAP = 200
 
     def documented_service_completion(self, rule_id: str, entries,
-                                      note_full_text: str):
+                                      note_full_text: str, icd=None):
         rule = self.rule(rule_id)
         if rule is None or not note_full_text:
             return
@@ -598,11 +598,17 @@ class RuleEngine:
         target = scored[0][1]
         if target in billed:
             return
+        # Link the added line to the diagnoses at CREATION, coverage-aware,
+        # via the same selector the empty-pointer backfill uses — so a
+        # rule-added code is never born with an empty box 24E (which is a
+        # transmission rejection). The downstream backfill remains as the net.
         entries.append({
             "code": target,
             "description": fam[target],
             "units": 1,
             "modifiers": [],
+            "linked_diagnoses": (v._select_linked_dx(target, icd)
+                                 if icd else []),
             "rationale": _fmt(act["rationale_added"], code=target,
                               desc=fam[target][:60]),
             "source_section": f"validator:{rule_id}",

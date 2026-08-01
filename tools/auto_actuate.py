@@ -192,6 +192,16 @@ class Replayer:
             patient_dob=str(meta.get("date_of_birth") or ""),
             payer_follows_medicare_coverage=follows_medicare,
             note_assessment_text=_assessment_slice(note_text),
+            # The completeness invariant must re-run on the REPLAYED claim —
+            # replay is what realizes the final shipped claim, and a code
+            # dropped/added during reconciliation changes what is accounted
+            # for. Read the documented procedures back from the stored
+            # payload (persisted on the record for exactly this) so the
+            # replayed validation_issues carry the completeness flag the
+            # coherence gate reads; without it the check no-ops on the claim
+            # that actually ships.
+            procedures_performed=(
+                payload.get("procedures_performed_today") or None),
         )
         return coding_result, report
 

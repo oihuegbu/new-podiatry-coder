@@ -177,6 +177,7 @@ class CodingValidator:
         patient_dob: str = "",
         payer_follows_medicare_coverage: bool = False,
         note_assessment_text: str = "",
+        procedures_performed: list | None = None,
     ) -> dict:
         self.issues = []
         self._bundled_codes_to_suppress = set()
@@ -231,8 +232,21 @@ class CodingValidator:
         # see the corrected designation), and the reorder auto-fix moves
         # the primary to every line's front — overwriting the raw
         # first-pointer evidence this check reads.
+        _primary_before = next((e.get("code") for e in icd
+                                if e.get("type") == "primary"), None)
         self._check_primary_designation(icd, cpt)
         self._check_cpt_dx_linkage(cpt, icd)
+        # Run-independent primary anchor AFTER the pointer backfill (needs the
+        # procedure linkage populated) and BEFORE _check_dx_pointers reorders.
+        # It is the tiebreaker ONLY when the authoritative pointer-shape
+        # anchor above did NOT resolve the designation — never overriding a
+        # valid linkage anchor — and only on a clearly-grounded
+        # procedure-linked diagnosis; otherwise it defers.
+        _primary_after = next((e.get("code") for e in icd
+                               if e.get("type") == "primary"), None)
+        if _primary_after == _primary_before:
+            self._check_indication_primary_anchor(icd, cpt,
+                                                  note_assessment_text)
         self._check_dx_pointers(icd, cpt, hcpcs)
         self._check_orphan_dx(icd, cpt, hcpcs)
         self._check_modifiers(cpt)
@@ -498,6 +512,25 @@ class CodingValidator:
                 logger.info(f"  Suppressed {removed} not-separately-billable code(s): {self._non_billable_codes_to_suppress}")
                 coding_result["cpt_codes"] = cpt
                 coding_result["hcpcs_codes"] = hcpcs
+
+        # INTEGRITY, after every add/remove above so it covers auto-added
+        # codes too: (1) verify each code's cited evidence is VERBATIM in the
+        # note and strip fabricated/spliced citations, THEN (2) re-run the
+        # diagnosis-pointer backfill — the pointer backfill at the top of
+        # validate() ran BEFORE run_auto_rules/conservation added their codes,
+        # so an auto-added line (measured live: the rule-added 27654) reached
+        # the claim with an EMPTY box 24E. _check_cpt_dx_linkage is idempotent
+        # (only fills empty pointers, skips billing-status 'B'), so the second
+        # pass links exactly the codes the first pass could not see.
+        self._check_evidence_span_grounding(cpt, hcpcs, icd, note_full_text)
+        self._check_cpt_dx_linkage(cpt, icd)
+
+        # COMPLETENESS INVARIANT — after the final claim is realized: every
+        # documented procedure must be ACCOUNTED FOR (represented by a billed
+        # code, or excluded with a legitimate reason). Runs last, on the final
+        # arrays and the full issue set, so it sees the true end state.
+        self._check_procedure_completeness(cpt, hcpcs, procedures_performed,
+                                          coding_result)
 
         # Source-level half of advisory suppression: validator WARNINGs
         # that assert the same adjudicated defect as a suppressed scrub
@@ -1408,6 +1441,30 @@ class CodingValidator:
                 denial_risk="LOW",
             )
 
+    def _select_linked_dx(self, code: str, icd) -> list:
+        """The diagnosis pointers a service line should carry, ranked the
+        CMS-1500 way: coverage-qualifying dxs for THIS code first (LCD/Article
+        lists), then primary, then claim order, capped at box 24E's 4
+        pointers. Shared by the empty-pointer backfill below AND the rule
+        engine's code-add (documented_service_completion) so an ADDED line is
+        BORN with the same coverage-aware linkage the backfill would give it —
+        never a naive pointer the backfill's empty-only guard would then leave
+        in place. Empty claim -> no pointers."""
+        claim_dx = [c.get("code", "") for c in icd if c.get("code")]
+        if not claim_dx:
+            return []
+        primary_first = sorted(claim_dx, key=lambda d: next(
+            (c.get("type") != "primary" for c in icd if c.get("code") == d),
+            True))
+        coverage_dx = []
+        if self.store is not None:
+            pols = self.store.coverage_policies_for_cpt(code)
+            coverage_dx = [dx for dx in primary_first if any(
+                self.store.coverage_icd_covered(p, dx) for p in pols)]
+        ordered = coverage_dx + [d for d in primary_first
+                                 if d not in coverage_dx]
+        return ordered[:4]
+
     def _check_cpt_dx_linkage(self, cpt, icd):
         # billing_status 'B' (bundled/no-charge, e.g. 99024 post-op follow-up)
         # codes are legitimately billed without a linked ICD — queried from
@@ -1415,8 +1472,6 @@ class CodingValidator:
         # one code this used to be checked against. Same fix already applied
         # to the identical concept in _check_em_modifier25.
         claim_dx = [c.get("code", "") for c in icd if c.get("code")]
-        primary_first = sorted(claim_dx, key=lambda d: next(
-            (c.get("type") != "primary" for c in icd if c.get("code") == d), True))
         for entry in cpt:
             code = entry.get("code", "")
             if self.store is not None and self.store.billing_status(code) == "B":
@@ -1424,20 +1479,14 @@ class CodingValidator:
             if not entry.get("linked_diagnoses"):
                 if claim_dx:
                     # An empty box 24E is a rejection, not a judgment call —
-                    # backfill deterministically: coverage-qualifying dxs for
-                    # this code first (LCD/Article lists), then primary, then
-                    # claim order, capped at the CMS-1500's 4 pointers.
-                    coverage_dx = []
-                    if self.store is not None:
-                        pols = self.store.coverage_policies_for_cpt(code)
-                        coverage_dx = [dx for dx in primary_first if any(
-                            self.store.coverage_icd_covered(p, dx) for p in pols)]
-                    ordered = coverage_dx + [d for d in primary_first if d not in coverage_dx]
-                    entry["linked_diagnoses"] = ordered[:4]
+                    # backfill deterministically via the shared coverage-aware
+                    # selector.
+                    ordered = self._select_linked_dx(code, icd)
+                    entry["linked_diagnoses"] = ordered
                     self._add(
                         "INFO", code, "cpt_icd_linkage",
                         f"AUTO-CORRECTED: CPT {code} had no linked diagnosis (box 24E empty "
-                        f"= rejection) — linked {', '.join(ordered[:4])} from the claim's "
+                        f"= rejection) — linked {', '.join(ordered)} from the claim's "
                         f"diagnosis list.",
                         "Verify the linked diagnoses support this procedure's medical necessity",
                         denial_risk="LOW",
@@ -7163,6 +7212,281 @@ class CodingValidator:
                 f"tabular/index, or code that condition separately",
                 denial_risk="MEDIUM",
                 clause="citation_unverified",
+            )
+
+    # Only substantive citations are worth a verbatim check; a fragment
+    # shorter than this is too small to distinguish a real quote from a
+    # coincidental match and is left alone.
+    _EVIDENCE_MIN_LEN = 14
+
+    @staticmethod
+    def _evidence_norm(text: str) -> str:
+        """Whitespace/case/punctuation-normalized text for verbatim matching:
+        '5.5 mm, right heel' -> '5 5 mm right heel'. Punctuation and case are
+        formatting, not content; collapsing them lets a faithfully-quoted
+        span match the note through cosmetic differences while a spliced or
+        paraphrased span (non-contiguous in the source) still fails."""
+        return re.sub(r"\s+", " ",
+                      re.sub(r"[^a-z0-9 ]+", " ", str(text or "").lower())
+                      ).strip()
+
+    # Diagnosis words too generic to distinguish one dx from another — a
+    # match on these is not evidence the assessment named THIS condition.
+    _DX_GENERIC = frozenset({
+        "deformity", "deformities", "disease", "disorder", "condition",
+        "other", "acquired", "unspecified", "chronic", "acute", "primary",
+        "secondary", "bilateral", "region", "site", "joint", "specified",
+        "involving", "multiple", "sites", "type", "with", "without"})
+
+    def _check_indication_primary_anchor(self, icd, cpt,
+                                         note_assessment_text):
+        """Run-INDEPENDENT tiebreaker for the first-listed diagnosis. The
+        procedure-pointer anchor (_check_primary_designation) fires only on an
+        unambiguous pointer shape; when it can't, designation falls back to
+        the coder's per-run choice and FLIPS across runs (measured live:
+        M76.61 / M21.6X1 / M77.31 over three runs of one note). This grounds
+        the choice in the note itself — identical across runs, so the runs
+        CONVERGE.
+
+        Fail-SAFE by construction, because a wrong first-listed diagnosis is a
+        real mis-sequencing:
+          - only a PROCEDURE-LINKED diagnosis is eligible (a code some
+            service line points to) — a comorbidity listed first in the
+            assessment (stable A-fib before the operative problem) can never
+            be promoted;
+          - grounding uses only DISTINCTIVE terms (descriptor + inclusion +
+            index, minus generic words), so an eponym or generic descriptor
+            that cannot be grounded yields NO match and the check DEFERS
+            rather than guesses;
+          - it acts only on a CLEAR positional winner among the eligible,
+            grounded diagnoses; any closeness, tie, or inability to ground
+            two of them defers entirely.
+        The genuinely ambiguous case (nothing distinctly grounds, or two
+        conditions are named together) is left for a human — correctly."""
+        if not note_assessment_text or len(icd) < 2 \
+                or self.db is None or self.store is None:
+            return
+        assess = self._evidence_norm(note_assessment_text)
+        if len(assess) < 20:
+            return
+        linked = set()
+        for e in cpt:
+            if isinstance(e, dict):
+                for d in (e.get("linked_diagnoses") or []):
+                    linked.add(str(d or "").replace(".", "").upper())
+        eligible = [e for e in icd if str(e.get("code") or "").replace(
+            ".", "").upper() in linked]
+        if len(eligible) < 2:
+            return  # 0/1 procedure-linked dx -> no ambiguity to resolve
+
+        def _earliest(e):
+            code = e.get("code", "")
+            rec = self.db.validate_icd10(code) \
+                if hasattr(self.db, "validate_icd10") else None
+            terms = [str((rec or {}).get("description")
+                         or (rec or {}).get("long_description") or "")]
+            try:
+                terms += self.store.icd10_inclusion_terms(code)
+                terms += self.store.icd10_index_terms(code)
+            except Exception:
+                pass
+            roots = {t[:7] for term in terms
+                     for t in self._evidence_norm(term).split()
+                     if len(t) >= 6 and t not in self._DESC_STOPWORDS
+                     and t not in self._DX_GENERIC}
+            pos = [assess.find(r) for r in roots if r in assess]
+            return min(pos) if pos else None
+
+        scored = sorted(((p, e) for e in eligible
+                         if (p := _earliest(e)) is not None),
+                        key=lambda s: s[0])
+        if len(scored) < 2:
+            return  # fewer than two distinctly groundable -> defer
+        if scored[1][0] - scored[0][0] < 8:
+            return  # too close to call -> defer
+        best = scored[0][1]
+        if best.get("type") == "primary":
+            return  # already correct
+        prev = [c.get("code") for c in icd if c.get("type") == "primary"]
+        for c in icd:
+            if c is best:
+                c["type"] = "primary"
+            elif c.get("type") == "primary":
+                c["type"] = "secondary"
+        self._add(
+            "INFO", best.get("code", ""), "primary_designation",
+            f"AUTO-CORRECTED: first-listed diagnosis set to "
+            f"{best.get('code')} (was {', '.join(prev) or 'unset'}) — among "
+            f"the procedure-linked diagnoses, the operative note's assessment "
+            f"names its condition first (ICD-10-CM IV.G: the first-listed "
+            f"diagnosis is the condition chiefly responsible for the "
+            f"encounter). Run-independent anchor so independent runs agree.",
+            "Verify the first-listed diagnosis is the procedure's indication",
+            denial_risk="LOW", clause="indication_anchor",
+        )
+
+    def _check_evidence_span_grounding(self, cpt, hcpcs, icd, note_full_text):
+        """INTEGRITY GATE on cited evidence: every quote a code carries must
+        actually appear in the operative note. The coder is INSTRUCTED to
+        quote verbatim (code_assigner Pass-2 prompt), but nothing enforced
+        it — a spliced citation ('Achilles tendon debridement and
+        reattachment with two 5.5 mm suture anchors, right heel', a mashup of
+        the PLAN line and a procedure detail that appears verbatim NOWHERE)
+        passed straight through and was caught only by the LLM audit
+        re-reading the note. This makes the check deterministic: normalize
+        formatting and require each span to be a CONTIGUOUS substring of the
+        note (a space-stripped fallback tolerates a line break inside a real
+        quote without tolerating a splice, whose fragments are far apart in
+        the source). A span that fails is a fabricated citation — it is
+        STRIPPED from the record (so the completeness invariant, which trusts
+        these spans AS real note text, can never match against a fabrication)
+        and flagged; a code left with no verifiable evidence is flagged HIGH.
+        Fail-open on missing/short note text (cannot verify -> never strip)."""
+        if not note_full_text or len(note_full_text) < 40:
+            return
+        note_n = self._evidence_norm(note_full_text)
+        note_ns = note_n.replace(" ", "")
+        for arr, key, is_list in ((cpt, "evidence_spans", True),
+                                  (hcpcs, "evidence_spans", True),
+                                  (icd, "supporting_text", False)):
+            for entry in arr:
+                if not isinstance(entry, dict):
+                    continue
+                raw = entry.get(key)
+                spans = raw if isinstance(raw, list) else [raw] if raw else []
+                kept, fabricated = [], []
+                for sp in spans:
+                    sn = self._evidence_norm(sp)
+                    if (len(sn) < self._EVIDENCE_MIN_LEN or sn in note_n
+                            or sn.replace(" ", "") in note_ns):
+                        kept.append(sp)
+                    else:
+                        fabricated.append(sp)
+                if not fabricated:
+                    continue
+                entry[key] = kept if is_list else (kept[0] if kept else "")
+                had_real = any(len(self._evidence_norm(k))
+                               >= self._EVIDENCE_MIN_LEN for k in kept)
+                code = entry.get("code", "")
+                self._add(
+                    "INFO" if had_real else "WARNING", code,
+                    "evidence_span_integrity",
+                    f"AUTO-CORRECTED: {len(fabricated)} cited quote(s) for "
+                    f"{code} are NOT verbatim in the operative note "
+                    f"(fabricated/spliced citation) and were stripped: "
+                    f"{'; '.join(str(f)[:70] for f in fabricated)}."
+                    + ("" if had_real else " The code now carries NO "
+                       "verifiable note evidence — confirm it is documented."),
+                    "Confirm the code is supported by the note's actual "
+                    "operative text and cite the real supporting sentence.",
+                    denial_risk="LOW" if had_real else "HIGH",
+                    clause="evidence_span_verbatim",
+                )
+
+    _EXCLUSION_CAT_RE = re.compile(
+        r"surgical_package|billab|mue_limit|bundl|pfs_exclusion|global",
+        re.IGNORECASE)
+
+    def _check_procedure_completeness(self, cpt, hcpcs, procedures_performed,
+                                     coding_result=None):
+        """COMPLETENESS INVARIANT — the structural check that unifies the
+        drop/over-code failure classes into one: every procedure the
+        operative note documents must be ACCOUNTED FOR on the final claim,
+        either represented by a billed code OR excluded for a LEGITIMATE
+        reason (integral to the global package, bundled, not separately
+        billable). A documented procedure that is neither billed nor
+        legitimately excluded is documented surgical work left UNCODED — the
+        failure that survived every per-code fix (measured live: the Haglund
+        ostectomy vanished when its wrong-sibling code 28119 was struck and
+        never substituted, and nothing noticed the primary operation was
+        gone from the claim).
+
+        The critical distinction: a WRONG-CODE removal (a code struck for an
+        undocumented indication) is NOT a legitimate exclusion — the work is
+        still documented and still uncoded. Only a deliberate
+        integral/bundled/not-billable disposition counts as accounting for
+        the work. That is exactly why this flags the dropped ostectomy but
+        not the correctly-integral splint or bursectomy.
+
+        Verification, not coding: it flags the gap for a human, it does not
+        invent the code. Specialty-invariant — any documented procedure, any
+        surgical note. Data-driven: matches the procedure's own distinctive
+        tokens against billed descriptors and recorded exclusion evidence; no
+        hardcoded codes."""
+        if not procedures_performed:
+            return
+        # Accounting evidence #1 — for each billed code, the VERBATIM note
+        # quotes the coder attached as its evidence (evidence_spans), plus
+        # the code's official descriptor as a fallback. The evidence_spans
+        # are the load-bearing half: they are drawn from the operative note,
+        # so they share the surgeon's own vocabulary ('exostectomy',
+        # 'Haglund') — which the terse CPT descriptor ('Ostectomy,
+        # calcaneus') does not. Matching a documented procedure against the
+        # billed code's note-quotes therefore bridges the surgeon-vs-CPT
+        # vocabulary gap that a descriptor-only match cannot, WITHOUT any
+        # hardcoded synonym table: when the ostectomy is billed its span
+        # quotes the Haglund resection; when it is dropped, no billed span
+        # does, and the procedure flags. The descriptor is added only as a
+        # floor for older results whose spans were not persisted.
+        billed_parts: list[str] = []
+        for c in (cpt + hcpcs):
+            code = c.get("code") or ""
+            for span in (c.get("evidence_spans") or []):
+                if isinstance(span, str):
+                    billed_parts.append(span)
+            desc = ((self.db.validate_cpt(code) or {}).get("long_description")
+                    or (self.db.validate_hcpcs(code) or {}).get(
+                        "long_description") or "")
+            billed_parts.append(desc)
+        billed_stems = {self._stem(t)
+                        for t in self._tokens(" ".join(billed_parts).lower())}
+        # Accounting evidence #2 — LEGITIMATE exclusion dispositions: only
+        # the validator's OWN issues in exclusion categories (integral,
+        # bundled, not-separately-billable). Deliberately NOT the coder's
+        # free-text narrative: a disposition sentence about ONE procedure
+        # routinely names ANOTHER ('bursa excision is integral to the
+        # exostectomy'), and counting that bleed would let a struck primary
+        # procedure look excluded because an integral step mentioned it.
+        # A wrong-code removal (undocumented_procedure_indication) is not an
+        # exclusion category, so it correctly does NOT account for the work.
+        # Consequence: a coder-determined integral the validator did not
+        # record may over-flag to REVIEW — the SAFE direction; never miss a
+        # dropped primary procedure to avoid flagging an integral one.
+        excl_parts = [(i.message or "") for i in self.issues
+                      if self._EXCLUSION_CAT_RE.search(i.category or "")]
+        excl_stems = {self._stem(t)
+                      for t in self._tokens(" ".join(excl_parts).lower())}
+        _GEN = self._DESC_STOPWORDS | {
+            "performed", "procedure", "right", "left", "today", "with",
+            "without", "using", "under", "bilateral"}
+        for proc in procedures_performed:
+            toks = [t for t in self._tokens(str(proc).lower())
+                    if len(t) >= 5 and t not in _GEN]
+            if not toks:
+                continue
+            billed_hits = sum(1 for t in toks
+                              if self._stem(t) in billed_stems)
+            excl_hits = sum(1 for t in toks if self._stem(t) in excl_stems)
+            # accounted: a strong overlap with a billed code OR a legitimate
+            # exclusion. Threshold of 2 distinctive tokens (or 1 when the
+            # procedure phrase itself is short) avoids incidental matches.
+            need = 1 if len(toks) <= 2 else 2
+            if billed_hits >= need or excl_hits >= need:
+                continue
+            self._add(
+                "WARNING", "", "documented_work_unaccounted",
+                f"Documented procedure not accounted for on the claim: "
+                f"'{str(proc)[:80]}'. It is neither represented by a billed "
+                f"code nor recorded as integral/bundled/not-separately-"
+                f"billable. Documented surgical work may be UNCODED — the "
+                f"primary procedure can silently drop when its code is struck "
+                f"as a wrong family member and never substituted. Verify the "
+                f"correct code for this procedure is on the claim, or that it "
+                f"is genuinely included in another billed procedure.",
+                "Code the documented procedure, or record why it is not "
+                "separately reportable",
+                denial_risk="HIGH",
+                clause="procedure_completeness",
             )
 
     def _check_integral_immobilization(self, cpt, hcpcs):

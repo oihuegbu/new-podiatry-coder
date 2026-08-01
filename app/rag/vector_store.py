@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -31,13 +32,69 @@ from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
+# The ICD-10-CM Index carries the clinical SYNONYMS and EPONYMS a note uses
+# ('Haglund', 'bunionette') that a terse Tabular descriptor omits — folded
+# into each diagnosis's embedding text so vocabulary-mismatched notes retrieve
+# the right code.
+ICD10_INDEX_TERMS_FILE = ICD10_FILE.parent / "icd10cm_index_terms.json"
+# LLM-generated, grounded, provenance-tagged clinical-synonym indexes
+# (tools/build_code_synonyms.py) — the eponym/clinician vocabulary the terse
+# descriptors omit. CPT/HCPCS ship no synonym source at all; ICD's authoritative
+# Index still misses eponyms, so its LLM file SUPPLEMENTS the Index. All
+# optional — an absent file degrades to descriptor(+Index)-only embeddings.
+CPT_SYNONYMS_FILE   = CPT_FILE.parent / "cpt_synonyms.json"
+HCPCS_SYNONYMS_FILE = HCPCS_FILE.parent / "hcpcs_synonyms.json"
+ICD10_SYNONYMS_FILE = ICD10_FILE.parent / "icd10_synonyms.json"
+# Cap synonyms folded per code so a code with a long index list does not
+# dominate/dilute its own embedding.
+_INDEX_TERMS_PER_CODE = 12
+
 # Files whose content drives the index — any change triggers a rebuild
-_INDEXED_FILES = [ICD10_FILE, CPT_FILE, HCPCS_FILE]
+_INDEXED_FILES = [ICD10_FILE, CPT_FILE, HCPCS_FILE, ICD10_INDEX_TERMS_FILE,
+                  CPT_SYNONYMS_FILE, HCPCS_SYNONYMS_FILE, ICD10_SYNONYMS_FILE]
+
+
+def _load_synonyms(path) -> dict:
+    """{code: [synonyms]} from an LLM-synonym file, or {} if absent/malformed."""
+    try:
+        d = _read_json(path)
+        t = d.get("terms", {}) if isinstance(d, dict) else {}
+        return {str(k): v for k, v in t.items() if isinstance(v, list)}
+    except Exception:
+        return {}
 _CHECKSUM_FILE = QDRANT_DIR / "codes_checksum.txt"
 _CODE_SYSTEMS  = ["icd10", "cpt", "hcpcs"]
+
+
+def _dedup_texts(texts) -> list[str]:
+    """Unique, order-preserving, case-insensitive non-empty strings — so a
+    code's several descriptor variants fold into one embedding text without
+    redundant repetition."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in texts:
+        t = (t or "").strip()
+        k = t.lower()
+        if t and k not in seen:
+            seen.add(k)
+            out.append(t)
+    return out
 _DENSE_MODEL   = "BAAI/bge-base-en-v1.5"   # 768-dim, strong on specialized text
 _DENSE_DIMS    = 768
 _UPSERT_BATCH  = 30
+# Cross-encoder reranker: reads (query, candidate descriptor) together and
+# reorders the high-recall fusion pool. DISABLED by default after measurement:
+# on the recall benchmark it was NET-NEGATIVE (total recall 73%->60%, MRR
+# 0.656->0.404; 28118 'Haglund resection' rank 1->17), because it scores the
+# BARE DESCRIPTOR, which lacks the synonym enrichment — so it demotes exactly
+# the eponym matches the synonyms just recovered ('onychomycosis' != the
+# descriptor's 'dermatophytosis'). Kept behind the flag; a synonym-AWARE
+# reranker (reranking against the enriched text, not the descriptor) could be
+# revisited, but the bi-encoder + BM25 + synonyms already rank most answers #1,
+# so the upside is marginal. Enable only with RAG_RERANK=1 after re-measuring.
+_RERANK_MODEL   = os.getenv("RAG_RERANK_MODEL", "BAAI/bge-reranker-base")
+_RERANK_DEPTH   = int(os.getenv("RAG_RERANK_DEPTH", "40"))
+_RERANK_ENABLED = os.getenv("RAG_RERANK", "0") == "1"
 
 
 def _compute_checksum() -> str:
@@ -72,6 +129,8 @@ class MedicalCodeVectorStore:
         self._client: QdrantClient | None = None
         self._dense_model: TextEmbedding | None = None
         self._sparse_model: SparseTextEmbedding | None = None
+        self._reranker = None          # lazy cross-encoder
+        self._reranker_failed = False  # don't retry a broken load every query
         self._loaded = False
 
     # ------------------------------------------------------------------
@@ -170,16 +229,24 @@ class MedicalCodeVectorStore:
         top_k     = top_k or RAG_TOP_K
         threshold = threshold or RAG_SIMILARITY_THRESHOLD
 
-        # Dense embedding via FastEmbed
-        dense_vec = list(self._dense_model.embed([query]))[0].tolist()
+        # Dense embedding via FastEmbed. bge-base-en-v1.5 is an ASYMMETRIC
+        # retrieval model: queries carry a retrieval instruction prefix,
+        # passages do not. query_embed() applies that prefix (passages were
+        # indexed with plain embed()) — using plain embed() here under-embeds
+        # every query and was silently degrading dense recall.
+        dense_vec = list(self._dense_model.query_embed([query]))[0].tolist()
 
         # Sparse BM25 embedding via FastEmbed
-        sparse_emb = list(self._sparse_model.embed([query]))[0]
+        sparse_emb = list(self._sparse_model.query_embed([query]))[0]
         sparse_vec = SparseVector(
             indices=sparse_emb.indices.tolist(),
             values=sparse_emb.values.tolist(),
         )
 
+        # Retrieve a WIDER pool than requested when a reranker is active, so
+        # the cross-encoder can promote the right code even if the bi-encoder
+        # fusion ranked it deep. Returned pool is reranked down to top_k below.
+        pool = max(top_k, _RERANK_DEPTH) if self._reranker_enabled() else top_k
         # Hybrid search: dense prefetch (with cosine threshold) + sparse prefetch, fused with RRF
         results = self._client.query_points(
             collection_name=code_system,
@@ -187,17 +254,17 @@ class MedicalCodeVectorStore:
                 Prefetch(
                     query=dense_vec,
                     using="dense",
-                    limit=top_k * 2,
+                    limit=pool * 2,
                     score_threshold=threshold,  # threshold on cosine similarity
                 ),
                 Prefetch(
                     query=sparse_vec,
                     using="sparse",
-                    limit=top_k * 2,
+                    limit=pool * 2,
                 ),
             ],
             query=FusionQuery(fusion=Fusion.RRF),
-            limit=top_k,
+            limit=pool,
             with_payload=True,
         )
 
@@ -206,7 +273,81 @@ class MedicalCodeVectorStore:
             entry = dict(point.payload)
             entry["similarity_score"] = round(float(point.score), 4)
             output.append(entry)
-        return output
+        # Cross-encoder rerank: the bi-encoder + BM25 fusion is high-RECALL but
+        # coarse on ranking; a cross-encoder reads the query and each
+        # candidate's descriptor TOGETHER and reorders for precision, pushing
+        # the right code toward rank 1 (measured: 28118 sat at rank 2 under
+        # fusion alone). Degrades gracefully to fusion order if the reranker
+        # is unavailable.
+        output = self._rerank(query, output, top_k, code_system)
+        return output[:top_k]
+
+    def _reranker_enabled(self) -> bool:
+        return _RERANK_ENABLED and not self._reranker_failed
+
+    def _get_reranker(self):
+        if self._reranker is None and not self._reranker_failed:
+            try:
+                from fastembed.rerank.cross_encoder import TextCrossEncoder
+                logger.info(f"Loading cross-encoder reranker ({_RERANK_MODEL})")
+                self._reranker = TextCrossEncoder(_RERANK_MODEL)
+            except Exception as exc:
+                logger.warning(f"Reranker unavailable ({exc}) — returning "
+                               f"fusion order")
+                self._reranker_failed = True
+        return self._reranker
+
+    def _syn_map(self, code_system: str) -> dict:
+        """Lazy-cached {code: [synonyms]} for a system — the SAME LLM synonym
+        files the embedding folds in, read here so the reranker can score the
+        query against the ENRICHED text (descriptor + synonyms), not the bare
+        descriptor. This is what makes reranking synonym-AWARE: scoring the
+        bare descriptor demoted exactly the eponym matches the synonyms just
+        recovered ('onychomycosis' != descriptor 'dermatophytosis')."""
+        if not hasattr(self, "_syn_cache"):
+            self._syn_cache = {}
+        if code_system not in self._syn_cache:
+            f = {"cpt": CPT_SYNONYMS_FILE, "hcpcs": HCPCS_SYNONYMS_FILE,
+                 "icd10": ICD10_SYNONYMS_FILE}.get(code_system)
+            self._syn_cache[code_system] = _load_synonyms(f) if f else {}
+        return self._syn_cache[code_system]
+
+    def _rerank_text(self, entry: dict, code_system: str) -> str:
+        """The enriched text the cross-encoder scores against the query:
+        descriptor variants PLUS the code's LLM synonyms — the same signal the
+        embedding uses. ICD synonym files key on the UNDOTTED code, so try
+        both the payload's dotted 'code' and undotted 'code_raw'."""
+        code = str(entry.get("code") or "")
+        smap = self._syn_map(code_system)
+        syns = (smap.get(code)
+                or smap.get(str(entry.get("code_raw") or ""))
+                or smap.get(code.replace(".", "").upper()) or [])
+        parts = [entry.get("long_description"), entry.get("description"),
+                 entry.get("short_description"),
+                 entry.get("consumer_description"),
+                 *[str(s) for s in syns if str(s).strip()]]
+        return " ".join(dict.fromkeys(
+            p.strip() for p in parts if isinstance(p, str) and p.strip()))
+
+    def _rerank(self, query: str, candidates: list[dict],
+                top_k: int, code_system: str) -> list[dict]:
+        """Reorder the fusion pool by cross-encoder relevance of (query,
+        descriptor+synonyms). Fail-open: any error returns input order."""
+        if not self._reranker_enabled() or len(candidates) <= 1:
+            return candidates
+        rr = self._get_reranker()
+        if rr is None:
+            return candidates
+        try:
+            docs = [self._rerank_text(c, code_system) for c in candidates]
+            scores = list(rr.rerank(query, docs))
+            for c, s in zip(candidates, scores):
+                c["rerank_score"] = round(float(s), 4)
+            return sorted(candidates, key=lambda c: c.get("rerank_score", 0.0),
+                          reverse=True)
+        except Exception as exc:
+            logger.warning(f"Rerank failed ({exc}) — fusion order kept")
+            return candidates
 
     def search_multi(
         self,
@@ -329,6 +470,23 @@ class MedicalCodeVectorStore:
 
     def _load_icd10_records(self) -> list[dict]:
         raw = _read_json(ICD10_FILE)
+        # Index synonyms/eponyms, keyed by undotted code: {'M2161': ['bunion
+        # of great toe', ...]}. Missing/malformed file degrades to
+        # descriptor-only embeddings (no crash).
+        index_terms: dict[str, list] = {}
+        try:
+            idx = _read_json(ICD10_INDEX_TERMS_FILE)
+            terms = idx.get("terms", idx) if isinstance(idx, dict) else {}
+            for k, v in terms.items():
+                if isinstance(v, list):
+                    index_terms[str(k).replace(".", "").upper()] = v
+        except Exception as exc:
+            logger.warning(f"ICD index terms unavailable ({exc}) — embedding "
+                           f"descriptors only")
+        # LLM synonym SUPPLEMENT: eponyms the authoritative Index misses
+        # (measured: 'Haglund's deformity' -> M77.31 was not retrieved because
+        # the Index lists only 'calcaneal spur').
+        icd_syns = _load_synonyms(ICD10_SYNONYMS_FILE)
         records = []
         for entry in _as_list(raw):
             code   = _get_field(entry, ["code"]).strip().replace(".", "").upper()
@@ -339,40 +497,65 @@ class MedicalCodeVectorStore:
             if status and status not in ("active", ""):
                 continue
             dotted = f"{code[:3]}.{code[3:]}" if len(code) > 3 else code
+            # Fold in the Index's clinical synonyms/eponyms (capped) PLUS the
+            # LLM supplement, so a note that names the condition the way a
+            # clinician does — not the way the Tabular descriptor does — still
+            # retrieves this code.
+            syns = [str(s) for s in index_terms.get(code, [])
+                    if str(s).strip()][:_INDEX_TERMS_PER_CODE]
+            llm = [str(s) for s in icd_syns.get(code, [])
+                   if str(s).strip()][:_INDEX_TERMS_PER_CODE]
+            variants = _dedup_texts([desc, *syns, *llm])
             records.append({
                 "code":            dotted,
                 "code_raw":        code,
                 "description":     desc,
                 "code_system":     "ICD-10-CM",
-                "embedding_text":  f"ICD-10-CM {dotted}: {desc}",
+                "embedding_text":  f"ICD-10-CM {dotted}: " + " ".join(variants),
             })
-        logger.info(f"  Loaded {len(records)} ICD-10-CM records from {ICD10_FILE.name}")
+        logger.info(f"  Loaded {len(records)} ICD-10-CM records from "
+                    f"{ICD10_FILE.name} ({len(index_terms)} with index terms)")
         return records
 
     def _load_cpt_records(self) -> list[dict]:
         raw  = _read_json(CPT_FILE)
         data = _as_list(raw)
+        cpt_syns = _load_synonyms(CPT_SYNONYMS_FILE)
         records = []
         for entry in data:
             code       = _get_field(entry, ["code"]).strip()
             long_desc  = _get_field(entry, ["long_description"]).strip()
             short_desc = _get_field(entry, ["short_description", "description"]).strip()
+            medium_desc   = _get_field(entry, ["medium_description"]).strip()
+            consumer_desc = _get_field(entry, ["consumer_description"]).strip()
             desc       = long_desc or short_desc
             if not code or not desc:
                 continue
+            # Embed EVERY descriptor variant (deduped), not just the terse
+            # long descriptor: the short/consumer forms use the note's
+            # vocabulary ('Removal of heel bone') where the long form uses
+            # CMS terminology ('Ostectomy, calcaneus;'). This is the recall
+            # fix for the whole code set — a semicolon-parent or any code
+            # whose surgeon-facing wording differs from its official
+            # descriptor becomes retrievable on both dense and sparse.
+            syns = [str(s) for s in cpt_syns.get(code, [])
+                    if str(s).strip()][:_INDEX_TERMS_PER_CODE]
+            variants = _dedup_texts(
+                [long_desc, short_desc, medium_desc, consumer_desc, *syns])
             records.append({
                 "code":                 code,
                 "short_description":    short_desc,
                 "long_description":     long_desc,
-                "consumer_description": _get_field(entry, ["consumer_description"]),
+                "consumer_description": consumer_desc,
                 "code_system":          "CPT",
-                "embedding_text":       f"CPT {code}: {desc}",
+                "embedding_text":       f"CPT {code}: " + " ".join(variants),
             })
         logger.info(f"  Loaded {len(records)} CPT records from {CPT_FILE.name}")
         return records
 
     def _load_hcpcs_records(self) -> list[dict]:
         raw = _read_json(HCPCS_FILE)
+        hcpcs_syns = _load_synonyms(HCPCS_SYNONYMS_FILE)
         records = []
         seen: set[str] = set()
         for entry in _as_list(raw):
@@ -384,17 +567,19 @@ class MedicalCodeVectorStore:
                 continue
             seen.add(code)
             remainder = raw_code[5:].strip() if len(raw_code) > 5 else ""
-            desc = (
-                remainder
-                or _get_field(entry, ["long_description", "short_description", "description"]).strip()
-            )
+            long_desc = _get_field(entry, ["long_description", "description"]).strip()
+            short_desc = _get_field(entry, ["short_description"]).strip()
+            desc = remainder or long_desc or short_desc
             if not desc:
                 continue
+            llm = [str(s) for s in hcpcs_syns.get(code, [])
+                   if str(s).strip()][:_INDEX_TERMS_PER_CODE]
+            variants = _dedup_texts([desc, long_desc, short_desc, *llm])
             records.append({
                 "code":            code,
                 "description":     desc,
                 "code_system":     "HCPCS",
-                "embedding_text":  f"HCPCS {code}: {desc}",
+                "embedding_text":  f"HCPCS {code}: " + " ".join(variants),
             })
         logger.info(f"  Loaded {len(records)} HCPCS records from {HCPCS_FILE.name}")
         return records

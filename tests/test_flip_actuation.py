@@ -1396,5 +1396,46 @@ class GraduatedDispatchTest(unittest.TestCase):
         self.assertIn("Grad doc.", prompt)
 
 
+class ReplayCompletenessWiringTest(unittest.TestCase):
+    """The replay path realizes the FINAL shipped claim, so it must feed the
+    completeness invariant the documented procedures — otherwise
+    _check_procedure_completeness no-ops on exactly the claim that ships and
+    the coherence gate reads zero completeness flags (the integration gap a
+    live run exposed: per-run validation flagged the drop, but the replayed
+    record did not carry it). This guards the pass-through so it cannot
+    silently regress. Mock-based: no reference DB / compliance store load."""
+
+    def _replay(self, payload):
+        from tools.auto_actuate import Replayer
+        rep = Replayer.__new__(Replayer)  # skip the heavy DB/store __init__
+        captured = {}
+
+        class _FakeValidator:
+            issues: list = []
+
+            def validate(self, coding_result, **kw):
+                captured.update(kw)
+                return {"validation_issues": []}
+
+        rep._fresh_validator = lambda: _FakeValidator()
+        rep.replay_arrays(payload, "note text")
+        return captured
+
+    def test_replay_forwards_persisted_procedures(self):
+        procs = ["Retrocalcaneal exostectomy (Haglund resection), right heel"]
+        captured = self._replay({
+            "cpt_codes": [], "hcpcs_codes": [], "icd_codes": [],
+            "patient_metadata": {}, "procedures_performed_today": procs})
+        self.assertEqual(captured.get("procedures_performed"), procs)
+
+    def test_replay_of_legacy_result_passes_none(self):
+        # A pre-fix stored result has no procedures_performed_today — the
+        # replayer must degrade to None (completeness no-op), never crash.
+        captured = self._replay({
+            "cpt_codes": [], "hcpcs_codes": [], "icd_codes": [],
+            "patient_metadata": {}})
+        self.assertIsNone(captured.get("procedures_performed"))
+
+
 if __name__ == "__main__":
     unittest.main()

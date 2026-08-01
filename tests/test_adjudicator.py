@@ -477,5 +477,91 @@ class RegistryTierTest(unittest.TestCase):
             self.assertEqual(view["n"]["verification"], "adjudicated")
 
 
+class ProposedCodeValidationTest(unittest.TestCase):
+    """The deterministic authoritative gate on an audit-PROPOSED code (one no
+    run bills, that a review/finding/exploratory lead wants added). It grounds
+    the fix in DATA, not the reviewer's say-so: a proposal materializes only
+    when it exists, its descriptor matches the documented work, it is billable,
+    and it raises no unbypassable NCCI conflict. Mock DB/store — the logic, not
+    the reference data."""
+
+    import types as _types
+
+    def _rep(self, *, rec, mue=1, gp="090", ncci=None):
+        import types
+        db = types.SimpleNamespace(
+            validate_cpt=lambda c: rec,
+            validate_hcpcs=lambda c: rec,
+            validate_icd10=lambda c: rec,
+            get_mue=lambda c: mue,
+            check_ncci=lambda a, b: ncci)
+        store = types.SimpleNamespace(global_period=lambda c, dos=None: gp)
+        return types.SimpleNamespace(db=db, store=store)
+
+    def _ok(self, rep, arr, code, note, procs=("Retrocalcaneal exostectomy "
+                                               "of the calcaneus",),
+            claim=None):
+        from tools.coder_adjudicator import _proposed_code_authoritative_ok
+        main = {"cpt_codes": [{"code": c} for c in (claim or ["27654"])],
+                "procedures_performed_today": list(procs)}
+        return _proposed_code_authoritative_ok(rep, arr, code, main, note)
+
+    _OSTECTOMY = {"long_description": "Ostectomy, calcaneus"}
+    _NOTE = "Retrocalcaneal exostectomy with Haglund resection of the calcaneus."
+
+    def test_valid_proposal_passes(self):
+        rep = self._rep(rec=self._OSTECTOMY)
+        ok, why = self._ok(rep, "cpt_codes", "28118", self._NOTE)
+        self.assertTrue(ok, why)
+
+    def test_not_in_reference_data_refused(self):
+        rep = self._rep(rec=None)
+        ok, why = self._ok(rep, "cpt_codes", "99999", self._NOTE)
+        self.assertFalse(ok)
+        self.assertIn("reference data", why)
+
+    def test_descriptor_not_grounded_refused(self):
+        # a real code whose descriptor has nothing to do with the note
+        rep = self._rep(rec={"long_description":
+                             "Office or other outpatient visit, established"})
+        ok, why = self._ok(rep, "cpt_codes", "99213", self._NOTE)
+        self.assertFalse(ok)
+        self.assertIn("not grounded", why)
+
+    def test_zero_mue_refused_even_when_documented(self):
+        rep = self._rep(rec={"long_description": "Ostectomy, calcaneus"}, mue=0)
+        ok, why = self._ok(rep, "cpt_codes", "28118", self._NOTE)
+        self.assertFalse(ok)
+        self.assertIn("MUE", why)
+
+    def test_missing_global_period_refused(self):
+        rep = self._rep(rec=self._OSTECTOMY, gp="")
+        ok, why = self._ok(rep, "cpt_codes", "28118", self._NOTE)
+        self.assertFalse(ok)
+        self.assertIn("global", why)
+
+    def test_ncci_hard_bundle_refused(self):
+        rep = self._rep(rec=self._OSTECTOMY,
+                        ncci={"code2": "28118", "modifier": "0"})
+        ok, why = self._ok(rep, "cpt_codes", "28118", self._NOTE,
+                           claim=["27654", "28100"])
+        self.assertFalse(ok)
+        self.assertIn("NCCI", why)
+
+    def test_ncci_bypassable_edit_allowed(self):
+        # indicator 1 (separation modifier may bypass) is NOT a hard bundle
+        rep = self._rep(rec=self._OSTECTOMY,
+                        ncci={"code2": "28118", "modifier": "1"})
+        ok, why = self._ok(rep, "cpt_codes", "28118", self._NOTE,
+                           claim=["27654", "28100"])
+        self.assertTrue(ok, why)
+
+    def test_diagnosis_only_needs_existence(self):
+        # a proposed ICD is not procedure-descriptor matched
+        rep = self._rep(rec={"description": "Acquired deformity of foot"})
+        ok, why = self._ok(rep, "icd_codes", "M21.6X1", self._NOTE)
+        self.assertTrue(ok, why)
+
+
 if __name__ == "__main__":
     unittest.main()
