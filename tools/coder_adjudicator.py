@@ -1222,14 +1222,128 @@ def _audit_disputed_items(main: dict) -> tuple[list[dict], list[str]]:
     return list(by_key.values()), residual
 
 
+def _proposed_code_authoritative_ok(rep: Replayer, arr: str, code: str,
+                                    main: dict, note_text: str
+                                    ) -> tuple[bool, str]:
+    """DETERMINISTIC authoritative validation for an audit-PROPOSED code —
+    one no stored run bills, that a review verdict, a whole-claim finding, or
+    an exploratory lead wants ADDED to the claim. The materialization would
+    otherwise build the entry from the reference-DB descriptor on the
+    reviewer's say-so alone; this gate grounds the fix in the DATA instead,
+    so a hallucinated addition never reaches the claim:
+
+      1. EXISTS — a real code with a real descriptor in the authoritative
+         reference data.
+      2. DESCRIPTOR MATCHES THE DOCUMENTED WORK — the code's own distinctive
+         descriptor tokens overlap the note's documented procedures / text
+         (the completeness invariant's grounding, run in the additive
+         direction: a proposed procedure code with no footing in what the
+         surgeon documented is refused).
+      3. BILLABLE — its MUE is not 0 (a 0-MUE code is not separately
+         reportable on a professional claim) and, for a CPT procedure, it
+         carries a global-period assignment (a real procedure, not an
+         unpriceable shell).
+      4. NO UNBYPASSABLE NCCI CONFLICT — it is not the bundled (column-2)
+         side of a hard PTP edit (modifier indicator 0) against a code
+         already billed on the claim.
+
+    Laterality and any residual PTP arrangement are enforced DOWNSTREAM when
+    the materialized code is replayed through validate(); this gate covers
+    the checks that replay cannot make (descriptor relevance) plus a fast
+    fail-closed billability/NCCI pre-screen. Every value is queried from the
+    authoritative data — no hardcoded codes. Fail-closed: a check that
+    cannot run returns False. Returns (ok, reason)."""
+    from app.validation.validator import CodingValidator as _V
+    db = rep.db
+    code = str(code or "").upper()
+    if not code:
+        return False, "empty code"
+    # 1. EXISTS in the authoritative reference data, with a descriptor.
+    if arr == "cpt_codes":
+        rec = db.validate_cpt(code)
+    elif arr == "hcpcs_codes":
+        rec = db.validate_hcpcs(code)
+    else:
+        rec = (db.validate_icd10(code)
+               if hasattr(db, "validate_icd10") else None)
+    if not rec:
+        return False, "not present in the authoritative reference data"
+    desc = str(rec.get("long_description")
+               or rec.get("description") or "").strip()
+    if not desc:
+        return False, "no authoritative descriptor"
+    # A proposed DIAGNOSIS is grounded by the documented condition, which the
+    # adjudicator's N-pass + authority-quote review judges; this gate only
+    # confirms it is a real code (the procedure-descriptor match below does
+    # not apply to a diagnosis).
+    if arr == "icd_codes":
+        return True, "diagnosis present in reference data"
+    # 2. DESCRIPTOR MATCHES THE DOCUMENTED WORK. Matched on shared ROOTS, not
+    # the suffix stemmer: a terse CPT descriptor ('Ostectomy, calcaneus') and
+    # the surgeon's wording ('exostectomy', 'retrocalcaneal') share medical
+    # roots ('ostectom', 'calcane') that suffix-stemming alone misses — the
+    # same vocabulary gap the completeness invariant hit. A distinctive
+    # descriptor token counts as grounded when its 6+char root appears inside
+    # some documented-work token (or vice-versa). Lenient by design (need
+    # ONE root, and the audit already supplies a mechanically-verified note
+    # quote): this is a backstop against a wildly-unrelated proposed code,
+    # not a second clinical judgment.
+    documented = " ".join(
+        str(p) for p in (main.get("procedures_performed_today") or [])
+    ) + " " + (note_text or "")
+    doc_toks = [t for t in _V._tokens(documented) if len(t) >= 4]
+    desc_toks = [t for t in _V._tokens(desc)
+                 if len(t) >= 5 and t not in _V._DESC_STOPWORDS]
+
+    def _root_grounded(dt: str) -> bool:
+        root = dt[:7] if len(dt) >= 8 else dt[:6] if len(dt) >= 6 else dt
+        if len(root) < 5:
+            return _V._stem(dt) in {_V._stem(o) for o in doc_toks}
+        return any(root in ot or (len(ot) >= 6 and ot[:6] in dt)
+                   for ot in doc_toks)
+
+    hits = sum(1 for t in desc_toks if _root_grounded(t))
+    need = 1 if len(desc_toks) <= 2 else 2
+    if hits < need:
+        return False, (f"descriptor {desc[:60]!r} is not grounded in the "
+                       f"documented work ({hits}/{need} distinctive roots)")
+    # 3. BILLABLE.
+    mue = db.get_mue(code)
+    if mue == 0:
+        return False, "MUE is 0 — not separately reportable on this claim"
+    if arr == "cpt_codes":
+        try:
+            gp = rep.store.global_period(code)
+        except Exception:
+            gp = None
+        if not str(gp or "").strip():
+            return False, "no global-period assignment — not an established " \
+                          "billable procedure"
+    # 4. NO UNBYPASSABLE NCCI CONFLICT with a code already on the claim.
+    for e in (main.get("cpt_codes") or []):
+        other = str(e.get("code") or "").upper() if isinstance(e, dict) else ""
+        if not other or other == code:
+            continue
+        edit = db.check_ncci(other, code)
+        if edit and str(edit.get("code2") or "").upper() == code \
+                and str(edit.get("modifier") or "").strip() == "0":
+            return False, (f"NCCI hard bundle (indicator 0): {code} is "
+                           f"included in billed {other}, not separately "
+                           f"reportable")
+    return True, "validated against the authoritative reference data"
+
+
 def _materialize_donor(rep: Replayer, main: dict, runs: list[dict],
-                       items: list[dict]) -> dict:
+                       items: list[dict], note_text: str = "") -> dict:
     """A synthetic 'run' carrying an entry for every disputed code that no
     stored run bills, so an 'include' decision has something mechanical to
     materialize from. Identity comes from the data, never invention: a
     demoted diagnosis is rebuilt from its supporting_conditions entry, and
-    anything else from its reference-DB descriptor. A code with neither
-    stays unmaterializable and the decision voids (fail closed)."""
+    anything else from its reference-DB descriptor — but a genuinely NEW
+    audit-proposed code (no run, no demoted-dx donor) materializes ONLY when
+    it passes _proposed_code_authoritative_ok, so a reviewer cannot conjure a
+    code that is not grounded in the authoritative data. A code that stays
+    unmaterializable voids its decision (fail closed)."""
     donor = {"icd_codes": [], "cpt_codes": [], "hcpcs_codes": []}
     for d in items:
         code = str(d.get("code") or "").upper()
@@ -1258,6 +1372,24 @@ def _materialize_donor(rep: Replayer, main: dict, runs: list[dict],
                 desc = ""
             if not desc:
                 continue
+            # AUDIT-PROPOSED code (no run bills it, no demoted-dx donor): it
+            # may materialize ONLY if it validates against the authoritative
+            # data — real code, descriptor matching the documented work,
+            # billable, no unbypassable NCCI conflict. Anti-hallucination by
+            # DATA: a proposal that fails is not materialized, so an 'include'
+            # decision on it cannot realize and the item fails closed to a
+            # human instead of putting an ungrounded code on the claim.
+            try:
+                ok, why = _proposed_code_authoritative_ok(
+                    rep, arr, code, main, note_text)
+            except Exception as exc:  # unverifiable ≠ valid (fail closed)
+                ok, why = False, f"validation could not run ({exc})"
+            if not ok:
+                logger.info(f"  audit-proposed {code} refused "
+                            f"materialization — {why}")
+                continue
+            logger.info(f"  audit-proposed {code} validated against "
+                        f"authoritative data — {why}")
             if arr == "icd_codes":
                 ent = {"code": code, "description": desc,
                        "type": "secondary"}
@@ -1660,7 +1792,7 @@ def adjudicate_audit(results_dir: Path, docs: list[str] | None = None,
                     f"item(s) from the clinical review, {passes} "
                     f"independent pass(es)")
 
-        donor = _materialize_donor(rep, main, runs, disputed)
+        donor = _materialize_donor(rep, main, runs, disputed, note_text=note)
         disputed_by_array: dict[str, set[str]] = {}
         for d in disputed:
             disputed_by_array.setdefault(d["array"], set()).add(d["code"])

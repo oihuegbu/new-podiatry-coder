@@ -426,16 +426,23 @@ def _audit_once(case: dict, pass_idx: int = 0) -> dict:
             f"then read full_record end to end against the doctor's note "
             f"(note_text) and the authoritative reference data, and review "
             f"the whole final claim (including the system advisories and "
-            f"the not-billed supporting conditions). Report your grounded "
-            f"findings.")
+            f"the not-billed supporting conditions). If "
+            f"preliminary_reviewer_notes is present, it is an earlier "
+            f"open-ended read — treat each point as a LEAD to check, not a "
+            f"finding: act on it only when you can independently ground it "
+            f"in an authority and a verbatim note quote, and ignore any "
+            f"lead you cannot. Report your grounded findings.")
     model = AUDITOR_MODEL if LLM_PROVIDER == "claude" else None
     temperature = 0.05 if pass_idx == 0 else 0.4
     system = _AUDITOR_PROMPT + _vocabulary_supplement()
+    # The final whole-claim review is the highest-stakes judgment in the
+    # pipeline (it gates CLEAN), so it runs at the maximum deliberation
+    # budget — matching the coding verify pass, not the cheaper default.
     try:
         text, usage = chat_completion(
             system_prompt=system, user_prompt=user,
             model=model, temperature=temperature, max_tokens=8192,
-            json_mode=True, effort="high")
+            json_mode=True, effort="xhigh")
     except Exception as exc:
         if model is None:
             raise
@@ -445,11 +452,68 @@ def _audit_once(case: dict, pass_idx: int = 0) -> dict:
         text, usage = chat_completion(
             system_prompt=system, user_prompt=user,
             temperature=temperature, max_tokens=8192,
-            json_mode=True, effort="high")
+            json_mode=True, effort="xhigh")
     verdict = json.loads(text)
     verdict["_model"] = model or "pipeline-default"
     verdict["_usage"] = usage
     return verdict
+
+
+_EXPLORATORY_PROMPT = """You are a senior medical-coding auditor giving a \
+claim a FIRST, OPEN-ENDED read before any scoring. This is the "fresh eyes on \
+the finished artifact" pass: reason aloud, follow your instincts, and do NOT \
+fill in any schema or scores yet.
+
+You are handed the COMPLETE saved output for one note (full_record), the \
+doctor's note (note_text), and the authoritative reference data. Read the \
+whole claim end to end against the note and the authorities and think about \
+what a careful human expert would notice on a first pass:
+
+- Does every procedure the note documents appear on the claim, coded or \
+explicitly accounted for? Is anything the surgeon did missing, or is anything \
+billed that the note does not support?
+- Is each code the RIGHT code for what the note describes (not just a \
+plausible sibling in the same family)? Do the descriptors actually match the \
+documented work?
+- Do the diagnoses, laterality, sequencing, and modifiers fit the note and \
+the coding rules?
+- Does anything look internally inconsistent, or like an artifact of the \
+automated pipeline rather than the clinical reality?
+
+Write a plain-prose list of everything that looks wrong, risky, or worth a \
+second look — each with the note detail and the coding/authority reason it \
+concerns you. Raising a suspicion you are unsure about is fine here; this pass \
+generates LEADS, and every lead is independently re-verified against the \
+authorities in the scored pass that follows. Do not invent facts about the \
+note. If the claim looks clean, say so and say why."""
+
+
+def _exploratory_scan(case: dict) -> str:
+    """Free-form 'what's wrong with this claim?' pass — open-ended expert
+    reasoning over the FINISHED claim BEFORE the structured verdict schema
+    constrains it. Its prose is fed into the scored passes as leads to
+    check, never as findings: every lead the scored pass acts on must still
+    independently cite an authority + a mechanically-verified note quote, so
+    an unfounded suspicion here cannot become a verdict. Fail-open — this is
+    an enhancement to the scored review, not a gate; if it errors the audit
+    proceeds without preliminary notes (the scored passes are unchanged)."""
+    from app.core.config import LLM_PROVIDER
+    from app.core.llm_client import chat_completion
+    model = AUDITOR_MODEL if LLM_PROVIDER == "claude" else None
+    user = (f"CASE FILE:\n{json.dumps(case, indent=1, default=str)}\n\n"
+            f"Give this finished claim your open-ended first read. What looks "
+            f"wrong, risky, or incomplete against the note and the "
+            f"authoritative data?")
+    try:
+        text, _ = chat_completion(
+            system_prompt=_EXPLORATORY_PROMPT, user_prompt=user,
+            model=model, temperature=0.5, max_tokens=4096,
+            json_mode=False, effort="xhigh")
+        return (text or "").strip()
+    except Exception as exc:  # fail-open: enhancement, not a gate
+        logger.warning(f"  exploratory audit pass failed ({exc}) — "
+                       f"proceeding to scored review without preliminary notes")
+        return ""
 
 
 def _grounded(item: dict) -> bool:
@@ -634,6 +698,13 @@ def audit_result(doc: str, result: dict, note: str, rep,
     fingerprint = corrections_fingerprint(result)
 
     case = assemble_case(doc, result, note, rep)
+    # Open-ended "what's wrong with this claim?" pass FIRST, so unconstrained
+    # expert reasoning happens before the verdict schema narrows attention.
+    # Its prose rides along in the case as LEADS the scored passes must still
+    # independently ground; it never bypasses the authority+quote gate.
+    prelim = _exploratory_scan(case)
+    if prelim:
+        case["preliminary_reviewer_notes"] = prelim
     maps, verdicts, findings_per_pass = [], [], []
     for i in range(passes):
         try:

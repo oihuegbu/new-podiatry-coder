@@ -182,6 +182,17 @@ class CodingResult(BaseModel):
     missing_physician_codes: list[dict] = Field(default_factory=list)
     cached_result: bool = False
     ner_entities: list[dict] = Field(default_factory=list)
+    # The operative note's documented procedures (vision extraction's
+    # procedures_performed_today). Persisted on the record — not just used
+    # transiently for the coding prompts — because the completeness
+    # invariant (CodingValidator._check_procedure_completeness) needs it to
+    # re-run when the claim is RE-validated on replay/reconciliation. Every
+    # replay produces the final shipped claim, so without this the
+    # completeness check would no-op on exactly the claim that ships (the
+    # replayer reconstructs claim context from the stored payload the same
+    # way it already re-reads note_category). Kept as documented (list of
+    # strings); never medical codes.
+    procedures_performed_today: list = Field(default_factory=list)
     # Every claim-mutating action the deterministic layers took (auto-
     # corrections + suppressions) — the input to the clinical-correctness
     # audit that verifies each layer decision against the note/authorities.

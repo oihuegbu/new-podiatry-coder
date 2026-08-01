@@ -279,12 +279,17 @@ class RegistryGateTest(unittest.TestCase):
     def test_interpretive_corrections_require_audit(self):
         ok, why = self._eligible(_result(_INTERP))
         self.assertFalse(ok)
-        self.assertIn("not yet clinically audited", why)
+        self.assertIn("not yet clinically reviewed", why)
 
     def test_upheld_audit_unblocks(self):
-        ok, _ = self._eligible(_result(_INTERP,
-                                       audit={"verdict": "upheld"}))
-        self.assertTrue(ok)
+        # eligibility now requires the upheld verdict to match the claim's
+        # CURRENT corrections fingerprint (a stale verdict never releases).
+        from tools.clinical_auditor import corrections_fingerprint
+        r = _result(_INTERP)
+        r["clinical_audit"] = {"verdict": "upheld",
+                               "fingerprint": corrections_fingerprint(r)}
+        ok, why = self._eligible(r)
+        self.assertTrue(ok, why)
 
     def test_disputed_audit_blocks(self):
         ok, why = self._eligible(_result(_INTERP,
@@ -292,9 +297,15 @@ class RegistryGateTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("disputed", why)
 
-    def test_data_grounded_corrections_need_no_audit(self):
-        ok, _ = self._eligible(_result(_DATA))
-        self.assertTrue(ok)
+    def test_data_grounded_corrections_still_need_audit(self):
+        # Universal-audit contract (routine_00003): the whole-claim review
+        # is required for EVERY claim — even one whose only corrections are
+        # data-grounded — because the absence of interpretive corrections is
+        # itself what an unreported mutation looks like. No audit -> not
+        # auto-eligible.
+        ok, why = self._eligible(_result(_DATA))
+        self.assertFalse(ok)
+        self.assertIn("not yet clinically reviewed", why)
 
 
 class ClinicalAuditorTest(unittest.TestCase):
@@ -309,19 +320,47 @@ class ClinicalAuditorTest(unittest.TestCase):
             calls["n"] += 1
             return dict(v, _model="test", _usage={})
 
-        with mock.patch.object(ca, "_audit_once", side_effect=fake_once):
+        with mock.patch.object(ca, "_audit_once", side_effect=fake_once), \
+                mock.patch.object(ca, "_exploratory_scan", return_value=""):
             block = ca.audit_result("note_x", result, note, rep=object(),
                                     passes=len(verdicts))
         return block, calls["n"]
 
-    def test_no_interpretive_corrections_upholds_without_llm(self):
+    def test_no_interpretive_corrections_still_reviewed_and_upheld(self):
+        # The whole-claim review ALWAYS runs — even with no interpretive
+        # corrections — because the absence of self-reported corrections is
+        # itself what an unreported mutation looks like (routine_00003). A
+        # clean review (no findings) upholds.
         import tools.clinical_auditor as ca
         result = _result(_DATA)
-        with mock.patch.object(ca, "_audit_once",
-                               side_effect=AssertionError("must not call")):
+        clean = {"items": [], "claim_findings": [],
+                 "claim_level_concerns": "", "overall_rationale": ""}
+        with mock.patch.object(
+                ca, "_audit_once",
+                side_effect=lambda case, pass_idx=0: dict(clean, _model="t")), \
+                mock.patch.object(ca, "_exploratory_scan", return_value=""):
             block = ca.audit_result("note_x", result, "note", rep=object())
         self.assertEqual(block["verdict"], "upheld")
         self.assertEqual(result["final_disposition"], "CLEAN")
+
+    def test_exploratory_notes_reach_scored_pass(self):
+        # The free-form 'what's wrong with this claim?' pass runs first and
+        # its prose must be handed to the scored pass as leads to verify.
+        import tools.clinical_auditor as ca
+        result = _result(_INTERP)
+        seen = {}
+
+        def capture_once(case, pass_idx=0):
+            seen["prelim"] = case.get("preliminary_reviewer_notes")
+            return {"items": [{"index": 0, "verdict": "uphold",
+                               "authority": "CPT", "note_evidence": "x"}],
+                    "claim_level_concerns": "", "overall_rationale": ""}
+
+        with mock.patch.object(ca, "_exploratory_scan",
+                               return_value="LEAD: check laterality"), \
+                mock.patch.object(ca, "_audit_once", side_effect=capture_once):
+            ca.audit_result("note_x", result, "note", rep=object(), passes=1)
+        self.assertEqual(seen.get("prelim"), "LEAD: check laterality")
 
     def test_grounded_uphold_keeps_clean(self):
         result = _result(_INTERP)
@@ -480,16 +519,31 @@ class AuditPendingGateTest(unittest.TestCase):
             disposition=D.CLEAN if clean else D.REVIEW,
             summary="scrub summary",
             blocking_findings=[],
-            model_dump=lambda: {"clean": clean,
-                                "disposition":
-                                    "CLEAN" if clean else "REVIEW",
-                                "summary": "scrub summary"})
+            # real Scrub.model_dump takes mode="json" (pipeline passes it);
+            # accept + ignore kwargs so the mock matches the true signature
+            model_dump=lambda **_kw: {"clean": clean,
+                                      "disposition":
+                                          "CLEAN" if clean else "REVIEW",
+                                      "summary": "scrub summary"})
+        # _apply_scrub_verdict fingerprints result.model_dump() to decide
+        # whether a stored upheld verdict still describes THIS claim, so the
+        # mock result must expose model_dump; an upheld audit is made CURRENT
+        # by stamping the matching fingerprint (the fingerprint reads only
+        # corrections + code arrays, so the extra clinical_audit key is inert).
+        record = {"material_corrections": corrections,
+                  "icd_codes": [], "cpt_codes": [], "hcpcs_codes": []}
+        if audit is not None and audit.get("verdict") == "upheld" \
+                and "fingerprint" not in audit:
+            from tools.clinical_auditor import corrections_fingerprint
+            audit = dict(audit, fingerprint=corrections_fingerprint(record))
         result = SimpleNamespace(
             claim_scrub=None, final_disposition="", final_summary="",
             material_corrections=corrections,
             clinical_audit=audit or {},
             auto_coding_tier="", auto_coding_summary="",
-            auto_coding_review_reasons=[], auto_coding_confidence=0.9)
+            auto_coding_review_reasons=[], auto_coding_confidence=0.9,
+            model_dump=lambda **_kw: dict(record,
+                                          clinical_audit=(audit or {})))
         MedicalCodingPipeline._apply_scrub_verdict(
             MedicalCodingPipeline.__new__(MedicalCodingPipeline), result, scrub)
         return result
@@ -507,10 +561,14 @@ class AuditPendingGateTest(unittest.TestCase):
         self.assertEqual(r.final_disposition, "CLEAN")
         self.assertEqual(r.auto_coding_tier, "AUTO")
 
-    def test_data_grounded_corrections_clean_without_hold(self):
+    def test_data_grounded_corrections_also_held_pending(self):
+        # Universal-audit contract: a scrub-CLEAN claim is held at REVIEW
+        # under the pending marker until the audit upholds it, EVEN when its
+        # corrections are all data-grounded (no interpretive ones).
         r = self._apply(_DATA)
-        self.assertEqual(r.final_disposition, "CLEAN")
-        self.assertEqual(r.auto_coding_tier, "AUTO")
+        self.assertEqual(r.final_disposition, "REVIEW")
+        self.assertTrue(any("[clinical_audit/pending]" in s
+                            for s in r.auto_coding_review_reasons))
 
     def test_scrub_review_never_held_pending(self):
         r = self._apply(_INTERP, clean=False)
@@ -546,7 +604,8 @@ class AuditPromotionTest(unittest.TestCase):
         note = "Assessment: the finding is documented in the note, right foot."
         with mock.patch.object(
                 ca, "_audit_once",
-                side_effect=lambda case, pass_idx=0: dict(v, _model="t")):
+                side_effect=lambda case, pass_idx=0: dict(v, _model="t")), \
+                mock.patch.object(ca, "_exploratory_scan", return_value=""):
             return ca.audit_result("note_x", result, note, rep=object(),
                                    passes=1)
 
@@ -608,7 +667,9 @@ class AuditSkipPathTest(unittest.TestCase):
             f.write_text(_json.dumps(r))
             with mock.patch.object(
                     ca, "_audit_once",
-                    side_effect=AssertionError("must not call the LLM")):
+                    side_effect=AssertionError("must not call the LLM")), \
+                    mock.patch.object(ca, "_exploratory_scan",
+                                      return_value=""):
                 stats = ca.audit_batch(Path(td), docs=["note_x"],
                                        rep=object())
             saved = _json.loads(f.read_text())

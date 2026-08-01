@@ -88,7 +88,13 @@ GLOBAL_PERIODS_FILE = DATA_DIR / "global_periods.json"
 SNOMED_ROOTS_FILE = DATA_DIR / "snomed_root_concepts.json"
 
 # --- RAG settings ---
-RAG_TOP_K: int = 15
+# top_k feeds the coder's candidate list; 20 gives recall headroom for a
+# borderline-ranked-but-correct code (e.g. a semicolon-parent) without
+# flooding the prompt. The dense prefetch keeps a cosine floor, but the
+# enriched multi-descriptor / index-synonym embedding text (see
+# vector_store record loaders) is what actually lifts vocabulary-mismatched
+# codes into range on BOTH dense and sparse.
+RAG_TOP_K: int = 20
 RAG_SIMILARITY_THRESHOLD: float = 0.35
 
 # --- Coding engine ---
