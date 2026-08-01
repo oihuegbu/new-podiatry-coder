@@ -368,9 +368,19 @@ class CodingValidator:
         # descriptor (or an unbilled sibling's) against the note's actual
         # words — the dimension the structural checks above can't see.
         self._check_cpt_descriptor_evidence(cpt, note_full_text)
+        # Family-distinctive grounding: a code's discriminating descriptor term
+        # (the word that separates it from its own siblings — '...secondary...')
+        # must be documented, else the documented work may match a different
+        # family member. Generalizes the reactive per-qualifier rules; flags,
+        # never removes (substitution is the conservation gate's job).
+        self._check_cpt_family_distinctive_grounding(cpt, note_full_text)
         # (_check_unbilled_descriptor_match runs earlier, pre-modifier/NCCI —
         # its upgrade arm changes codes and everything below must see them.)
         self._check_icd_sibling_descriptor(icd, note_full_text)
+        # Eponym-citation grounding: an ICD line citing an eponym ('Haglund's')
+        # whose code's authoritative terms (descriptor/inclusion/index) never
+        # name it has an unverified index basis — cap confidence and flag.
+        self._check_icd_citation_grounding(icd)
         self._check_with_without_axis(icd, note_full_text)
         # Severity-tier arbitration alongside the sibling checks: final-
         # character axes (ulcer depth) are structurally excluded from the
@@ -6835,6 +6845,158 @@ class CodingValidator:
     def _cpt_desc_tokens(self, desc: str) -> set:
         return {t for t in self._tokens(self._EG_PAREN_RE.sub(" ", desc or ""))
                 if len(t) >= 4 and t not in self._DESC_STOPWORDS}
+
+    _EPONYM_RE = re.compile(r"\b([A-Z][a-z]{3,})'s\b")
+
+    def _check_icd_citation_grounding(self, icd):
+        """Ground an ICD assignment's EPONYM basis against the authoritative
+        tables, and cap confidence when it does not hold. Eponyms ('Haglund's',
+        'Morton's', 'Charcot's') are the fabrication-prone class — they resolve
+        only through a specific Alphabetic-Index main term — and the coder was
+        observed asserting an index path that the loaded index does not
+        contain, then laundering it with a high confidence score.
+
+        Measured live (note 00001): M21.6X1 was assigned for 'Haglund's
+        deformity' at confidence 0.9 with needs_review False, rationale citing
+        '"Deformity, Haglund's" in the Index'. The loaded Index maps 'Haglund'
+        only to disease/osteochondrosis (M92/M93), never to M21.6X1 — the
+        cited path does not exist. When the eponym named in the line's own
+        supporting text appears NOWHERE in the code's authoritative coverage
+        (description + inclusion terms + index terms), the citation is
+        unverified: confidence is capped and the line flagged for a human to
+        pin the code to a real authority. Verification only, never a removal —
+        an unverifiable eponym is still often a defensible clinical
+        approximation, just not a 0.9-confident one.
+
+        Data-driven: coverage comes 100% from store.icd10_inclusion_terms /
+        icd10_index_terms and the code's own description — no hardcoded codes,
+        no curated eponym list (eponyms are found by possessive grammar)."""
+        if self.store is None:
+            return
+        for entry in icd:
+            code = (entry.get("code") or "").strip()
+            text = " ".join(str(entry.get(k) or "") for k in
+                            ("supporting_text", "rationale"))
+            eponyms = {m.group(1).lower()
+                       for m in self._EPONYM_RE.finditer(text)}
+            if not code or not eponyms:
+                continue
+            cover = " ".join([
+                (self.db.validate_icd10(code) or {}).get("description", ""),
+                " ".join(self.store.icd10_inclusion_terms(code) or []),
+                " ".join(self.store.icd10_index_terms(code) or []),
+            ]).lower()
+            cover_stems = {self._stem(t) for t in self._tokens(cover)}
+            unverified = sorted(e for e in eponyms
+                                if self._stem(e) not in cover_stems)
+            if not unverified:
+                continue
+            try:
+                conf = float(entry.get("confidence") or 1.0)
+            except (TypeError, ValueError):
+                conf = 1.0
+            entry["confidence"] = f"{min(conf, 0.5):.2f}"
+            entry["needs_review"] = True
+            self._add(
+                "WARNING", code, "eponym_citation_unverified",
+                f"{code}'s basis cites the eponym(s) "
+                f"{', '.join(e.title() for e in unverified)}, but no "
+                f"authoritative term for the code (its descriptor, inclusion "
+                f"terms, or Alphabetic-Index terms) names them — the cited "
+                f"index/tabular path is unverified. Confidence capped and "
+                f"flagged; pin the code to the eponym's actual Index main term "
+                f"or select the code that term resolves to.",
+                f"Verify {code} against the eponym's real ICD-10-CM Index entry",
+                denial_risk="MEDIUM",
+                clause="eponym_citation",
+            )
+
+    def _check_cpt_family_distinctive_grounding(self, cpt, note_full_text: str):
+        """Ground a billed CPT's DISTINCTIVE descriptor term — the word that
+        differentiates it from its own family siblings — against the note.
+        Generalizes the reactive per-qualifier rules ('for spur', 'ruptured')
+        without a curated list: the discriminating term is derived from the
+        code's family, so a NEW qualifier ('secondary') is caught the first
+        time it appears, not only after a rule is actuated for it.
+
+        Measured live (note 00001): 27654 ('Repair, SECONDARY, Achilles
+        tendon') was billed for a primary insertional debridement/reattachment
+        — no prior or delayed re-repair documented. 'secondary' is exactly the
+        token that separates 27654 from its sibling 27650 ('Repair, PRIMARY,
+        ... ruptured Achilles'); the note documents neither 'secondary' nor a
+        re-repair context, so the defining term is unsupported. Same class as
+        the already-rejected 28119 'for spur' and 27650 'ruptured'.
+
+        A family is codes within a small numeric neighborhood that share the
+        code's core operation+anatomy tokens; the billed code's distinctive
+        tokens are those it carries that a sibling does not. A distinctive
+        token absent from the note (+ the line's evidence spans and linked
+        diagnoses) is flagged — WARNING + needs_review, never a removal (the
+        substitution direction is the conservation gate's job)."""
+        if not note_full_text:
+            return
+        _GENERIC = {"with", "without", "graft", "open", "closed", "percutaneous",
+                    "each", "single", "initial", "subsequent", "repair",
+                    "application", "excision", "removal", "procedure"}
+        evidence, low = self._note_evidence(note_full_text)
+        for entry in cpt:
+            code = (entry.get("code") or "").strip()
+            if not code.isdigit():
+                continue
+            own = self.db.validate_cpt(code) or {}
+            own_desc = (own.get("long_description")
+                        or own.get("description") or "")
+            own_toks = {t for t in self._tokens(
+                self._EG_PAREN_RE.sub(" ", own_desc.split(";")[0]))
+                if len(t) >= 4 and t not in self._DESC_STOPWORDS
+                and t not in _GENERIC}
+            if not own_toks:
+                continue
+            # Core-operation family: near-numeric codes sharing >= 2 of this
+            # code's core tokens. A token is DISTINCTIVE if at least one such
+            # sibling lacks it — the word(s) that discriminate this code from
+            # the family. Without any sibling the descriptor is not part of a
+            # discriminating family, so there is nothing to ground — skip.
+            siblings = []
+            for c2, info in (getattr(self.db, "cpt", {}) or {}).items():
+                if c2 == code or not c2.isdigit() \
+                        or abs(int(c2) - int(code)) > 12:
+                    continue
+                d2 = (info.get("long_description")
+                      or info.get("description") or "")
+                toks2 = {t for t in self._tokens(
+                    self._EG_PAREN_RE.sub(" ", d2.split(";")[0]))
+                    if len(t) >= 4 and t not in self._DESC_STOPWORDS
+                    and t not in _GENERIC}
+                if len(own_toks & toks2) >= 2:  # shares the core operation
+                    siblings.append(toks2)
+            if not siblings:
+                continue
+            distinctive = {t for t in own_toks
+                           if any(t not in sib for sib in siblings)}
+            undocumented = sorted(
+                t for t in distinctive
+                if not self._desc_documented(t, evidence, low))
+            if not undocumented:
+                continue
+            entry["needs_review"] = True
+            try:
+                conf = float(entry.get("confidence") or 1.0)
+            except (TypeError, ValueError):
+                conf = 1.0
+            entry["confidence"] = f"{min(conf, 0.5):.2f}"
+            self._add(
+                "WARNING", code, "descriptor_qualifier_undocumented",
+                f"{code}'s descriptor carries the distinguishing term(s) "
+                f"{', '.join(undocumented[:4])} — the word(s) that separate it "
+                f"from its own CPT family — but the note documents neither "
+                f"them nor an equivalent basis. The documented work may match "
+                f"a different family member. Confidence capped and flagged.",
+                f"Verify {code} vs its family siblings; the defining term "
+                f"{undocumented[0]!r} is not documented",
+                denial_risk="MEDIUM",
+                clause="descriptor_qualifier",
+            )
 
     def _check_integral_immobilization(self, cpt, hcpcs):
         """CMS Global Surgery (IOM 100-04 Ch.12 §40.1) / NCCI Policy Manual

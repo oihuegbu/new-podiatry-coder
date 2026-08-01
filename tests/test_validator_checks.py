@@ -851,6 +851,64 @@ def main():
     v._non_billable_codes_to_suppress = set()
     v._bundled_codes_to_suppress = set()
 
+    print("\n[eponym citation grounding (gap #3)]")
+    # M21.6X1 cited for 'Haglund's deformity' — but the loaded index maps
+    # Haglund only to disease/osteochondrosis, never to M21.6X1. The eponym
+    # is absent from the code's authoritative coverage → cap + flag.
+    if not (store.icd10_inclusion_terms("M21.6X1")
+            or any("haglund" in t.lower()
+                   for t in store.icd10_index_terms("M21.6X1") or [])):
+        v.issues = []
+        icd_e = [{"code": "M21.6X1", "confidence": "0.9", "needs_review": False,
+                  "supporting_text": "Haglund's deformity, right heel"},
+                 {"code": "M76.61", "confidence": "0.85",
+                  "supporting_text": "Achilles tendinitis"}]
+        v._check_icd_citation_grounding(icd_e)
+        check("unverifiable eponym (Haglund's) → confidence capped + flagged",
+              float(icd_e[0]["confidence"]) <= 0.5
+              and icd_e[0]["needs_review"] is True
+              and any(i.code == "M21.6X1"
+                      and i.category == "eponym_citation_unverified"
+                      for i in v.issues))
+        check("no eponym in supporting text → line untouched",
+              icd_e[1]["confidence"] == "0.85"
+              and not any(i.code == "M76.61" for i in v.issues))
+    else:
+        check("SKIP: M21.6X1 dataset carries a Haglund term", True)
+
+    print("\n[family distinctive grounding (gap #2)]")
+    # 27654 ('Repair, secondary, Achilles tendon'): 'secondary' is the term
+    # separating it from sibling 27650 ('Repair, primary, ruptured Achilles').
+    # A note documenting neither 'secondary' nor a re-repair basis → cap+flag,
+    # generalizing the reactive 'ruptured'/'for spur' rules with no curated list.
+    d54 = (db.cpt.get("27654") or {}).get("long_description") or ""
+    if "secondary" in d54.lower():
+        v.issues = []
+        note_primary = ("The Achilles was debrided of degenerative tissue and "
+                        "reattached to the calcaneus with two suture anchors.")
+        cpt_q = [{"code": "27654", "confidence": "0.68"},
+                 {"code": "28118", "confidence": "0.9"}]
+        v._check_cpt_family_distinctive_grounding(cpt_q, note_primary)
+        check("undocumented distinguishing term 'secondary' → 27654 capped + flagged",
+              float(cpt_q[0]["confidence"]) <= 0.5
+              and cpt_q[0].get("needs_review") is True
+              and any(i.code == "27654"
+                      and i.category == "descriptor_qualifier_undocumented"
+                      for i in v.issues))
+        check("documented code (28118 ostectomy/calcaneus) NOT flagged",
+              cpt_q[1]["confidence"] == "0.9"
+              and not any(i.code == "28118" for i in v.issues))
+        # Negative: if the note DOES document the secondary basis, no flag.
+        v.issues = []
+        cpt_q2 = [{"code": "27654", "confidence": "0.68"}]
+        v._check_cpt_family_distinctive_grounding(
+            cpt_q2, "Secondary repair of the previously reconstructed Achilles.")
+        check("documented 'secondary' basis → 27654 NOT flagged",
+              not any(i.code == "27654" for i in v.issues))
+    else:
+        check("SKIP: 27654 descriptor lacks 'secondary' in dataset", True)
+    v.issues = []
+
     print("\n[injury 7th character D→S with post-traumatic condition]")
     icd42 = [{"code": "M19.171", "type": "primary"},
              {"code": "S93.321D", "type": "secondary"}]
