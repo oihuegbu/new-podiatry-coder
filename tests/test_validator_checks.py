@@ -913,6 +913,16 @@ def main():
             cpt_q2, "Revision repair of the previously reconstructed Achilles.")
         check("documented 'secondary' basis (revision/previous) → 27654 NOT flagged",
               not any(i.code == "27654" for i in v.issues))
+        # Regression (caught live in v6): a bare 'failed' — 'conservative care
+        # has failed' — must NOT satisfy 'secondary'; it is failed care, not a
+        # failed prior REPAIR. Over-broad evidence stems caused a false negative.
+        v.issues = []
+        cpt_q3 = [{"code": "27654", "confidence": 0.68}]
+        v._check_cpt_qualifier_ontology(
+            cpt_q3, "Conservative care with NSAIDs has failed over 18 months. "
+                    "Primary Achilles debridement and reattachment performed.")
+        check("'conservative care failed' does NOT satisfy 'secondary' → 27654 flagged",
+              any(i.code == "27654" for i in v.issues))
     else:
         check("SKIP: 27654 'secondary' or ontology not in dataset", True)
     v.issues = []

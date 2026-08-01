@@ -3,10 +3,10 @@
   "version": "2026.08",
   "qualifiers": {
     "secondary": {
-      "evidence_stems": ["revis", "reoper", "re-repair", "rerepair", "previous", "prior", "delay", "neglect", "chronic ruptur", "failed", "staged", "reconstruct"],
+      "evidence_stems": ["revision", "re-repair", "rerepair", "reoperation", "reoperative", "previous repair", "prior repair", "previously repaired", "prior surgery", "previous surgery", "failed repair", "failed reconstruction", "delayed repair", "neglected ruptur", "chronic ruptur", "staged"],
       "requires_context": "repair",
-      "authority": "CPT surgery guidelines — a 'secondary' repair is a re-repair or delayed/neglected repair; it presupposes a prior or failed repair, or a chronically neglected injury, not a first-time reconstruction.",
-      "message": "the descriptor's 'secondary' denotes a re-repair or delayed/neglected repair; the note documents a primary reconstruction with no prior repair, revision, or delayed/neglected context"
+      "authority": "CPT surgery guidelines — a 'secondary' repair is a re-repair or delayed/neglected repair; it presupposes a prior or failed REPAIR, or a chronically neglected injury, not a first-time reconstruction. Evidence must name a prior/failed REPAIR context specifically — a bare 'failed' (e.g. 'conservative care failed') or 'reconstruction' (done in primary repairs too) does not qualify.",
+      "message": "the descriptor's 'secondary' denotes a re-repair or delayed/neglected repair; the note documents a primary reconstruction with no prior repair, revision, reoperation, or neglected/delayed-repair context"
     },
     "ruptured": {
       "evidence_stems": ["ruptur", "torn", "tear", "avuls", "complete disrupt"],
