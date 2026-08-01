@@ -6847,13 +6847,22 @@ class CodingValidator:
             own = self.db.validate_cpt(code)
             if not own or not code.isdigit():
                 continue
-            own_toks = self._cpt_desc_tokens(own.get("description", ""))
+            # CPT reference entries carry `long_description` (the AMA full
+            # descriptor); `description` is absent. Reading the missing key
+            # left own_toks empty for EVERY code, silently disabling this
+            # whole gate on real data — the sibling loop below already reads
+            # long_description, so `own` must too. (Found only when an
+            # end-to-end run showed a documented ostectomy dropped with no
+            # substitution: the gate never even scored a candidate.)
+            own_toks = self._cpt_desc_tokens(
+                own.get("long_description") or own.get("description") or "")
             if not own_toks:
                 continue
             # Shared work documented? The family's common tokens (the
             # operation itself: 'repair', 'achilles', 'tendon') must be
             # spoken by the note before any conservation claim is made.
-            candidates = []
+            candidates = []       # more-specific siblings (upgrade direction)
+            parents = []          # general semicolon parents (fallback dir.)
             shared_documented = False
             for c2, info in (getattr(self.db, "cpt", {}) or {}).items():
                 if c2 == code or not c2.isdigit() \
@@ -6870,22 +6879,61 @@ class CodingValidator:
                 if len(doc_shared) < 2:
                     continue
                 shared_documented = True
-                sib_only = toks2 - own_toks
-                if (not sib_only or c2 in billed
+                if (c2 in billed
                         or c2 in self._non_billable_codes_to_suppress
                         or c2 in self._bundled_codes_to_suppress):
                     continue  # never resurrect a code another layer removed
-                # substitution requires EVERY distinguishing attribute of
-                # the sibling affirmatively documented in the clinical view
-                if all(self._desc_documented(t, clin_words, clin_low)
-                       for t in sib_only):
-                    candidates.append((len(shared), c2, desc2))
+                sib_only = toks2 - own_toks     # what c2 ADDS over the removed code
+                child_only = own_toks - toks2   # what the removed code ADDS over c2
+                if sib_only:
+                    # More-specific sibling: substitute only if EVERY
+                    # distinguishing attribute is affirmatively documented.
+                    if all(self._desc_documented(t, clin_words, clin_low)
+                           for t in sib_only):
+                        candidates.append((len(shared), c2, desc2))
+                elif child_only:
+                    # c2's descriptor tokens are a strict SUBSET of the
+                    # removed code's — the CPT semicolon PARENT (same base
+                    # operation, minus a post-semicolon qualifier the child
+                    # adds; e.g. 28118 'Ostectomy, calcaneus;' under 28119
+                    # '...; for spur, with... plantar fascial release'). The
+                    # parent is the correct fallback precisely when the
+                    # child's distinguishing qualifier is UNsupported: the
+                    # child was struck for a documentation mismatch, so the
+                    # same operation still belongs on the claim under the
+                    # unqualified base code. Guard: at least one child-only
+                    # token must be undocumented, so we only generalize away
+                    # an unsupported qualifier — never drop a documented
+                    # attribute (if the child were fully documented its
+                    # removal is the suspect step, and we escalate instead).
+                    if not all(self._desc_documented(t, clin_words, clin_low)
+                               for t in child_only):
+                        parents.append((len(shared), c2, desc2))
             if not shared_documented:
                 continue  # the work itself isn't documented — removal stands
             candidates.sort(reverse=True)
+            parents.sort(reverse=True)
+            # A more-specific sibling (accurate upgrade) is always preferred
+            # over the general parent (safe generalization); the parent is a
+            # last resort so the primary procedure is never dropped when no
+            # sibling's added attributes are provable. Either target must be
+            # UNAMBIGUOUS — a tie means the deterministic layer cannot pick,
+            # so it escalates rather than guess (consistency contract).
+            target = None
             if candidates and (len(candidates) == 1
                                or candidates[0][0] > candidates[1][0]):
                 _, target, tdesc = candidates[0]
+                kind, why = "sibling", (
+                    f"every distinguishing attribute of {target}'s descriptor "
+                    f"is documented")
+            elif parents and (len(parents) == 1
+                              or parents[0][0] > parents[1][0]):
+                _, target, tdesc = parents[0]
+                kind, why = "parent", (
+                    f"the removed code's distinguishing qualifier is not "
+                    f"documented, so the same base operation belongs on the "
+                    f"claim under its unqualified parent {target}")
+            if target is not None:
                 entry["code"] = target
                 entry["description"] = tdesc
                 entry["needs_review"] = True
@@ -6895,15 +6943,14 @@ class CodingValidator:
                 self._add(
                     "WARNING", target, "removal_conservation",
                     f"AUTO-CORRECTED: {code} was removed for a documentation "
-                    f"mismatch, but the documented work matches family member "
-                    f"{target} ('{tdesc[:60]}') — every distinguishing "
-                    f"attribute of {target}'s descriptor is documented, so "
-                    f"the line was substituted instead of dropped.",
+                    f"mismatch, but the documented work is conserved on family "
+                    f"{kind} {target} ('{tdesc[:60]}') — {why}, so the line "
+                    f"was substituted instead of dropped.",
                     "Verify the substituted code matches the documented work",
                     denial_risk="MEDIUM",
                 )
                 logger.info(f"  Removal conservation: {code} → {target} "
-                            f"(documented work preserved)")
+                            f"({kind}; documented work preserved)")
             else:
                 self._add(
                     "WARNING", code, "removal_conservation",

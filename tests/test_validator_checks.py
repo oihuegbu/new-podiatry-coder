@@ -751,6 +751,68 @@ def main():
     else:
         check("SKIP: 90389 MUE is not 0 in this dataset", True)
 
+    print("\n[removal conservation — semicolon family substitution]")
+    # 28118 'Ostectomy, calcaneus;' is the semicolon PARENT of 28119
+    # '...; for spur, with or without plantar fascial release'. Data-driven
+    # off the real descriptors — no code is hardcoded in the check.
+    from app.models.schemas import ValidationIssue as _VI
+    d18 = (db.cpt.get("28118") or {}).get("long_description") or ""
+    d19 = (db.cpt.get("28119") or {}).get("long_description") or ""
+    if "calcaneus" in d18.lower() and "spur" in d19.lower():
+        def _conserve(removed, note, suppressed=None):
+            v.issues = []
+            v._non_billable_codes_to_suppress = set(suppressed or [removed])
+            v._bundled_codes_to_suppress = set()
+            v.issues = [_VI(severity="WARNING", code=removed,
+                            category="undocumented_procedure_indication",
+                            message="removed for documentation mismatch")]
+            line = [{"code": removed, "description": "x", "units": 1}]
+            v._check_removal_conservation(line, note)
+            rc = [i for i in v.issues if i.category == "removal_conservation"]
+            return line[0]["code"], rc
+
+        # Parent fallback: child 28119 struck, base ostectomy documented but
+        # the 'for spur / plantar fascial release' qualifier is NOT — the
+        # same operation belongs under the unqualified parent 28118.
+        haglund = ("The posterosuperior calcaneal prominence (Haglund "
+                   "deformity) was exposed. An ostectomy of the calcaneus "
+                   "was performed, resecting the prominent bone. The "
+                   "Achilles insertion was debrided and reattached.")
+        code_after, rc = _conserve("28119", haglund)
+        check("parent fallback: 28119 (child) → 28118 (parent) when qualifier undocumented",
+              code_after == "28118"
+              and "28119" not in v._non_billable_codes_to_suppress
+              and any(i.severity == "WARNING" and i.code == "28118" for i in rc))
+        # This ALSO regression-guards the own-description bug: the gate read
+        # the absent `description` key (not `long_description`), leaving
+        # own_toks empty and silently disabling conservation for every CPT
+        # code — the substitution above is impossible unless own_toks fills.
+        check("own_toks populates from long_description (gate not silently dead)",
+              code_after == "28118")
+
+        # Sibling upgrade (opposite direction): base 28118 struck, and the
+        # note DOES document the child's distinguishing work → upgrade to
+        # the more-specific 28119, not down to a parent.
+        spur = ("Ostectomy of the calcaneus was performed for a plantar "
+                "heel spur, including a plantar fascial release.")
+        code_up, rc_up = _conserve("28118", spur)
+        check("sibling upgrade: 28118 → 28119 when child's attributes documented",
+              code_up == "28119"
+              and any(i.code == "28119" for i in rc_up))
+
+        # Negative control: child 28119 struck, but the distinguishing
+        # qualifier IS documented → do NOT force the parent; escalate so a
+        # coder resolves it (guards against over-generalization).
+        code_neg, rc_neg = _conserve("28119", spur)
+        check("negative: qualifier documented → escalate, parent NOT forced",
+              code_neg == "28119"
+              and any(i.code == "28119" and i.severity in ("WARNING", "HIGH")
+                      for i in rc_neg))
+    else:
+        check("SKIP: 28118/28119 semicolon family not in dataset", True)
+    v._non_billable_codes_to_suppress = set()
+    v._bundled_codes_to_suppress = set()
+
     print("\n[injury 7th character D→S with post-traumatic condition]")
     icd42 = [{"code": "M19.171", "type": "primary"},
              {"code": "S93.321D", "type": "secondary"}]
