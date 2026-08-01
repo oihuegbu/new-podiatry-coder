@@ -368,11 +368,11 @@ class CodingValidator:
         # descriptor (or an unbilled sibling's) against the note's actual
         # words — the dimension the structural checks above can't see.
         self._check_cpt_descriptor_evidence(cpt, note_full_text)
-        # Family-distinctive grounding: a code's discriminating descriptor term
-        # (the word that separates it from its own siblings — '...secondary...')
-        # must be documented, else the documented work may match a different
-        # family member. Generalizes the reactive per-qualifier rules; flags,
-        # never removes (substitution is the conservation gate's job).
+        # Qualifier ontology FIRST (semantic evidence for known qualifiers:
+        # 'secondary' satisfied by 'revision'/'previous repair'), then the
+        # family-distinctive check for any OTHER discriminating term (literal
+        # match). The ontology owns its qualifiers so they aren't double-flagged.
+        self._check_cpt_qualifier_ontology(cpt, note_full_text)
         self._check_cpt_family_distinctive_grounding(cpt, note_full_text)
         # (_check_unbilled_descriptor_match runs earlier, pre-modifier/NCCI —
         # its upgrade arm changes codes and everything below must see them.)
@@ -381,6 +381,10 @@ class CodingValidator:
         # whose code's authoritative terms (descriptor/inclusion/index) never
         # name it has an unverified index basis — cap confidence and flag.
         self._check_icd_citation_grounding(icd)
+        # ...and explicit includes/index/excludes citation assertions (beyond
+        # eponyms): a rationale citing an inclusion/index basis for a condition
+        # the code's authoritative terms never name is an unverified fold.
+        self._check_icd_explicit_citation(icd)
         self._check_with_without_axis(icd, note_full_text)
         # Severity-tier arbitration alongside the sibling checks: final-
         # character axes (ulcer depth) are structurally excluded from the
@@ -6895,7 +6899,7 @@ class CodingValidator:
                 conf = float(entry.get("confidence") or 1.0)
             except (TypeError, ValueError):
                 conf = 1.0
-            entry["confidence"] = f"{min(conf, 0.5):.2f}"
+            entry["confidence"] = round(min(conf, 0.5), 2)
             entry["needs_review"] = True
             self._add(
                 "WARNING", code, "eponym_citation_unverified",
@@ -6910,6 +6914,83 @@ class CodingValidator:
                 denial_risk="MEDIUM",
                 clause="eponym_citation",
             )
+
+    def _qualifier_ontology(self) -> dict:
+        """Cached load of the descriptor-qualifier documentation ontology
+        (data/rules/descriptor_qualifiers.json) — config, per the rule-as-
+        config convention. {qualifier_token: {evidence_stems, requires_context,
+        authority, message}}."""
+        cache = getattr(self, "_qual_onto_cache", None)
+        if cache is not None:
+            return cache
+        onto = {}
+        try:
+            import json
+            from app.core.config import DATA_DIR
+            path = DATA_DIR / "rules" / "descriptor_qualifiers.json"
+            onto = (json.loads(path.read_text()).get("qualifiers") or {}) \
+                if path.exists() else {}
+        except Exception as exc:  # a malformed file must never sink validation
+            logger.warning(f"descriptor_qualifiers.json load failed: {exc!r}")
+            onto = {}
+        self._qual_onto_cache = onto
+        return onto
+
+    def _check_cpt_qualifier_ontology(self, cpt, note_full_text: str):
+        """Ground a code's DEFINING descriptor qualifier against the note using
+        the curated qualifier->documentation ontology — the config half of the
+        complete gap-#2 form. For each qualifier the ontology knows (secondary,
+        ruptured, spur, recurrent, revision), if the code's own descriptor
+        carries it and NONE of the qualifier's SEMANTIC evidence stems appears
+        in the note, cap confidence and flag. Semantic evidence is why this
+        does not over-flag where the literal family-distinctive check would: a
+        'secondary' repair documented as a 'revision' or 'previous repair' is
+        satisfied, not flagged.
+
+        Measured live (note 00001): 27654 ('Repair, secondary, ...') for a
+        primary reconstruction — no revision/prior-repair/delayed/neglected
+        evidence. Data-driven off the ontology config + the code's own
+        descriptor; no hardcoded codes; adding a qualifier is a config entry."""
+        if not note_full_text:
+            return
+        onto = self._qualifier_ontology()
+        if not onto:
+            return
+        low = note_full_text.lower()
+        for entry in cpt:
+            code = (entry.get("code") or "").strip()
+            info = self.db.validate_cpt(code) or {}
+            desc = (info.get("long_description")
+                    or info.get("description") or "").lower()
+            if not desc:
+                continue
+            desc_toks = self._tokens(desc)
+            for qual, spec in onto.items():
+                if qual not in desc_toks:
+                    continue
+                ctx = str(spec.get("requires_context") or "")
+                if ctx and ctx not in desc:
+                    continue  # qualifier not in its governing context here
+                stems = spec.get("evidence_stems") or []
+                if any(str(s).lower() in low for s in stems):
+                    continue  # the qualifier's basis IS documented
+                entry["needs_review"] = True
+                try:
+                    conf = float(entry.get("confidence") or 1.0)
+                except (TypeError, ValueError):
+                    conf = 1.0
+                entry["confidence"] = round(min(conf, 0.5), 2)
+                self._add(
+                    "WARNING", code, "descriptor_qualifier_undocumented",
+                    f"{code}: {spec.get('message') or qual + ' undocumented'}. "
+                    f"Confidence capped and flagged. Authority: "
+                    f"{(spec.get('authority') or '')[:180]}",
+                    f"Verify {code}: the descriptor qualifier {qual!r} is not "
+                    f"supported by the documentation",
+                    denial_risk="MEDIUM",
+                    clause="descriptor_qualifier",
+                )
+                break  # one qualifier finding per line is enough
 
     def _check_cpt_family_distinctive_grounding(self, cpt, note_full_text: str):
         """Ground a billed CPT's DISTINCTIVE descriptor term — the word that
@@ -6972,8 +7053,14 @@ class CodingValidator:
                     siblings.append(toks2)
             if not siblings:
                 continue
-            distinctive = {t for t in own_toks
-                           if any(t not in sib for sib in siblings)}
+            # Defer to the semantic ontology for qualifiers it owns: those get
+            # evidence-set grounding (a 'secondary' repair satisfied by
+            # 'revision'), so the literal family-distinctive check must not
+            # also flag them — otherwise a legitimately-documented qualifier
+            # double-flags. Non-ontology distinctive terms stay literal here.
+            onto_quals = set(self._qualifier_ontology().keys())
+            distinctive = {t for t in own_toks if t not in onto_quals
+                           and any(t not in sib for sib in siblings)}
             undocumented = sorted(
                 t for t in distinctive
                 if not self._desc_documented(t, evidence, low))
@@ -6984,7 +7071,7 @@ class CodingValidator:
                 conf = float(entry.get("confidence") or 1.0)
             except (TypeError, ValueError):
                 conf = 1.0
-            entry["confidence"] = f"{min(conf, 0.5):.2f}"
+            entry["confidence"] = round(min(conf, 0.5), 2)
             self._add(
                 "WARNING", code, "descriptor_qualifier_undocumented",
                 f"{code}'s descriptor carries the distinguishing term(s) "
@@ -6996,6 +7083,86 @@ class CodingValidator:
                 f"{undocumented[0]!r} is not documented",
                 denial_risk="MEDIUM",
                 clause="descriptor_qualifier",
+            )
+
+    _CITATION_RE = re.compile(
+        r"\b(includ\w*|inclusion(?:\s+term)?|index|tabular|exclud\w*)\b"
+        r"[^A-Za-z0-9]{0,4}"
+        # the cited condition phrase — stop at a comma/semicolon/period so it
+        # does not sweep into the rest of the sentence ('..., so the bursitis
+        # is captured' must not become part of the cited term)
+        r"['\"]?([A-Za-z][A-Za-z '/\-]{4,45})",
+        re.IGNORECASE)
+
+    def _check_icd_explicit_citation(self, icd):
+        """Extend eponym grounding to EXPLICIT authority citations: when an ICD
+        line's rationale asserts an 'includes / inclusion term / index /
+        tabular / excludes' basis and names a condition, verify that named
+        condition against the code's actual authoritative terms. The deter-
+        ministic extraction (pattern-match the citation keyword + the following
+        condition phrase) closes the eponym-only boundary to all explicit,
+        checkable citation claims — the fabrication-prone kind — without an LLM
+        (which would re-introduce the run-to-run non-determinism the pipeline
+        exists to catch, and which cannot self-verify a citation it produced).
+
+        Measured pattern (note 00001 folds): a rationale claiming 'M76.6
+        includes retrocalcaneal bursitis' when the code's only inclusion term
+        is 'Achilles bursitis' — the cited condition's distinguishing token
+        ('retrocalcaneal') appears in none of the code's inclusion/index/
+        descriptor terms. Verification only: confidence capped + flagged, never
+        a removal. Data-driven off the loaded inclusion/index tables."""
+        if self.store is None:
+            return
+        _GEN = self._DESC_STOPWORDS | {"deformity", "disorder", "disease",
+                                       "condition", "right", "left", "foot",
+                                       "ankle", "leg", "heel", "acquired",
+                                       "other", "specified", "unspecified"}
+        for entry in icd:
+            code = (entry.get("code") or "").strip()
+            rationale = str(entry.get("rationale") or "")
+            if not code or not rationale:
+                continue
+            cover = " ".join([
+                (self.db.validate_icd10(code) or {}).get("description", ""),
+                " ".join(self.store.icd10_inclusion_terms(code) or []),
+                " ".join(self.store.icd10_index_terms(code) or []),
+            ]).lower()
+            cover_stems = {self._stem(t) for t in self._tokens(cover)}
+            unverified = []
+            for m in self._CITATION_RE.finditer(rationale):
+                cited = m.group(2)
+                # the distinguishing tokens of the cited condition phrase
+                toks = [t for t in self._tokens(cited.lower())
+                        if len(t) >= 5 and t not in _GEN]
+                missing = [t for t in toks
+                           if self._stem(t) not in cover_stems]
+                # flag only when a genuine distinguishing token is uncited AND
+                # some part of the phrase IS covered (so it's a real fold of
+                # THIS code's family, not an unrelated sentence fragment)
+                if missing and any(self._stem(t) in cover_stems
+                                   for t in toks):
+                    unverified.extend(missing)
+            unverified = sorted(set(unverified))
+            if not unverified:
+                continue
+            try:
+                conf = float(entry.get("confidence") or 1.0)
+            except (TypeError, ValueError):
+                conf = 1.0
+            entry["confidence"] = round(min(conf, 0.5), 2)
+            entry["needs_review"] = True
+            self._add(
+                "WARNING", code, "citation_unverified",
+                f"{code}'s rationale cites an inclusion/index basis for "
+                f"'{', '.join(unverified[:4])}', but the code's authoritative "
+                f"terms (descriptor, inclusion terms, Alphabetic-Index terms) "
+                f"do not name it — the cited path is unverified for that "
+                f"condition. Confidence capped and flagged; a documented, "
+                f"more-specific diagnosis may be under-captured by this fold.",
+                f"Verify {code} actually includes {unverified[0]!r} per the "
+                f"tabular/index, or code that condition separately",
+                denial_risk="MEDIUM",
+                clause="citation_unverified",
             )
 
     def _check_integral_immobilization(self, cpt, hcpcs):

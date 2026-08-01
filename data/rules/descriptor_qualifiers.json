@@ -1,0 +1,32 @@
+{
+  "_comment": "CPT descriptor qualifier -> documentation ontology (gap #2, complete form). Each entry maps a DEFINING descriptor qualifier (a word in a code's own descriptor that changes which clinical situation the code describes) to the set of note-evidence STEMS any one of which satisfies the qualifier, plus the governing authority. This is the curated-ontology half of 'LLM/curated-ontology extraction + deterministic verification': the mechanic (_check_cpt_qualifier_ontology) reads a code's OWN descriptor for these qualifiers and grounds each against the note deterministically. Unlike the family-distinctive check, evidence is SEMANTIC (a 'secondary' repair is satisfied by 'revision' or 'previous repair', not only the literal word 'secondary'), so it does not over-flag a legitimately-documented qualifier. Extending coverage to a new qualifier is a config entry here, never new Python or a per-code rule. STEMS only (matched via the validator's stemmer); never medical codes.",
+  "version": "2026.08",
+  "qualifiers": {
+    "secondary": {
+      "evidence_stems": ["revis", "reoper", "re-repair", "rerepair", "previous", "prior", "delay", "neglect", "chronic ruptur", "failed", "staged", "reconstruct"],
+      "requires_context": "repair",
+      "authority": "CPT surgery guidelines — a 'secondary' repair is a re-repair or delayed/neglected repair; it presupposes a prior or failed repair, or a chronically neglected injury, not a first-time reconstruction.",
+      "message": "the descriptor's 'secondary' denotes a re-repair or delayed/neglected repair; the note documents a primary reconstruction with no prior repair, revision, or delayed/neglected context"
+    },
+    "ruptured": {
+      "evidence_stems": ["ruptur", "torn", "tear", "avuls", "complete disrupt"],
+      "authority": "CPT descriptor defining term — the code treats a RUPTURED tendon; a degenerative/insertional debridement is not a rupture repair.",
+      "message": "the descriptor is defined by a RUPTURED tendon; no acute rupture, tear, or avulsion is documented"
+    },
+    "spur": {
+      "evidence_stems": ["spur", "exostos", "osteophyt", "calcaneal spur"],
+      "authority": "CPT semicolon-child qualifier — the code's 'for spur' variant treats a documented calcaneal/plantar spur.",
+      "message": "the descriptor's 'for spur' variant requires a documented spur/exostosis; none is documented as the treated pathology"
+    },
+    "recurrent": {
+      "evidence_stems": ["recurr", "return", "reoccur", "relaps"],
+      "authority": "CPT descriptor defining term — 'recurrent' presupposes a prior occurrence of the same condition.",
+      "message": "the descriptor's 'recurrent' requires a documented prior occurrence; none is documented"
+    },
+    "revision": {
+      "evidence_stems": ["revis", "redo", "reoper", "previous", "prior", "failed", "hardware removal"],
+      "authority": "CPT descriptor defining term — a 'revision' presupposes a prior procedure being revised.",
+      "message": "the descriptor's 'revision' requires a documented prior procedure being revised; none is documented"
+    }
+  }
+}

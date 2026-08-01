@@ -881,32 +881,73 @@ def main():
     # separating it from sibling 27650 ('Repair, primary, ruptured Achilles').
     # A note documenting neither 'secondary' nor a re-repair basis → cap+flag,
     # generalizing the reactive 'ruptured'/'for spur' rules with no curated list.
+    # 'secondary' is now owned by the qualifier ONTOLOGY (semantic evidence);
+    # the family-distinctive check DEFERS it. Run both as validate() does and
+    # assert exactly one flag (no double-flag), confidence capped to a FLOAT.
     d54 = (db.cpt.get("27654") or {}).get("long_description") or ""
-    if "secondary" in d54.lower():
+    if "secondary" in d54.lower() and v._qualifier_ontology().get("secondary"):
         v.issues = []
         note_primary = ("The Achilles was debrided of degenerative tissue and "
                         "reattached to the calcaneus with two suture anchors.")
-        cpt_q = [{"code": "27654", "confidence": "0.68"},
-                 {"code": "28118", "confidence": "0.9"}]
+        cpt_q = [{"code": "27654", "confidence": 0.68},
+                 {"code": "28118", "confidence": 0.9}]
+        v._check_cpt_qualifier_ontology(cpt_q, note_primary)
         v._check_cpt_family_distinctive_grounding(cpt_q, note_primary)
-        check("undocumented distinguishing term 'secondary' → 27654 capped + flagged",
-              float(cpt_q[0]["confidence"]) <= 0.5
+        q_flags = [i for i in v.issues if i.code == "27654"
+                   and i.category == "descriptor_qualifier_undocumented"]
+        check("ontology 'secondary' → 27654 capped + flagged EXACTLY once (no double-flag)",
+              isinstance(cpt_q[0]["confidence"], float)
+              and cpt_q[0]["confidence"] <= 0.5
               and cpt_q[0].get("needs_review") is True
-              and any(i.code == "27654"
-                      and i.category == "descriptor_qualifier_undocumented"
-                      for i in v.issues))
+              and len(q_flags) == 1)
         check("documented code (28118 ostectomy/calcaneus) NOT flagged",
-              cpt_q[1]["confidence"] == "0.9"
+              cpt_q[1]["confidence"] == 0.9
               and not any(i.code == "28118" for i in v.issues))
-        # Negative: if the note DOES document the secondary basis, no flag.
+        # Semantic negative: the ontology is satisfied by a synonym ('revision',
+        # 'previously') — the literal-only family check would over-flag; here no.
         v.issues = []
-        cpt_q2 = [{"code": "27654", "confidence": "0.68"}]
+        cpt_q2 = [{"code": "27654", "confidence": 0.68}]
+        v._check_cpt_qualifier_ontology(
+            cpt_q2, "Revision repair of the previously reconstructed Achilles.")
         v._check_cpt_family_distinctive_grounding(
-            cpt_q2, "Secondary repair of the previously reconstructed Achilles.")
-        check("documented 'secondary' basis → 27654 NOT flagged",
+            cpt_q2, "Revision repair of the previously reconstructed Achilles.")
+        check("documented 'secondary' basis (revision/previous) → 27654 NOT flagged",
               not any(i.code == "27654" for i in v.issues))
     else:
-        check("SKIP: 27654 descriptor lacks 'secondary' in dataset", True)
+        check("SKIP: 27654 'secondary' or ontology not in dataset", True)
+    v.issues = []
+
+    print("\n[explicit includes/index citation grounding (gap #3 extension)]")
+    if "achilles bursitis" in " ".join(
+            store.icd10_inclusion_terms("M76.61") or []).lower():
+        # Fabricated includes claim: the cited condition's distinguishing token
+        # ('retrocalcaneal') is in none of the code's authoritative terms.
+        v.issues = []
+        icd_c = [{"code": "M76.61", "confidence": 0.85,
+                  "rationale": "M76.6 includes retrocalcaneal bursitis, captured here."}]
+        v._check_icd_explicit_citation(icd_c)
+        check("fabricated includes claim (retrocalcaneal) → capped + flagged",
+              isinstance(icd_c[0]["confidence"], float)
+              and icd_c[0]["confidence"] <= 0.5
+              and any(i.code == "M76.61" and i.category == "citation_unverified"
+                      for i in v.issues))
+        # True includes claim → the cited term IS in the inclusion terms → no flag.
+        v.issues = []
+        icd_c2 = [{"code": "M76.61", "confidence": 0.85,
+                   "rationale": "Per the tabular, M76.6 includes Achilles bursitis."}]
+        v._check_icd_explicit_citation(icd_c2)
+        check("true includes claim (Achilles bursitis) → NOT flagged",
+              icd_c2[0]["confidence"] == 0.85
+              and not any(i.code == "M76.61" for i in v.issues))
+        # No citation keyword → check does not fire.
+        v.issues = []
+        icd_c3 = [{"code": "M76.61", "confidence": 0.85,
+                   "rationale": "The note documents Achilles tendinitis."}]
+        v._check_icd_explicit_citation(icd_c3)
+        check("no citation keyword → not checked",
+              not any(i.code == "M76.61" for i in v.issues))
+    else:
+        check("SKIP: M76.6 inclusion terms not in dataset", True)
     v.issues = []
 
     print("\n[injury 7th character D→S with post-traumatic condition]")
