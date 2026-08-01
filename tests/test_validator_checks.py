@@ -813,6 +813,44 @@ def main():
     v._non_billable_codes_to_suppress = set()
     v._bundled_codes_to_suppress = set()
 
+    print("\n[integral immobilization — global surgical package]")
+    # 29515 (short leg splint application) applied same-session as a 090-global
+    # surgery (28118) by the operating surgeon is post-op immobilization
+    # included in the package. Data-driven off descriptor grammar + global
+    # period — no hardcoded codes in the check.
+    if store.global_period("28118") == "090" and "splint" in (
+            (db.cpt.get("29515") or {}).get("long_description") or "").lower():
+        def _integral(cpt):
+            v.issues = []
+            v._non_billable_codes_to_suppress = set()
+            v._check_integral_immobilization(cpt, [])
+            return v._non_billable_codes_to_suppress
+        # Suppress: splint same-session as major surgery, no distinct modifier.
+        s = _integral([{"code": "28118", "modifiers": ["RT"], "units": 1},
+                       {"code": "29515", "modifiers": ["RT"], "units": 1}])
+        check("integral splint (29515) suppressed with same-session major surgery",
+              "29515" in s and "28118" not in s
+              and any(i.code == "29515" and i.category == "surgical_package"
+                      for i in v.issues))
+        # Do NOT suppress: a supported distinct-procedural modifier is present.
+        s = _integral([{"code": "28118", "modifiers": ["RT"], "units": 1},
+                       {"code": "29515", "modifiers": ["59", "RT"], "units": 1}])
+        check("distinct modifier 59 → splint NOT suppressed",
+              "29515" not in s)
+        # Do NOT suppress: no major surgery on the claim to fold it into.
+        s = _integral([{"code": "29515", "modifiers": ["RT"], "units": 1}])
+        check("no same-session major surgery → splint NOT suppressed",
+              "29515" not in s)
+        # Laterality alone (RT) is same-region, never a distinct-service rescue.
+        s = _integral([{"code": "28118", "modifiers": ["RT"], "units": 1},
+                       {"code": "29515", "modifiers": ["RT", "LT"], "units": 1}])
+        check("plain laterality does not rescue the splint",
+              "29515" in s)
+    else:
+        check("SKIP: 28118/29515 not in dataset for integral-immobilization", True)
+    v._non_billable_codes_to_suppress = set()
+    v._bundled_codes_to_suppress = set()
+
     print("\n[injury 7th character D→S with post-traumatic condition]")
     icd42 = [{"code": "M19.171", "type": "primary"},
              {"code": "S93.321D", "type": "secondary"}]

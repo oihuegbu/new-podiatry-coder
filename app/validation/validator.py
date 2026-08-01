@@ -445,6 +445,14 @@ class CodingValidator:
         self.rule_engine.run_auto_rules(icd, cpt, hcpcs, coding_result,
                                         note_full_text, note_assessment_text)
 
+        # Global-package integral services: the initial cast/splint applied
+        # by the operating surgeon at the same session as a major procedure
+        # is post-op immobilization included in the package. Runs AFTER
+        # run_auto_rules (which strips an unsupported distinct-service
+        # modifier) so a stripped-59 line reads as non-distinct, and before
+        # the suppression blocks realize the removal.
+        self._check_integral_immobilization(cpt, hcpcs)
+
         # Conservation gate BEFORE the suppression blocks realize removals:
         # a documentation-mismatch removal must either substitute the family
         # member the documented work supports, or escalate loudly — never
@@ -6827,6 +6835,78 @@ class CodingValidator:
     def _cpt_desc_tokens(self, desc: str) -> set:
         return {t for t in self._tokens(self._EG_PAREN_RE.sub(" ", desc or ""))
                 if len(t) >= 4 and t not in self._DESC_STOPWORDS}
+
+    def _check_integral_immobilization(self, cpt, hcpcs):
+        """CMS Global Surgery (IOM 100-04 Ch.12 §40.1) / NCCI Policy Manual
+        Ch.1: the INITIAL cast/splint/strap application furnished by the
+        operating surgeon at the same session as a 010/090-global surgical
+        procedure is post-operative immobilization included in the global
+        surgical package — not separately reportable. A replacement cast at
+        a later encounter, or a genuinely distinct-site application carrying
+        a SUPPORTED distinct-procedural modifier, remains billable.
+
+        Measured live (note 00001): the operating surgeon's posterior splint,
+        applied at the close of a Haglund resection (28118, global 090), was
+        coded as 29515 across runs. NCCI PTP FAILed it (bundles into 28118
+        and 27654, indicator 1) but nothing removed it, so the claim shipped
+        a will-bundle line to REVIEW. This is the same integral-service class
+        as the splint SUPPLY A4570 (removed by the MUE-0 gate): under either
+        code the splint is post-op care, not a separate service. The
+        SURGICAL_PACKAGE scrub filter and GLOBAL_PERIOD filter both PASSED on
+        this claim — they read code-level global indicators but did not
+        encode the same-session-integral determination this check adds.
+
+        Data-driven: the application line is identified by its OWN descriptor
+        grammar (an 'application' of a 'cast'/'splint'/'strap'), the
+        governing surgery by global_period 010/090 from the PFS data — no
+        hardcoded code lists. Distinctness is judged by a supported
+        distinct-procedural modifier (59/XE/XS/XP/XU); plain laterality
+        (RT/LT) denotes the SAME side/region and never rescues the line."""
+        if self.store is None:
+            return
+
+        def _is_major(code: str) -> bool:
+            return (self.store.global_period(code) or "").strip() in (
+                "010", "090")
+
+        # A same-claim major surgery by the operating surgeon must be present;
+        # without one there is no global package to fold the splint into.
+        major = [c for c in cpt if _is_major((c.get("code") or "").strip())]
+        if not major:
+            return
+        gov = (major[0].get("code") or "").strip()
+        _DISTINCT = {"59", "XE", "XS", "XP", "XU"}
+        for entry in cpt + hcpcs:
+            code = (entry.get("code") or "").strip()
+            if not code or code in self._non_billable_codes_to_suppress:
+                continue
+            if _is_major(code):
+                continue  # the surgery itself is never the integral line
+            info = (self.db.cpt.get(code) or self.db.hcpcs.get(code) or {})
+            desc = (info.get("long_description")
+                    or info.get("description") or "").lower()
+            # Own-descriptor grammar: an APPLICATION of a cast/splint/strap.
+            if "appl" not in desc or not any(
+                    w in desc for w in ("cast", "splint", "strap")):
+                continue
+            mods = {m.strip().upper() for m in (entry.get("modifiers") or [])}
+            if mods & _DISTINCT:
+                continue  # supported distinct modifier — separately reportable
+            self._non_billable_codes_to_suppress.add(code)
+            self._add(
+                "INFO", code, "surgical_package",
+                f"AUTO-CORRECTED: Removed {code} — the initial cast/splint "
+                f"application by the operating surgeon at the same session as "
+                f"a global-{self.store.global_period(gov)} procedure ({gov}) "
+                f"is post-operative immobilization included in the global "
+                f"surgical package (CMS IOM 100-04 Ch.12 §40.1; NCCI Policy "
+                f"Manual Ch.1); it is not separately reportable. If a distinct "
+                f"application at a separate site or session is documented, "
+                f"append a supported distinct-procedural modifier.",
+                f"{code} suppressed as integral post-op immobilization",
+                denial_risk="LOW",
+                clause="integral_immobilization",
+            )
 
     def _check_removal_conservation(self, cpt, note_full_text: str):
         if not note_full_text or not self._non_billable_codes_to_suppress:

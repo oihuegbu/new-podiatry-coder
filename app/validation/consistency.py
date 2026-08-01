@@ -391,6 +391,81 @@ def annotate_result(result: dict, report: dict, route: bool = True) -> dict:
                 prior = e.get("review_reason")
                 e["review_reason"] = f"{prior} | {why}" if prior else why
 
+    # Variance RESPONSE, not just detection: a BILLING code present in a
+    # strict MINORITY of runs (< half) is a run-specific over-code — the
+    # canonical run's own idiosyncratic addition, by definition NOT in the
+    # majority consensus select_canonical scored on. Flagging it (above)
+    # left it ON the claim; here it is REMOVED from the canonical claim and
+    # recorded, so the auto-path never ships a code the runs themselves
+    # didn't agree on. Majority-but-not-unanimous codes (>= half) keep the
+    # flag-and-review treatment — they are probably right, just uncertain.
+    # Measured live (note 00001): 29515 rode the canonical run at 1/3 while
+    # NCCI FAILed it; the consistency net detected the 1/3 but passed the
+    # code through. (Recorded + still routed to REVIEW, so a human can
+    # re-add a genuinely missed minority code; shipping a spurious over-code
+    # is the worse default.)
+    removed_minority: set[tuple[str, str]] = set()
+    for d in report["disagreements"]:
+        if (d.get("advisory") or d.get("kind") != "presence"
+                or d["array"] in _ADVISORY_ARRAYS):
+            continue
+        if d.get("present_in_runs", 0) * 2 >= d.get("runs", 1):
+            continue  # majority or better — keep flagged, do not remove
+        arr, code = d["array"], d["code"]
+        kept = [e for e in (result.get(arr) or [])
+                if not (isinstance(e, dict) and _code_of(e, arr) == code)]
+        if len(kept) != len(result.get(arr) or []):
+            result[arr] = kept
+            removed_minority.add((arr, code))
+    if removed_minority:
+        removed_codes = {c for _, c in removed_minority}
+        corr = list(result.get("material_corrections") or [])
+        for arr, code in sorted(removed_minority):
+            d = next(x for x in report["disagreements"]
+                     if x.get("array") == arr and x.get("code") == code)
+            corr.append({
+                "category": "consistency_minority_removed", "code": code,
+                "action": "removed", "interpretive": False,
+                "clause": "consistency_minority",
+                "message": (f"AUTO-CORRECTED: {code} removed — present in only "
+                            f"{d['present_in_runs']}/{d['runs']} independent "
+                            f"runs (below majority); a run-specific over-code "
+                            f"not in the cross-run consensus. Re-add on review "
+                            f"if the service is documented and warranted."),
+            })
+        result["material_corrections"] = corr
+        # Keep the saved result consistent: drop validation/scrub findings
+        # that reference ONLY now-removed codes, and recompute scrub.clean.
+        def _codes_of(f: dict) -> set:
+            cs = f.get("codes")
+            if isinstance(cs, list):
+                return {str(c).strip() for c in cs if c}
+            c = f.get("code")
+            return {str(c).strip()} if c else set()
+
+        def _prune(items):
+            # A finding is orphaned when it references ANY removed code:
+            # these filters emit per-code (MUE, billability) or per-pair
+            # (NCCI PTP) findings, and removing a referenced code makes the
+            # finding moot — a pair edit cannot bundle a code that is no
+            # longer on the claim.
+            out = []
+            for f in items or []:
+                fc = _codes_of(f) if isinstance(f, dict) else set()
+                if fc and (fc & removed_codes):
+                    continue  # orphaned by the removal
+                out.append(f)
+            return out
+        for key in ("validation_issues", "pre_submission_audit_findings"):
+            if key in result:
+                result[key] = _prune(result[key])
+        scrub = result.get("claim_scrub")
+        if isinstance(scrub, dict) and isinstance(scrub.get("findings"), list):
+            scrub["findings"] = _prune(scrub["findings"])
+            scrub["clean"] = not any(
+                str(f.get("status")).upper() == "FAIL"
+                for f in scrub["findings"] if isinstance(f, dict))
+
     reasons = list(result.get("auto_coding_review_reasons") or [])
     summary_bits = []
     billing = [d for d in report["disagreements"] if not d.get("advisory")]
