@@ -37,14 +37,22 @@ PROBES = [
     ("hammertoe correction with proximal interphalangeal arthrodesis",
      "28285", "cpt"),
     ("Morton's neuroma excision, intermetatarsal nerve", "28080", "cpt"),
-    ("Haglund's deformity of the right heel", "M77.31", "icd10"),
-    ("pump bump of the heel", "M77.31", "icd10"),          # eponym/lay term
+    # NOTE: ICD-10-CM has no dedicated code for Haglund's deformity; the nearest
+    # data code M77.31 is "Calcaneal spur" (its own synonym is "Heel spur") — a
+    # distinct entity — so a Haglund->M77.31 probe would reward WRONG retrieval.
+    # Omitted deliberately; the CPT "Haglund resection"->28118 probes cover the eponym.
     ("hallux valgus, bunion of the great toe", "M20.11", "icd10"),
-    ("plantar fasciitis", "M72.2", "icd10"),
-    ("onychomycosis of the toenail", "B35.1", "icd10"),
-    ("diabetic foot ulcer of the heel", "L97.4", "icd10"),
-    ("total contact cast application, diabetic foot", "A6501", "hcpcs"),
+    ("plantar fasciitis", "M72.2", "icd10"),               # indexes to M72.2
+    ("onychomycosis of the toenail", "B35.1", "icd10"),    # = tinea unguium
+    # L97.4 alone is a non-billable category header (NOT FOUND as a leaf);
+    # L97.409 is the valid heel-and-midfoot ulcer leaf, unspecified laterality/severity.
+    ("diabetic foot ulcer of the heel", "L97.409", "icd10"),
+    # TCC application is CPT 29445 (rigid total contact leg cast); the prior
+    # A6501 was a burn-garment code — a fixture bug that rewarded wrong retrieval.
+    ("total contact cast application, diabetic foot", "29445", "cpt"),
     ("therapeutic diabetic shoe, custom molded", "A5501", "hcpcs"),
+    # sibling disambiguation vs A5501/A5512: A5513 = custom-molded insert
+    ("custom molded diabetic shoe insert, multiple density", "A5513", "hcpcs"),
 ]
 
 
