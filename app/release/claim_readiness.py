@@ -150,6 +150,7 @@ def readiness_input_payload(result: dict) -> dict:
         "ner_entities": result.get("ner_entities") or [],
         "terminology_normalization": (
             result.get("terminology_normalization") or {}),
+        "clinical_facts": result.get("clinical_facts") or {},
         "consistency": result.get("consistency") or {},
         "claim_scrub": result.get("claim_scrub") or {},
         "clinical_audit": result.get("clinical_audit") or {},
@@ -227,10 +228,26 @@ def _source_control(result: dict) -> ControlResult:
     present = {str(r.get("source_id")) for r in records}
     mandatory = {"icd10_codes", "cpt_codes", "hcpcs_codes", "ncci_edits",
                  "mue_limits", "coverage_policy", "validator_rules",
+                 "pfs_indicators",
                  "compliance_database", "validator_implementation",
+                 "consistency_implementation",
                  "scrubber_implementation", "release_gate_implementation",
+                 "compliance_datastore_implementation",
+                 "payer_registry_implementation",
+                 "mutation_ledger_implementation",
                  "submission_configuration", "terminology_registry",
-                 "terminology_implementation"}
+                 "terminology_implementation", "terminology_source_catalog",
+                 "source_requirements",
+                 "mcd_coverage_cache", "autonomous_scope_registry",
+                 "scope_bootstrap_implementation",
+                 "scope_authorization_implementation",
+                 "identifier_validation_implementation",
+                 "model_execution_implementation",
+                 "terminology_builder_implementation",
+                 "source_preflight_implementation",
+                 "clinical_facts_implementation",
+                 "clinical_audit_implementation",
+                 "record_coherence_implementation"}
     missing = sorted(mandatory - present)
     if missing:
         return _control("authoritative_sources", ControlOutcome.NOT_CHECKED,
@@ -240,25 +257,92 @@ def _source_control(result: dict) -> ControlResult:
         dos = _parse_dos(result.get("patient_metadata") or {})
     except Exception:
         dos = None
-    needed = {"icd10_codes"}
-    if result.get("cpt_codes"):
-        needed.add("cpt_codes")
-    if result.get("hcpcs_codes"):
-        needed.add("hcpcs_codes")
     by_id = {str(record.get("source_id")): record for record in records}
-    stale = []
-    for source_id in sorted(needed):
-        record = by_id.get(source_id) or {}
-        start = _parse_iso(record.get("release_effective_from"))
-        end = _parse_iso(record.get("release_effective_to"))
-        if not dos or not start or not end or not start <= dos <= end:
-            stale.append(source_id)
-    if stale:
+    contract_errors = _source_contract_errors(result, by_id, dos)
+    if contract_errors:
         return _control(
             "authoritative_sources", ControlOutcome.BLOCKED,
-            "claim date is outside the loaded source release window: "
-            + ", ".join(stale))
+            "; ".join(contract_errors))
     return _control("authoritative_sources", ControlOutcome.PASS)
+
+
+def _source_contract_errors(result: dict, by_id: dict[str, dict],
+                            dos: date | None) -> list[str]:
+    """Evaluate versioned applicability/freshness requirements as data."""
+    from app.core.config import SOURCE_REQUIREMENTS_FILE
+    try:
+        pack = json.loads(SOURCE_REQUIREMENTS_FILE.read_text())
+    except Exception as exc:
+        return [f"source-requirement pack unavailable ({exc})"]
+    if pack.get("schema_version") != 1 or not isinstance(
+            pack.get("requirements"), list):
+        return ["source-requirement pack is malformed"]
+    context = _context(result)
+    try:
+        from app.compliance.payer_registry import parse_insurance_text
+        follows_medicare = bool(parse_insurance_text(
+            str((result.get("patient_metadata") or {}).get(
+                "insurance") or "")).follows_medicare_coverage)
+    except Exception:
+        follows_medicare = False
+    service_count = len(result.get("cpt_codes") or []) + len(
+        result.get("hcpcs_codes") or [])
+    predicates = {
+        "always": True,
+        "has_cpt": bool(result.get("cpt_codes")),
+        "has_hcpcs": bool(result.get("hcpcs_codes")),
+        "service": service_count > 0,
+        "multiple_services": service_count > 1,
+        "medicare_coverage_service": follows_medicare and service_count > 0,
+    }
+    errors = []
+    for requirement in pack["requirements"]:
+        if not isinstance(requirement, dict):
+            errors.append("source-requirement entry is malformed")
+            continue
+        applies = str(requirement.get("applies_when") or "")
+        if applies not in predicates:
+            errors.append(
+                f"source requirement {requirement.get('id') or '?'} has an "
+                "unsupported applicability predicate")
+            continue
+        if not predicates[applies]:
+            continue
+        source_id = str(requirement.get("source_id") or "")
+        record = by_id.get(source_id)
+        if not record:
+            errors.append(f"required source is absent: {source_id}")
+            continue
+        if requirement.get("dos_release_window"):
+            windows = record.get("release_windows") or [{
+                "effective_from": record.get("release_effective_from"),
+                "effective_to": record.get("release_effective_to"),
+            }]
+            covered = bool(dos) and any(
+                (start := _parse_iso(window.get("effective_from")))
+                and (end := _parse_iso(window.get("effective_to")))
+                and start <= dos <= end
+                for window in windows if isinstance(window, dict))
+            if not covered:
+                errors.append(
+                    f"claim date is outside the loaded source release window: "
+                    f"{source_id}")
+        if requirement.get("max_age_days") is not None:
+            try:
+                limit = int(requirement["max_age_days"])
+                fetched = datetime.fromisoformat(
+                    str(record.get("fetched_at") or "").replace("Z", "+00:00"))
+                if fetched.tzinfo is None:
+                    fetched = fetched.replace(tzinfo=timezone.utc)
+                age = datetime.now(timezone.utc) - fetched.astimezone(timezone.utc)
+                if limit < 0 or age.days > limit:
+                    errors.append(
+                        f"required source exceeds its freshness contract: {source_id} "
+                        f"({age.days} days > {limit})")
+            except (TypeError, ValueError):
+                errors.append(
+                    f"required source has no valid freshness timestamp: {source_id}")
+    return errors
 
 
 def _parse_iso(value) -> date | None:
@@ -451,6 +535,7 @@ def _terminology_control(result: dict) -> ControlResult:
         "schema_version", "registry_version", "registry_sha256",
         "entities", "entity_fingerprint", "note_occurrences",
         "unresolved_billing_relevant", "status", "report_fingerprint",
+        "registry_files", "authority_role",
     }
     missing = sorted(required - set(report))
     if missing:
@@ -471,10 +556,9 @@ def _terminology_control(result: dict) -> ControlResult:
             "terminology_normalization", ControlOutcome.ERROR,
             "terminology registry identity is malformed")
     try:
-        from app.core.config import TERMINOLOGY_REGISTRY_FILE
-        from app.release.source_manifest import sha256_file
-        from app.terminology import terminology_entity_fingerprint
-        live_registry = sha256_file(TERMINOLOGY_REGISTRY_FILE)
+        from app.terminology import (TerminologyNormalizer,
+                                     terminology_entity_fingerprint)
+        live_registry = TerminologyNormalizer().registry_sha256
         entity_fingerprint = terminology_entity_fingerprint(
             result.get("ner_entities") or [])
     except Exception as exc:
@@ -485,6 +569,10 @@ def _terminology_control(result: dict) -> ControlResult:
         return _control(
             "terminology_normalization", ControlOutcome.BLOCKED,
             "terminology registry changed after normalization")
+    if report.get("authority_role") != "retrieval_only":
+        return _control(
+            "terminology_normalization", ControlOutcome.ERROR,
+            "terminology normalization attempted to act as coding authority")
     if report.get("entity_fingerprint") != entity_fingerprint:
         return _control(
             "terminology_normalization", ControlOutcome.BLOCKED,
@@ -545,6 +633,84 @@ def _legacy_controls(result: dict) -> list[ControlResult]:
         ControlOutcome.REVIEW_REQUIRED,
         "" if repeatable else
         "claim outputs and critical extracted inputs are not independently unanimous"))
+    independence = cons.get("model_independence") or {}
+    domains = independence.get("observed_domains") or []
+    profiles = independence.get("observed_profiles") or []
+    try:
+        required_domains = int(independence.get("required_domains"))
+    except (TypeError, ValueError):
+        required_domains = 0
+    valid_profiles = bool(profiles) and all(
+        isinstance(profile, dict)
+        and str(profile.get("provider") or "").strip().lower()
+        and str(profile.get("model") or "").strip()
+        and str(profile.get("independence_domain") or "").strip().lower()
+        == str(profile.get("provider") or "").strip().lower()
+        and isinstance(profile.get("models_used"), list)
+        and bool(profile.get("models_used"))
+        and str(profile.get("model") or "").strip()
+        in {str(value or "").strip()
+            for value in profile.get("models_used") or []}
+        for profile in profiles)
+    derived_domains = sorted({
+        str(profile.get("provider") or "").strip().lower()
+        for profile in profiles if isinstance(profile, dict)
+    })
+    from app.core.config import MIN_INDEPENDENT_MODEL_DOMAINS
+    coder_profile = result.get("model_execution") or {}
+    coder_identity = (
+        str(coder_profile.get("provider") or "").strip().lower(),
+        str(coder_profile.get("model") or "").strip())
+    observed_identities = {
+        (str(profile.get("provider") or "").strip().lower(),
+         str(profile.get("model") or "").strip())
+        for profile in profiles if isinstance(profile, dict)
+    }
+    independently_corroborated = bool(
+        independence.get("satisfied")
+        and not independence.get("invalid_run_profiles")
+        and valid_profiles
+        and len(profiles) == int(cons.get("runs") or 0)
+        and required_domains == MIN_INDEPENDENT_MODEL_DOMAINS
+        and domains == derived_domains
+        and len(derived_domains) >= required_domains
+        and coder_identity in observed_identities)
+    controls.append(_control(
+        "independent_model_corroboration",
+        ControlOutcome.PASS if independently_corroborated else
+        ControlOutcome.REVIEW_REQUIRED,
+        "" if independently_corroborated else
+        "autonomous coding requires agreeing runs from independently operated "
+        "model-provider domains; observed: " + (", ".join(domains) or "none")))
+    adjudication = result.get("adjudication") or {}
+    adjudication_profiles = adjudication.get("execution_profiles") or []
+    if adjudication:
+        try:
+            adjudication_passes = int(adjudication.get("passes") or 0)
+        except (TypeError, ValueError):
+            adjudication_passes = 0
+        valid_adjudication_profiles = (
+            adjudication_passes >= 2
+            and len(adjudication_profiles) == adjudication_passes
+            and all(
+                isinstance(profile, dict)
+                and str(profile.get("provider") or "").strip().lower()
+                and str(profile.get("model") or "").strip()
+                and str(profile.get("independence_domain") or "").strip().lower()
+                == str(profile.get("provider") or "").strip().lower()
+                for profile in adjudication_profiles)
+            and len({
+                (str(profile.get("provider") or "").strip().lower(),
+                 str(profile.get("model") or "").strip())
+                for profile in adjudication_profiles
+            }) >= 2)
+        controls.append(_control(
+            "adjudication_model_separation",
+            ControlOutcome.PASS if valid_adjudication_profiles else
+            ControlOutcome.REVIEW_REQUIRED,
+            "" if valid_adjudication_profiles else
+            "adjudication influenced the claim without two persisted, "
+            "distinct model identities"))
     clean = str(result.get("final_disposition") or "").upper() == "CLEAN"
     scrub = result.get("claim_scrub") or {}
     scrub_clean = bool(scrub.get("clean")) or str(
@@ -556,6 +722,7 @@ def _legacy_controls(result: dict) -> list[ControlResult]:
     controls.append(_mandatory_filter_control(result))
     controls.append(_validation_control(result))
     controls.append(_terminology_control(result))
+    controls.append(_clinical_fact_control(result))
     has_dx = bool(result.get("icd_codes"))
     has_service = bool(result.get("cpt_codes") or result.get("hcpcs_codes"))
     controls.append(_control(
@@ -564,7 +731,31 @@ def _legacy_controls(result: dict) -> list[ControlResult]:
         "" if has_dx and has_service else
         "claim requires at least one diagnosis and one service line"))
     audit = result.get("clinical_audit") or {}
-    audit_ok = audit.get("verdict") == "upheld"
+    audit_profile = audit.get("execution_profile") or {}
+    coder_profile = result.get("model_execution") or {}
+    coder_models = coder_profile.get("models_used") or [coder_profile.get("model")]
+    coder_identities = {
+        (str(coder_profile.get("provider") or "").strip().lower(),
+        str(model or "").strip()) for model in coder_models if str(model or "").strip()
+    }
+    adjudication_identities = {
+        (str(profile.get("provider") or "").strip().lower(),
+         str(profile.get("model") or "").strip())
+        for profile in adjudication_profiles if isinstance(profile, dict)
+        and str(profile.get("provider") or "").strip()
+        and str(profile.get("model") or "").strip()
+    }
+    audit_identity = (
+        str(audit_profile.get("provider") or "").strip().lower(),
+        str(audit_profile.get("model") or "").strip())
+    audit_separate = bool(
+        audit_profile.get("provider") and audit_profile.get("model")
+        and coder_profile.get("provider") and coder_profile.get("model")
+        and str(audit_profile.get("independence_domain") or "").strip().lower()
+        == str(audit_profile.get("provider") or "").strip().lower()
+        and audit_identity not in coder_identities
+        and audit_identity not in adjudication_identities)
+    audit_ok = audit.get("verdict") == "upheld" and audit_separate
     if audit_ok:
         try:
             from tools.clinical_auditor import corrections_fingerprint
@@ -574,7 +765,8 @@ def _legacy_controls(result: dict) -> list[ControlResult]:
     controls.append(_control(
         "independent_clinical_audit", ControlOutcome.PASS if audit_ok else
         ControlOutcome.REVIEW_REQUIRED,
-        "" if audit_ok else "clinical audit is absent, disputed, or stale"))
+        "" if audit_ok else
+        "clinical audit is absent, disputed, stale, or not model-separated"))
     try:
         from tools.record_coherence import coherence_violations
         violations = coherence_violations(result)
@@ -585,6 +777,75 @@ def _legacy_controls(result: dict) -> list[ControlResult]:
         controls.append(_control("record_coherence", ControlOutcome.ERROR,
                                  f"coherence could not be verified ({exc})"))
     return controls
+
+
+def _clinical_fact_control(result: dict) -> ControlResult:
+    report = result.get("clinical_facts")
+    if not isinstance(report, dict) or not report:
+        return _control("clinical_facts", ControlOutcome.NOT_CHECKED,
+                        "normalized clinical-fact evidence is absent")
+    required = {"schema_version", "facts", "unresolved_material_facts",
+                "note_sha256", "facts_fingerprint", "status",
+                "report_fingerprint"}
+    if required - set(report) or report.get("schema_version") != 1:
+        return _control("clinical_facts", ControlOutcome.ERROR,
+                        "clinical-fact report is incomplete or unsupported")
+    if not isinstance(report.get("facts"), list) or not isinstance(
+            report.get("unresolved_material_facts"), list):
+        return _control("clinical_facts", ControlOutcome.ERROR,
+                        "clinical-fact report collections are malformed")
+    note = str((result.get("rag_context") or {}).get("note_full_text") or "")
+    if report.get("note_sha256") != "sha256:" + hashlib.sha256(
+            note.encode()).hexdigest():
+        return _control("clinical_facts", ControlOutcome.BLOCKED,
+                        "clinical facts do not bind to the persisted note")
+    if report.get("facts_fingerprint") != _fingerprint(report["facts"]):
+        return _control("clinical_facts", ControlOutcome.ERROR,
+                        "clinical-fact fingerprint is invalid")
+    body = {key: value for key, value in report.items()
+            if key != "report_fingerprint"}
+    if report.get("report_fingerprint") != _fingerprint(body):
+        return _control("clinical_facts", ControlOutcome.ERROR,
+                        "clinical-fact report fingerprint is invalid")
+    facts = report["facts"]
+    evidence_errors = []
+    for index, fact in enumerate(facts):
+        if not isinstance(fact, dict) or not fact.get("kind"):
+            evidence_errors.append(f"fact {index + 1} is malformed")
+            continue
+        if fact.get("kind") == "entity":
+            span = fact.get("source_span") or {}
+            start, end = span.get("document_start"), span.get("document_end")
+            if (not span.get("verified") or not isinstance(start, int)
+                    or not isinstance(end, int) or not 0 <= start < end <= len(note)
+                    or note[start:end] != fact.get("raw_text")):
+                evidence_errors.append(
+                    f"entity fact {index + 1} lacks an exact note span")
+        else:
+            evidence = str(fact.get("evidence_span") or "")
+            if bool(fact.get("evidence_verified")) != bool(
+                    evidence and evidence in note):
+                evidence_errors.append(
+                    f"event fact {index + 1} has invalid evidence")
+    if evidence_errors:
+        return _control("clinical_facts", ControlOutcome.BLOCKED,
+                        "; ".join(evidence_errors))
+    unresolved = report["unresolved_material_facts"]
+    if any(not isinstance(row, dict) or not row.get("kind")
+           or not row.get("reason") for row in unresolved):
+        return _control("clinical_facts", ControlOutcome.ERROR,
+                        "unresolved clinical-fact evidence is malformed")
+    expected = "REVIEW_REQUIRED" if unresolved else "PASS"
+    if report.get("status") != expected:
+        return _control("clinical_facts", ControlOutcome.ERROR,
+                        "clinical-fact status contradicts unresolved facts")
+    if unresolved:
+        labels = sorted({str(row.get("label") or row.get("kind") or "fact")
+                         for row in unresolved if isinstance(row, dict)})
+        return _control("clinical_facts", ControlOutcome.REVIEW_REQUIRED,
+                        "material clinical facts lack exact evidence: " +
+                        ", ".join(labels[:20]))
+    return _control("clinical_facts", ControlOutcome.PASS)
 
 
 def _certificate_fingerprint(payload: dict) -> str:

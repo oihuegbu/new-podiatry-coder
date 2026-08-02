@@ -322,13 +322,23 @@ def _quotable_sources() -> list[str]:
 
 def _adjudicate_once(case: dict, pass_idx: int = 0,
                      system_suffix: str = "") -> dict:
-    from app.core.config import LLM_PROVIDER
+    from app.core import config
     from app.core.llm_client import chat_completion
+    from app.core.model_profiles import active_profile
     system = _ADJUDICATOR_PROMPT + system_suffix
     user = (f"CASE FILE:\n{json.dumps(case, indent=1, default=str)}\n\n"
             f"Adjudicate every disputed item, or abstain per item.")
-    model = CODER_MODEL if LLM_PROVIDER == "claude" else None
-    if pass_idx > 0 and ALT_MODEL and LLM_PROVIDER == "claude":
+    profile = active_profile()
+    # The deployment's primary provider may use the specialist adjudicator
+    # model. A corroborating provider always uses the explicitly authorized
+    # model in its execution profile—passing a Claude slug to OpenAI (or the
+    # reverse) would both fail and falsify the recorded execution identity.
+    if profile.provider == config.LLM_PROVIDER:
+        model = CODER_MODEL if profile.provider == "claude" else profile.model
+    else:
+        model = profile.model
+    if (pass_idx > 0 and ALT_MODEL
+            and profile.provider == config.LLM_PROVIDER):
         model = ALT_MODEL
     # Later passes sample at a higher temperature: a second opinion at
     # near-greedy temperature is largely a re-roll of the first, and
@@ -337,25 +347,36 @@ def _adjudicate_once(case: dict, pass_idx: int = 0,
     # different model family) is evidence the verdict is
     # authority-determined rather than a sampling artifact.
     temperature = 0.05 if pass_idx == 0 else 0.4
-    try:
-        text, usage = chat_completion(
-            system_prompt=system, user_prompt=user,
-            model=model, temperature=temperature, max_tokens=8192,
-            json_mode=True, effort="high")
-    except Exception as exc:
-        if model is None:
-            raise
-        logger.warning(f"Adjudicator model {model!r} failed ({exc}) — "
-                       f"falling back to the pipeline default")
-        model = None
-        text, usage = chat_completion(
-            system_prompt=system, user_prompt=user,
-            temperature=temperature, max_tokens=8192,
-            json_mode=True, effort="high")
+    # Never hide a failed opinion by silently switching models. The caller
+    # records that pass as incomplete and keeps the claim at REVIEW; otherwise
+    # persisted model-independence metadata would no longer describe who
+    # actually influenced the decision.
+    text, usage = chat_completion(
+        system_prompt=system, user_prompt=user,
+        model=model, temperature=temperature, max_tokens=8192,
+        json_mode=True, effort="high")
     verdict = json.loads(text)
-    verdict["_model"] = model or "pipeline-default"
+    actual_model = model or profile.model
+    verdict["_model"] = actual_model
+    verdict["_execution_profile"] = {
+        "provider": profile.provider,
+        "model": actual_model,
+        "independence_domain": profile.independence_domain,
+    }
     verdict["_usage"] = usage
     return verdict
+
+
+def _execution_profiles(verdicts: list[dict]) -> list[dict]:
+    """Exact providers/models whose agreeing opinions settled the dispute."""
+    return [dict(verdict.get("_execution_profile") or {})
+            for verdict in verdicts]
+
+
+def _adjudication_profiles(passes: int):
+    """Mirror the explicitly authorized cross-provider coding schedule."""
+    from app.core.model_profiles import profiles_for_runs
+    return profiles_for_runs(passes)
 
 
 def _item_key(d: dict) -> tuple:
@@ -616,6 +637,7 @@ def adjudicate(results_dir: Path, docs: list[str] | None = None,
             f"the rest keep their deferred/review status")
         targets = targets[:ADJUDICATION_LIMIT]
 
+    adjudication_profiles = _adjudication_profiles(passes)
     rep = rep or Replayer()
     scrubber = ClaimScrubber(rep.store,
                              agents=build_default_agents(rep.store))
@@ -632,7 +654,9 @@ def adjudicate(results_dir: Path, docs: list[str] | None = None,
         maps, verdicts = [], []
         for i in range(passes):
             try:
-                v = _adjudicate_once(case, pass_idx=i)
+                from app.core.model_profiles import use_execution_profile
+                with use_execution_profile(adjudication_profiles[i]):
+                    v = _adjudicate_once(case, pass_idx=i)
             except Exception as exc:
                 logger.warning(f"  pass {i + 1} failed: {exc}")
                 maps.append(None)
@@ -737,6 +761,7 @@ def adjudicate(results_dir: Path, docs: list[str] | None = None,
             "at": datetime.now(timezone.utc).isoformat(),
             "model": verdicts[0].get("_model"),
             "passes": passes,
+            "execution_profiles": _execution_profiles(verdicts),
             "items": verdicts[0].get("items"),
             "overall_rationale": verdicts[0].get("overall_rationale", ""),
             "protocol": "authority-grounded expert-coder adjudication; "
@@ -1764,6 +1789,7 @@ def adjudicate_audit(results_dir: Path, docs: list[str] | None = None,
             f"{len(targets)} disputed note(s) (CODER_ADJUDICATION_LIMIT)")
         targets = targets[:ADJUDICATION_LIMIT]
 
+    adjudication_profiles = _adjudication_profiles(passes)
     rep = rep or Replayer()
     scrubber = ClaimScrubber(rep.store,
                              agents=build_default_agents(rep.store))
@@ -1844,8 +1870,11 @@ def adjudicate_audit(results_dir: Path, docs: list[str] | None = None,
         maps, verdicts = [], []
         for i in range(passes):
             try:
-                v = _adjudicate_once(case, pass_idx=i,
-                                     system_suffix=_AUDIT_MODE_SUPPLEMENT)
+                from app.core.model_profiles import use_execution_profile
+                with use_execution_profile(adjudication_profiles[i]):
+                    v = _adjudicate_once(
+                        case, pass_idx=i,
+                        system_suffix=_AUDIT_MODE_SUPPLEMENT)
             except Exception as exc:
                 logger.warning(f"  pass {i + 1} failed: {exc}")
                 maps.append(None)
@@ -1948,6 +1977,7 @@ def adjudicate_audit(results_dir: Path, docs: list[str] | None = None,
             "at": datetime.now(timezone.utc).isoformat(),
             "model": verdicts[0].get("_model"),
             "passes": passes,
+            "execution_profiles": _execution_profiles(verdicts),
             "items": verdicts[0].get("items"),
             "overall_rationale": verdicts[0].get("overall_rationale", ""),
             "protocol": "authority-grounded expert-coder adjudication of "

@@ -18,6 +18,7 @@ from app.core.config import (
     ANTHROPIC_BATCH_MAX_WAIT_S,
 )
 from app.core.logger import get_logger
+from app.core.model_profiles import active_profile
 
 logger = get_logger(__name__)
 
@@ -98,13 +99,14 @@ def chat_completion(
     per-call reasoning-effort override (Claude only; defaults to
     CLAUDE_EFFORT)."""
     last_exc: Exception | None = None
+    profile = active_profile()
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
-            if LLM_PROVIDER == "claude":
+            if profile.provider == "claude":
                 return _claude_chat_completion(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
-                    model=model,
+                    model=model or profile.model,
                     max_tokens=max_tokens,
                     json_mode=json_mode,
                     effort=effort,
@@ -113,7 +115,7 @@ def chat_completion(
             return _openai_chat_completion(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                model=model,
+                model=model or profile.model,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 json_mode=json_mode,
@@ -382,5 +384,4 @@ def _claude_chat_completion(
             response.usage, "cache_creation_input_tokens", 0) or 0,
     }
     return content, usage
-
 

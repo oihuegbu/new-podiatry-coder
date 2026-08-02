@@ -1,0 +1,3106 @@
+{
+  "schema_version": 1,
+  "version": "2026.08.1+derived",
+  "input_fingerprint": "sha256:a26179162538781e087dfe9ef6ed8e99cbaacbafa6c43365de2c302664ff80f7",
+  "sources": {
+    "ama_cpt_descriptors": {
+      "name": "American Medical Association",
+      "version": "sha256:8ec85a3eeb7d758364ff0b8a8be32592180c464aaea7db2cafea7c40441198d7+sha256:a3ac7871b14a839eca5d8f10926341aee235d0237548b6c25a9e0cb4c7af6e51",
+      "review_status": "publisher-attested-explicit-definition",
+      "scope": "Explicit parenthetical aliases extracted from pinned corpus bytes",
+      "authority_role": "retrieval_only",
+      "provenance_kind": "licensed_primary"
+    },
+    "cms_hcpcs_descriptors": {
+      "name": "Centers for Medicare & Medicaid Services",
+      "version": "sha256:ade87ad0357e9e5da444852fc30f99077c8818f7ee04941cf3ace8f16a65f316+sha256:17634ab12998244a1fbe70e8dcb2e79bb75f401c821dc09f9e1cc5e34745fc4b",
+      "review_status": "publisher-attested-explicit-definition",
+      "scope": "Explicit parenthetical aliases extracted from pinned corpus bytes",
+      "authority_role": "retrieval_only",
+      "provenance_kind": "government_primary"
+    },
+    "cdc_icd10cm_index": {
+      "name": "CDC National Center for Health Statistics",
+      "version": "sha256:d05174cc65bb863346743067e592da693d9c63869d821a0b223bd261c12a944c",
+      "review_status": "publisher-attested-explicit-definition",
+      "scope": "Explicit parenthetical aliases extracted from pinned corpus bytes",
+      "authority_role": "retrieval_only",
+      "provenance_kind": "government_primary"
+    },
+    "cms_published_policy": {
+      "name": "Centers for Medicare & Medicaid Services",
+      "version": "sha256:13522bf3b43b40093d6c82617099039ee1fabc8a14ed259da65b68fb2c3fa5ab+sha256:d76cc9bf3f2fed6bacbd1b412b7e946c34a05b20f3ac1343cf5915c6cdd18639",
+      "review_status": "publisher-attested-explicit-definition",
+      "scope": "Explicit parenthetical aliases extracted from pinned corpus bytes",
+      "authority_role": "retrieval_only",
+      "provenance_kind": "government_primary"
+    }
+  },
+  "entries": [
+    {
+      "id": "zz_derived_b800c2468d64bed7",
+      "patterns": [
+        "\\bABN\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Advance Beneficiary Notice",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_bd006b42bb31cb6d",
+      "patterns": [
+        "\\bACE\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Angiotensin Converting Enzyme",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_79dac514f06b1988",
+      "patterns": [
+        "\\bACIP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Advisory Committee on Immunization Practices",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_75ad69d7586c3d7e",
+      "patterns": [
+        "\\bACP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Advance Care Planning",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_7aa443866d7eebc6",
+      "patterns": [
+        "\\bADL\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "activities of daily living",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_91deab7d5483274c",
+      "patterns": [
+        "\\bAJCC\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "American Joint Committee on Cancer",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_a43915481c3b48d8",
+      "patterns": [
+        "\\bAPC\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Activated Protein C",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "adenomatous polyposis coli",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_3e09ff6aa809978a",
+      "patterns": [
+        "\\bAQMBF\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Absolute quantitation of myocardial blood flow",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_b1b7afa76db27145",
+      "patterns": [
+        "\\bAR\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "androgen receptor",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_9445ff04667ca5ba",
+      "patterns": [
+        "\\bARB\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "angiotensin receptor blockers",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_323b087e0afcbcc4",
+      "patterns": [
+        "\\bASC\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Ambulatory surgical center",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "Ambulatory Surgical Center",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "ambulatory surgical centers",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_ffc027edcc0ef3f2",
+      "patterns": [
+        "\\bATM\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "ataxia telangiectasia mutated",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_a27b3920fa2604a6",
+      "patterns": [
+        "\\bAWV\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Annual Wellness Visit",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_735ff2109a063ee1",
+      "patterns": [
+        "\\bBBA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Balanced Budget Act",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "Bipartisan Budget Act",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_c16431b1087a8f5f",
+      "patterns": [
+        "\\bBMI\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Body Mass Index",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_36b717811ee15f49",
+      "patterns": [
+        "\\bBP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "blood pressure",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_3568d51588db30de",
+      "patterns": [
+        "\\bBTK\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Bruton's tyrosine kinase",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_fe786dba537c18dd",
+      "patterns": [
+        "\\bCAAHEP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Commission on Accreditation of Allied Health Education Programs",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_5dbaa59c1978b20a",
+      "patterns": [
+        "\\bCAH\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "critical access hospital",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "critical access hospitals",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_2cf4fa5fc4d50b7e",
+      "patterns": [
+        "\\bCAHEA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Committee on Allied Health Education and Accreditation",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_0d6f95eaff7d037f",
+      "patterns": [
+        "\\bCAR\\-T\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Chimeric antigen receptor T-cell",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_0bfe0c0ae03ee15f",
+      "patterns": [
+        "\\bCCMI\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Correct Coding Modifier Indicator",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_39462ae2bc9f5453",
+      "patterns": [
+        "\\bCCP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Cyclic citrullinated peptide",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_cf216410f312a5f2",
+      "patterns": [
+        "\\bCDP\\-SOT\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Computerized dynamic posturography sensory organization test",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_eda951a776b0ea79",
+      "patterns": [
+        "\\bCFR\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Code of Federal Regulation",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "Code of Federal Regulations",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_1a93e20c2236f7dc",
+      "patterns": [
+        "\\bCGH\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "comparative genomic hybridization",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_38fd003a0cbc2ad9",
+      "patterns": [
+        "\\bCHCT\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Caffeine halothane contracture test",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_8d5579affb518db0",
+      "patterns": [
+        "\\bCK\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Creatine kinase",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_526b2959a3d6a2b6",
+      "patterns": [
+        "\\bCKD\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "chronic kidney disease",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_21d591e9ddd2848f",
+      "patterns": [
+        "\\bCMA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "chromosomal microarray analysis",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_c201404b9892bd27",
+      "patterns": [
+        "\\bCMT\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Chiropractic manipulative treatment",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_2192ecccbc32f5ad",
+      "patterns": [
+        "\\bCNS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Central Nervous System",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "Clinical Nurse Specialist",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_54a1bf6409a5854a",
+      "patterns": [
+        "\\bCOMS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Concurrent optical and magnetic stimulation",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_08b625639cb5fa27",
+      "patterns": [
+        "\\bCOPD\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Chronic obstructive pulmonary disease",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_bff6659d66585304",
+      "patterns": [
+        "\\bCORF\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "comprehensive outpatient rehabilitation facilities",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "Comprehensive Outpatient Rehabilitation Facility",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_e4918de4024a9f13",
+      "patterns": [
+        "\\bCP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Clinical Psychologist",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_caea5871d00f916d",
+      "patterns": [
+        "\\bCPAP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "continuous positive airway pressure",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_a4b8abb4189b7f0d",
+      "patterns": [
+        "\\bCPO\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "care plan oversight",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_d7f0a6b2d14fa942",
+      "patterns": [
+        "\\bCPT\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Current Procedural Terminology",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_c13539d156899913",
+      "patterns": [
+        "\\bCR\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Cardiac Rehabilitation",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_613b3977cb0343bf",
+      "patterns": [
+        "\\bCRH\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Corticotropic releasing hormone",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_3030c977b4c345ca",
+      "patterns": [
+        "\\bCRNA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "certified registered nurse anesthetist",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_6c232b7559cf7674",
+      "patterns": [
+        "\\bCROWD\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Contractor Reporting of Operational Workload Data",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_c351e707ff812268",
+      "patterns": [
+        "\\bCSW\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Clinical Social Worker",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_15cbe5f066da7961",
+      "patterns": [
+        "\\bCT\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Computed tomographic",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "Computed tomography",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_020620132bbb140f",
+      "patterns": [
+        "\\bCTA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Computed tomographic angiography",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "computed tomographic angiography",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "computed tomography angiography",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_d7d020dfbe9f25e7",
+      "patterns": [
+        "\\bCY\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "calendar year",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_66276375f561352e",
+      "patterns": [
+        "\\bDFA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "direct fluorescent antibody",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_acb47327557c2a72",
+      "patterns": [
+        "\\bDME\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Durable Medical Equipment",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_2dbe24189806eb9b",
+      "patterns": [
+        "\\bDMEPOS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Durable Medical Equipment Prosthetics Orthotics and Supplies",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_a7a05ffd197d796b",
+      "patterns": [
+        "\\bDRE\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "digital rectal exam",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_252f31585908b864",
+      "patterns": [
+        "\\bDRIL\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Distal revascularization and interval ligation",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_3e5b486ca3a46dbc",
+      "patterns": [
+        "\\bDVT\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Deep vein thrombosis",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_6f533f8eb0797466",
+      "patterns": [
+        "\\bDXA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Dual-energy X-ray absorptiometry",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_fb2a4edd17f56dd0",
+      "patterns": [
+        "\\bEA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "early antigen",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_427e43cd0a290579",
+      "patterns": [
+        "\\bEGFR\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "epidermal growth factor receptor",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_a0772b1aa325211e",
+      "patterns": [
+        "\\bEMR\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "endoscopic mucosal resection",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_7a475a8b0a074fa8",
+      "patterns": [
+        "\\bER\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Estrogen receptor",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_ce344a418127968f",
+      "patterns": [
+        "\\bES\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Electrical Stimulation",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_410a4a907140b121",
+      "patterns": [
+        "\\bESG\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "endoscopic sleeve gastroplasty",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_dbc468a14b601d5d",
+      "patterns": [
+        "\\bFAQ\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Frequently Asked Questions",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_8aca5d417955b314",
+      "patterns": [
+        "\\bFCCPT\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Foreign Credentialing Commission on Physical Therapy",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_593a04186aafad58",
+      "patterns": [
+        "\\bFDA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Food and Drug Administration",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_b13431a5389b781f",
+      "patterns": [
+        "\\bFH\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "fumarate hydratase",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_9c3fd223b3938623",
+      "patterns": [
+        "\\bFNA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Fine needle aspiration",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_eb67e32c4a4b427a",
+      "patterns": [
+        "\\bFQHC\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Federally Qualified Health Center",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_a68c905444ebd667",
+      "patterns": [
+        "\\bFSH\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Follicle stimulating hormone",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_41fe553d66d4fc7c",
+      "patterns": [
+        "\\bGBS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Group B Streptococcus",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_f47c9ea946392a2c",
+      "patterns": [
+        "\\bGFAP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Glial fibrillary acidic protein",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_d375590e77c9b73c",
+      "patterns": [
+        "\\bGFR\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Glomerular filtration rate",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_ec78455c8feadb17",
+      "patterns": [
+        "\\bGHR\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "growth hormone receptor",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_3dc43e86e5ca89fa",
+      "patterns": [
+        "\\bGHRHR\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "growth hormone releasing hormone receptor",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_97a55975c83372e2",
+      "patterns": [
+        "\\bGLC\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "gas liquid chromatography",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_9a5bdd48ab9dfcb8",
+      "patterns": [
+        "\\bGTT\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "GLUCOSE TOLERANCE TEST",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_f55614294aa47543",
+      "patterns": [
+        "\\bHAST\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "High altitude simulation test",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_6a33f29fe8e38f65",
+      "patterns": [
+        "\\bHBV\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Hepatitis B Virus",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_88ca127665b5aa24",
+      "patterns": [
+        "\\bHCPCS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Healthcare Common Procedure Coding System",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_b674f1ea592f7325",
+      "patterns": [
+        "\\bHGH\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Human growth hormone",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_a417aa4975c55a9b",
+      "patterns": [
+        "\\bHH\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Home Health",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_0446d392627c480f",
+      "patterns": [
+        "\\bHHA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "home health agencies",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "home health agency",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_4a2296a54fea57c9",
+      "patterns": [
+        "\\bHLA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Human leukocyte antigen",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_2ee9a9ec44f7b477",
+      "patterns": [
+        "\\bHPC\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Hematopoietic progenitor cell",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_d3d1fa3a7468c2ce",
+      "patterns": [
+        "\\bHRD\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "homologous recombination deficiency",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_c1242f7f888cd4e1",
+      "patterns": [
+        "\\bHSV\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Herpes simplex virus",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_7c6733d4b5d51532",
+      "patterns": [
+        "\\bIBMFS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Inherited bone marrow failure syndromes",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_e9d289d1fb1c9742",
+      "patterns": [
+        "\\bICR\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Intensive Cardiac Rehabilitation",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_cf3dd9aaf369b6df",
+      "patterns": [
+        "\\bIHS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Indian Health Service",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_45e52daf0456f454",
+      "patterns": [
+        "\\bIMRT\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "intensity modulated radiation therapy",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [
+            "cms_published_policy"
+          ],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_aaf64d802f66dcd4",
+      "patterns": [
+        "\\bIOM\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Internet- Only Manual",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_6f97721d27391814",
+      "patterns": [
+        "\\bIOP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Intensive Outpatient Program",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "intensive outpatient program",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_c153598b257f3d03",
+      "patterns": [
+        "\\bIRF\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Inpatient Rehabilitation Facility",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_6399a4063d727e8e",
+      "patterns": [
+        "\\bITD\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "internal tandem duplication",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_4bdc940b42f2a723",
+      "patterns": [
+        "\\bIVRO\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "intraoral vertical ramus osteotomy",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_a767e517e7eb77fd",
+      "patterns": [
+        "\\bJC\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "John Cunningham",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_61fad3e18c0b80ab",
+      "patterns": [
+        "\\bKD\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Kawasaki disease",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_d19f30380889cadf",
+      "patterns": [
+        "\\bL/S\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "lecithin sphingomyelin",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_d302384fe92251a6",
+      "patterns": [
+        "\\bLC\\-MS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "liquid chromatography mass spectrometry",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_ab31ea4ae5075371",
+      "patterns": [
+        "\\bLD\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Lactate dehydrogenase",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_40d83ddbb8776e31",
+      "patterns": [
+        "\\bLDLR\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "low density lipoprotein receptor",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_3ebe95bc23aea71f",
+      "patterns": [
+        "\\bLH\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Luteinizing hormone",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_7d7518357309f78c",
+      "patterns": [
+        "\\bLITT\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Laser interstitial thermal therapy",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_f7e6e36594b731a9",
+      "patterns": [
+        "\\bLVEF\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Left ventricular ejection fraction",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_7fdbe18a02e33b73",
+      "patterns": [
+        "\\bLVF\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Left ventricular function",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_6a885ea3a468b7cc",
+      "patterns": [
+        "\\bMAE\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Mobility Assisted Equipment",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_746eeb5497be32c0",
+      "patterns": [
+        "\\bMBR\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "major breakpoint region",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_2185016533cab36b",
+      "patterns": [
+        "\\bMCPM\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Medicare Claims Processing Manual",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_6b0d4ef967eae224",
+      "patterns": [
+        "\\bMCT\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "motor control test",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_551c09122469ee07",
+      "patterns": [
+        "\\bMCTRJCA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Middle Class Tax Relief and Jobs Creation Act",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_7767dc4c21de1618",
+      "patterns": [
+        "\\bMFT\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Marriage and Family Therapist",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_ebfe9fad7dad141b",
+      "patterns": [
+        "\\bMHC\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Mental Health Counselor",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_f89039a0d78858c6",
+      "patterns": [
+        "\\bMIPPA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Medicare Improvements for Patients and Providers Act",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_d59e1d9433962c3d",
+      "patterns": [
+        "\\bMLC\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "minimum lethal concentration",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_026ac1082b23a35b",
+      "patterns": [
+        "\\bMLPA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "multiplex ligation-dependent probe amplification",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_204ac66a8856d0cc",
+      "patterns": [
+        "\\bMP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "MAINTENANCE PROGRAM",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_b1e76c1ffdda0de2",
+      "patterns": [
+        "\\bMPI\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "mannose phosphate isomerase",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_4b5cc431df27ff57",
+      "patterns": [
+        "\\bMPZ\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "myelin protein zero",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_2157dc6330725969",
+      "patterns": [
+        "\\bMRA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "magnetic resonance angiography",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_983da6aa108b8f13",
+      "patterns": [
+        "\\bMRD\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "minimal residual disease",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_04095669cc08c745",
+      "patterns": [
+        "\\bMRI\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "magnetic resonance imaging",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_c228fe8bf1367bc4",
+      "patterns": [
+        "\\bMUE\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Medically Unlikely Edit",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_91c1d81f314d1d1d",
+      "patterns": [
+        "\\bNCCI\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "National Correct Coding Initiative",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_dcc73bf631f9be42",
+      "patterns": [
+        "\\bNCCN\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "National Comprehensive Cancer Network",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_cbb7d1c1d280b95e",
+      "patterns": [
+        "\\bNK\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Natural killer",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_acbcf44a52cb6886",
+      "patterns": [
+        "\\bNMR\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "nuclear magnetic resonance",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_64a885cb8e555c3b",
+      "patterns": [
+        "\\bNOMS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "National Outcomes Measurement System",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_b35d1ce81a4047e0",
+      "patterns": [
+        "\\bNP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Nurse Practitioner",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_14271b6a29cfe697",
+      "patterns": [
+        "\\bNYHA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "New York Heart Association",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_a677a155342a846c",
+      "patterns": [
+        "\\bOA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Osteoarthritis assessed",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_08f2e1178ab25c7f",
+      "patterns": [
+        "\\bOCT\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Optical coherence tomography",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_164d615a0d440b7a",
+      "patterns": [
+        "\\bOGM\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "optical genome mapping",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_9a6fd1f8a567f87c",
+      "patterns": [
+        "\\bOMT\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Osteopathic manipulative treatment",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_9a526bb7420e1c78",
+      "patterns": [
+        "\\bOP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "osteoporosis prescribed",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_99fd010b18c4e684",
+      "patterns": [
+        "\\bOPPS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Outpatient Prospective Payment System",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_c2d4fe38448be66b",
+      "patterns": [
+        "\\bOT\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "occupational therapy",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_86a7f47b333770c6",
+      "patterns": [
+        "\\bPA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Physician Assistant",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_875e9ea8234d5a5c",
+      "patterns": [
+        "\\bPAD\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Peripheral arterial disease",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_21d017c40a91c157",
+      "patterns": [
+        "\\bPC\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "pyruvate carboxylase",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_17f7eeaff478fad4",
+      "patterns": [
+        "\\bPD\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Peritoneal dialysis",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_d9761cebea7a1a7d",
+      "patterns": [
+        "\\bPET\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "positron emission tomography",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "Positron emission tomography",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_f2a3e4bcb9603b5f",
+      "patterns": [
+        "\\bPFS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Physician Fee Schedule",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_0a6a15345ad0c7e3",
+      "patterns": [
+        "\\bPHP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "partial hospitalization program",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_eafc6b05785b9972",
+      "patterns": [
+        "\\bPLA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Proprietary Laboratory Analyses",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_41b04dfee7a28851",
+      "patterns": [
+        "\\bPPACA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Patient Protection Affordable Care Act",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_c3972ccd73541907",
+      "patterns": [
+        "\\bPR\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "patient responsibility",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "progesterone receptor",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "Pulmonary Rehabilitation",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_9c2803bdee7e1887",
+      "patterns": [
+        "\\bPSA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Prostate specific antigen",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_f860686ca1ff3655",
+      "patterns": [
+        "\\bPTCA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Percutaneous transluminal coronary angioplasty",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_6bf764c19ba61865",
+      "patterns": [
+        "\\bPTNS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "posterior tibial nerve stimulation",
+          "confidence": 0.995,
+          "source_id": "cms_hcpcs_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_5d5a732a1caea52d",
+      "patterns": [
+        "\\bQSART\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "quantitative sudomotor axon reflex test",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_32303ab2fb45bfa6",
+      "patterns": [
+        "\\bQST\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Quantitative sensory testing",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_5a4afafd041a19c6",
+      "patterns": [
+        "\\bRA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Rheumatoid arthritis",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_72ad63583210d6ff",
+      "patterns": [
+        "\\bRBC\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "red blood cell",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_6c556fb08f887d08",
+      "patterns": [
+        "\\bRCM\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Reflectance confocal microscopy",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_ca1a9546e25a6074",
+      "patterns": [
+        "\\bREM\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "rapid eye movement",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_83378d3161851a76",
+      "patterns": [
+        "\\bRHC\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Rural health clinic",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_0049aa51a630b791",
+      "patterns": [
+        "\\bRO\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "regional office",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_3e322bf93323b701",
+      "patterns": [
+        "\\bRT\\-PCR\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "reverse transcription polymerase chain reaction",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_621f1bb60bdb3b09",
+      "patterns": [
+        "\\bSHBG\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Sex hormone binding globulin",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_3423bcbbed75e366",
+      "patterns": [
+        "\\bSIS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Saline infusion sonohysterography",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_bb262a5ac6f8b0f0",
+      "patterns": [
+        "\\bSMI\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Supplementary Medical Insurance",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_9dc5eb6a477bc82b",
+      "patterns": [
+        "\\bSNF\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "skilled nursing facilities",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        },
+        {
+          "expansion": "skilled nursing facility",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_7aadcab10d314d56",
+      "patterns": [
+        "\\bSPECT\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Single photon emission computed tomography",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_e1bad657cc0ddd36",
+      "patterns": [
+        "\\bSTR\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "short tandem repeat",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_71feee9e08c7311b",
+      "patterns": [
+        "\\bTAP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Transversus abdominis plane",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_a69cbe4521973226",
+      "patterns": [
+        "\\bTAS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Transcatheter atrial septostomy",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_b578c4c4fbeb5c11",
+      "patterns": [
+        "\\bTBG\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Thyroxine binding globulin",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_c9d7b0fdc67ffe18",
+      "patterns": [
+        "\\bTBS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Trabecular bone score",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_47c0ee17aba3f24e",
+      "patterns": [
+        "\\bTBSA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "total body surface area",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_72a7792eafa0eee6",
+      "patterns": [
+        "\\bTENS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Transcutaneous Electrical Nerve Stimulators",
+          "confidence": 0.995,
+          "source_id": "cms_published_policy",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_3d8bd58431d10615",
+      "patterns": [
+        "\\bTH\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "tyrosine hydroxylase",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_b560adb370b3ea81",
+      "patterns": [
+        "\\bTIF\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "transoral incisionless fundoplication",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_638163268a951a9a",
+      "patterns": [
+        "\\bTIS\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Transcatheter intracardiac shunt",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_839e19832beed81a",
+      "patterns": [
+        "\\bTKD\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "tyrosine kinase domain",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_a2156606a4c8b9c3",
+      "patterns": [
+        "\\bTNF\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "tumor necrosis factor",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_ac69d8436b6c62d6",
+      "patterns": [
+        "\\bTRH\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Thyrotropin releasing hormone",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_bcfccb8d6434c4f7",
+      "patterns": [
+        "\\bTSH\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Thyroid stimulating hormone",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_b8b6a8bb355625da",
+      "patterns": [
+        "\\bTTVI\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Transcatheter tricuspid valve implantation",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_61b759245e335a3a",
+      "patterns": [
+        "\\bVEMP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Vestibular evoked myogenic potential",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_93c4eccd11c599e4",
+      "patterns": [
+        "\\bVEP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Visual evoked potential",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_986e2890737d7abe",
+      "patterns": [
+        "\\bVIP\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Vasoactive intestinal peptide",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_74215a25caabd6bf",
+      "patterns": [
+        "\\bVR\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Virtual reality",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_72f71256635e0a41",
+      "patterns": [
+        "\\bVRA\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Visual reinforcement audiometry",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_1b9be475c59af1c8",
+      "patterns": [
+        "\\bVWF\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "von Willebrand factor",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_8d85c08eb01fd756",
+      "patterns": [
+        "\\bVZV\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Varicella zoster virus",
+          "confidence": 0.995,
+          "source_id": "ama_cpt_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    },
+    {
+      "id": "zz_derived_c077a665f0da939d",
+      "patterns": [
+        "\\bWAV\\b"
+      ],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "Wheelchair accessible van",
+          "confidence": 0.995,
+          "source_id": "cms_hcpcs_descriptors",
+          "corroborating_source_ids": [],
+          "attestation": "explicit_parenthetical_definition"
+        }
+      ]
+    }
+  ]
+}

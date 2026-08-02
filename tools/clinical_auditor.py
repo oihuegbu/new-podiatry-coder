@@ -438,23 +438,22 @@ def _audit_once(case: dict, pass_idx: int = 0) -> dict:
     # The final whole-claim review is the highest-stakes judgment in the
     # pipeline (it gates CLEAN), so it runs at the maximum deliberation
     # budget — matching the coding verify pass, not the cheaper default.
-    try:
-        text, usage = chat_completion(
-            system_prompt=system, user_prompt=user,
-            model=model, temperature=temperature, max_tokens=8192,
-            json_mode=True, effort="xhigh")
-    except Exception as exc:
-        if model is None:
-            raise
-        logger.warning(f"Auditor model {model!r} failed ({exc}) — "
-                       f"falling back to the pipeline default")
-        model = None
-        text, usage = chat_completion(
-            system_prompt=system, user_prompt=user,
-            temperature=temperature, max_tokens=8192,
-            json_mode=True, effort="xhigh")
+    # Model identity is a release control. A failed audit opinion cannot be
+    # silently replaced by the pipeline model (which may have authored the
+    # claim); the caller treats the failed pass as incomplete and holds it.
+    text, usage = chat_completion(
+        system_prompt=system, user_prompt=user,
+        model=model, temperature=temperature, max_tokens=8192,
+        json_mode=True, effort="xhigh")
     verdict = json.loads(text)
     verdict["_model"] = model or "pipeline-default"
+    from app.core.model_profiles import active_profile
+    profile = active_profile()
+    verdict["_execution_profile"] = {
+        **profile.model_dump(),
+        "model": model or profile.model,
+        "models_used": [model or profile.model],
+    }
     verdict["_usage"] = usage
     return verdict
 
@@ -754,6 +753,8 @@ def audit_result(doc: str, result: dict, note: str, rep,
     block = {
         "at": _now(),
         "model": verdicts[0].get("_model") if verdicts else None,
+        "execution_profile": (
+            verdicts[0].get("_execution_profile") if verdicts else {}),
         "passes": passes,
         "verdict": ("upheld" if not disputed and not material
                     and not concerns and not incomplete else "disputed"),

@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "version": "2026.08.1",
+  "requirements": [
+    {
+      "id": "diagnosis_code_edition",
+      "source_id": "icd10_codes",
+      "applies_when": "always",
+      "dos_release_window": true
+    },
+    {
+      "id": "procedure_code_edition",
+      "source_id": "cpt_codes",
+      "applies_when": "has_cpt",
+      "dos_release_window": true
+    },
+    {
+      "id": "supply_code_edition",
+      "source_id": "hcpcs_codes",
+      "applies_when": "has_hcpcs",
+      "dos_release_window": true
+    },
+    {
+      "id": "pair_edit_release",
+      "source_id": "ncci_edits",
+      "applies_when": "multiple_services",
+      "dos_release_window": true
+    },
+    {
+      "id": "unit_edit_release",
+      "source_id": "mue_limits",
+      "applies_when": "service",
+      "dos_release_window": true
+    },
+    {
+      "id": "physician_fee_schedule_release",
+      "source_id": "pfs_indicators",
+      "applies_when": "service",
+      "dos_release_window": true
+    },
+    {
+      "id": "coverage_export_freshness",
+      "source_id": "mcd_coverage_cache",
+      "applies_when": "medicare_coverage_service",
+      "max_age_days": 14
+    }
+  ]
+}

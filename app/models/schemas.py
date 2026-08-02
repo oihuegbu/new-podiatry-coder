@@ -220,6 +220,7 @@ class CodingResult(BaseModel):
     auto_coding_summary: str = ""
     rag_context: dict = Field(default_factory=dict)
     model_source: str = ""
+    model_execution: dict = Field(default_factory=dict)
     api_usage: dict = Field(default_factory=dict)
     physician_documented_codes: list[dict] = Field(default_factory=list)
     missing_physician_codes: list[dict] = Field(default_factory=list)
@@ -229,6 +230,7 @@ class CodingResult(BaseModel):
     # an unresolved affirmed shorthand term blocks autonomy only when the
     # registry marks its context as capable of changing a billed line.
     terminology_normalization: dict = Field(default_factory=dict)
+    clinical_facts: dict = Field(default_factory=dict)
     # The operative note's documented procedures (vision extraction's
     # procedures_performed_today). Persisted on the record — not just used
     # transiently for the coding prompts — because the completeness

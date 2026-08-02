@@ -7,12 +7,16 @@
       "name": "Governed podiatry documentation conventions",
       "version": "2026.08.1",
       "review_status": "repository-reviewed",
+      "authority_role": "retrieval_only",
+      "provenance_kind": "practice_governed",
       "scope": "Common shorthand observed in podiatry clinical and operative notes"
     },
     "project_general_clinical_conventions": {
       "name": "Governed general clinical documentation conventions",
       "version": "2026.08.1",
       "review_status": "repository-reviewed",
+      "authority_role": "retrieval_only",
+      "provenance_kind": "practice_governed",
       "scope": "Common cross-specialty shorthand needed to interpret podiatry notes"
     }
   },

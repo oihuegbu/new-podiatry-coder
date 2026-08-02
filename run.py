@@ -49,11 +49,15 @@ def _consistency_worker_init():
     logger.info(f"  [CONSISTENCY] worker pid {os.getpid()} ready")
 
 
-def _consistency_worker_run(pdf_path_str: str, run_idx: int, total: int) -> dict:
+def _consistency_worker_run(pdf_path_str: str, run_idx: int, total: int,
+                            profile: dict) -> dict:
     logger.info(f"  [CONSISTENCY] {Path(pdf_path_str).stem}: run {run_idx}/{total} "
                 f"(worker pid {os.getpid()})")
     try:
-        result = _WORKER_PIPELINE.process_note(Path(pdf_path_str), use_cache=False)
+        from app.core.model_profiles import use_execution_profile
+        with use_execution_profile(profile):
+            result = _WORKER_PIPELINE.process_note(
+                Path(pdf_path_str), use_cache=False)
         return result.model_dump()
     except Exception as exc:
         # Log the full traceback HERE, in the worker — it is the only place
@@ -102,6 +106,40 @@ def main():
                              "notes (a non-contiguous subset --start/--end can't "
                              "express, e.g. the unanimity loop's holdouts)")
     args = parser.parse_args()
+    if args.consistency < 1:
+        parser.error("--consistency must be at least 1")
+
+    if os.getenv("AUTO_BUILD_TERMINOLOGY_PACK", "1") != "0":
+        from tools.build_terminology_pack import materialize_pack
+        terminology_status = materialize_pack()
+        logger.info(f"Terminology authority pack: {terminology_status}")
+
+    # A deployment may enable a bounded autonomous envelope once in the
+    # practice configuration. Materialize its HMAC-signed registry on every
+    # startup so secret/config rotation is automatic and stale scopes cannot
+    # linger. Disabled autonomy is a safe no-op.
+    from app.release.scope_bootstrap import bootstrap_scope
+    scope_status = bootstrap_scope()
+    logger.info(f"Autonomy scope: {scope_status}")
+
+    from app.core.model_profiles import (
+        autonomous_execution_errors, profiles_for_runs,
+    )
+    execution_profiles = profiles_for_runs(args.consistency)
+    logger.info("Coding execution profiles: " + ", ".join(
+        f"{profile.provider}:{profile.model}" for profile in execution_profiles))
+    if scope_status.get("enabled"):
+        execution_errors = autonomous_execution_errors(
+            execution_profiles, args.consistency)
+        if execution_errors:
+            raise RuntimeError(
+                "autonomous execution preflight failed: "
+                + "; ".join(execution_errors))
+    if os.getenv("AUTO_REFRESH_AUTHORITIES", "1") != "0":
+        from app.compliance.refresh.preflight import refresh_stale_sources
+        refresh_status = refresh_stale_sources(
+            require_current=bool(scope_status.get("enabled")))
+        logger.info(f"Authoritative-source preflight: {refresh_status}")
 
     from app.core.config import LLM_PROVIDER, CLAUDE_MODEL, OPENAI_MODEL
     active_model = CLAUDE_MODEL if LLM_PROVIDER == "claude" else OPENAI_MODEL
@@ -195,16 +233,21 @@ def main():
     if pool is not None and args.consistency > 1:
         for pdf_path in note_files:
             jobs[pdf_path] = [
-                pool.apply_async(_consistency_worker_run,
-                                 (str(pdf_path), i + 1, args.consistency))
+                pool.apply_async(
+                    _consistency_worker_run,
+                    (str(pdf_path), i + 1, args.consistency,
+                     execution_profiles[i].model_dump()))
                 for i in range(args.consistency)
             ]
 
     for pdf_path in note_files:
         try:
             if args.consistency > 1:
-                # Self-consistency: N independent uncached runs; any code that
-                # is not unanimous across them is routed to human review.
+                # Cross-provider consistency: N independent uncached runs.
+                # A billing split is held while deterministic actuation/replay
+                # attempts to converge it, then the same explicitly authorized
+                # provider schedule adjudicates the evidence-bound residue.
+                # Only an unresolved/abstained split reaches human review.
                 from app.validation.consistency import (
                     compare_runs, select_canonical, annotate_result)
                 if pool is not None:
@@ -213,7 +256,9 @@ def main():
                     dumps = []
                     for i in range(args.consistency):
                         logger.info(f"  [CONSISTENCY] run {i + 1}/{args.consistency}")
-                        r = pipeline.process_note(pdf_path, use_cache=False)
+                        from app.core.model_profiles import use_execution_profile
+                        with use_execution_profile(execution_profiles[i]):
+                            r = pipeline.process_note(pdf_path, use_cache=False)
                         dumps.append(r.model_dump())
                 # Persist every independent run — flip forensics need the
                 # losing runs' validation traces, and only the canonical

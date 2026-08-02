@@ -13,14 +13,20 @@ Design:
 """
 from __future__ import annotations
 
+import io
+import json
+import os
 import re
+import tempfile
 import urllib.request
 import urllib.error
+import zipfile
 from datetime import date
 
 from app.compliance.datastore.store import ComplianceDataStore
 from app.compliance.refresh.sources import SOURCES_BY_ID, due_sources
 from app.compliance.refresh import parsers as P
+from app.core.config import HCPCS_FILE
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -28,6 +34,7 @@ logger = get_logger(__name__)
 _UA = "Mozilla/5.0 (compatible; ClaimScrubber/1.0; +compliance-refresh)"
 # Tables that retain history (effective-dated, no primary key)
 _HISTORY_TABLES = {"ncci_ptp", "mue", "global_period"}
+_MIN_SOURCE_RETENTION_RATIO = 0.95
 
 
 def download(url: str, timeout: int = 60) -> bytes:
@@ -114,6 +121,26 @@ def _resolve_pfs(url: str) -> tuple[list[str], str | None]:
     return [_abs(page, zips[0])], _quarter_start(2000 + yy, ord(letter) - ord("a") + 1)
 
 
+_HCPCS_RELEASE_MONTHS = {
+    "january": 1, "april": 4, "july": 7, "october": 10,
+}
+
+
+def _resolve_hcpcs(url: str) -> tuple[list[str], str | None]:
+    """Newest official CMS quarterly alpha-numeric HCPCS archive."""
+    html = download(url).decode("utf-8", errors="replace")
+    hits = re.findall(
+        r'href="([^"]*?/(january|april|july|october)-(\d{4})-'
+        r'alpha-numeric-hcpcs-file\.zip(?:\?[^"]*)?)"', html, re.I)
+    if not hits:
+        return [], None
+    newest = max(
+        hits, key=lambda hit: (int(hit[2]), _HCPCS_RELEASE_MONTHS[hit[1].lower()]))
+    href, month_name, year = newest
+    month = _HCPCS_RELEASE_MONTHS[month_name.lower()]
+    return [_abs(url, href)], f"{int(year):04d}-{month:02d}-01"
+
+
 # The MCD bulk export lives at a STABLE url (verified live) — the landing
 # page in sources.py is javascript-rendered and exposes no scrapeable link.
 _MCD_EXPORT_URL = ("https://downloads.cms.gov/medicare-coverage-database/"
@@ -129,7 +156,113 @@ _RESOLVERS = {
     "mue": _resolve_mue,
     "pfs_global": _resolve_pfs,
     "mcd_articles": _resolve_mcd,
+    "hcpcs": _resolve_hcpcs,
 }
+
+
+def _hcpcs_archive_records(raw: bytes, *, source_url: str) -> tuple[list[dict], str]:
+    """Select and parse the contractor data member from one CMS archive."""
+    if raw[:2] != b"PK":
+        source_file = "local-fixed-width.txt"
+        text = raw.decode("latin-1", errors="replace")
+    else:
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(raw))
+        except zipfile.BadZipFile as exc:
+            raise ValueError("HCPCS download is not a valid ZIP archive") from exc
+        matches = [name for name in zf.namelist()
+                   if re.search(r"ANWEB.*\.txt$", name, re.I)]
+        if len(matches) != 1:
+            raise ValueError(
+                "HCPCS archive must contain exactly one ANWEB contractor text file")
+        source_file = matches[0]
+        text = zf.read(source_file).decode("latin-1", errors="replace")
+    return P.parse_hcpcs_fixed_width(
+        text, source_file=source_file, source_url=source_url), source_file
+
+
+def _hcpcs_kind_counts(records: list[dict]) -> dict[str, int]:
+    counts = {"procedure": 0, "modifier": 0}
+    for record in records:
+        kind = str((record.get("metadata") or {}).get("record_type") or "")
+        if kind not in counts:
+            # Older source snapshots predate record_type provenance. Their
+            # two/five-character layout still distinguishes CMS modifiers
+            # from service records without consulting any medical code value.
+            kind = "modifier" if len(str(record.get("code") or "")) == 2 else "procedure"
+        counts[kind] += 1
+    return counts
+
+
+def _validate_hcpcs_completeness(records: list[dict]) -> None:
+    """Reject a structurally valid but unexpectedly truncated release."""
+    incoming = _hcpcs_kind_counts(records)
+    if not all(incoming.values()):
+        raise ValueError("HCPCS release is missing a required record family")
+    try:
+        existing = json.loads(HCPCS_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        existing = []
+    previous = _hcpcs_kind_counts(existing) if isinstance(existing, list) else {}
+    for kind, prior_count in previous.items():
+        retained = incoming.get(kind, 0) / prior_count if prior_count else 1.0
+        if retained < _MIN_SOURCE_RETENTION_RATIO:
+            raise ValueError(
+                f"HCPCS {kind} record count retained only {retained:.1%} of the "
+                "installed authoritative release")
+
+
+def _write_hcpcs_source(records: list[dict]) -> None:
+    """Durably replace the versioned HCPCS source without partial readers."""
+    HCPCS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                "w", dir=HCPCS_FILE.parent,
+                prefix=f".{HCPCS_FILE.name}.", suffix=".tmp",
+                delete=False) as handle:
+            tmp = handle.name
+            json.dump(records, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, HCPCS_FILE)
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+
+
+def _replace_pos_reference(store: ComplianceDataStore,
+                           rows: list[tuple], *, dry_run: bool = False) -> int:
+    """Refresh POS names without fabricating PFS payment designations.
+
+    CMS's live code-set page omits facility/non-facility status. Existing
+    codes retain the designation sourced in ``pos_codes.json``. A newly
+    published code has no safe value to inherit, so the whole refresh fails
+    before writing anything and the claim path continues to reject that POS
+    as unknown until its authoritative payment designation is loaded.
+    """
+    installed = {
+        str(row["code"]): str(row["facility"])
+        for row in store.conn.execute("SELECT code, facility FROM pos")
+    }
+    unknown = sorted({str(code) for code, _name, _facility in rows
+                      if str(code) not in installed})
+    if unknown:
+        raise ValueError(
+            "CMS POS refresh contains code(s) without an authoritative "
+            "facility designation: " + ", ".join(unknown))
+    merged = [(str(code), str(name), installed[str(code)])
+              for code, name, _facility in rows]
+    if not dry_run:
+        with store.conn:
+            store.conn.executemany(
+                "INSERT OR REPLACE INTO pos (code,name,facility) VALUES (?,?,?)",
+                merged)
+    return len(merged)
 
 
 def _write_coverage_cache(articles: list[dict], effective: str | None) -> None:
@@ -160,10 +293,23 @@ def _write_coverage_cache(articles: list[dict], effective: str | None) -> None:
                  "podiatry_lcd.json seed at every compliance.db rebuild."),
         "articles": articles,
     }
-    tmp = path.with_suffix(".json.tmp")
-    with open(tmp, "w") as f:
-        json.dump(payload, f, separators=(",", ":"))
-    os.replace(tmp, path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                "w", dir=path.parent, prefix=f".{path.name}.",
+                suffix=".tmp", delete=False) as f:
+            tmp = f.name
+            json.dump(payload, f, separators=(",", ":"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
     logger.info(f"refresh[mcd_articles]: coverage cache written "
                 f"({len(articles)} articles) → {path.name}")
 
@@ -206,13 +352,13 @@ def refresh_source(store: ComplianceDataStore, source_id: str, *,
     # Resolve the current concrete file URL(s) from the landing page; a
     # local file (offline/air-gapped ingest) bypasses resolution entirely.
     if local_bytes is not None:
-        payloads, resolved_eff = [(local_bytes, "local-file")], None
+        payloads, resolved_eff = [(local_bytes, "local-file", "local-file")], None
     else:
         urls, resolved_eff = _resolve_urls(src)
         payloads = []
         for u in urls:
             try:
-                payloads.append((download(u, timeout=300), u.rsplit("/", 1)[-1]))
+                payloads.append((download(u, timeout=300), u.rsplit("/", 1)[-1], u))
             except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
                 logger.warning(f"refresh[{source_id}]: download failed for {u} ({e})")
         if not payloads:
@@ -222,6 +368,30 @@ def refresh_source(store: ComplianceDataStore, source_id: str, *,
     # (derived by the resolver from the filename) > today.
     eff = effective_from or resolved_eff or date.today().isoformat()
 
+    # The HCPCS quarterly source is a complete code-set replacement rather
+    # than an effective-dated relational snapshot. Persisting the official
+    # parsed source keeps clean database rebuilds deterministic; build_or_load
+    # immediately verifies and re-ingests it through the normal fingerprint
+    # path for the current process.
+    if source_id == "hcpcs":
+        raw, _download_name, source_url = payloads[0]
+        try:
+            records, member_name = _hcpcs_archive_records(
+                raw, source_url=source_url)
+            _validate_hcpcs_completeness(records)
+        except (ValueError, zipfile.BadZipFile) as exc:
+            logger.warning(f"refresh[{source_id}]: {exc}")
+            return {"source": source_id, "ok": False, "error": str(exc)}
+        if dry_run:
+            return {"source": source_id, "ok": True,
+                    "parsed_records": len(records), "files": [member_name],
+                    "effective_from": eff, "dry_run": True}
+        _write_hcpcs_source(records)
+        store.build_or_load()
+        return {"source": source_id, "ok": True,
+                "ingested_records": len(records), "effective_from": eff,
+                "files": [member_name]}
+
     parser = P.PARSERS.get(src.parser)
     if not parser:
         return {"source": source_id, "ok": False, "error": f"no parser {src.parser}"}
@@ -230,7 +400,7 @@ def refresh_source(store: ComplianceDataStore, source_id: str, *,
     # bulk export is a nested relational zip (parse_mcd_export); a plain
     # CSV payload (offline ingest / tests) uses the flat-file parser.
     if source_id == "mcd_articles":
-        raw, _name = payloads[0]
+        raw, _name, _url = payloads[0]
         if raw[:2] == b"PK":
             articles = P.parse_mcd_export(raw)
         else:
@@ -255,7 +425,7 @@ def refresh_source(store: ComplianceDataStore, source_id: str, *,
     # second file for the same quarter would otherwise no-op as "already
     # present".
     rows, cols, file_names = [], None, []
-    for raw, name in payloads:
+    for raw, name, _url in payloads:
         text = _payload_text(src, raw)
         r, cols = parser(text, eff)
         rows.extend(r)
@@ -269,6 +439,16 @@ def refresh_source(store: ComplianceDataStore, source_id: str, *,
         return {"source": source_id, "ok": False,
                 "error": "0 rows parsed — payload is likely a landing page or an "
                          "unrecognized format; check the source URL or ingest offline via --file"}
+    if source_id == "pos":
+        try:
+            n = _replace_pos_reference(store, rows, dry_run=dry_run)
+        except ValueError as exc:
+            logger.warning(f"refresh[{source_id}]: {exc}")
+            return {"source": source_id, "ok": False, "error": str(exc)}
+        return {"source": source_id, "ok": True,
+                ("parsed_rows" if dry_run else "ingested_rows"): n,
+                "files": file_names, "effective_from": eff,
+                "dry_run": dry_run}
     if dry_run:
         return {"source": source_id, "ok": True, "parsed_rows": len(rows),
                 "files": file_names, "effective_from": eff, "dry_run": True}
@@ -276,7 +456,7 @@ def refresh_source(store: ComplianceDataStore, source_id: str, *,
     if src.target_table in _HISTORY_TABLES:
         n = store.ingest_snapshot(src.target_table, cols, rows, source_id, eff,
                                   file_name=", ".join(file_names))
-    else:  # reference tables (pos) — replace in place
+    else:  # reference tables — replace in place
         ph = ",".join("?" * len(cols))
         store.conn.executemany(
             f"INSERT OR REPLACE INTO {src.target_table} ({','.join(cols)}) VALUES ({ph})", rows

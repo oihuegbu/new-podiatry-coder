@@ -23,6 +23,7 @@ class ClaimReadinessTest(unittest.TestCase):
         scope = {
             "id": "test-scope", "approved": True,
             "approved_by": "safety-reviewer",
+            "approval_reference": "test-authorization-record",
             "effective_from": "2020-01-01", "effective_to": "2099-12-31",
             "dimensions": {
                 "payer_kinds": ["*"], "payer_ids": ["*"],
@@ -42,8 +43,16 @@ class ClaimReadinessTest(unittest.TestCase):
             "CLAIM_READINESS_SIGNING_KEY": "test-certificate-key-with-32-bytes-minimum",
         })
         self.env.start()
+        # Source applicability contracts have dedicated tests with synthetic
+        # release windows. These certificate tests isolate signing/control
+        # behavior from whichever quarterly snapshots are present locally.
+        self.source_contract = mock.patch(
+            "app.release.claim_readiness._source_contract_errors",
+            return_value=[])
+        self.source_contract.start()
 
     def tearDown(self):
+        self.source_contract.stop()
         self.env.stop()
         self.tmp.cleanup()
 
@@ -54,7 +63,7 @@ class ClaimReadinessTest(unittest.TestCase):
             "final_disposition": "CLEAN",
             "patient_metadata": {
                 "insurance": "UnitedHealthcare Choice Plus",
-                "date_of_service": "2026-01-05",
+                "date_of_service": "2026-05-05",
                 "provider_specialty": "podiatry", "place_of_service": "office",
                 "insurance_plan": "Choice Plus", "member_id": "member-1",
                 "provider_npi": "1888888882", "billing_npi": "1999999984",
@@ -65,7 +74,36 @@ class ClaimReadinessTest(unittest.TestCase):
                                 "note_category": "established_visit"}},
             "consistency": {"runs": 3, "unanimous": True,
                             "input_consistent": True,
-                            "input_disagreements": []},
+                            "input_disagreements": [],
+                            "model_independence": {
+                                "required_domains": 2,
+                                "observed_domains": ["claude", "openai"],
+                                "observed_profiles": [
+                                    {"profile_id": "coder-primary",
+                                     "provider": "claude",
+                                     "model": "coder-model",
+                                     "independence_domain": "claude",
+                                     "models_used": ["coder-model"]},
+                                    {"profile_id": "coder-secondary",
+                                     "provider": "openai",
+                                     "model": "second-model",
+                                     "independence_domain": "openai",
+                                     "models_used": ["second-model"]},
+                                    {"profile_id": "coder-primary",
+                                     "provider": "claude",
+                                     "model": "coder-model",
+                                     "independence_domain": "claude",
+                                     "models_used": ["coder-model"]},
+                                ],
+                                "invalid_run_profiles": [],
+                                "satisfied": True,
+                            }},
+            "model_execution": {
+                "profile_id": "coder-primary",
+                "provider": "claude", "model": "coder-model",
+                "independence_domain": "claude",
+                "models_used": ["coder-model"],
+            },
             "claim_scrub": {"clean": True, "disposition": "CLEAN"},
             "icd_codes": [{
                 "code": "DX", "type": "primary",
@@ -103,6 +141,10 @@ class ClaimReadinessTest(unittest.TestCase):
             TerminologyNormalizer().normalize_entities(
                 [], {"full_text": self.note}))
         result["ner_entities"] = []
+        from app.clinical_facts import build_clinical_fact_report
+        result["clinical_facts"] = build_clinical_fact_report(
+            entities=[], sections={"full_text": self.note},
+            procedures=[], imaging=[], supplies=[], prior_surgery={})
         from app.compliance.agents import build_default_agents
         required = [a.filter_id for a in build_default_agents(None)]
         result["claim_scrub"]["expected_filter_count"] = len(required)
@@ -119,6 +161,11 @@ class ClaimReadinessTest(unittest.TestCase):
         result["clinical_audit"] = {
             "verdict": "upheld",
             "fingerprint": corrections_fingerprint(result),
+            "execution_profile": {
+                "profile_id": "auditor-secondary",
+                "provider": "claude", "model": "auditor-model",
+                "independence_domain": "claude",
+            },
         }
         return result
 
@@ -210,6 +257,52 @@ class ClaimReadinessTest(unittest.TestCase):
         result["clinical_audit"]["fingerprint"] = corrections_fingerprint(result)
         cert = build_readiness_certificate(result)
         self.assertEqual(cert.disposition.value, "REVIEW_REQUIRED")
+
+    def test_fabricated_model_independence_summary_cannot_auto_release(self):
+        result = self.result()
+        diversity = result["consistency"]["model_independence"]
+        diversity["observed_profiles"] = [
+            diversity["observed_profiles"][0] for _ in range(3)]
+        # A stale or fabricated summary flag cannot override the profiles.
+        diversity["satisfied"] = True
+        cert = build_readiness_certificate(result)
+        self.assertEqual(cert.disposition.value, "REVIEW_REQUIRED")
+
+    def test_auditor_cannot_reuse_any_model_that_influenced_coding(self):
+        result = self.result()
+        result["model_execution"]["models_used"].append("auditor-model")
+        cert = build_readiness_certificate(result)
+        self.assertEqual(cert.disposition.value, "REVIEW_REQUIRED")
+
+    def test_auditor_cannot_reuse_model_that_broke_a_coding_tie(self):
+        result = self.result()
+        result["adjudication"] = {
+            "passes": 2,
+            "execution_profiles": [
+                {"provider": "claude", "model": "auditor-model",
+                 "independence_domain": "claude"},
+                {"provider": "openai", "model": "second-judge",
+                 "independence_domain": "openai"},
+            ],
+            "items": [],
+        }
+        cert = build_readiness_certificate(result)
+        self.assertEqual(cert.disposition.value, "REVIEW_REQUIRED")
+
+    def test_cross_provider_adjudication_with_separate_audit_can_release(self):
+        result = self.result()
+        result["adjudication"] = {
+            "passes": 2,
+            "execution_profiles": [
+                {"provider": "claude", "model": "first-judge",
+                 "independence_domain": "claude"},
+                {"provider": "openai", "model": "second-judge",
+                 "independence_domain": "openai"},
+            ],
+            "items": [],
+        }
+        cert = build_readiness_certificate(result)
+        self.assertEqual(cert.disposition.value, "AUTO_READY")
 
     def test_malformed_validator_issue_blocks(self):
         result = self.result()

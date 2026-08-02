@@ -250,6 +250,104 @@ def unzip_first(data: bytes, want_ext=(".csv", ".txt"), prefer: tuple[str, ...] 
 
 
 # --------------------------------------------------------------------------- #
+def parse_hcpcs_fixed_width(text: str, *, source_file: str,
+                            source_url: str) -> list[dict]:
+    """Official CMS alpha-numeric contractor record -> source JSON records.
+
+    Field positions come from ``HCPC20YY_recordlayout.txt`` shipped in the
+    same quarterly CMS archive.  Record IDs 3/4 are procedure first/
+    continuation rows and 7/8 are modifier first/continuation rows.  Keeping
+    modifiers in the source file preserves the full CMS release even though
+    ``ComplianceDataStore`` deliberately ingests only five-character Level II
+    service codes into ``code_set``.
+
+    The parser is intentionally structural and contains no medical code
+    values, families, or prefixes.  A continuation without a matching first
+    row, a duplicate first row, or an invalid first-row identity makes the
+    entire refresh invalid rather than silently producing a partial code set.
+    """
+    records: list[dict] = []
+    current: dict | None = None
+    seen: set[tuple[str, str]] = set()
+
+    def field(line: str, begin: int, end: int) -> str:
+        # CMS layout positions are one-based and inclusive.
+        return line[begin - 1:end].strip()
+
+    def finish() -> None:
+        nonlocal current
+        if current is None:
+            return
+        current["long_description"] = " ".join(current.pop("_long_parts")).strip()
+        records.append(current)
+        current = None
+
+    for line_number, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        if len(line) < 11:
+            raise ValueError(
+                f"HCPCS contractor row {line_number} is shorter than its record header")
+        record_id = field(line, 11, 11)
+        if record_id in {"3", "7"}:
+            if len(line) < 293:
+                raise ValueError(
+                    f"HCPCS contractor row {line_number} is missing required detail fields")
+            finish()
+            kind = "procedure" if record_id == "3" else "modifier"
+            code = field(line, 1, 5) if kind == "procedure" else field(line, 4, 5)
+            expected_length = 5 if kind == "procedure" else 2
+            if len(code) != expected_length or not code.isalnum():
+                raise ValueError(
+                    f"HCPCS contractor row {line_number} has an invalid {kind} identity")
+            identity = (kind, code.upper())
+            if identity in seen:
+                raise ValueError(
+                    f"HCPCS contractor row {line_number} duplicates {kind} {code}")
+            seen.add(identity)
+            current = {
+                "code": code.upper(),
+                "short_description": field(line, 92, 119),
+                "_long_parts": [field(line, 12, 91)],
+                "effective_from": _norm_date(field(line, 277, 284), "") or None,
+                "effective_to": _norm_date(field(line, 285, 292), "") or None,
+                "modifiers": [],
+                "coverage_code": field(line, 230, 230) or None,
+                "betos": field(line, 257, 259) or None,
+                "action_code": field(line, 293, 293) or None,
+                "add_date": _norm_date(field(line, 269, 276), "") or None,
+                "metadata": {
+                    "source_file": source_file,
+                    "source_url": source_url,
+                    "record_type": kind,
+                },
+            }
+            if not all((current["short_description"], current["_long_parts"][0],
+                        current["effective_from"], current["add_date"],
+                        current["action_code"])):
+                raise ValueError(
+                    f"HCPCS contractor row {line_number} has incomplete required fields")
+        elif record_id in {"4", "8"}:
+            expected_kind = "procedure" if record_id == "4" else "modifier"
+            if current is None or current["metadata"]["record_type"] != expected_kind:
+                raise ValueError(
+                    f"HCPCS contractor row {line_number} is an orphaned continuation")
+            continuation_code = (
+                field(line, 1, 5) if expected_kind == "procedure"
+                else field(line, 4, 5))
+            if continuation_code.upper() != current["code"]:
+                raise ValueError(
+                    f"HCPCS contractor row {line_number} changes identity mid-description")
+            current["_long_parts"].append(field(line, 12, 91))
+        else:
+            raise ValueError(
+                f"HCPCS contractor row {line_number} has unknown record id {record_id!r}")
+    finish()
+    if not records:
+        raise ValueError("HCPCS contractor file contains no records")
+    return records
+
+
 def parse_ncci(text: str, effective_date: str) -> tuple[list[tuple], list[str]]:
     """→ rows for ncci_ptp(col1, col2, modifier_indicator, effective_from, effective_to).
 
@@ -338,21 +436,39 @@ def parse_pfs(text: str, effective_date: str) -> tuple[list[tuple], list[str]]:
                   "effective_from", "effective_to"]
 
 
-def parse_pos(html: str, effective_date: str) -> tuple[list[tuple], list[str]]:
-    """Best-effort scrape of the CMS POS HTML table → pos(code, name, facility).
+def parse_pos(markup: str, effective_date: str) -> tuple[list[tuple], list[str]]:
+    """CMS POS HTML table -> ``pos(code, name, facility)`` candidates.
 
-    Facility designation isn't in the HTML; defaults to 'N' and is corrected from
-    the maintained reference file. Primarily refreshes names/new codes.
+    The current CMS web table publishes code/name/description but not the
+    Medicare PFS facility designation. ``facility`` is therefore deliberately
+    ``None``: the runner may preserve an installed authoritative designation,
+    but must never invent non-facility status for a new or changed code.
     """
     rows = []
-    for m in re.finditer(r"\b(\d{2})\b\s*[-–:]\s*([A-Z][A-Za-z0-9 ,/&'\-]{3,60})", html):
-        code, name = m.group(1), m.group(2).strip()
-        rows.append((code, name, "N"))
+    for table_row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", markup,
+                                flags=re.I | re.S):
+        cells = [paragraph_text(cell) for cell in re.findall(
+            r"<t[dh]\b[^>]*>(.*?)</t[dh]>", table_row,
+            flags=re.I | re.S)]
+        if len(cells) >= 2 and re.fullmatch(r"\d{2}", cells[0]):
+            rows.append((cells[0], cells[1], None))
+    # Small synthetic/legacy pages sometimes render code and name in one
+    # cell. Keep a bounded fallback without interpreting code ranges.
+    if not rows:
+        cells = re.findall(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", markup,
+                           flags=re.I | re.S) or [markup]
+        for cell in cells:
+            match = re.match(
+                r"^\s*(\d{2})\s*[-–:]\s*"
+                r"([A-Z][A-Za-z0-9 ,/&'\-]{3,60}?)\s*$",
+                paragraph_text(cell))
+            if match:
+                rows.append((match.group(1), match.group(2).strip(), None))
     # dedup by code
     seen, uniq = set(), []
-    for c, n, f in rows:
+    for c, n, facility in rows:
         if c not in seen:
-            seen.add(c); uniq.append((c, n, f))
+            seen.add(c); uniq.append((c, n, facility))
     return uniq, ["code", "name", "facility"]
 
 

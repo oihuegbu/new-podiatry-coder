@@ -5,7 +5,7 @@ from datetime import datetime
 
 from app.core.logger import get_logger
 from app.core import cache as result_cache
-from app.core.config import LLM_PROVIDER
+from app.core.config import LLM_PROVIDER, RAG_TOP_K
 from app.ingestion.pdf_parser import extract_from_pdf
 from app.ner.entity_extractor import extract_entities
 from app.rag.retriever import CandidateRetriever
@@ -18,6 +18,8 @@ from app.compliance.engine import ClaimScrubber, _parse_dos
 from app.compliance.agents import build_default_agents
 from app.models.schemas import CodingResult
 from app.terminology import TerminologyNormalizer
+from app.core.model_profiles import active_profile, execution_record
+from app.clinical_facts import build_clinical_fact_report
 
 logger = get_logger(__name__)
 
@@ -171,6 +173,10 @@ class MedicalCodingPipeline:
         entities = extract_entities(sections)
         entities, terminology_report = self.terminology.normalize_entities(
             entities, sections)
+        clinical_facts = build_clinical_fact_report(
+            entities=entities, sections=sections, procedures=procedures_today,
+            imaging=imaging_today, supplies=supplies_today,
+            prior_surgery=prior_surgery_info)
         logger.info(f"  Found {len(entities)} entities")
         for e in entities:
             logger.info(f"    [{e.category:>14}] {e.clinical_term} {'['+e.laterality+']' if e.laterality else ''}")
@@ -179,6 +185,15 @@ class MedicalCodingPipeline:
         logger.info("[3/5] Retrieving candidate codes (RAG/Qdrant hybrid)...")
         entity_candidates = self.retriever.retrieve_for_entities(entities)
         note_candidates = self.retriever.retrieve_for_full_note(sections)
+        fact_candidates = self.retriever.retrieve_for_clinical_facts(
+            clinical_facts)
+        note_candidates = {
+            system: self.retriever._round_robin(
+                [rows for rows in (note_candidates.get(system) or [],
+                                   fact_candidates.get(system) or []) if rows],
+                RAG_TOP_K)
+            for system in ("icd10", "cpt", "hcpcs")
+        }
 
         merged = self._merge_candidates(entity_candidates, note_candidates)
         # Deleted/not-yet-effective codes must never be OFFERED to the coding
@@ -226,6 +241,7 @@ class MedicalCodingPipeline:
             physician_documented_codes=physician_documented_codes,
             store=self.compliance_store,
             exemplar_block=exemplar_block,
+            clinical_facts=clinical_facts,
         )
 
         # Immutable candidate snapshot: deterministic validation may propose
@@ -334,12 +350,14 @@ class MedicalCodingPipeline:
                 # without the note text can't evaluate note-evidence rules.
                 "note_full_text": full_text,
             },
-            model_source=LLM_PROVIDER,
+            model_source=active_profile().provider,
+            model_execution=execution_record(),
             api_usage=usage,
             physician_documented_codes=physician_documented_codes,
             missing_physician_codes=coding_result.get("missing_physician_codes", []),
             ner_entities=entity_dicts,
             terminology_normalization=terminology_report,
+            clinical_facts=clinical_facts,
             # Persist the documented procedures so the completeness invariant
             # can re-run when this claim is re-validated on replay/reconcile
             # (the replayer reads it back from the stored payload).

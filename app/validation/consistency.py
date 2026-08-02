@@ -92,6 +92,8 @@ _INPUT_PATHS: dict[str, tuple[str, ...]] = {
     "terminology_registry_sha256": (
         "terminology_normalization", "registry_sha256"),
     "terminology_status": ("terminology_normalization", "status"),
+    "clinical_facts_fingerprint": ("clinical_facts", "facts_fingerprint"),
+    "clinical_facts_status": ("clinical_facts", "status"),
 }
 
 
@@ -381,6 +383,37 @@ def compare_runs(runs: list[dict], store=None) -> dict:
     billing = [d for d in disagreements if not d["advisory"]]
     input_disagreements = _input_disagreements(runs)
     input_consistent = not input_disagreements
+    profiles = []
+    invalid_profiles = []
+    for index, run in enumerate(runs):
+        profile = run.get("model_execution") or {}
+        provider = str(profile.get("provider") or "").strip().lower()
+        model = str(profile.get("model") or "").strip()
+        domain = str(profile.get("independence_domain") or "").strip().lower()
+        if not provider or not model or domain != provider:
+            invalid_profiles.append(index + 1)
+            continue
+        models_used = profile.get("models_used") or [model]
+        if (not isinstance(models_used, list) or not models_used
+                or any(not str(value or "").strip() for value in models_used)
+                or model not in {str(value).strip() for value in models_used}):
+            invalid_profiles.append(index + 1)
+            continue
+        profiles.append({"profile_id": str(profile.get("profile_id") or ""),
+                         "provider": provider, "model": model,
+                         "independence_domain": domain,
+                         "models_used": list(dict.fromkeys(
+                             str(value).strip() for value in models_used))})
+    domains = sorted({row["independence_domain"] for row in profiles})
+    from app.core.config import MIN_INDEPENDENT_MODEL_DOMAINS
+    independence = {
+        "required_domains": MIN_INDEPENDENT_MODEL_DOMAINS,
+        "observed_domains": domains,
+        "observed_profiles": profiles,
+        "invalid_run_profiles": invalid_profiles,
+        "satisfied": (not invalid_profiles and
+                      len(domains) >= MIN_INDEPENDENT_MODEL_DOMAINS),
+    }
     return {
         "runs": n,
         # unanimity (and therefore REVIEW routing) is judged on the arrays
@@ -392,6 +425,7 @@ def compare_runs(runs: list[dict], store=None) -> dict:
         "disagreements": disagreements,
         "dispositions": dispositions,
         "tiers": tiers,
+        "model_independence": independence,
     }
 
 

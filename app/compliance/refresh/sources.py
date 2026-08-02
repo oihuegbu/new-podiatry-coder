@@ -59,7 +59,9 @@ SOURCES: list[Source] = [
         id="pos", layer="POS", publisher="CMS", cadence="annual",
         fmt="html", target_table="pos", parser="parse_pos",
         url="https://www.cms.gov/medicare/coding-billing/place-of-service-codes/code-sets",
-        notes="Facility vs non-facility differential.",
+        notes="Refreshes CMS names only. Facility vs non-facility status is "
+              "preserved from the authoritative installed reference; a new code "
+              "without that second authority fails closed.",
     ),
     Source(
         id="mcd_articles", layer="MEDICAL_NECESSITY", publisher="CMS", cadence="weekly",
@@ -69,12 +71,11 @@ SOURCES: list[Source] = [
     ),
     Source(
         id="hcpcs", layer="CODE_SET", publisher="CMS", cadence="quarterly",
-        fmt="zip-csv", target_table="code_set", parser="parse_hcpcs",
-        url="https://www.cms.gov/medicare/coding-billing/healthcare-common-procedure-system",
-        manual=True,
-        notes="parse_hcpcs not implemented yet — data/codes/hcpcs_codes.json is refreshed "
-              "manually from the CMS quarterly alpha-numeric file; compliance.db re-ingests "
-              "it automatically on file change (store fingerprint check).",
+        fmt="zip-fixed", target_table="code_set", parser="parse_hcpcs",
+        url="https://www.cms.gov/medicare/coding-billing/healthcare-common-procedure-system/quarterly-update",
+        notes="Official quarterly alpha-numeric contractor file. The fixed-width parser "
+              "uses the CMS-published record layout, persists the complete versioned JSON "
+              "source atomically, and triggers compliance.db fingerprint re-ingestion.",
     ),
     Source(
         id="prior_auth_medicare", layer="PRIOR_AUTH", publisher="CMS", cadence="quarterly",

@@ -121,6 +121,46 @@ def _is_valid_date(val) -> bool:
         return False
 
 
+def _published_effective_date(entry: dict) -> str:
+    """Prefer an explicit CMS ``Eff_MM-DD-YYYY`` source filename.
+
+    Some transformed MUE rows carry the prior day as ``effective_date`` even
+    though the retained CMS filename identifies the actual quarterly start.
+    Applicability follows the published release identity, not that transform
+    artifact.
+    """
+    source_file = str(entry.get("source_file") or
+                      (entry.get("metadata") or {}).get("source_file") or "")
+    match = re.search(r"Eff[_-]?(\d{2})[-_](\d{2})[-_](20\d{2})",
+                      source_file, re.IGNORECASE)
+    if match:
+        month, day, year = match.groups()
+        candidate = f"{year}-{month}-{day}"
+        if _is_valid_date(candidate):
+            return candidate
+    return _clean_date(entry.get("effective_date"))
+
+
+def _pfs_published_effective_date(data: dict) -> str:
+    """Quarter start identified by the retained CMS PFS release metadata."""
+    text = " ".join(str(data.get(key) or "")
+                    for key in ("version", "source", "source_url"))
+    match = re.search(
+        r"(20\d{2})[_\s-]*(Jan(?:uary)?|Apr(?:il)?|Jul(?:y)?|Oct(?:ober)?)",
+        text, re.IGNORECASE)
+    if match:
+        year, month_name = match.groups()
+        month = {"jan": 1, "apr": 4, "jul": 7, "oct": 10}[
+            month_name[:3].lower()]
+        return f"{year}-{month:02d}-01"
+    match = re.search(r"\bRVU(\d{2})([A-D])\b", text, re.IGNORECASE)
+    if match:
+        year, letter = match.groups()
+        month = (ord(letter.upper()) - ord("A")) * 3 + 1
+        return f"20{year}-{month:02d}-01"
+    return "1900-01-01"
+
+
 def cpt_edition_window(data: dict, entry: dict) -> tuple[str, str, bool]:
     """Conservative activation window proven by a licensed CPT edition.
 
@@ -176,6 +216,12 @@ class ComplianceDataStore:
             except sqlite3.Error:
                 pass  # e.g. read-only or network filesystem — timeout still applies
         return self._conn
+
+    def close(self) -> None:
+        """Release the lazily opened SQLite connection."""
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
 
     # ----------------------------------------------------------------- build
     def build_or_load(self, force_rebuild: bool = False) -> None:
@@ -529,6 +575,45 @@ class ComplianceDataStore:
             self.conn.execute("DELETE FROM global_period")
             self._ingest_global_periods()
             self.conn.commit()
+
+        # Older seed ingests made the quarterly PFS release timeless. Replace
+        # only those legacy rows, preserving any historical/live refresh
+        # snapshots already retained alongside them.
+        try:
+            with open(GLOBAL_PERIODS_FILE) as handle:
+                expected_pfs_release = _pfs_published_effective_date(
+                    json.load(handle))
+            timeless = self.conn.execute(
+                "SELECT COUNT(*) FROM global_period "
+                "WHERE effective_from='1900-01-01'").fetchone()[0]
+            if expected_pfs_release != "1900-01-01" and timeless:
+                self.conn.execute(
+                    "DELETE FROM global_period WHERE effective_from='1900-01-01'")
+                self._ingest_global_periods()
+                self.conn.commit()
+        except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
+            raise RuntimeError(
+                "PFS published-release migration could not be verified"
+            ) from exc
+
+        # MUE seed transforms historically stored the day before the CMS
+        # filename's stated quarterly effective date. Repair values in older
+        # databases without disturbing a newer refresh snapshot.
+        try:
+            with open(MUE_FILE) as handle:
+                first_mue = next(iter(json.load(handle)), {})
+            expected_mue_release = _published_effective_date(first_mue)
+            current_mue_release = str(self.conn.execute(
+                "SELECT MAX(effective_from) FROM mue").fetchone()[0] or "")
+            if (expected_mue_release != "1900-01-01"
+                    and current_mue_release < expected_mue_release):
+                self.conn.execute("DELETE FROM mue")
+                self._ingest_mue()
+                self.conn.commit()
+        except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
+            raise RuntimeError(
+                "MUE published-release migration could not be verified"
+            ) from exc
 
         n_mce = self.conn.execute("SELECT COUNT(*) FROM mce_edit").fetchone()[0]
         if n_mce == 0:
@@ -1238,7 +1323,7 @@ class ComplianceDataStore:
             rationale = desc[1:].strip(" :|") if mai else desc
             rows.append((
                 code, int(e.get("mue_value", 0) or 0), mai, rationale,
-                _clean_date(e.get("effective_date")),
+                _published_effective_date(e),
                 str(e.get("end_date") or "").strip() or _OPEN,
             ))
         self.conn.executemany("INSERT INTO mue VALUES (?,?,?,?,?,?)", rows)
@@ -1252,6 +1337,7 @@ class ComplianceDataStore:
         except Exception as exc:
             logger.warning(f"  global_period: could not load ({exc})")
             return
+        effective_from = _pfs_published_effective_date(data)
         rows = []
         for code, days in data.get("codes", {}).items():
             # New format: dict with {global_days, status, pctc_ind, ...}
@@ -1270,7 +1356,7 @@ class ComplianceDataStore:
             if not glob_days:
                 continue
             rows.append((_norm(code), glob_days, status, bilat_surg,
-                         pctc, mult, asst, co, team, "1900-01-01", _OPEN))
+                         pctc, mult, asst, co, team, effective_from, _OPEN))
         # Named columns, not positional VALUES — ALTER TABLE ADD COLUMN (the
         # migration path for DBs built before billing_status existed) always
         # appends the new column at the end of the table regardless of where
@@ -2276,7 +2362,7 @@ class ComplianceDataStore:
         row = self._asof(
             "global_period",
             "pctc_ind, mult_proc, bilat_surg, asst_surg, co_surg, team_surg",
-            "code=?", (_norm(code),), self._dos(dos),
+            "code=?", (_norm(code),), self._dos(dos), strict=True,
         )
         if not row:
             return {}
@@ -2842,7 +2928,8 @@ class ComplianceDataStore:
         ).fetchone()
         return row is not None
 
-    def _asof(self, table: str, cols: str, where: str, params: tuple, dos: str):
+    def _asof(self, table: str, cols: str, where: str, params: tuple, dos: str,
+              *, strict: bool = False):
         """Effective-dated lookup with graceful fallback for single-snapshot data.
 
         1. a rule whose [effective_from, effective_to] range contains the DOS;
@@ -2858,6 +2945,8 @@ class ComplianceDataStore:
         ).fetchone()
         if row:
             return row
+        if strict:
+            return None
         row = self.conn.execute(
             f"{base} AND effective_from<=? ORDER BY effective_from DESC LIMIT 1",
             (*params, dos),
@@ -3002,9 +3091,9 @@ class ComplianceDataStore:
         return dict(row) if row else None
 
     def global_period(self, code: str, dos=None) -> str | None:
-        row = self.conn.execute(
-            "SELECT glob_days FROM global_period WHERE code=? LIMIT 1", (_norm(code),)
-        ).fetchone()
+        row = self._asof(
+            "global_period", "glob_days", "code=?", (_norm(code),),
+            self._dos(dos), strict=True)
         return row["glob_days"] if row else None
 
     def billing_status(self, code: str, dos=None) -> str | None:
@@ -3012,9 +3101,9 @@ class ComplianceDataStore:
         E/M/J/P which appear in the source but aren't documented by its own
         indicator_meanings — returned as-is; interpretation lives in
         not_separately_billable_reason / pfs_exclusion_advisory)."""
-        row = self.conn.execute(
-            "SELECT billing_status FROM global_period WHERE code=? LIMIT 1", (_norm(code),)
-        ).fetchone()
+        row = self._asof(
+            "global_period", "billing_status", "code=?", (_norm(code),),
+            self._dos(dos), strict=True)
         return row["billing_status"] if row else None
 
     def em_mdm_level(self, code: str) -> str | None:
@@ -3172,9 +3261,9 @@ class ComplianceDataStore:
         indicator_meanings.bilat_surg). '1' is the real, code-specific signal
         that a laterality modifier (RT/LT/50) is expected on this code — used
         instead of guessing from a CPT section/prefix."""
-        row = self.conn.execute(
-            "SELECT bilat_surg FROM global_period WHERE code=? LIMIT 1", (_norm(code),)
-        ).fetchone()
+        row = self._asof(
+            "global_period", "bilat_surg", "code=?", (_norm(code),),
+            self._dos(dos), strict=True)
         return row["bilat_surg"] if row else None
 
     def not_separately_billable_reason(self, code: str, dos=None) -> str | None:

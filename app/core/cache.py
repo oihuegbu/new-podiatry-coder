@@ -18,7 +18,8 @@ import hashlib
 import json
 from pathlib import Path
 
-from app.core.config import BASE_DIR, LLM_PROVIDER
+from app.core.config import BASE_DIR
+from app.core.model_profiles import execution_record
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -37,6 +38,9 @@ _LOGIC_SOURCES = [
     _APP_DIR / "ner" / "biomed_ner.py",
     _APP_DIR / "terminology" / "normalizer.py",
     BASE_DIR / "data" / "terminology" / "clinical_abbreviations.json",
+    BASE_DIR / "data" / "terminology" / "source_catalog.json",
+    *sorted((BASE_DIR / "data" / "terminology" / "packs").glob("*.json")),
+    _APP_DIR / "core" / "model_profiles.py",
     _APP_DIR / "rag" / "retriever.py",
     _APP_DIR / "coding" / "code_assigner.py",
     _APP_DIR / "validation" / "validator.py",
@@ -70,7 +74,7 @@ def _key(pdf_path: Path) -> str:
     raw = (
         content
         + PIPELINE_VERSION.encode()
-        + LLM_PROVIDER.encode()
+        + json.dumps(execution_record(), sort_keys=True).encode()
         + _logic_fingerprint().encode()
     )
     return hashlib.sha256(raw).hexdigest()[:20]

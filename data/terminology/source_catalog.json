@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "version": "2026.08.1",
+  "sources": [
+    {
+      "id": "ama_cpt_descriptors",
+      "publisher": "American Medical Association",
+      "authority": "licensed_primary",
+      "paths": ["data/codes/cpt_codes.json", "data/codes/cpt_synonyms.json"]
+    },
+    {
+      "id": "cms_hcpcs_descriptors",
+      "publisher": "Centers for Medicare & Medicaid Services",
+      "authority": "government_primary",
+      "paths": ["data/codes/hcpcs_codes.json", "data/codes/hcpcs_synonyms.json"]
+    },
+    {
+      "id": "cdc_icd10cm_index",
+      "publisher": "CDC National Center for Health Statistics",
+      "authority": "government_primary",
+      "paths": ["data/codes/icd10cm_index_terms.json"]
+    },
+    {
+      "id": "cms_published_policy",
+      "publisher": "Centers for Medicare & Medicaid Services",
+      "authority": "government_primary",
+      "paths": ["data/policy/mbpm_ch15.txt", "data/policy/ncci_policy_manual.txt"]
+    }
+  ],
+  "derivation": {
+    "method": "explicit_parenthetical_alias_only",
+    "minimum_long_form_words": 2,
+    "maximum_long_form_words": 12,
+    "minimum_alias_characters": 2,
+    "maximum_alias_characters": 10,
+    "initialism_ignore_words": ["a", "an", "and", "for", "in", "of", "on", "the", "to", "with"],
+    "candidate_confidence": 0.995
+  }
+}

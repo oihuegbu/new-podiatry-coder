@@ -443,6 +443,27 @@ class AltModelPassTest(unittest.TestCase):
         from tools.coder_adjudicator import CODER_MODEL
         self.assertEqual(self._run(1, "")["model"], CODER_MODEL)
 
+    def test_cross_provider_pass_uses_that_provider_profile_model(self):
+        from app.core.model_profiles import (
+            CodingExecutionProfile, use_execution_profile)
+        calls = []
+
+        def fake_chat(**kw):
+            calls.append(kw)
+            return json.dumps({"items": []}), {}
+
+        profile = CodingExecutionProfile(
+            "corroborator", "openai", "openai-corroborator", "openai")
+        with mock.patch("app.core.llm_client.chat_completion",
+                        side_effect=fake_chat), \
+                mock.patch("app.core.config.LLM_PROVIDER", "claude"), \
+                mock.patch("tools.coder_adjudicator.ALT_MODEL",
+                           "claude-second-opinion"), \
+                use_execution_profile(profile):
+            verdict = _adjudicate_once({"case": 1}, pass_idx=1)
+        self.assertEqual(calls[0]["model"], "openai-corroborator")
+        self.assertEqual(verdict["_execution_profile"]["provider"], "openai")
+
 
 if __name__ == "__main__":
     unittest.main()

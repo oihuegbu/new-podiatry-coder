@@ -63,6 +63,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from loguru import logger  # noqa: E402
+from app.core.identifiers import is_valid_npi as _valid_npi  # noqa: E402
 
 from tools.claims_registry import (REGISTRY_PATH, _claim_key,  # noqa: E402
                                    current_view, load_events)
@@ -73,21 +74,7 @@ POS_CODES_FILE = ROOT / "data" / "codes" / "pos_codes.json"
 LEDGER_PATH = ROOT / "data" / "registry" / "submissions.jsonl"
 DRYRUN_DIR = ROOT / "output" / "submissions"
 
-_NPI_RE = re.compile(r"^\d{10}$")
 _pos_cache: tuple[int, frozenset[str]] | None = None
-
-
-def _valid_npi(value) -> bool:
-    """Validate the CMS NPI check digit (ISO 7812 Luhn with 80840 prefix)."""
-    npi = str(value or "").strip()
-    if not _NPI_RE.fullmatch(npi):
-        return False
-    payload = "80840" + npi[:-1]
-    total = 0
-    for index, char in enumerate(reversed(payload)):
-        digit = int(char) * (2 if index % 2 == 0 else 1)
-        total += digit // 10 + digit % 10
-    return str((10 - total % 10) % 10) == npi[-1]
 
 
 def _valid_pos(value) -> bool:

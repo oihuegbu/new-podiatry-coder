@@ -95,5 +95,26 @@
     "_comment": "Which verified claims may transmit. verification_tiers: registry tiers allowed to submit. require_clean_disposition should stay true.",
     "verification_tiers": ["auto", "adjudicated", "human"],
     "require_clean_disposition": true
+  },
+  "autonomy": {
+    "_comment": "One-time production authorization envelope. When enabled, run.py signs and materializes this exact scope from AUTONOMOUS_SCOPE_SIGNING_KEY; invalid/example configuration stops startup. It never approves a code family implicitly.",
+    "enabled": false,
+    "scope_id": "",
+    "approved_by": "",
+    "approval_reference": "",
+    "effective_from": "",
+    "effective_to": "",
+    "dimensions": {
+      "payer_kinds": [],
+      "payer_ids": [],
+      "plans": [],
+      "provider_specialties": [],
+      "rendering_npis": [],
+      "billing_npis": [],
+      "places_of_service": [],
+      "jurisdictions": [],
+      "note_categories": [],
+      "claim_families": []
+    }
   }
 }

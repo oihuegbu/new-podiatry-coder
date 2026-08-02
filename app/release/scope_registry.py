@@ -58,7 +58,8 @@ def approved_scope(context: dict, on_date: date | None = None
         return None, f"autonomous scope registry is unavailable ({exc})"
     today = on_date or date.today()
     for scope in raw.get("scopes", []):
-        if not scope.get("approved") or not scope.get("approved_by"):
+        if (not scope.get("approved") or not scope.get("approved_by")
+                or not scope.get("approval_reference")):
             continue
         expected = sign_scope(scope, key)
         if not hmac.compare_digest(str(scope.get("signature") or ""),

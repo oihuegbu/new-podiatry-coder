@@ -125,6 +125,39 @@ class CandidateRetriever:
             "hcpcs": hcpcs_candidates,
         }
 
+    def retrieve_for_clinical_facts(
+        self, report: dict, top_k: int | None = None,
+    ) -> dict[str, list[dict]]:
+        """Retrieve from evidence-bound encounter events.
+
+        Entity facts already travel through ``retrieve_for_entities`` with
+        both raw and normalized terminology. This path gives performed-event
+        and dispensed-item facts equal retrieval opportunity without treating
+        the fact layer as coding authority. Only events whose evidence was
+        found verbatim in the note participate.
+        """
+        top_k = top_k or RAG_TOP_K
+        query_system = {
+            "performed_procedure": "cpt",
+            "performed_imaging": "cpt",
+            "dispensed_supply": "hcpcs",
+        }
+        per_system: dict[str, list[list[dict]]] = {
+            "icd10": [], "cpt": [], "hcpcs": []}
+        for fact in report.get("facts") or []:
+            if not isinstance(fact, dict) or not fact.get("evidence_verified"):
+                continue
+            system = query_system.get(str(fact.get("kind") or ""))
+            label = str(fact.get("label") or "").strip()
+            if not system or not label:
+                continue
+            per_system[system].append(self.store.search(
+                label, system, top_k=top_k))
+        return {
+            system: self._round_robin(rows, top_k) if rows else []
+            for system, rows in per_system.items()
+        }
+
     def _build_queries(self, entity: ClinicalEntity) -> list[str]:
         base_terms = entity.retrieval_terms or [entity.clinical_term, entity.text]
         queries = []

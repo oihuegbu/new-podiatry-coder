@@ -153,6 +153,35 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now note-watcher.service
 
+echo "==> Installing authoritative-source refresh timer"
+cat > /etc/systemd/system/coding-authority-refresh.service <<'UNIT'
+[Unit]
+Description=Refresh and verify medical-coding authorities
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/app
+ExecStart=/usr/bin/docker compose run --rm app python tools/refresh_authorities.py --require-current
+UNIT
+
+cat > /etc/systemd/system/coding-authority-refresh.timer <<'UNIT'
+[Unit]
+Description=Check medical-coding authorities daily
+
+[Timer]
+OnBootSec=20min
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now coding-authority-refresh.timer
+
 echo "==> Installing idle watchdog: auto-stop after 1h with nothing processing"
 cat > /opt/app/idle-watchdog.sh <<'SCRIPT'
 #!/usr/bin/env bash

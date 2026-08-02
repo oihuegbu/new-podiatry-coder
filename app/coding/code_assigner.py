@@ -17,6 +17,7 @@ from app.coding.schemas import (
     VERIFY_PASS_SCHEMA,
 )
 from app.core.logger import get_logger
+from app.core.model_profiles import active_profile
 
 logger = get_logger(__name__)
 
@@ -378,6 +379,7 @@ def assign_codes(
     physician_documented_codes: list[dict] | None = None,
     store=None,
     exemplar_block: str = "",
+    clinical_facts: dict | None = None,
 ) -> tuple[dict, dict]:
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
                    "cache_read_tokens": 0, "cache_write_tokens": 0}
@@ -398,6 +400,7 @@ def assign_codes(
     if memo:
         note_context = f"{note_context}\n\n{memo}"
     entity_summary = _format_entities(entities)
+    fact_block = _format_clinical_facts(clinical_facts or {})
     vision_block = _format_vision_context(vision_context) if vision_context else ""
     global_block = _format_global_period_context(
         prior_surgery_info, store=store) if prior_surgery_info else ""
@@ -439,6 +442,8 @@ def assign_codes(
 
 ## EXTRACTED CLINICAL ENTITIES
 {entity_summary}
+
+{fact_block}
 
 ## ICD-10-CM CANDIDATE CODES (effective-dated authoritative retrieval)
 {_format_candidates_for_system(rag_candidates, 'icd10')}
@@ -487,6 +492,8 @@ additional status, manifestation, etiology, or other companion code is supported
 ## EXTRACTED CLINICAL ENTITIES
 {entity_summary}
 
+{fact_block}
+
 ## CPT CANDIDATE CODES (from official database via semantic search)
 ## Candidate annotations are authoritative attributes, not standalone billing
 ## decisions. Do not infer a modifier solely from a global-period value.
@@ -526,6 +533,8 @@ available in verification."""
 
 ## EXTRACTED CLINICAL ENTITIES
 {entity_summary}
+
+{fact_block}
 
 ## HCPCS CANDIDATE CODES (from official database via semantic search)
 {_format_candidates_for_system(rag_candidates, 'hcpcs')}
@@ -595,6 +604,8 @@ data. Do not code ordered, prescribed, recommended, historical, or continued ite
 ## EXTRACTED CLINICAL ENTITIES
 {entity_summary}
 
+{fact_block}
+
 {db_description_block}
 
 {ncci_pair_block}
@@ -647,8 +658,9 @@ data. Do not code ordered, prescribed, recommended, historical, or continued ite
     # Escalation tiering: the verify pass optionally runs on a stronger
     # model/effort (CLAUDE_VERIFY_MODEL / CLAUDE_VERIFY_EFFORT) — it is the
     # one judgment-concentrated call per note. Claude-provider only.
-    _verify_model = (CLAUDE_VERIFY_MODEL or None) if LLM_PROVIDER == "claude" else None
-    _verify_effort = (CLAUDE_VERIFY_EFFORT or None) if LLM_PROVIDER == "claude" else None
+    _active_provider = active_profile().provider
+    _verify_model = (CLAUDE_VERIFY_MODEL or None) if _active_provider == "claude" else None
+    _verify_effort = (CLAUDE_VERIFY_EFFORT or None) if _active_provider == "claude" else None
     if _verify_model or _verify_effort:
         logger.info(f"    verify tier: model={_verify_model or 'default'}, "
                     f"effort={_verify_effort or 'default'}")
@@ -814,6 +826,24 @@ def _format_entities(entities: list[dict]) -> str:
             f"(section: {e.get('source_section', '?')}, text: \"{raw}\"{terminology})"
         )
     return "\n".join(lines)
+
+
+def _format_clinical_facts(report: dict) -> str:
+    """Render the deterministic fact envelope as evidence, never authority."""
+    if not report:
+        return "## NORMALIZED CLINICAL FACTS\nUnavailable — do not infer missing facts."
+    payload = {
+        "status": report.get("status"),
+        "facts": report.get("facts") or [],
+        "unresolved_material_facts": (
+            report.get("unresolved_material_facts") or []),
+    }
+    return (
+        "## NORMALIZED CLINICAL FACTS (evidence-bound; not coding authority)\n"
+        "Use these only to reconcile the raw note. If a fact is unresolved or "
+        "conflicts with the note, omit the affected line and flag review.\n"
+        + json.dumps(payload, indent=2, default=str)
+    )
 
 
 def _build_billability_block(cpt_codes: list[dict], hcpcs_codes: list[dict], store) -> str:

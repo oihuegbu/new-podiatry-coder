@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from app.core.config import TERMINOLOGY_REGISTRY_FILE
+from app.core.config import TERMINOLOGY_PACK_DIR, TERMINOLOGY_REGISTRY_FILE
 from app.models.schemas import ClinicalEntity
 
 
@@ -131,13 +131,41 @@ class TerminologyNormalizer:
 
     def __init__(self, registry_path: str | Path | None = None):
         self.path = Path(registry_path or TERMINOLOGY_REGISTRY_FILE)
+        paths = [self.path]
+        if registry_path is None and TERMINOLOGY_PACK_DIR.is_dir():
+            paths.extend(sorted(TERMINOLOGY_PACK_DIR.glob("*.json")))
         try:
-            raw = self.path.read_bytes()
-            data = json.loads(raw)
+            payloads = [(path, path.read_bytes()) for path in paths]
+            data = json.loads(payloads[0][1])
+            for path, raw in payloads[1:]:
+                pack = json.loads(raw)
+                if int(pack.get("schema_version") or 0) != 1:
+                    raise TerminologyConfigError(
+                        f"unsupported terminology pack schema: {path.name}")
+                if not isinstance(pack.get("entries"), list):
+                    raise TerminologyConfigError(
+                        f"terminology pack entries missing: {path.name}")
+                pack_sources = pack.get("sources") or {}
+                if not isinstance(pack_sources, dict):
+                    raise TerminologyConfigError(
+                        f"terminology pack sources malformed: {path.name}")
+                for source_id, source in pack_sources.items():
+                    prior = data.setdefault("sources", {}).get(source_id)
+                    if prior is not None and prior != source:
+                        raise TerminologyConfigError(
+                            f"terminology source collision: {source_id}")
+                    data["sources"][source_id] = source
+                data.setdefault("entries", []).extend(pack["entries"])
         except Exception as exc:
             raise TerminologyConfigError(
                 f"terminology registry unavailable or invalid: {exc}") from exc
-        self.registry_sha256 = "sha256:" + hashlib.sha256(raw).hexdigest()
+        digest = hashlib.sha256()
+        for path, raw in payloads:
+            digest.update(path.name.encode())
+            digest.update(b"\0")
+            digest.update(raw)
+        self.registry_sha256 = "sha256:" + digest.hexdigest()
+        self.registry_files = [str(path) for path, _ in payloads]
         self._load(data)
 
     def _load(self, data: dict) -> None:
@@ -151,6 +179,13 @@ class TerminologyNormalizer:
         sources = data.get("sources") or {}
         if not isinstance(sources, dict) or not sources:
             raise TerminologyConfigError("terminology sources are required")
+        for source_id, source in sources.items():
+            if (not isinstance(source, dict)
+                    or source.get("authority_role") != "retrieval_only"
+                    or not source.get("provenance_kind")):
+                raise TerminologyConfigError(
+                    f"{source_id}: terminology sources must be provenance-bearing "
+                    "retrieval-only aids")
         acceptance = data.get("acceptance") or {}
         try:
             self.min_confidence = float(acceptance["min_confidence"])
@@ -340,6 +375,10 @@ class TerminologyNormalizer:
                 "source_id": source_id,
                 "source_version": str(
                     (self.sources.get(source_id) or {}).get("version") or ""),
+                "provenance_kind": str(
+                    (self.sources.get(source_id) or {}).get(
+                        "provenance_kind") or ""),
+                "authority_role": "retrieval_only",
                 "eligible": not rejection_reasons,
                 "rejection_reasons": rejection_reasons,
             })
@@ -596,6 +635,8 @@ class TerminologyNormalizer:
             "schema_version": 1,
             "registry_version": self.version,
             "registry_sha256": self.registry_sha256,
+            "registry_files": self.registry_files,
+            "authority_role": "retrieval_only",
             "entities_processed": len(normalized),
             "entities": canonical_entities,
             "note_occurrences": note_occurrences,

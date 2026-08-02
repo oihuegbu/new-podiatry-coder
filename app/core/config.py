@@ -89,6 +89,10 @@ SNOMED_ROOTS_FILE = DATA_DIR / "snomed_root_concepts.json"
 TERMINOLOGY_REGISTRY_FILE = (
     DATA_DIR / "terminology" / "clinical_abbreviations.json"
 )
+TERMINOLOGY_PACK_DIR = DATA_DIR / "terminology" / "packs"
+TERMINOLOGY_SOURCE_CATALOG_FILE = (
+    DATA_DIR / "terminology" / "source_catalog.json")
+SOURCE_REQUIREMENTS_FILE = DATA_DIR / "release" / "source_requirements.json"
 
 # --- RAG settings ---
 # top_k feeds the coder's candidate list; 20 gives recall headroom for a
@@ -103,6 +107,12 @@ RAG_SIMILARITY_THRESHOLD: float = 0.35
 # --- Coding engine ---
 CODING_TEMPERATURE: float = 0.0
 CODING_MAX_TOKENS: int = 4096
+
+# Autonomous corroboration requires agreement across genuinely independent
+# provider domains. Repeating one provider more times remains useful for
+# instability detection but cannot satisfy this threshold.
+MIN_INDEPENDENT_MODEL_DOMAINS: int = int(
+    os.getenv("MIN_INDEPENDENT_MODEL_DOMAINS", "2"))
 
 # --- Verified-claim exemplars (few-shot from the finalized-claims registry) ---
 # Mode:

@@ -115,7 +115,7 @@ MANIFEST: dict[str, dict[str, dict]] = {
         "mue_value":      {"consumer": "_ingest_mue"},
         "effective_date": {"consumer": "_ingest_mue"},
         "description":    {"consumer": "_ingest_mue"},  # carries the MAI digit
-        "source_file":    {"waived": "provenance"},
+        "source_file":    {"consumer": "_published_effective_date"},
     },
     "codes/ncci_data.json []": {
         "code1":          {"consumer": "_ingest_ncci"},
@@ -229,6 +229,8 @@ MANIFEST: dict[str, dict[str, dict]] = {
         "name":          {"waived": "human-readable source name"},
         "version":       {"consumer": "source_version"},
         "review_status": {"waived": "governance metadata surfaced through the bound registry"},
+        "authority_role": {"consumer": "authority_role"},
+        "provenance_kind": {"consumer": "provenance_kind"},
         "scope":         {"waived": "human-readable source scope"},
     },
     "terminology/clinical_abbreviations.json acceptance": {
