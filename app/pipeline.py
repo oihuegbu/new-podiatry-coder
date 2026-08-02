@@ -1,4 +1,5 @@
 import time
+import copy
 from pathlib import Path
 from datetime import datetime
 
@@ -145,6 +146,7 @@ class MedicalCodingPipeline:
 
         prior_surgery_info = extraction.get("prior_surgery_info", {}) or {}
         physician_documented_codes = extraction.get("physician_documented_codes", []) or []
+        note_integrity = extraction.get("note_integrity") or {}
 
         logger.info(f"  Patient: {metadata.get('patient_name')} | DOS: {metadata.get('date_of_service')}")
         logger.info(f"  Category: {note_category}")
@@ -218,6 +220,12 @@ class MedicalCodingPipeline:
             exemplar_block=exemplar_block,
         )
 
+        # Immutable candidate snapshot: deterministic validation may propose
+        # and realize changes, but the pre-validation claim must survive so
+        # every mutation can be accounted for at the release boundary.
+        from app.release.mutation_ledger import normalize_claim
+        candidate_claim = normalize_claim(copy.deepcopy(coding_result))
+
         # Step 5: Validation
         logger.info("[5/5] Validating codes...")
         plan_text = sections.get("plan", "")
@@ -249,6 +257,26 @@ class MedicalCodingPipeline:
             # on the final claim (coded or legitimately excluded).
             procedures_performed=procedures_today,
         )
+
+        # Bind each final line to the exact authoritative database record and
+        # edition window used for date-of-service validation.  Evidence is
+        # normalized into spans but never invented when the coder omitted it.
+        system_rows = (
+            ("icd10_codes", "icd10_codes", self.ref_db.validate_icd10),
+            ("cpt_codes", "cpt_codes", self.ref_db.validate_cpt),
+            ("hcpcs_codes", "hcpcs_codes", self.ref_db.validate_hcpcs),
+        )
+        for array, source_id, lookup in system_rows:
+            for line in coding_result.get(array) or []:
+                code = str(line.get("code") or "").strip()
+                ref = lookup(code) or {}
+                line["source_record_ids"] = [f"{source_id}:{code.upper()}"] \
+                    if ref else []
+                line["source_effective_from"] = ref.get("effective_from")
+                line["source_effective_to"] = ref.get("effective_to")
+                if not line.get("evidence_spans"):
+                    span = line.get("supporting_text") or line.get("source") or ""
+                    line["evidence_spans"] = [span] if span else []
 
         elapsed = time.time() - start
 
@@ -305,6 +333,8 @@ class MedicalCodingPipeline:
             # can re-run when this claim is re-validated on replay/reconcile
             # (the replayer reads it back from the stored payload).
             procedures_performed_today=procedures_today,
+            candidate_claim=candidate_claim,
+            note_integrity=note_integrity,
             **{k: v for k, v in validation.items()
                if k not in ("auto_coding_review_reasons", "auto_coding_summary")},
             auto_coding_review_reasons=(
@@ -337,6 +367,20 @@ class MedicalCodingPipeline:
         scrub_payload["note_text"] = full_text
         scrub = self.scrubber.scrub(scrub_payload)
         self._apply_scrub_verdict(result, scrub)
+
+        # Centralized mutation accounting and source manifest are attached
+        # after every deterministic layer has run.  Incomplete legacy
+        # correction records remain explicitly unresolved and therefore
+        # cannot produce AUTO_READY.
+        from app.release.mutation_ledger import reconcile_mutation_ledger
+        from app.release.source_manifest import build_source_manifest
+        result.mutation_ledger = reconcile_mutation_ledger(
+            result.candidate_claim, result.model_dump(),
+            result.material_corrections)
+        result.authoritative_source_manifest = build_source_manifest()
+        from app.release.claim_readiness import build_readiness_certificate
+        result.claim_readiness_certificate = build_readiness_certificate(
+            result.model_dump()).model_dump(mode="json")
         logger.info(f"  VERDICT: {result.final_disposition} — {result.final_summary}")
 
         # Fix 4 — Store to cache (only on success, so failed runs don't get

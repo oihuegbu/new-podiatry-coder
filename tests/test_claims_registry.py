@@ -112,6 +112,10 @@ def main():
     human = make_finalized_event(
         "n1", _result("n1", cpt_mods=("TA",)), verification="human",
         verified_by="coder-JD", source="n1_results.json")
+    human["gold_review"] = {
+        "approved": True, "reviewed_by": "coder-AB",
+        "reviewed_at": "2026-07-18T00:00:00Z",
+    }
     append_events([human], reg)
     view = current_view(load_events(reg))
     check("human is current", view["n1"]["verification"] == "human")

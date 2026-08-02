@@ -252,11 +252,14 @@ class PackAuditTest(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self._old = aa.RULES_PATH
         aa.RULES_PATH = Path(self.tmp.name) / "pack.json"
+        self._old_proposals = aa.PROPOSALS_DIR
+        aa.PROPOSALS_DIR = Path(self.tmp.name) / "proposals"
         self._old_dir = at.AUTO_TEMPLATES_DIR
         at.AUTO_TEMPLATES_DIR = Path(self.tmp.name) / "auto_templates"
 
     def tearDown(self):
         self.aa.RULES_PATH = self._old
+        self.aa.PROPOSALS_DIR = self._old_proposals
         self.at.AUTO_TEMPLATES_DIR = self._old_dir
         self.tmp.cleanup()
 
@@ -319,14 +322,17 @@ class PackAuditTest(unittest.TestCase):
         self.assertIn("template t.py", problems)
         self.assertIn("11720", problems)
 
-    def test_disable_rule_rolls_back_in_place(self):
+    def test_disable_rule_creates_inert_retirement_proposal(self):
         self._write([{"id": "a", "template": "context_gate",
                       "auto_generated": True, "enabled": True}])
         self.aa._disable_rule("a")
         pack = json.loads(self.aa.RULES_PATH.read_text())
-        self.assertFalse(pack["rules"][0]["enabled"])
-        self.assertIn("audit", pack["rules"][0]["provenance"]
-                      ["disabled_reason"])
+        self.assertTrue(pack["rules"][0]["enabled"])
+        drafts = list(self.aa.PROPOSALS_DIR.glob("*.json"))
+        self.assertEqual(len(drafts), 1)
+        proposal = json.loads(drafts[0].read_text())
+        self.assertEqual(proposal["status"], "draft")
+        self.assertEqual(proposal["rule"]["target_rule_id"], "a")
 
 
 class PerCodeTargetGateTest(unittest.TestCase):
@@ -500,11 +506,14 @@ class ImplicatedRulesTest(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self._old = aa.RULES_PATH
         aa.RULES_PATH = Path(self.tmp.name) / "pack.json"
+        self._old_proposals = aa.PROPOSALS_DIR
+        aa.PROPOSALS_DIR = Path(self.tmp.name) / "proposals"
         self.results = Path(self.tmp.name) / "results"
         (self.results / "consistency_runs").mkdir(parents=True)
 
     def tearDown(self):
         self.aa.RULES_PATH = self._old
+        self.aa.PROPOSALS_DIR = self._old_proposals
         self.tmp.cleanup()
 
     def test_selects_enabled_matching_rules_only(self):
@@ -561,23 +570,26 @@ class AmendDisableHelpersTest(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self._old = aa.RULES_PATH
         aa.RULES_PATH = Path(self.tmp.name) / "pack.json"
+        self._old_proposals = aa.PROPOSALS_DIR
+        aa.PROPOSALS_DIR = Path(self.tmp.name) / "proposals"
         aa.RULES_PATH.write_text(json.dumps({"rules": [
             {"id": "old-rule", "auto_generated": True, "enabled": True,
              "template": "context_gate"}]}))
 
     def tearDown(self):
         self.aa.RULES_PATH = self._old
+        self.aa.PROPOSALS_DIR = self._old_proposals
         self.tmp.cleanup()
 
-    def test_disable_records_reason_and_successor(self):
+    def test_disable_proposes_reason_and_successor_without_live_change(self):
         self.aa._disable_rule("old-rule",
                               reason="superseded by amendment",
                               superseded_by="old-rule-r2")
         r = json.loads(self.aa.RULES_PATH.read_text())["rules"][0]
-        self.assertFalse(r["enabled"])
-        self.assertEqual(r["provenance"]["disabled_reason"],
-                         "superseded by amendment")
-        self.assertEqual(r["provenance"]["superseded_by"], "old-rule-r2")
+        self.assertTrue(r["enabled"])
+        draft = json.loads(next(self.aa.PROPOSALS_DIR.glob("*.json")).read_text())
+        self.assertEqual(draft["rule"]["reason"], "superseded by amendment")
+        self.assertEqual(draft["rule"]["superseded_by"], "old-rule-r2")
 
     def test_reenable_restores_the_rule(self):
         self.aa._disable_rule("old-rule", reason="x",

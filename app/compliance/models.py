@@ -170,6 +170,7 @@ class ScrubResult(BaseModel):
     # from "not checked" (raised on note 031 when a fixed false FAIL simply
     # vanished between runs).
     filter_results: list[dict] = Field(default_factory=list)
+    expected_filter_count: int = 0
     clean: bool = False
     summary: str = ""
 
@@ -182,6 +183,7 @@ class ScrubResult(BaseModel):
         return [f for f in self.findings if f.status == Status.WARN]
 
     def finalize(self, filter_count: int | None = None) -> "ScrubResult":
+        self.expected_filter_count = int(filter_count or 0)
         blocking = self.blocking_findings
         self.clean = len(blocking) == 0
         self.disposition = Disposition.CLEAN if self.clean else Disposition.REVIEW

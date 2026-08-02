@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import re
 import time
@@ -127,7 +128,13 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
     pdf_path = Path(pdf_path)
     logger.info(f"Converting {pdf_path.name} to image for Claude Opus 4.7 Vision...")
 
-    images = convert_from_path(str(pdf_path), dpi=300, first_page=1, last_page=2)
+    # Convert the complete document.  The previous first_page/last_page cap
+    # silently discarded page 3 onward while still returning a successful
+    # extraction — an unacceptable release ambiguity for a medical claim.
+    images = convert_from_path(str(pdf_path), dpi=300)
+    if not images:
+        raise RuntimeError(f"PDF conversion produced no pages: {pdf_path.name}")
+    source_digest = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
 
     image_blocks = []
     for img in images:
@@ -262,6 +269,7 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
         if text:
             full_text_parts.append(text)
     sections["full_text"] = "\n\n".join(full_text_parts)
+    text_digest = hashlib.sha256(sections["full_text"].encode()).hexdigest()
 
     logger.info(
         f"  Vision extraction complete: "
@@ -292,4 +300,11 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
         "prior_surgery_info": prior_surgery_info,
         "physician_documented_codes": physician_codes,
         "extraction_usage": usage,
+        "note_integrity": {
+            "complete": True,
+            "page_count": len(images),
+            "extracted_page_count": len(images),
+            "source_pdf_sha256": f"sha256:{source_digest}",
+            "extracted_text_sha256": f"sha256:{text_digest}",
+        },
     }

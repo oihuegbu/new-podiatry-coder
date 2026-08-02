@@ -683,6 +683,7 @@ class CodingValidator:
                 "NCCI edits cannot be evaluated without a date of service",
                 "Verify the date of service and re-run validation",
                 denial_risk="HIGH",
+                clause="dos_present",
             )
             return
         if not self.db.ncci_data_available(dos):
@@ -691,6 +692,7 @@ class CodingValidator:
                 f"No local NCCI release covers date of service {dos}",
                 "Load the CMS NCCI release covering the DOS and re-run validation",
                 denial_risk="HIGH",
+                clause="release_available",
             )
             return
         for i in range(len(codes)):

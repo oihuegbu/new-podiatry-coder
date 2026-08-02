@@ -62,6 +62,10 @@ class ICDCode(BaseModel):
     review_reason: str | None = None
     code_source: str = "ai_inferred"  # physician_documented|ai_confirmed|ai_inferred|ai_replaced_physician
     physician_code_note: str | None = None  # original physician code if AI replaced it
+    evidence_spans: list[str] = Field(default_factory=list)
+    source_record_ids: list[str] = Field(default_factory=list)
+    source_effective_from: str | None = None
+    source_effective_to: str | None = None
 
 
 class CPTCode(BaseModel):
@@ -82,6 +86,9 @@ class CPTCode(BaseModel):
     mue_limit: int | None = None
     code_source: str = "ai_inferred"
     physician_code_note: str | None = None
+    source_record_ids: list[str] = Field(default_factory=list)
+    source_effective_from: str | None = None
+    source_effective_to: str | None = None
 
 
 class HCPCSCode(BaseModel):
@@ -104,6 +111,10 @@ class HCPCSCode(BaseModel):
     review_reason: str | None = None
     code_source: str = "ai_inferred"
     physician_code_note: str | None = None
+    evidence_spans: list[str] = Field(default_factory=list)
+    source_record_ids: list[str] = Field(default_factory=list)
+    source_effective_from: str | None = None
+    source_effective_to: str | None = None
 
 
 class SNOMEDCode(BaseModel):
@@ -214,3 +225,11 @@ class CodingResult(BaseModel):
     # source of truth; auto_coding_tier is derived from it for backward compatibility.
     final_disposition: str = "REVIEW"
     final_summary: str = ""
+    # Release-boundary artifacts.  CLEAN remains an internal validation
+    # result; only an immutable AUTO_READY certificate authorizes autonomous
+    # registry ingest/submission.
+    candidate_claim: dict = Field(default_factory=dict)
+    mutation_ledger: list[dict] = Field(default_factory=list)
+    note_integrity: dict = Field(default_factory=dict)
+    authoritative_source_manifest: dict = Field(default_factory=dict)
+    claim_readiness_certificate: dict = Field(default_factory=dict)

@@ -663,6 +663,13 @@ def export_gold(gold_dir: Path, registry_path: Path = REGISTRY_PATH) -> int:
     gold_dir.mkdir(parents=True, exist_ok=True)
     n = 0
     for doc, e in sorted(view.items()):
+        review = e.get("gold_review") or {}
+        # A pipeline or adjudicator answer must never promote itself into
+        # benchmark truth.  Export requires two distinct human attestations.
+        if e.get("verification") != "human" or not review.get("approved") \
+                or not review.get("reviewed_by") \
+                or review.get("reviewed_by") == e.get("verified_by"):
+            continue
         payload = {
             "document_id": doc,
             **e["claim"],
@@ -670,6 +677,7 @@ def export_gold(gold_dir: Path, registry_path: Path = REGISTRY_PATH) -> int:
                 "verification": e["verification"],
                 "verified_by": e["verified_by"],
                 "recorded_at": e["recorded_at"],
+                "independent_review": review,
             },
         }
         (gold_dir / f"{doc}_results.json").write_text(
@@ -695,6 +703,10 @@ def main() -> None:
     s.add_argument("--by", required=True,
                    help="coder identity (name/initials) — the audit trail")
     s.add_argument("--note", default="", help="optional review note")
+    s.add_argument("--gold-approved", action="store_true",
+                   help="approve this claim for benchmark export")
+    s.add_argument("--independent-reviewer", default="",
+                   help="second reviewer; must differ from --by")
 
     s = sub.add_parser("outcome", help="attach payer adjudication")
     s.add_argument("document_id")
@@ -731,6 +743,16 @@ def main() -> None:
                                   source=Path(args.result_file).name)
         if args.note:
             ev["note"] = args.note
+        if args.gold_approved:
+            if not args.independent_reviewer or \
+                    args.independent_reviewer == args.by:
+                sys.exit("--gold-approved requires a distinct "
+                         "--independent-reviewer")
+            ev["gold_review"] = {
+                "approved": True,
+                "reviewed_by": args.independent_reviewer,
+                "reviewed_at": _now(),
+            }
         append_events([ev])
         print(f"Recorded human-verified claim for {doc} (by {args.by})")
         return
