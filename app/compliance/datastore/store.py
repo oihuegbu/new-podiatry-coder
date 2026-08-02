@@ -92,6 +92,8 @@ class ComplianceDataStore:
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
         self._conn: sqlite3.Connection | None = None
+        self._ncci_release_window_loaded = False
+        self._ncci_release_window: tuple[date, date] | None = None
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -1089,6 +1091,11 @@ class ComplianceDataStore:
                     f"skipped, {len(cov_rows)} coverage codes)")
 
     def _ingest_ncci(self) -> None:
+        # A refresh can move the authoritative release quarter. Invalidate
+        # the per-store lookup cache before replacing its rows so already-
+        # constructed store instances cannot retain the prior window.
+        self._ncci_release_window_loaded = False
+        self._ncci_release_window = None
         with open(NCCI_FILE) as f:
             data = json.load(f)
         rows, skipped = [], 0
@@ -2406,6 +2413,39 @@ class ComplianceDataStore:
             f"{base} ORDER BY effective_from ASC LIMIT 1", params,
         ).fetchone()
 
+    def _ncci_release_bounds(self) -> tuple[date, date] | None:
+        """Return the loaded snapshot's quarter, querying SQLite once.
+
+        Pair-heavy validator paths can perform thousands of NCCI lookups for
+        one claim. Re-running ``MAX(effective_from)`` for every pair made the
+        fail-closed availability guard dominate runtime. The release only
+        changes when this store ingests NCCI data, which invalidates the cache.
+        ``getattr`` keeps lightweight ``__new__`` test stores compatible.
+        """
+        if getattr(self, "_ncci_release_window_loaded", False):
+            return getattr(self, "_ncci_release_window", None)
+        row = self.conn.execute(
+            "SELECT MAX(effective_from) AS release_start FROM ncci_ptp",
+        ).fetchone()
+        bounds = None
+        if row and row["release_start"]:
+            try:
+                release_date = date.fromisoformat(row["release_start"])
+            except (TypeError, ValueError):
+                pass
+            else:
+                quarter_index = (release_date.month - 1) // 3
+                start = date(release_date.year, quarter_index * 3 + 1, 1)
+                end_month = (quarter_index + 1) * 3
+                bounds = (
+                    start,
+                    date(start.year, end_month,
+                         calendar.monthrange(start.year, end_month)[1]),
+                )
+        self._ncci_release_window = bounds
+        self._ncci_release_window_loaded = True
+        return bounds
+
     def ncci_data_available(self, dos=None) -> bool:
         """Whether an NCCI release in the local store actually covers DOS.
 
@@ -2420,20 +2460,10 @@ class ComplianceDataStore:
             d = date.fromisoformat(dos) if isinstance(dos, str) else dos
         except (TypeError, ValueError):
             return False
-        row = self.conn.execute(
-            "SELECT MAX(effective_from) AS release_start FROM ncci_ptp",
-        ).fetchone()
-        if not row or not row["release_start"]:
+        bounds = self._ncci_release_bounds()
+        if bounds is None:
             return False
-        try:
-            start = date.fromisoformat(row["release_start"])
-        except (TypeError, ValueError):
-            return False
-        quarter_index = (start.month - 1) // 3
-        start = date(start.year, quarter_index * 3 + 1, 1)
-        quarter_end_month = (quarter_index + 1) * 3
-        end = date(start.year, quarter_end_month,
-                   calendar.monthrange(start.year, quarter_end_month)[1])
+        start, end = bounds
         return start <= d <= end
 
     def ncci_pair(self, c1: str, c2: str, dos=None) -> dict | None:

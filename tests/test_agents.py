@@ -134,7 +134,10 @@ a = NCCIPTPAgent(_STORE)
 # fixture pairs rot with every quarterly CMS refresh (the previous hardcoded
 # pairs, e.g. 15271/C5271, no longer exist in current data, and a pair once
 # assumed "non-conflicting" had since become a real edit).
-_NCCI_DOS = "2026-05-01"
+_ncci_release = _STORE.conn.execute(
+    "SELECT MAX(effective_from) AS release_start FROM ncci_ptp"
+).fetchone()
+_NCCI_DOS = _ncci_release["release_start"]
 
 
 def _live_pair(indicator: str):
@@ -790,7 +793,7 @@ check("every agent appears in filter_results (checked-vs-skipped is auditable)",
 _mn = next((r for r in _sr.filter_results if r["filter_id"] == "MEDICAL_NECESSITY"), None)
 check("MEDICAL_NECESSITY recorded even when it emits no WARN/FAIL",
       _mn is not None and _mn["status"] == "PASS")
-check("statuses restricted to PASS/WARN/FAIL/ERROR",
+check("statuses restricted to PASS/WARN/FAIL/UNKNOWN/ERROR",
       all(r["status"] in ("PASS", "WARN", "FAIL", "UNKNOWN", "ERROR")
           for r in _sr.filter_results))
 

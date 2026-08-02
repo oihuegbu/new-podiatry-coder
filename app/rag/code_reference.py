@@ -59,8 +59,15 @@ class CodeReferenceDB:
         self.mue: dict[str, dict] = {}
         self.snomed_roots: dict[str, str] = {}
         self.snomed_root_confidence_cap: float = 0.4
+        self._ncci_release_window_loaded = False
+        self._ncci_release_window: tuple[date, date] | None = None
 
     def load_all(self) -> None:
+        # Treat one load as one authoritative data snapshot. A subsequent
+        # load may follow a compliance.db refresh and must rediscover its
+        # NCCI release window.
+        self._ncci_release_window_loaded = False
+        self._ncci_release_window = None
         self._load_icd10()
         self._load_cpt()
         self._load_hcpcs()
@@ -201,6 +208,36 @@ class CodeReferenceDB:
         d = dos if isinstance(dos, str) else (dos.isoformat() if dos else date.today().isoformat())
         return entry["effective_from"] <= d <= entry["effective_to"]
 
+    def _ncci_release_bounds(self) -> tuple[date, date] | None:
+        """Return the loaded NCCI snapshot quarter, querying SQLite once."""
+        if self._ncci_release_window_loaded:
+            return self._ncci_release_window
+        conn = sqlite3.connect(f"file:{_COMPLIANCE_DB_PATH}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT MAX(effective_from) FROM ncci_ptp",
+            ).fetchone()
+        finally:
+            conn.close()
+        bounds = None
+        if row and row[0]:
+            try:
+                release_date = date.fromisoformat(row[0])
+            except (TypeError, ValueError):
+                pass
+            else:
+                quarter_index = (release_date.month - 1) // 3
+                start = date(release_date.year, quarter_index * 3 + 1, 1)
+                end_month = (quarter_index + 1) * 3
+                bounds = (
+                    start,
+                    date(start.year, end_month,
+                         calendar.monthrange(start.year, end_month)[1]),
+                )
+        self._ncci_release_window = bounds
+        self._ncci_release_window_loaded = True
+        return bounds
+
     def ncci_data_available(self, dos=None) -> bool:
         """Return whether the loaded quarterly NCCI snapshot covers DOS."""
         if dos is None:
@@ -209,24 +246,10 @@ class CodeReferenceDB:
             d = date.fromisoformat(dos) if isinstance(dos, str) else dos
         except (TypeError, ValueError):
             return False
-        conn = sqlite3.connect(f"file:{_COMPLIANCE_DB_PATH}?mode=ro", uri=True)
-        try:
-            row = conn.execute(
-                "SELECT MAX(effective_from) FROM ncci_ptp",
-            ).fetchone()
-        finally:
-            conn.close()
-        if not row or not row[0]:
+        bounds = self._ncci_release_bounds()
+        if bounds is None:
             return False
-        try:
-            start = date.fromisoformat(row[0])
-        except (TypeError, ValueError):
-            return False
-        quarter_index = (start.month - 1) // 3
-        start = date(start.year, quarter_index * 3 + 1, 1)
-        quarter_end_month = (quarter_index + 1) * 3
-        end = date(start.year, quarter_end_month,
-                   calendar.monthrange(start.year, quarter_end_month)[1])
+        start, end = bounds
         return start <= d <= end
 
     def check_ncci(self, code1: str, code2: str, dos=None) -> dict | None:

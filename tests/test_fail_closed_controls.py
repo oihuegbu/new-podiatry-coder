@@ -4,6 +4,7 @@ from __future__ import annotations
 import unittest
 import sqlite3
 from datetime import date, timedelta
+from unittest.mock import patch
 
 from app.compliance.agents.base import ComplianceAgent
 from app.compliance.agents.ncci_ptp import NCCIPTPAgent
@@ -13,6 +14,7 @@ from app.compliance.datastore.store import ComplianceDataStore
 from app.compliance.models import (
     Claim, ClaimLine, DenialRisk, Disposition, Finding, ScrubResult, Status,
 )
+from app.rag.code_reference import CodeReferenceDB
 
 
 class _CrashAgent(ComplianceAgent):
@@ -127,6 +129,46 @@ class TestNCCITemporalControls(unittest.TestCase):
                 store.ncci_pair("PROCEDURE", "SUPPLY", unsupported_dos))
         finally:
             store.conn.close()
+
+    def test_release_window_queries_are_cached_per_database_instance(self):
+        store = ComplianceDataStore.__new__(ComplianceDataStore)
+        store._conn = sqlite3.connect(":memory:")
+        store._conn.row_factory = sqlite3.Row
+        store.conn.execute(
+            "CREATE TABLE ncci_ptp (effective_from TEXT)"
+        )
+        store.conn.execute("INSERT INTO ncci_ptp VALUES (?)", ("2026-07-01",))
+        traced = []
+        store.conn.set_trace_callback(traced.append)
+        try:
+            self.assertTrue(store.ncci_data_available(date(2026, 7, 1)))
+            self.assertTrue(store.ncci_data_available(date(2026, 8, 1)))
+            self.assertEqual(
+                sum("MAX(effective_from)" in statement for statement in traced), 1
+            )
+        finally:
+            store.conn.close()
+
+        class _ReferenceConnection:
+            def __init__(self):
+                self.executions = 0
+
+            def execute(self, _sql):
+                self.executions += 1
+                return self
+
+            def fetchone(self):
+                return ("2026-07-01",)
+
+            def close(self):
+                pass
+
+        connection = _ReferenceConnection()
+        with patch("app.rag.code_reference.sqlite3.connect", return_value=connection):
+            reference = CodeReferenceDB()
+            self.assertTrue(reference.ncci_data_available(date(2026, 7, 1)))
+            self.assertTrue(reference.ncci_data_available(date(2026, 8, 1)))
+        self.assertEqual(connection.executions, 1)
 
 
 if __name__ == "__main__":
