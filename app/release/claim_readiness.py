@@ -147,6 +147,9 @@ def readiness_input_payload(result: dict) -> dict:
         "candidate_claim": result.get("candidate_claim") or {},
         "mutation_ledger": result.get("mutation_ledger") or [],
         "material_corrections": result.get("material_corrections") or [],
+        "ner_entities": result.get("ner_entities") or [],
+        "terminology_normalization": (
+            result.get("terminology_normalization") or {}),
         "consistency": result.get("consistency") or {},
         "claim_scrub": result.get("claim_scrub") or {},
         "clinical_audit": result.get("clinical_audit") or {},
@@ -226,7 +229,8 @@ def _source_control(result: dict) -> ControlResult:
                  "mue_limits", "coverage_policy", "validator_rules",
                  "compliance_database", "validator_implementation",
                  "scrubber_implementation", "release_gate_implementation",
-                 "submission_configuration"}
+                 "submission_configuration", "terminology_registry",
+                 "terminology_implementation"}
     missing = sorted(mandatory - present)
     if missing:
         return _control("authoritative_sources", ControlOutcome.NOT_CHECKED,
@@ -436,6 +440,97 @@ def _validation_control(result: dict) -> ControlResult:
     return _control("deterministic_validation", ControlOutcome.PASS)
 
 
+def _terminology_control(result: dict) -> ControlResult:
+    """Require traceable, stable terminology interpretation for autonomy."""
+    report = result.get("terminology_normalization")
+    if not isinstance(report, dict) or not report:
+        return _control(
+            "terminology_normalization", ControlOutcome.NOT_CHECKED,
+            "terminology normalization evidence is absent")
+    required = {
+        "schema_version", "registry_version", "registry_sha256",
+        "entities", "entity_fingerprint", "note_occurrences",
+        "unresolved_billing_relevant", "status", "report_fingerprint",
+    }
+    missing = sorted(required - set(report))
+    if missing:
+        return _control(
+            "terminology_normalization", ControlOutcome.ERROR,
+            "terminology report is incomplete: " + ", ".join(missing))
+    if report.get("schema_version") != 1:
+        return _control(
+            "terminology_normalization", ControlOutcome.ERROR,
+            "terminology report schema is unsupported")
+    if not all(isinstance(report.get(name), list) for name in
+               ("entities", "note_occurrences", "unresolved_billing_relevant")):
+        return _control(
+            "terminology_normalization", ControlOutcome.ERROR,
+            "terminology report collections are malformed")
+    if not _SHA256_RE.fullmatch(str(report.get("registry_sha256") or "")):
+        return _control(
+            "terminology_normalization", ControlOutcome.ERROR,
+            "terminology registry identity is malformed")
+    try:
+        from app.core.config import TERMINOLOGY_REGISTRY_FILE
+        from app.release.source_manifest import sha256_file
+        from app.terminology import terminology_entity_fingerprint
+        live_registry = sha256_file(TERMINOLOGY_REGISTRY_FILE)
+        entity_fingerprint = terminology_entity_fingerprint(
+            result.get("ner_entities") or [])
+    except Exception as exc:
+        return _control(
+            "terminology_normalization", ControlOutcome.ERROR,
+            f"terminology evidence could not be verified ({exc})")
+    if report.get("registry_sha256") != live_registry:
+        return _control(
+            "terminology_normalization", ControlOutcome.BLOCKED,
+            "terminology registry changed after normalization")
+    if report.get("entity_fingerprint") != entity_fingerprint:
+        return _control(
+            "terminology_normalization", ControlOutcome.BLOCKED,
+            "normalized entity evidence does not match persisted NER entities")
+    if report.get("entity_fingerprint") != _fingerprint(report.get("entities")):
+        return _control(
+            "terminology_normalization", ControlOutcome.ERROR,
+            "terminology entity fingerprint is invalid")
+    body = {key: value for key, value in report.items()
+            if key != "report_fingerprint"}
+    if report.get("report_fingerprint") != _fingerprint(body):
+        return _control(
+            "terminology_normalization", ControlOutcome.ERROR,
+            "terminology report fingerprint is invalid")
+    unresolved = report.get("unresolved_billing_relevant") or []
+    if any(not isinstance(row, dict) or not row.get("raw_text")
+           or row.get("status") not in {"ambiguous", "unresolved"}
+           for row in unresolved):
+        return _control(
+            "terminology_normalization", ControlOutcome.ERROR,
+            "unresolved terminology evidence is malformed")
+    unverified_spans = [
+        str(row.get("text") or "") for row in report.get("entities") or []
+        if not bool((row.get("source_span") or {}).get("verified"))
+    ]
+    expected_status = "REVIEW_REQUIRED" if unresolved else "PASS"
+    if report.get("status") != expected_status:
+        return _control(
+            "terminology_normalization", ControlOutcome.ERROR,
+            "terminology report status contradicts its unresolved terms")
+    if unverified_spans:
+        return _control(
+            "terminology_normalization", ControlOutcome.REVIEW_REQUIRED,
+            "entity text lacks an exact source span: "
+            + ", ".join(sorted(set(unverified_spans))))
+    if unresolved:
+        labels = sorted({
+            f"{row.get('section')}:{row.get('raw_text')}"
+            for row in unresolved
+        })
+        return _control(
+            "terminology_normalization", ControlOutcome.REVIEW_REQUIRED,
+            "billing-relevant terminology is unresolved: " + ", ".join(labels))
+    return _control("terminology_normalization", ControlOutcome.PASS)
+
+
 def _legacy_controls(result: dict) -> list[ControlResult]:
     controls = [_control(
         "pipeline_execution",
@@ -460,6 +555,7 @@ def _legacy_controls(result: dict) -> list[ControlResult]:
         "" if clean and scrub_clean else "compliance scrub did not return CLEAN"))
     controls.append(_mandatory_filter_control(result))
     controls.append(_validation_control(result))
+    controls.append(_terminology_control(result))
     has_dx = bool(result.get("icd_codes"))
     has_service = bool(result.get("cpt_codes") or result.get("hcpcs_codes"))
     controls.append(_control(

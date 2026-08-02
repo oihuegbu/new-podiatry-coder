@@ -86,6 +86,9 @@ NOTES_DIR = Path(os.getenv("NOTES_DIR", str(ATTACHMENTS_DIR)))
 # --- Supplementary rule tables (bundled with system) ---
 GLOBAL_PERIODS_FILE = DATA_DIR / "global_periods.json"
 SNOMED_ROOTS_FILE = DATA_DIR / "snomed_root_concepts.json"
+TERMINOLOGY_REGISTRY_FILE = (
+    DATA_DIR / "terminology" / "clinical_abbreviations.json"
+)
 
 # --- RAG settings ---
 # top_k feeds the coder's candidate list; 20 gives recall headroom for a

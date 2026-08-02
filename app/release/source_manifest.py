@@ -22,6 +22,9 @@ _AUTHORITATIVE = {
     "mue_limits": config.MUE_FILE,
     "coverage_policy": config.LCD_FILE,
     "validator_rules": config.DATA_DIR / "rules" / "validator_rules.json",
+    # Governed terminology is not code authority, but it is a release-bearing
+    # interpretation source and must be bound into the same immutable manifest.
+    "terminology_registry": config.TERMINOLOGY_REGISTRY_FILE,
 }
 
 
@@ -39,6 +42,8 @@ def _authoritative_paths() -> dict[str, Path]:
                                    "engine.py",
         "release_gate_implementation": config.BASE_DIR / "app" / "release" /
                                        "claim_readiness.py",
+        "terminology_implementation": config.BASE_DIR / "app" /
+                                      "terminology" / "normalizer.py",
         "submission_configuration": Path(os.getenv(
             "PRACTICE_CONFIG_PATH",
             str(config.DATA_DIR / "practice_config.json"))),

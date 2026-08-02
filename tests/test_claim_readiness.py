@@ -98,6 +98,11 @@ class ClaimReadinessTest(unittest.TestCase):
                 ],
             },
         }
+        from app.terminology import TerminologyNormalizer
+        _, result["terminology_normalization"] = (
+            TerminologyNormalizer().normalize_entities(
+                [], {"full_text": self.note}))
+        result["ner_entities"] = []
         from app.compliance.agents import build_default_agents
         required = [a.filter_id for a in build_default_agents(None)]
         result["claim_scrub"]["expected_filter_count"] = len(required)

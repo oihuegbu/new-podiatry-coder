@@ -801,9 +801,17 @@ def _format_entities(entities: list[dict]) -> str:
         ner = e.get("ner_source", "llm")
         # [G] = GLiNER-confirmed (biomedical NER validated), [L] = LLM-only
         ner_tag = "[G]" if ner == "gliner_confirmed" else "[L]"
+        status = e.get("normalization_status", "not_evaluated")
+        normalized = str(e.get("normalized_text") or "").strip()
+        raw = str(e.get("text") or "").strip()
+        terminology = ""
+        if status == "accepted" and normalized and normalized.casefold() != raw.casefold():
+            terminology = f", governed expansion: \"{normalized}\""
+        elif status in {"ambiguous", "unresolved"}:
+            terminology = ", unresolved shorthand: use the verbatim note only; do not guess"
         lines.append(
             f"- {ner_tag} [{e.get('category', '?').upper():>14}] {e.get('clinical_term', '')}{lat}{spec} "
-            f"(section: {e.get('source_section', '?')}, text: \"{e.get('text', '')}\")"
+            f"(section: {e.get('source_section', '?')}, text: \"{raw}\"{terminology})"
         )
     return "\n".join(lines)
 

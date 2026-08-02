@@ -82,6 +82,16 @@ _INPUT_PATHS: dict[str, tuple[str, ...]] = {
     "supplies": ("rag_context", "vision_context",
                  "supplies_dispensed_today"),
     "prior_surgery": ("rag_context", "prior_surgery_info"),
+    # The fingerprint is over raw spans, deterministic expansions,
+    # alternatives, context, and retrieval forms.  Code unanimity therefore
+    # cannot conceal run-to-run disagreement in terminology interpretation.
+    "terminology_entity_fingerprint": (
+        "terminology_normalization", "entity_fingerprint"),
+    "terminology_registry_version": (
+        "terminology_normalization", "registry_version"),
+    "terminology_registry_sha256": (
+        "terminology_normalization", "registry_sha256"),
+    "terminology_status": ("terminology_normalization", "status"),
 }
 
 

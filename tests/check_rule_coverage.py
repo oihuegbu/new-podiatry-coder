@@ -216,6 +216,55 @@ MANIFEST: dict[str, dict[str, dict]] = {
         "_comment": {"waived": "authoring documentation"},
         "rules":    {"consumer": "load_rule_pack"},
     },
+    "terminology/clinical_abbreviations.json .": {
+        "schema_version": {"consumer": "TerminologyNormalizer"},
+        "version":        {"consumer": "normalization_registry_version"},
+        "governance":     {"waived": "human-readable safety contract"},
+        "sources":        {"consumer": "source_version"},
+        "acceptance":     {"consumer": "min_confidence"},
+        "unknown_detection": {"consumer": "unknown_pattern"},
+        "entries":        {"consumer": "self.entries"},
+    },
+    "terminology/clinical_abbreviations.json sources.*": {
+        "name":          {"waived": "human-readable source name"},
+        "version":       {"consumer": "source_version"},
+        "review_status": {"waived": "governance metadata surfaced through the bound registry"},
+        "scope":         {"waived": "human-readable source scope"},
+    },
+    "terminology/clinical_abbreviations.json acceptance": {
+        "min_confidence":       {"consumer": "min_confidence"},
+        "min_margin":           {"consumer": "min_margin"},
+        "context_window_chars": {"consumer": "context_window"},
+        "evidence_weights":     {"consumer": "evidence_weights"},
+    },
+    "terminology/clinical_abbreviations.json acceptance.evidence_weights": {
+        "required_section":     {"consumer": "required_section"},
+        "required_context_any": {"consumer": "required_context_any"},
+        "required_context_all": {"consumer": "required_context_all"},
+        "anatomy":              {"consumer": "anatomy"},
+        "laterality":           {"consumer": "laterality"},
+    },
+    "terminology/clinical_abbreviations.json unknown_detection": {
+        "pattern":                   {"consumer": "unknown_pattern"},
+        "negation_patterns":         {"consumer": "negation_patterns"},
+        "ignored_terms":             {"consumer": "ignored_terms"},
+        "billing_relevant_sections": {"consumer": "billing_sections"},
+    },
+    "terminology/clinical_abbreviations.json entries[]": {
+        "id":            {"consumer": "entry_id"},
+        "patterns":      {"consumer": "regexes"},
+        "coding_impact": {"consumer": "coding_impact"},
+        "candidates":    {"consumer": "_candidate_scores"},
+    },
+    "terminology/clinical_abbreviations.json entries[].candidates[]": {
+        "expansion":            {"consumer": "expansion"},
+        "confidence":           {"consumer": "confidence"},
+        "source_id":            {"consumer": "source_id"},
+        "required_context_any": {"consumer": "required_any"},
+        "anatomy_any":          {"consumer": "anatomy"},
+        "required_sections":    {"consumer": "required_sections"},
+        "allowed_laterality":   {"consumer": "allowed_laterality"},
+    },
 }
 
 
@@ -238,6 +287,11 @@ def _observed_fields(spec: str) -> set[str] | None:
         return set(data.keys())
     if accessor == "[]":
         items = data
+    elif accessor == "entries[].candidates[]":
+        items = [candidate for entry in data.get("entries", [])
+                 if isinstance(entry, dict)
+                 for candidate in entry.get("candidates", [])
+                 if isinstance(candidate, dict)]
     elif accessor.endswith("[]"):
         items = data[accessor[:-2]]
     elif accessor.endswith(".*"):

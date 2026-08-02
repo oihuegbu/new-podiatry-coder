@@ -17,6 +17,7 @@ from app.compliance.datastore.store import ComplianceDataStore
 from app.compliance.engine import ClaimScrubber, _parse_dos
 from app.compliance.agents import build_default_agents
 from app.models.schemas import CodingResult
+from app.terminology import TerminologyNormalizer
 
 logger = get_logger(__name__)
 
@@ -68,6 +69,7 @@ class MedicalCodingPipeline:
         self.validator: CodingValidator | None = None
         self.compliance_store: ComplianceDataStore | None = None
         self.scrubber: ClaimScrubber | None = None
+        self.terminology: TerminologyNormalizer | None = None
         self._initialized = False
 
     def initialize(self, force_rebuild_index: bool = False) -> None:
@@ -77,6 +79,9 @@ class MedicalCodingPipeline:
 
         logger.info("Loading code reference database...")
         self.ref_db.load_all()
+
+        logger.info("Loading governed clinical terminology registry...")
+        self.terminology = TerminologyNormalizer()
 
         logger.info("Building/loading Qdrant hybrid vector store...")
         self.vector_store.build_or_load(force_rebuild=force_rebuild_index)
@@ -164,6 +169,8 @@ class MedicalCodingPipeline:
         # Step 2: NER — extract clinical entities
         logger.info("[2/5] Extracting clinical entities (NER)...")
         entities = extract_entities(sections)
+        entities, terminology_report = self.terminology.normalize_entities(
+            entities, sections)
         logger.info(f"  Found {len(entities)} entities")
         for e in entities:
             logger.info(f"    [{e.category:>14}] {e.clinical_term} {'['+e.laterality+']' if e.laterality else ''}")
@@ -332,6 +339,7 @@ class MedicalCodingPipeline:
             physician_documented_codes=physician_documented_codes,
             missing_physician_codes=coding_result.get("missing_physician_codes", []),
             ner_entities=entity_dicts,
+            terminology_normalization=terminology_report,
             # Persist the documented procedures so the completeness invariant
             # can re-run when this claim is re-validated on replay/reconcile
             # (the replayer reads it back from the stored payload).
@@ -516,14 +524,14 @@ class MedicalCodingPipeline:
         for data in entity_cands.values():
             for cs, cands in data.get("candidates", {}).items():
                 if cs in sources and cands:
-                    sources[cs].append(sorted(
-                        cands, key=lambda x: x.get("similarity_score", 0),
-                        reverse=True))
+                    # CandidateRetriever already preserves each query form's
+                    # local rank via round-robin. Scores from raw/model/
+                    # expanded queries are not comparable; re-sorting here
+                    # would silently undo that balance.
+                    sources[cs].append(list(cands))
         for cs, cands in note_cands.items():
             if cs in sources and cands:
-                sources[cs].append(sorted(
-                    cands, key=lambda x: x.get("similarity_score", 0),
-                    reverse=True))
+                sources[cs].append(list(cands))
 
         merged = {cs: [] for cs in systems}
         for cs in systems:

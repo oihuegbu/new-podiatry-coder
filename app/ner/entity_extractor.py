@@ -100,7 +100,10 @@ def extract_entities(note_sections: dict) -> list[ClinicalEntity]:
     # Tag entities with default ner_source before GLiNER enrichment
     for item in entities_data:
         item.setdefault("ner_source", "llm")
-        item.setdefault("ner_confidence", 1.0)
+        # An unconfirmed model extraction is not certainty.  GLiNER may
+        # replace this with a measured score; otherwise the conservative
+        # LLM-only value survives into the terminology/release evidence.
+        item.setdefault("ner_confidence", 0.7)
 
     # Layer 2: GLiNER-BioMed confirmation — tags each entity as gliner_confirmed or llm_only
     full_text = note_sections.get("full_text", "")
