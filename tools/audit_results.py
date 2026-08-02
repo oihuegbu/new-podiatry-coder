@@ -173,8 +173,13 @@ def audit_note(path: Path, db: CodeReferenceDB, store: ComplianceDataStore):
             mods_c1 = set(str(m) for m in (by_code[col1].get("modifiers") or []))
             mods_c2 = set(str(m) for m in (by_code[col2].get("modifiers") or []))
             # NCCI PTP-associated modifiers (CMS: valid on either column code)
-            ptp_assoc = {"24", "25", "27", "57", "58", "59", "78", "79", "91",
-                         "XE", "XP", "XS", "XU"} | anatomic
+            ptp_assoc = (
+                store.modifier_codes_for_role("ncci_procedure_separation")
+                | store.modifier_codes_for_role("ncci_em_separation")
+                | store.modifier_codes_for_role("postoperative_context")
+                | store.modifier_codes_for_role("laboratory_repeat")
+                | anatomic
+            )
             bypass = ptp_assoc & (mods_c1 | mods_c2)
             anat_split = (mods_c1 & anatomic) and (mods_c2 & anatomic) and \
                          (mods_c1 & anatomic) != (mods_c2 & anatomic)

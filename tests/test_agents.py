@@ -215,7 +215,9 @@ check("unrecognized modifier ZZ → FAIL", any(x.status == Status.FAIL for x in 
 f = run(a, base(cpt=[{"code": "11721", "modifiers": ["RT", "LT"]}]))
 check("RT+LT same line → WARN", any(x.status == Status.WARN for x in f))
 f = run(a, base(cpt=[{"code": "11721", "modifiers": ["59"]}]))
-check("modifier 59 → advisory WARN (prefer X{EPSU})", any("X{EPSU}" in x.reason or "XE/XS" in x.recommendation for x in f))
+check("general separation modifier → advisory WARN (prefer specific role)",
+      any(x.status == Status.WARN and "specific" in x.recommendation.lower()
+          for x in f))
 f = run(a, base(cpt=[{"code": "11721", "modifiers": ["79"]}]))
 check("postop modifier 79 with no post-op context → WARN",
       any("postoperative global period" in x.reason for x in f))
@@ -228,7 +230,9 @@ check("valid single modifier RT → no finding", len(f) == 0)
 
 # E/M + same-day procedure: modifier-25 bundling
 f = run(a, base(cpt=[{"code": "99213"}, {"code": "11721"}]))  # E/M + surgery, no 25
-check("E/M + procedure, no mod 25 → FAIL", any(x.status == Status.FAIL and "25" in x.reason for x in f))
+check("E/M + procedure, no separation modifier → FAIL",
+      any(x.status == Status.FAIL and "same-day procedure bundling" in x.source_rule
+          for x in f))
 f = run(a, base(cpt=[{"code": "99213", "modifiers": ["25"]}, {"code": "11721"}]))  # has 25
 check("E/M + procedure WITH mod 25 → no 25-bundling finding", not any("same day" in x.reason for x in f))
 f = run(a, base(cpt=[{"code": "99213"}, {"code": "73630"}]))  # E/M + radiology (not surgery)
@@ -720,7 +724,8 @@ check("54+55 on one line → FAIL (exclusive split-care parts)",
       any(x.status == Status.FAIL and "exclusive part" in x.reason for x in f))
 f = run(a, base(cpt=[{"code": "29445", "modifiers": ["54", "RT"]}]))
 check("54 on a 000-global code → FAIL (no package to split)",
-      any(x.status == Status.FAIL and "010/090" in x.reason for x in f))
+      any(x.status == Status.FAIL and "positive numeric global period" in x.reason
+          for x in f))
 f = run(a, base(cpt=[{"code": "28296", "modifiers": ["54", "RT"]}]))
 check("54 on a 090-global code → no split-care finding",
       not any("split" in x.reason.lower() or "010/090" in x.reason for x in f))
@@ -731,7 +736,8 @@ check("modifier 73 on professional claim → FAIL (institutional-only)",
       any(x.status == Status.FAIL and "institutional" in x.reason.lower() for x in f))
 f = run(a, base(cpt=[{"code": "28296", "modifiers": ["52", "53"]}]))
 check("52+53 combined → FAIL (mutually exclusive outcomes)",
-      any(x.status == Status.FAIL and "52" in x.reason and "53" in x.reason for x in f))
+      any(x.status == Status.FAIL and "reduced vs discontinued" in x.source_rule
+          for x in f))
 
 # modifier 63: Appendix F exemption + patient-age impossibility
 row = _STORE.conn.execute(

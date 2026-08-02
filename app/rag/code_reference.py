@@ -7,6 +7,7 @@ from app.core.config import (
     SNOMED_ROOTS_FILE, DATA_DIR,
 )
 from app.core.logger import get_logger
+from app.compliance.datastore.store import cpt_edition_window
 
 logger = get_logger(__name__)
 
@@ -98,31 +99,15 @@ class CodeReferenceDB:
         for entry in codes_list:
             code = entry.get("code", "").strip()
             if code:
-                # CPT's effective_date is NOT a code-introduction date —
-                # verified empirically: 99202/99213/99214 (decades-old,
-                # unquestionably not new codes) all carry effective_date
-                # 2024-01-01, and the full distribution of populated values
-                # clusters on Jan 1/Jul 1 across 2020-2026 — a periodic
-                # descriptor-revision cycle marker, not a lifecycle date.
-                # Using it as an activation gate would flag huge numbers of
-                # long-standing, merely-reworded codes (e.g. any E/M code
-                # touched by the 2021 guideline overhaul) as "not active"
-                # for any older, perfectly valid date of service. No
-                # reliable introduction/retirement signal exists in this
-                # source for CPT, so — unlike ICD-10 and HCPCS, both
-                # verified against real add/discontinue signals — CPT stays
-                # always-open rather than approximating with the wrong field.
+                effective_from, effective_to, authority = cpt_edition_window(
+                    data, entry)
                 self.cpt[code] = {
                     "code": code,
                     "short_description": entry.get("short_description", ""),
                     "long_description": entry.get("long_description", ""),
-                    "effective_from": "1900-01-01",
-                    "effective_to": _OPEN,
-                    # Presence in this snapshot proves identity, not that the
-                    # code was active on an arbitrary historical DOS.  The
-                    # release gate must not turn the wide-open compatibility
-                    # window above into a temporal-authority assertion.
-                    "temporal_authority": False,
+                    "effective_from": effective_from,
+                    "effective_to": effective_to,
+                    "temporal_authority": authority,
                 }
         logger.info(f"Loaded {len(self.cpt)} CPT codes")
 

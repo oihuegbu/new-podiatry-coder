@@ -231,6 +231,29 @@ def _source_control(result: dict) -> ControlResult:
     if missing:
         return _control("authoritative_sources", ControlOutcome.NOT_CHECKED,
                         "missing authoritative sources: " + ", ".join(missing))
+    try:
+        from app.compliance.engine import _parse_dos
+        dos = _parse_dos(result.get("patient_metadata") or {})
+    except Exception:
+        dos = None
+    needed = {"icd10_codes"}
+    if result.get("cpt_codes"):
+        needed.add("cpt_codes")
+    if result.get("hcpcs_codes"):
+        needed.add("hcpcs_codes")
+    by_id = {str(record.get("source_id")): record for record in records}
+    stale = []
+    for source_id in sorted(needed):
+        record = by_id.get(source_id) or {}
+        start = _parse_iso(record.get("release_effective_from"))
+        end = _parse_iso(record.get("release_effective_to"))
+        if not dos or not start or not end or not start <= dos <= end:
+            stale.append(source_id)
+    if stale:
+        return _control(
+            "authoritative_sources", ControlOutcome.BLOCKED,
+            "claim date is outside the loaded source release window: "
+            + ", ".join(stale))
     return _control("authoritative_sources", ControlOutcome.PASS)
 
 
@@ -419,11 +442,14 @@ def _legacy_controls(result: dict) -> list[ControlResult]:
         ControlOutcome.PASS if result.get("success") else ControlOutcome.ERROR,
         "" if result.get("success") else "pipeline did not succeed")]
     cons = result.get("consistency") or {}
-    repeatable = (cons.get("runs") or 0) >= 2 and bool(cons.get("unanimous"))
+    repeatable = ((cons.get("runs") or 0) >= 2
+                  and bool(cons.get("unanimous"))
+                  and cons.get("input_consistent") is True)
     controls.append(_control(
         "repeatability", ControlOutcome.PASS if repeatable else
         ControlOutcome.REVIEW_REQUIRED,
-        "" if repeatable else "claim is not unanimous across independent runs"))
+        "" if repeatable else
+        "claim outputs and critical extracted inputs are not independently unanimous"))
     clean = str(result.get("final_disposition") or "").upper() == "CLEAN"
     scrub = result.get("claim_scrub") or {}
     scrub_clean = bool(scrub.get("clean")) or str(

@@ -30,7 +30,7 @@ def _practice_config(**overrides) -> dict:
         "rendering_providers": {
             "providers": [
                 {"match": ["yvonne baptiste"], "first_name": "Yvonne",
-                 "last_name": "Baptiste", "npi": "1888888882",
+                 "last_name": "Baptiste", "npi": "1888888884",
                  "taxonomy_code": "213E00000X"},
             ],
             "trust_note_npi": True,
@@ -43,8 +43,11 @@ def _practice_config(**overrides) -> dict:
             "missing_code_policy": "block",
         },
         "claim_defaults": {
-            "place_of_service_default": "11",
             "claim_frequency_code": "1",
+            "signature_indicator": "Y",
+            "plan_participation_code": "A",
+            "release_information_code": "Y",
+            "benefits_assignment_certification_indicator": "Y",
             "claim_filing_code": {"by_kind": {"medicare_ffs": "MB",
                                               "commercial": "CI"},
                                   "default": "CI"},
@@ -69,11 +72,12 @@ def _result(**overrides) -> dict:
             "date_of_birth": "09/02/1982",
             "date_of_service": "January 5, 2026",
             "provider": "Dr. Yvonne Baptiste, DPM",
-            "npi": "4777752010",
+            "npi": "4777752013",
             "mrn": "359907",
             "insurance": ("UnitedHealthcare Choice Plus, Member/Policy ID "
                           "70736715633, Group Number GRP93623"),
             "place_of_service": "11",
+            "gender": "F",
         },
         "icd_codes": [
             {"code": "M71.571", "type": "primary", "description": "Bursitis"},
@@ -87,7 +91,8 @@ def _result(**overrides) -> dict:
         "hcpcs_codes": [
             {"code": "A4570", "description": "Splint", "units": 1},
         ],
-        "consistency": {"runs": 3, "unanimous": True},
+        "consistency": {"runs": 3, "unanimous": True,
+                        "input_consistent": True},
         "claim_readiness_certificate": {"test_certificate": True},
     }
     r.update(overrides)
@@ -129,7 +134,7 @@ class BuildClaimTest(unittest.TestCase):
         self.assertEqual(payload["billing"]["npi"], "1999999984")
         self.assertEqual(payload["billing"]["employerId"], "123456789")
         # rendering provider resolved from the roster by note provider name
-        self.assertEqual(payload["rendering"]["npi"], "1888888882")
+        self.assertEqual(payload["rendering"]["npi"], "1888888884")
         # subscriber from the note's own metadata
         self.assertEqual(payload["subscriber"]["memberId"], "70736715633")
         self.assertEqual(payload["subscriber"]["dateOfBirth"], "19820902")
@@ -157,6 +162,13 @@ class BuildClaimTest(unittest.TestCase):
         self.assertIsNone(payload)
         self.assertTrue(any("Member/Policy ID" in b for b in blocks))
 
+    def test_conflicting_structured_member_id_blocks(self):
+        self.result["patient_metadata"]["member_id"] = "DIFFERENT"
+        payload, blocks = cs.build_claim("note_x", self.event, self.result,
+                                         self.cfg)
+        self.assertIsNone(payload)
+        self.assertTrue(any("IDs disagree" in block for block in blocks))
+
     def test_unparseable_dob_blocks(self):
         self.result["patient_metadata"]["date_of_birth"] = "sometime in 1982"
         payload, blocks = cs.build_claim("note_x", self.event, self.result,
@@ -164,12 +176,27 @@ class BuildClaimTest(unittest.TestCase):
         self.assertIsNone(payload)
         self.assertTrue(any("DOB" in b for b in blocks))
 
+    def test_invalid_place_of_service_blocks(self):
+        self.result["patient_metadata"]["place_of_service"] = "office"
+        payload, blocks = cs.build_claim("note_x", self.event, self.result,
+                                         self.cfg)
+        self.assertIsNone(payload)
+        self.assertTrue(any("authoritative CMS POS" in block
+                            for block in blocks))
+
+    def test_invalid_gender_blocks(self):
+        self.result["patient_metadata"]["gender"] = "not recorded"
+        payload, blocks = cs.build_claim("note_x", self.event, self.result,
+                                         self.cfg)
+        self.assertIsNone(payload)
+        self.assertTrue(any("gender/sex" in block for block in blocks))
+
     def test_rendering_falls_back_to_note_npi(self):
         self.result["patient_metadata"]["provider"] = "Dr. Someone Else, DPM"
         payload, blocks = cs.build_claim("note_x", self.event, self.result,
                                          self.cfg)
         self.assertEqual(blocks, [])
-        self.assertEqual(payload["rendering"]["npi"], "4777752010")
+        self.assertEqual(payload["rendering"]["npi"], "4777752013")
 
     def test_no_provider_resolution_blocks(self):
         self.cfg["rendering_providers"]["trust_note_npi"] = False
@@ -187,6 +214,20 @@ class BuildClaimTest(unittest.TestCase):
         self.assertEqual(blocks, [])
         self.assertEqual(payload["claimInformation"]["claimFilingCode"],
                          "MB")
+
+    def test_missing_claim_indicator_blocks_instead_of_defaulting(self):
+        self.cfg["claim_defaults"].pop("signature_indicator")
+        payload, blocks = cs.build_claim("note_x", self.event, self.result,
+                                         self.cfg)
+        self.assertIsNone(payload)
+        self.assertIn("claim_defaults.signature_indicator missing", blocks)
+
+    def test_unresolved_claim_filing_code_blocks(self):
+        self.cfg["claim_defaults"]["claim_filing_code"] = {"by_kind": {}}
+        payload, blocks = cs.build_claim("note_x", self.event, self.result,
+                                         self.cfg)
+        self.assertIsNone(payload)
+        self.assertTrue(any("claim filing code" in block for block in blocks))
 
     def test_units_multiply_charge(self):
         self.result["cpt_codes"][0]["units"] = 2
@@ -228,7 +269,7 @@ class ConfigValidationTest(unittest.TestCase):
     def test_bad_npi_reported(self):
         cfg = _practice_config()
         cfg["billing_provider"]["npi"] = "12345"
-        self.assertTrue(any("10-digit" in p for p in cs.validate_config(cfg)))
+        self.assertTrue(any("check digit" in p for p in cs.validate_config(cfg)))
 
     def test_config_hot_reload(self):
         with tempfile.TemporaryDirectory() as td:

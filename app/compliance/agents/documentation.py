@@ -12,7 +12,6 @@ from __future__ import annotations
 from app.compliance.agents.base import ComplianceAgent
 from app.compliance.models import Claim, DenialRisk, Finding, Status
 
-_DISTINCT_MODIFIERS = {"59", "XE", "XS", "XP", "XU"}
 _DISTINCT_LANGUAGE = (
     "separate", "distinct", "different site", "different session", "different encounter",
     "independent", "unrelated",
@@ -38,7 +37,8 @@ class DocumentationAgent(ComplianceAgent):
                     source_rule="documentation audit",
                 ))
             # distinctness modifiers must be justified
-            distinct_mods = set(line.modifiers) & _DISTINCT_MODIFIERS
+            distinct_mods = set(line.modifiers) & self.store.modifier_codes_for_role(
+                "ncci_procedure_separation")
             if distinct_mods and note and not any(k in note for k in _DISTINCT_LANGUAGE):
                 findings.append(self.finding(
                     status=Status.WARN, codes=[line.code], denial_risk=DenialRisk.HIGH,

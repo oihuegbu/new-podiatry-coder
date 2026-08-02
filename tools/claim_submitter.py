@@ -69,10 +69,39 @@ from tools.claims_registry import (REGISTRY_PATH, _claim_key,  # noqa: E402
 
 DEFAULT_RESULTS = ROOT / "output" / "results"
 DEFAULT_CONFIG = ROOT / "data" / "practice_config.json"
+POS_CODES_FILE = ROOT / "data" / "codes" / "pos_codes.json"
 LEDGER_PATH = ROOT / "data" / "registry" / "submissions.jsonl"
 DRYRUN_DIR = ROOT / "output" / "submissions"
 
 _NPI_RE = re.compile(r"^\d{10}$")
+_pos_cache: tuple[int, frozenset[str]] | None = None
+
+
+def _valid_npi(value) -> bool:
+    """Validate the CMS NPI check digit (ISO 7812 Luhn with 80840 prefix)."""
+    npi = str(value or "").strip()
+    if not _NPI_RE.fullmatch(npi):
+        return False
+    payload = "80840" + npi[:-1]
+    total = 0
+    for index, char in enumerate(reversed(payload)):
+        digit = int(char) * (2 if index % 2 == 0 else 1)
+        total += digit // 10 + digit % 10
+    return str((10 - total % 10) % 10) == npi[-1]
+
+
+def _valid_pos(value) -> bool:
+    """Validate against the checked-in CMS Place of Service source."""
+    global _pos_cache
+    try:
+        mtime = POS_CODES_FILE.stat().st_mtime_ns
+        if _pos_cache is None or _pos_cache[0] != mtime:
+            raw = json.loads(POS_CODES_FILE.read_text())
+            _pos_cache = (mtime, frozenset(str(code) for code in
+                                           (raw.get("codes") or {})))
+    except (OSError, ValueError):
+        return False
+    return str(value or "").strip() in _pos_cache[1]
 
 
 # --------------------------------------------------------------------------
@@ -119,8 +148,11 @@ def validate_config(cfg: dict) -> list[str]:
     for field in ("organization_name", "npi", "tax_id"):
         if not str(bp.get(field) or "").strip():
             problems.append(f"billing_provider.{field} missing")
-    if bp.get("npi") and not _NPI_RE.match(str(bp["npi"])):
-        problems.append("billing_provider.npi is not a 10-digit NPI")
+    if bp.get("npi") and not _valid_npi(bp["npi"]):
+        problems.append("billing_provider.npi fails the CMS NPI check digit")
+    tax_id = str(bp.get("tax_id") or "").strip()
+    if tax_id and (not re.fullmatch(r"\d{9}", tax_id) or len(set(tax_id)) == 1):
+        problems.append("billing_provider.tax_id must be a non-placeholder 9-digit TIN")
     addr = bp.get("address") or {}
     for field in ("address1", "city", "state", "postal_code"):
         if not str(addr.get(field) or "").strip():
@@ -130,6 +162,18 @@ def validate_config(cfg: dict) -> list[str]:
         problems.append("submitter.organization_name missing")
     if not isinstance((cfg.get("fee_schedule") or {}).get("charges"), dict):
         problems.append("fee_schedule.charges missing")
+    defaults = cfg.get("claim_defaults") or {}
+    for field in (
+        "claim_frequency_code", "signature_indicator",
+        "plan_participation_code", "release_information_code",
+        "benefits_assignment_certification_indicator",
+    ):
+        if not str(defaults.get(field) or "").strip():
+            problems.append(f"claim_defaults.{field} missing")
+    filing = defaults.get("claim_filing_code") or {}
+    if not isinstance(filing, dict) or not (
+            filing.get("default") or filing.get("by_kind")):
+        problems.append("claim_defaults.claim_filing_code missing")
     return problems
 
 
@@ -194,20 +238,20 @@ def resolve_rendering_provider(cfg: dict, meta: dict) -> tuple[dict | None, str]
     for entry in rp_cfg.get("providers") or []:
         for pattern in entry.get("match") or []:
             if pattern and str(pattern).lower() in note_provider:
-                if _NPI_RE.match(str(entry.get("npi") or "")):
+                if _valid_npi(entry.get("npi")):
                     return entry, ""
                 return None, (f"roster entry for '{pattern}' has an invalid "
                               f"NPI — fix rendering_providers in the "
                               f"practice config")
-    note_npi = str(meta.get("npi") or "").strip()
-    if rp_cfg.get("trust_note_npi") and _NPI_RE.match(note_npi):
+    note_npi = str(meta.get("provider_npi") or meta.get("npi") or "").strip()
+    if rp_cfg.get("trust_note_npi") and _valid_npi(note_npi):
         name = _split_provider_name(meta.get("provider") or "")
         return {"first_name": name[0] if name else "",
                 "last_name": name[1] if name else "",
                 "npi": note_npi,
                 "taxonomy_code": rp_cfg.get("default_taxonomy_code")}, ""
     default = rp_cfg.get("default")
-    if default and _NPI_RE.match(str(default.get("npi") or "")):
+    if default and _valid_npi(default.get("npi")):
         return default, ""
     return None, ("rendering provider unresolvable: no roster match for "
                   f"'{meta.get('provider')}', no valid note NPI, no default")
@@ -234,7 +278,7 @@ def claim_filing_code(cfg: dict, parsed) -> str:
     payer_override = (overrides.get(parsed.payer_id or "") or {})
     return (payer_override.get("claim_filing_code")
             or (d.get("by_kind") or {}).get(parsed.kind)
-            or d.get("default") or "CI")
+            or d.get("default") or "")
 
 
 # --------------------------------------------------------------------------
@@ -301,9 +345,20 @@ def build_claim(doc: str, reg_event: dict, result: dict,
     if not parsed.stedi_trading_partner_id:
         blocks.append(f"payer '{parsed.payer_name or 'unknown'}' has no "
                       f"stedi_trading_partner_id in data/codes/payers.json")
-    if not parsed.member_id:
-        blocks.append("no Member/Policy ID extractable from the note's "
-                      "insurance text")
+    structured_member = str(meta.get("member_id") or
+                            meta.get("insurance_id") or "").strip()
+    parsed_member = str(parsed.member_id or "").strip()
+    if structured_member and parsed_member and structured_member != parsed_member:
+        blocks.append("structured and insurance-text Member/Policy IDs disagree")
+    member_id = structured_member or parsed_member
+    structured_group = str(meta.get("group_number") or "").strip()
+    parsed_group = str(parsed.group_number or "").strip()
+    if structured_group and parsed_group and structured_group != parsed_group:
+        blocks.append("structured and insurance-text group identifiers disagree")
+    group_number = structured_group or parsed_group
+    if not member_id:
+        blocks.append("no Member/Policy ID present in structured encounter "
+                      "metadata or the insurance text")
 
     # -- patient / subscriber ----------------------------------------------
     name = _split_name(meta.get("patient_name") or "")
@@ -318,6 +373,25 @@ def build_claim(doc: str, reg_event: dict, result: dict,
     if not dos:
         blocks.append(f"date of service unparseable: "
                       f"{meta.get('date_of_service')!r}")
+    gender = str(meta.get("gender") or meta.get("sex") or "").strip()[:1].upper()
+    if gender not in {"F", "M", "U"}:
+        blocks.append("patient gender/sex is missing or not valid for the claim "
+                      "transaction")
+    pos = str(meta.get("place_of_service") or "").strip()
+    if not _valid_pos(pos):
+        blocks.append("place of service is missing or absent from the authoritative "
+                      "CMS POS set; autonomous submission cannot infer it")
+    filing_code = claim_filing_code(cfg, parsed)
+    if not filing_code:
+        blocks.append("claim filing code is unresolved for this payer; configure "
+                      "claim_defaults.claim_filing_code")
+    for field in (
+        "claim_frequency_code", "signature_indicator",
+        "plan_participation_code", "release_information_code",
+        "benefits_assignment_certification_indicator",
+    ):
+        if not str(defaults.get(field) or "").strip():
+            blocks.append(f"claim_defaults.{field} missing")
 
     # -- providers ----------------------------------------------------------
     rendering, why = resolve_rendering_provider(cfg, meta)
@@ -376,9 +450,6 @@ def build_claim(doc: str, reg_event: dict, result: dict,
 
     bp = cfg["billing_provider"]
     sub = cfg["submitter"]
-    pos = str(meta.get("place_of_service")
-              or defaults.get("place_of_service_default") or "11")
-
     health_codes = []
     for i, e in enumerate(ordered_dx[:12]):
         health_codes.append({
@@ -400,15 +471,12 @@ def build_claim(doc: str, reg_event: dict, result: dict,
         },
         "receiver": {"organizationName": parsed.payer_name},
         "subscriber": {
-            "memberId": parsed.member_id,
+            "memberId": member_id,
             "firstName": name[0],
             "lastName": name[1],
             "dateOfBirth": dob,
-            "gender": str(meta.get("gender") or meta.get("sex")
-                          or defaults.get("patient_gender_default")
-                          or "U")[:1].upper(),
-            **({"groupNumber": parsed.group_number}
-               if parsed.group_number else {}),
+            "gender": gender,
+            **({"groupNumber": group_number} if group_number else {}),
             "paymentResponsibilityLevelCode": "P",
         },
         "billing": {
@@ -439,21 +507,16 @@ def build_claim(doc: str, reg_event: dict, result: dict,
                if rendering.get("taxonomy_code") else {}),
         },
         "claimInformation": {
-            "claimFilingCode": claim_filing_code(cfg, parsed),
+            "claimFilingCode": filing_code,
             "patientControlNumber": str(meta.get("mrn") or doc)[:20],
             "claimChargeAmount": f"{total:.2f}",
             "placeOfServiceCode": pos,
-            "claimFrequencyCode": str(defaults.get("claim_frequency_code")
-                                      or "1"),
-            "signatureIndicator": str(defaults.get("signature_indicator")
-                                      or "Y"),
-            "planParticipationCode": str(
-                defaults.get("plan_participation_code") or "A"),
-            "releaseInformationCode": str(
-                defaults.get("release_information_code") or "Y"),
+            "claimFrequencyCode": str(defaults["claim_frequency_code"]),
+            "signatureIndicator": str(defaults["signature_indicator"]),
+            "planParticipationCode": str(defaults["plan_participation_code"]),
+            "releaseInformationCode": str(defaults["release_information_code"]),
             "benefitsAssignmentCertificationIndicator": str(
-                defaults.get("benefits_assignment_certification_indicator")
-                or "Y"),
+                defaults["benefits_assignment_certification_indicator"]),
             "healthCareCodeInformation": health_codes,
             "serviceLines": service_lines,
         },
@@ -461,6 +524,8 @@ def build_claim(doc: str, reg_event: dict, result: dict,
 
     fac = cfg.get("service_facility") or {}
     if fac.get("organization_name") and fac.get("npi") and fac.get("address"):
+        if not _valid_npi(fac.get("npi")):
+            return None, ["service_facility.npi fails the CMS NPI check digit"]
         payload["claimInformation"]["serviceFacilityLocation"] = {
             "organizationName": fac["organization_name"],
             "npi": str(fac["npi"]),

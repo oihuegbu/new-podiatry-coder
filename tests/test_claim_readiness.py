@@ -63,7 +63,9 @@ class ClaimReadinessTest(unittest.TestCase):
             "rag_context": {"note_full_text": self.note,
                             "vision_context": {
                                 "note_category": "established_visit"}},
-            "consistency": {"runs": 3, "unanimous": True},
+            "consistency": {"runs": 3, "unanimous": True,
+                            "input_consistent": True,
+                            "input_disagreements": []},
             "claim_scrub": {"clean": True, "disposition": "CLEAN"},
             "icd_codes": [{
                 "code": "DX", "type": "primary",

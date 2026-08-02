@@ -43,21 +43,90 @@ _ARRAYS: dict[str, tuple[str, ...]] = {
 # report, but only billing-relevant arrays gate unanimity/routing.
 _ADVISORY_ARRAYS = {"snomed_codes", "supporting_conditions"}
 
-# ICD-10-CM Chapter 20 (External causes of morbidity) spans V00-Y99 — a
-# structural chapter boundary of the classification itself (same boundary
-# mce.py uses). Per the ICD-10-CM Official Guidelines (I.C.20), "there is no
+# ICD-10-CM Chapter 20 external-cause membership is resolved from the
+# authoritative chapter table (the same source mce.py uses). Per the
+# ICD-10-CM Official Guidelines (I.C.20), "there is no
 # national requirement for mandatory ICD-10-CM external cause code
 # reporting" — these codes are supplementary context (activity, place,
 # mechanism), never medical-necessity or payment drivers. A run-to-run
 # PRESENCE flip on an optional supplementary code is therefore advisory:
 # recorded, but not a reason to pull the note from auto-submission.
-_EXTERNAL_CAUSE_FIRST_CHARS = ("V", "W", "X", "Y")
+_INPUT_PATHS: dict[str, tuple[str, ...]] = {
+    "source_pdf_sha256": ("note_integrity", "source_pdf_sha256"),
+    "extracted_text_sha256": ("note_integrity", "extracted_text_sha256"),
+    "extraction_complete": ("note_integrity", "complete"),
+    "page_count": ("note_integrity", "page_count"),
+    "extracted_page_count": ("note_integrity", "extracted_page_count"),
+    "page_coverage": ("note_integrity", "page_coverage"),
+    "date_of_service": ("patient_metadata", "date_of_service"),
+    "date_of_birth": ("patient_metadata", "date_of_birth"),
+    "gender": ("patient_metadata", "gender"),
+    "payer": ("patient_metadata", "insurance"),
+    "plan": ("patient_metadata", "insurance_plan"),
+    "member_id": ("patient_metadata", "member_id"),
+    "group_number": ("patient_metadata", "group_number"),
+    "authorization_number": ("patient_metadata", "authorization_number"),
+    "provider_npi": ("patient_metadata", "provider_npi"),
+    "extracted_npi": ("patient_metadata", "npi"),
+    "billing_npi": ("patient_metadata", "billing_npi"),
+    "place_of_service": ("patient_metadata", "place_of_service"),
+    "care_setting": ("patient_metadata", "care_setting"),
+    "state": ("patient_metadata", "state"),
+    "facility_state": ("patient_metadata", "service_facility", "state"),
+    "facility_identity": ("patient_metadata", "service_facility"),
+    "note_category": ("rag_context", "vision_context", "note_category"),
+    "procedures": ("rag_context", "vision_context",
+                   "procedures_performed_today"),
+    "imaging": ("rag_context", "vision_context",
+                "imaging_performed_today"),
+    "supplies": ("rag_context", "vision_context",
+                 "supplies_dispensed_today"),
+    "prior_surgery": ("rag_context", "prior_surgery_info"),
+}
 
 
-def _is_advisory(array: str, code: str) -> bool:
+def _path_value(payload: dict, path: tuple[str, ...]):
+    value: Any = payload
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (dict, list)):
+        # Stable structural comparison without depending on insertion order.
+        import json
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return value
+
+
+def _input_disagreements(runs: list[dict]) -> list[dict]:
+    """Critical extraction/identity differences that make coding unsafe.
+
+    Billing output unanimity is not meaningful when independent runs did not
+    operate on the same note, pages, patient, payer, provider, or encounter
+    facts.  These differences are kept separate from code disagreements so
+    code-flip remediation never attempts to "fix" an input-integrity fault.
+    """
+    if not runs:
+        return [{"field": "consistency_runs", "values": [], "runs": 0}]
+    out = []
+    for field, path in _INPUT_PATHS.items():
+        values = [_path_value(run, path) for run in runs]
+        if any(value != values[0] for value in values[1:]):
+            out.append({"field": field, "values": values, "runs": len(runs)})
+    return out
+
+
+def _is_advisory(array: str, code: str, store=None) -> bool:
     if array in _ADVISORY_ARRAYS:
         return True
-    return array == "icd_codes" and code[:1] in _EXTERNAL_CAUSE_FIRST_CHARS
+    if array != "icd_codes" or store is None:
+        return False
+    try:
+        return bool(store.is_external_cause(code))
+    except Exception:
+        return False
 
 
 def _norm_code(code: str) -> str:
@@ -276,7 +345,7 @@ def compare_runs(runs: list[dict], store=None) -> dict:
                     attrs.setdefault(code, []).append(_attrs_of(e, array))
         for code, in_runs in sorted(presence.items()):
             if len(in_runs) < n:
-                advisory = _is_advisory(array, code)
+                advisory = _is_advisory(array, code, store)
                 if (not advisory and array == "icd_codes"
                         and _icd_flip_is_claim_inert(code, runs, store)):
                     advisory = True
@@ -290,7 +359,7 @@ def compare_runs(runs: list[dict], store=None) -> dict:
                                     for f in a if a[f] != attrs[code][0][f]})
                 disagreements.append({
                     "array": array, "code": code,
-                    "kind": "attributes", "advisory": _is_advisory(array, code),
+                    "kind": "attributes", "advisory": _is_advisory(array, code, store),
                     "fields": differing,
                     "values": attrs[code], "runs": n,
                 })
@@ -300,12 +369,16 @@ def compare_runs(runs: list[dict], store=None) -> dict:
     dispositions = [str(r.get("final_disposition") or "") for r in runs]
     tiers = [str(r.get("auto_coding_tier") or "") for r in runs]
     billing = [d for d in disagreements if not d["advisory"]]
+    input_disagreements = _input_disagreements(runs)
+    input_consistent = not input_disagreements
     return {
         "runs": n,
         # unanimity (and therefore REVIEW routing) is judged on the arrays
         # that reach the claim form; advisory-array variance is reported only
-        "unanimous": not billing and len(set(dispositions)) <= 1
+        "unanimous": input_consistent and not billing and len(set(dispositions)) <= 1
                      and len(set(tiers)) <= 1,
+        "input_consistent": input_consistent,
+        "input_disagreements": input_disagreements,
         "disagreements": disagreements,
         "dispositions": dispositions,
         "tiers": tiers,
@@ -478,6 +551,10 @@ def annotate_result(result: dict, report: dict, route: bool = True) -> dict:
     if len(set(report["dispositions"])) > 1:
         summary_bits.append("disposition varied across runs: "
                             + "/".join(report["dispositions"]))
+    input_disagreements = report.get("input_disagreements") or []
+    if input_disagreements:
+        summary_bits.append("critical inputs varied: " + ", ".join(
+            item["field"] for item in input_disagreements[:10]))
     reason = "Self-consistency check — " + "; ".join(summary_bits)
     reasons.append(reason)
     result["auto_coding_review_reasons"] = reasons

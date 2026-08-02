@@ -7,6 +7,8 @@ import json
 import os
 import re
 import sqlite3
+import calendar
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 
@@ -220,14 +222,68 @@ def _release_metadata(source_id: str) -> dict:
             # Older stores may predate the refresh-version registry.  That
             # must not discard effective bounds successfully read above.
             version_row = None
-        return {
+        metadata = {
             "effective_from": str((row or ("", ""))[0] or ""),
             "effective_to": str((row or ("", ""))[1] or ""),
             "version": ("/".join(str(v or "") for v in version_row)
                         if version_row else ""),
         }
+        metadata.update(_edition_release_window(source_id))
+        return metadata
     except (OSError, sqlite3.Error):
         return {"effective_from": "", "effective_to": "", "version": ""}
     finally:
         if conn is not None:
             conn.close()
+
+
+def _quarter_window(year: int, month: int) -> tuple[str, str]:
+    quarter_month = ((month - 1) // 3) * 3 + 1
+    end_month = quarter_month + 2
+    return (date(year, quarter_month, 1).isoformat(),
+            date(year, end_month, calendar.monthrange(year, end_month)[1]).isoformat())
+
+
+def _edition_release_window(source_id: str) -> dict:
+    """Claim-date coverage of the exact licensed/published snapshot.
+
+    Code lifecycle dates and release freshness are separate concepts.  A
+    decades-old HCPCS code may remain active, while an April quarterly file
+    is still insufficient authority for an August claim.  The manifest
+    records both so the release certificate can enforce the latter.
+    """
+    try:
+        if source_id == "cpt_codes":
+            data = json.loads(config.CPT_FILE.read_text())
+            year = int((data.get("metadata") or {}).get("year"))
+            return {"release_effective_from": date(year, 1, 1).isoformat(),
+                    "release_effective_to": date(year, 12, 31).isoformat(),
+                    "release_basis": "licensed CPT edition"}
+        if source_id == "icd10_codes":
+            rows = json.loads(config.ICD10_FILE.read_text())
+            fy = int(next(str(row.get("fy")) for row in rows if row.get("fy")))
+            return {"release_effective_from": date(fy - 1, 10, 1).isoformat(),
+                    "release_effective_to": date(fy, 9, 30).isoformat(),
+                    "release_basis": "ICD-10-CM fiscal-year edition"}
+        if source_id == "hcpcs_codes":
+            rows = json.loads(config.HCPCS_FILE.read_text())
+            source_name = str(((rows[0].get("metadata") or {}).get("source_file")))
+            match = re.search(r"(20\d{2})[_-]?(JAN|APR|JUL|OCT)", source_name,
+                              re.IGNORECASE)
+            if not match:
+                match = re.search(r"(JAN|APR|JUL|OCT)[_-]?(20\d{2})", source_name,
+                                  re.IGNORECASE)
+                if match:
+                    month_name, year_text = match.groups()
+                else:
+                    return {}
+            else:
+                year_text, month_name = match.groups()
+            month = {"JAN": 1, "APR": 4, "JUL": 7, "OCT": 10}[month_name.upper()]
+            start, end = _quarter_window(int(year_text), month)
+            return {"release_effective_from": start,
+                    "release_effective_to": end,
+                    "release_basis": "CMS quarterly HCPCS release"}
+    except (OSError, ValueError, TypeError, StopIteration, IndexError):
+        return {}
+    return {}

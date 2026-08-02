@@ -21,23 +21,7 @@ from __future__ import annotations
 from app.compliance.agents.base import ComplianceAgent
 from app.compliance.models import Claim, DenialRisk, Finding, Status
 
-# CPT section boundary (code-system grammar, not a medical-rule list — same
-# pattern as _EM_SECTION in modifiers.py/global_period.py/ncci_ptp.py).
-_EM_SECTION = range(99202, 99500)
-
-# Medicare routine-foot-care class-findings modifiers (Q7 = one class A
-# finding, Q8 = two class B, Q9 = one class B + two class C) and the ABN/
-# noncovered routing modifiers that legitimately replace them. Modifier
-# references are structural (allowed per the no-hardcoding guard); WHICH
-# CPT codes need them is derived from the governing policy's own CMS title
-# ("routine foot care") — never a hardcoded procedure list.
-_CLASS_FINDINGS_MODIFIERS = {"Q7", "Q8", "Q9"}
-_ABN_ROUTING_MODIFIERS = {"GA", "GX", "GY", "GZ"}
 _ROUTINE_FOOT_CARE_TITLE = "routine foot care"
-
-
-def _is_em(code: str) -> bool:
-    return code.isdigit() and int(code) in _EM_SECTION
 
 
 class MedicalNecessityAgent(ComplianceAgent):
@@ -99,7 +83,10 @@ class MedicalNecessityAgent(ComplianceAgent):
         # point to a diagnosis. This also guards against upstream coding failures
         # that drop the diagnoses (e.g. an LLM pass that fails to parse).
         billable = [ln for ln in claim.lines if ln.code]
-        non_em_billable = [ln for ln in billable if not _is_em(ln.code)]
+        non_em_billable = [
+            ln for ln in billable
+            if not self.store.is_em_code(ln.code, claim.date_of_service)
+        ]
         if non_em_billable and (claim.payer.kind == "unknown" or
                                 not claim.payer.follows_medicare_coverage):
             return [self.finding(
@@ -127,7 +114,7 @@ class MedicalNecessityAgent(ComplianceAgent):
             ))
 
         for line in claim.lines:
-            if _is_em(line.code):
+            if self.store.is_em_code(line.code, claim.date_of_service):
                 continue  # E/M necessity is an MDM question, not LCD code-pairing
             all_policies = self.store.coverage_policies_for_cpt(line.code)
             dated_policies = self.store.coverage_policies_for_cpt(
@@ -280,6 +267,10 @@ class MedicalNecessityAgent(ComplianceAgent):
                 # having been appended yet, and non-Medicare payers vary.
                 rfc_policies = self.store.policies_titled(policies, _ROUTINE_FOOT_CARE_TITLE)
                 mods = {m.strip().upper() for m in line.modifiers}
+                class_findings_modifiers = self.store.modifier_codes_for_role(
+                    "class_findings")
+                liability_modifiers = self.store.modifier_codes_for_role(
+                    "liability_notice")
                 if (
                     rfc_policies
                     # follows_medicare_coverage, not is_medicare: MA plans are
@@ -287,18 +278,22 @@ class MedicalNecessityAgent(ComplianceAgent):
                     # 422.101), so routine-foot-care class findings apply to
                     # both FFS and Medicare Advantage claims.
                     and claim.payer.follows_medicare_coverage
-                    and not (mods & (_CLASS_FINDINGS_MODIFIERS | _ABN_ROUTING_MODIFIERS))
+                    and not (mods & (class_findings_modifiers | liability_modifiers))
                 ):
                     findings.append(self.finding(
                         status=Status.WARN, codes=[line.code], denial_risk=DenialRisk.HIGH,
                         reason=f"{line.code} is governed by routine-foot-care polic"
                                f"{'y' if len(rfc_policies) == 1 else 'ies'} "
                                f"{', '.join(rfc_policies)} and billed to Medicare without a "
-                               f"class-findings modifier (Q7/Q8/Q9) or ABN routing modifier — "
+                               "an authoritative class-findings or liability-notice modifier — "
                                f"routine foot care denies without documented class findings.",
-                        recommendation="Append Q7 (one class A), Q8 (two class B), or Q9 (one class B "
-                                       "+ two class C) if the exam documents the findings; otherwise "
-                                       "obtain an ABN (GA/GX) or do not bill as covered.",
+                        recommendation=(
+                            "Append the applicable class-findings modifier "
+                            f"({ '/'.join(sorted(class_findings_modifiers)) }) if the exam supports "
+                            "its authoritative definition; otherwise use an applicable liability-"
+                            f"notice modifier ({ '/'.join(sorted(liability_modifiers)) }) only when "
+                            "the required notice was obtained, or do not bill as covered."
+                        ),
                         source_rule=f"Routine foot care coverage policy "
                                     f"({', '.join(rfc_policies)}) — class-findings requirement",
                         clause="class_findings_modifier",

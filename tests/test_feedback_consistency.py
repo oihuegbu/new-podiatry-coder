@@ -118,12 +118,20 @@ ann = annotate_result(json.loads(json.dumps(c1)), rep)
 check("tier untouched by supporting-only variance", ann["auto_coding_tier"] == "AUTO")
 
 print("\n[self-consistency: optional external-cause ICD variance is advisory-only]")
+
+
+class _ChapterStore:
+    @staticmethod
+    def is_external_cause(code):
+        return code == "W22.8XXA"
+
+
 x1 = _run(icd=[{"code": "S90.122A", "type": "primary"},
                {"code": "W22.8XXA", "type": "secondary"}],
           cpt=[{"code": "99213", "modifiers": [], "units": 1}])
 x2 = _run(icd=[{"code": "S90.122A", "type": "primary"}],
           cpt=[{"code": "99213", "modifiers": [], "units": 1}])
-rep = compare_runs([x1, x2])
+rep = compare_runs([x1, x2], store=_ChapterStore())
 check("external-cause (Chapter 20) presence flip stays unanimous "
       "(ICD-10-CM guidelines: reporting is optional)", rep["unanimous"])
 check("flip still recorded as advisory",

@@ -32,6 +32,10 @@ ICD10_INDEX_TERMS_FILE = CODES_DIR / "icd10cm_index_terms.json"
 MCE_EDITS_FILE = CODES_DIR / "mce_edits.json"
 ICD10_CHRONIC_FILE = CODES_DIR / "icd10cm_chronic.json"
 EM_MDM_GRID_FILE = CODES_DIR / "em_mdm_grid.json"
+CODING_SEMANTICS_FILE = CODES_DIR / "coding_semantics.json"
+CPT_CATEGORIES_FILE = CODES_DIR / "cpt_categories.json"
+ICD10_CHAPTERS_FILE = CODES_DIR / "icd10cm_chapters.json"
+ICD10_EXTENSIONS_FILE = CODES_DIR / "icd10cm_extensions.json"
 
 # Official CPT phrasing that designates an add-on code (Appendix D)
 _ADDON_PHRASES = ("list separately in addition", "each additional", "add-on code")
@@ -117,6 +121,29 @@ def _is_valid_date(val) -> bool:
         return False
 
 
+def cpt_edition_window(data: dict, entry: dict) -> tuple[str, str, bool]:
+    """Conservative activation window proven by a licensed CPT edition.
+
+    A snapshot proves membership only within its edition year.  The source's
+    per-row effective date is a revision marker for older rows, but a date
+    later than the edition's first day is still a safe lower bound for
+    mid-year/future additions.  Claims outside the edition fail closed until
+    the corresponding licensed historical/future edition is loaded.
+    """
+    metadata = data.get("metadata") or {} if isinstance(data, dict) else {}
+    year_text = str(metadata.get("year") or "").strip()
+    if not re.fullmatch(r"\d{4}", year_text):
+        return "1900-01-01", _OPEN, False
+    start = f"{year_text}-01-01"
+    end = f"{year_text}-12-31"
+    raw_effective = entry.get("effective_date")
+    if _is_valid_date(raw_effective):
+        candidate = _clean_date(raw_effective)
+        if candidate.startswith(year_text + "-") and candidate > start:
+            start = candidate
+    return start, end, True
+
+
 class ComplianceDataStore:
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
@@ -126,6 +153,11 @@ class ComplianceDataStore:
         self._mue_release_window_loaded = False
         self._mue_release_window: tuple[date, date] | None = None
         self._mue_release_windows: tuple[tuple[date, date], ...] = ()
+        self._coding_semantics_cache: dict | None = None
+        self._cpt_categories_cache: dict[str, frozenset[str]] | None = None
+        self._cpt_categories_edition_year: int | None = None
+        self._icd_chapters_cache: tuple[dict, ...] | None = None
+        self._icd_extensions_cache: dict[str, str] | None = None
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -530,6 +562,19 @@ class ComplianceDataStore:
             self.conn.execute("DELETE FROM addon")
             self._ingest_cpt()
             self._ingest_hcpcs()
+            self.conn.commit()
+
+        # CPT identity is edition-scoped authority.  Stores built before the
+        # edition-window gate retain wide-open CPT rows even though HCPCS has
+        # real dates (so the combined migration above cannot detect them).
+        wide_cpt = self.conn.execute(
+            "SELECT COUNT(*) FROM code_set WHERE code_system='CPT' AND "
+            "(effective_from='1900-01-01' OR effective_to='9999-12-31')"
+        ).fetchone()[0]
+        if wide_cpt:
+            self.conn.execute("DELETE FROM code_set WHERE code_system='CPT'")
+            self.conn.execute("DELETE FROM addon")
+            self._ingest_cpt()
             self.conn.commit()
 
         # coverage_cpt/coverage_icd: _ingest_lcd() used to expect a single
@@ -1095,20 +1140,8 @@ class ComplianceDataStore:
             if not code:
                 continue
             desc = e.get("long_description") or e.get("short_description") or e.get("description", "")
-            # CPT's effective_date is NOT a code-introduction date — verified
-            # empirically: 99202/99213/99214 (decades-old, unquestionably
-            # not new codes) all carry effective_date 2024-01-01, and the
-            # full distribution of populated values clusters on Jan 1/Jul 1
-            # across 2020-2026 — a periodic descriptor-revision cycle
-            # marker, not a lifecycle date. Using it as an activation gate
-            # would flag huge numbers of long-standing, merely-reworded
-            # codes (e.g. any E/M code touched by the 2021 guideline
-            # overhaul) as "not active" for any older, perfectly valid date
-            # of service. No reliable introduction/retirement signal exists
-            # in this source for CPT, so — unlike ICD-10 and HCPCS, both
-            # verified against real add/discontinue signals — CPT stays
-            # always-open rather than approximating with the wrong field.
-            rows.append(("CPT", code, desc, "1900-01-01", _OPEN, "active"))
+            effective_from, effective_to, _authority = cpt_edition_window(data, e)
+            rows.append(("CPT", code, desc, effective_from, effective_to, "active"))
             # Add-on status is derived from the official CPT descriptor phrasing
             # (Appendix D) — fully data-driven, no hardcoded code list.
             if any(p in (desc or "").lower() for p in _ADDON_PHRASES):
@@ -2000,6 +2033,15 @@ class ComplianceDataStore:
         live on three claims)."""
         return self._all_note_refs("icd10_use_additional_code", "ref", code)
 
+    def is_use_additional_target(self, code: str) -> bool:
+        """Whether any Tabular use-additional note names this code/family."""
+        norm = _norm(code)
+        rows = self.conn.execute(
+            "SELECT DISTINCT ref FROM icd10_use_additional_code"
+        ).fetchall()
+        return any(norm.startswith(str(row[0])) or str(row[0]).startswith(norm)
+                   for row in rows if row[0])
+
     def _all_note_refs(self, table: str, col: str, code: str) -> list[str]:
         norm = _norm(code)
         out: list[str] = []
@@ -2280,7 +2322,7 @@ class ComplianceDataStore:
         return self.conn.execute("SELECT COUNT(*) FROM modifier").fetchone()[0]
 
     def modifier_laterality(self, mod: str) -> str | None:
-        """'RT' / 'LT' if this modifier denotes a body side, else None —
+        """Semantic body side (``right``/``left``), else None —
         derived from the modifier's own name in the AMA/CMS reference data
         ('Left foot, great toe' → LT; 'Right side …' → RT), never from a
         hardcoded toe-modifier→side mapping. A prior hand-written mapping in
@@ -2295,10 +2337,25 @@ class ComplianceDataStore:
         name = (row["category"] or "").lower()
         has_left, has_right = "left" in name, "right" in name
         if has_left and not has_right:
-            return "LT"
+            return "left"
         if has_right and not has_left:
-            return "RT"
+            return "right"
         return None
+
+    def modifier_for_laterality(self, side: str) -> str | None:
+        """Unique general side modifier resolved from authoritative names.
+
+        Digit/site-specific modifiers also carry a side.  For automatically
+        appending a general side, restrict to the semantic ``laterality``
+        role and require uniqueness rather than guessing among anatomic
+        alternatives.
+        """
+        target = str(side or "").strip().lower()
+        matches = [
+            code for code in self.modifier_codes_for_role("laterality")
+            if self.modifier_laterality(code) == target
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     def modifier_name(self, mod: str) -> str | None:
         """The modifier's own AMA/CMS name ('Right foot, great toe' for T5),
@@ -2310,6 +2367,203 @@ class ComplianceDataStore:
             "SELECT category FROM modifier WHERE code=? LIMIT 1", (str(mod).strip().upper(),)
         ).fetchone()
         return row["category"] if row else None
+
+    def _coding_semantics(self) -> dict:
+        """Versioned, code-free semantic roles for generic coding mechanics.
+
+        Python owns only the matching mechanism.  The role vocabulary and
+        the authoritative descriptor/PFS attributes that define each role
+        live in ``data/codes/coding_semantics.json`` so a source update can
+        change membership without a code deployment.
+        """
+        cached = getattr(self, "_coding_semantics_cache", None)
+        if cached is not None:
+            return cached
+        try:
+            data = json.loads(CODING_SEMANTICS_FILE.read_text())
+        except (OSError, ValueError) as exc:
+            logger.error("coding semantics unavailable: %s", exc)
+            data = {}
+        self._coding_semantics_cache = data
+        return data
+
+    def modifier_codes_for_role(self, role: str) -> set[str]:
+        """Resolve a semantic modifier role from authoritative modifier names.
+
+        An absent/ambiguous role returns an empty set and therefore fails
+        closed in callers; it never falls back to a Python allow-list.
+        """
+        spec = (self._coding_semantics().get("modifier_roles") or {}).get(role) or {}
+        needles = [str(v).casefold() for v in spec.get("name_any") or [] if str(v).strip()]
+        if not needles:
+            return set()
+        rows = self.conn.execute("SELECT code, category FROM modifier").fetchall()
+        return {
+            row["code"] for row in rows
+            if any(needle in str(row["category"] or "").casefold() for needle in needles)
+        }
+
+    def code_matches_semantic_class(self, code: str, role: str, dos=None) -> bool:
+        """Classify a code using authoritative descriptor/PFS/chapter fields."""
+        spec = (self._coding_semantics().get("code_classes") or {}).get(role) or {}
+        if not spec:
+            return False
+        norm = _norm(code)
+        chapter_ids = {int(v) for v in spec.get("icd_chapter_ids") or []}
+        if chapter_ids and self.icd_chapter_id(norm) in chapter_ids:
+            return True
+        cpt_category = str(spec.get("cpt_category") or "").strip()
+        if cpt_category and norm in self.cpt_category_codes(cpt_category, dos):
+            return True
+        row = self.conn.execute(
+            "SELECT description FROM code_set WHERE code=? "
+            "AND code_system IN ('CPT','HCPCS') LIMIT 1", (norm,),
+        ).fetchone()
+        descriptor = str(row["description"] or "").casefold() if row else ""
+        descriptor_terms = [
+            str(v).casefold() for v in spec.get("descriptor_any") or [] if str(v).strip()
+        ]
+        if descriptor_terms and any(term in descriptor for term in descriptor_terms):
+            return True
+        statuses = {str(v).strip().upper() for v in spec.get("pfs_status_any") or []}
+        if statuses and str(self.billing_status(norm, dos) or "").upper() in statuses:
+            return True
+        if spec.get("global_days_kind") == "numeric":
+            value = str(self.global_period(norm, dos) or "").strip()
+            return bool(value and value.isdigit())
+        return False
+
+    def icd_chapter_id(self, code: str) -> int | None:
+        """Resolve ICD-10-CM chapter membership from the CDC/NCHS ranges.
+
+        The Python mechanic is generic; chapter boundaries remain versioned,
+        checksummed source data so annual classification changes require no
+        code deployment and cannot be hidden in a prefix tuple.
+        """
+        cached = self._icd_chapters_cache
+        if cached is None:
+            try:
+                raw = json.loads(ICD10_CHAPTERS_FILE.read_text())
+                cached = tuple(raw.get("chapters") or [])
+            except (OSError, ValueError) as exc:
+                logger.error("ICD-10-CM chapter authority unavailable: %s", exc)
+                cached = ()
+            self._icd_chapters_cache = cached
+        category = _norm(code)[:3]
+        if len(category) != 3:
+            return None
+        matches = [int(row["id"]) for row in cached
+                   if str(row.get("start") or "") <= category <=
+                   str(row.get("end") or "")]
+        return matches[0] if len(matches) == 1 else None
+
+    def is_external_cause(self, code: str) -> bool:
+        return self.code_matches_semantic_class(code, "external_cause")
+
+    def is_injury_or_poisoning(self, code: str) -> bool:
+        return self.code_matches_semantic_class(code, "injury_poisoning")
+
+    def exclude_from_assessment_completion(self, code: str) -> bool:
+        return self.code_matches_semantic_class(
+            code, "assessment_completion_excluded")
+
+    def icd_extension_for_role(self, role: str) -> str | None:
+        cached = self._icd_extensions_cache
+        if cached is None:
+            try:
+                raw = json.loads(ICD10_EXTENSIONS_FILE.read_text())
+                cached = {
+                    str(name): str(value).strip().upper()
+                    for name, value in
+                    (raw.get("seventh_character_roles") or {}).items()
+                    if len(str(value).strip()) == 1
+                }
+            except (OSError, ValueError) as exc:
+                logger.error("ICD-10-CM extension authority unavailable: %s", exc)
+                cached = {}
+            self._icd_extensions_cache = cached
+        return cached.get(str(role))
+
+    def icd_with_extension(self, code: str, role: str, dos=None) -> str | None:
+        """Return an active code after substituting a sourced extension."""
+        norm = _norm(code)
+        extension = self.icd_extension_for_role(role)
+        if len(norm) != 7 or not extension:
+            return None
+        candidate = norm[:-1] + extension
+        if not self.code_exists("ICD10", candidate, dos):
+            return None
+        return (candidate[:3] + "." + candidate[3:]
+                if "." in str(code) else candidate)
+
+    def cpt_category_codes(self, category: str, dos=None) -> frozenset[str]:
+        """Edition-bound CPT category membership from licensed source data."""
+        cached = self._cpt_categories_cache
+        if cached is None:
+            try:
+                raw = json.loads(CPT_CATEGORIES_FILE.read_text())
+                self._cpt_categories_edition_year = int(raw.get("version"))
+                cached = {
+                    str(name): frozenset(_norm(code) for code in codes or [])
+                    for name, codes in (raw.get("categories") or {}).items()
+                }
+            except (OSError, ValueError) as exc:
+                logger.error("CPT category authority unavailable: %s", exc)
+                cached = {}
+            self._cpt_categories_cache = cached
+        try:
+            service_year = date.fromisoformat(self._dos(dos)).year
+        except (TypeError, ValueError):
+            return frozenset()
+        if service_year != self._cpt_categories_edition_year:
+            return frozenset()
+        return cached.get(str(category), frozenset())
+
+    def is_performance_measure_tracking(self, code: str, dos=None) -> bool:
+        return self.code_matches_semantic_class(
+            code, "performance_measure_tracking", dos)
+
+    def is_em_code(self, code: str, dos=None) -> bool:
+        return self.code_matches_semantic_class(code, "evaluation_management", dos)
+
+    def is_surgical_procedure(self, code: str, dos=None) -> bool:
+        return self.code_matches_semantic_class(code, "surgical_procedure", dos)
+
+    def is_anesthesia_service(self, code: str, dos=None) -> bool:
+        return self.code_matches_semantic_class(code, "anesthesia", dos)
+
+    def postoperative_followup_code(self, dos=None) -> str | None:
+        """Return the unique authoritative no-charge follow-up service code."""
+        spec = ((self._coding_semantics().get("code_classes") or {})
+                .get("postoperative_followup") or {})
+        terms = [str(value).casefold() for value in spec.get("descriptor_any") or []
+                 if str(value).strip()]
+        if not terms:
+            return None
+        service_date = self._dos(dos)
+        matches = [
+            row["code"] for row in self.conn.execute(
+                "SELECT DISTINCT code, description FROM code_set "
+                "WHERE code_system='CPT' AND effective_from<=? "
+                "AND effective_to>=?", (service_date, service_date))
+            if any(term in str(row["description"] or "").casefold()
+                   for term in terms)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def global_period_class(self, code: str, dos=None) -> str | None:
+        value = str(self.global_period(code, dos) or "").strip().upper()
+        for role, values in (
+                self._coding_semantics().get("global_period_classes") or {}).items():
+            if value in {str(item).strip().upper() for item in values or []}:
+                return role
+        return None
+
+    def global_period_has_class(self, code: str, role: str, dos=None) -> bool:
+        value = str(self.global_period(code, dos) or "").strip().upper()
+        values = ((self._coding_semantics().get("global_period_classes") or {})
+                  .get(role) or [])
+        return value in {str(item).strip().upper() for item in values}
 
     def anatomic_modifiers(self) -> set[str]:
         """Modifiers whose OWN AMA/CMS name designates an anatomic site —
@@ -2944,7 +3198,7 @@ class ComplianceDataStore:
         observed suppressing real DMEPOS revenue. X is surfaced separately
         via pfs_exclusion_advisory() as a review-level signal.
 
-        CPT Category II codes (4 digits + 'F' suffix) are the one universal
+        CPT performance-measure tracking codes are the one universal
         exception to that payer-conditional rule: they're AMA performance-
         measure tracking codes with zero RVU value, carrying no payment under
         ANY payer by design — not a coverage decision like a normal code's
@@ -2953,8 +3207,7 @@ class ComplianceDataStore:
         (active/normally billable) — a 100% pattern across the whole code
         category, not a per-code judgment call.
         """
-        norm = _norm(code)
-        if len(norm) == 5 and norm[:4].isdigit() and norm[4] == "F":
+        if self.is_performance_measure_tracking(code, dos):
             return "CPT Category II code (performance-measure tracking, zero RVU by AMA design)"
         status = self.billing_status(code, dos)
         meanings = {

@@ -1406,39 +1406,41 @@ def main():
     # Find a digit modifier whose own reference name states each side —
     # data-driven, no hand-typed T-modifier map (that map was once inverted).
     right_digit = left_digit = None
+    right_general = store.modifier_for_laterality("right")
+    left_general = store.modifier_for_laterality("left")
     for r in store.conn.execute("SELECT code FROM modifier"):
         mod_code = r[0]
-        if mod_code in ("RT", "LT"):
+        if mod_code in {right_general, left_general}:
             continue
         side = store.modifier_laterality(mod_code)
-        if side == "RT" and right_digit is None:
+        if side == "right" and right_digit is None:
             right_digit = mod_code
-        elif side == "LT" and left_digit is None:
+        elif side == "left" and left_digit is None:
             left_digit = mod_code
         if right_digit and left_digit:
             break
     if right_digit:
-        line = {"code": "11750", "modifiers": ["RT", right_digit]}
+        line = {"code": "11750", "modifiers": [right_general, right_digit]}
         v.issues = []
         v._check_redundant_laterality([line], [])
-        check(f"RT stripped when {right_digit} (a right-side digit modifier) present",
+        check(f"general side stripped when {right_digit} (a right-side digit modifier) present",
               line["modifiers"] == [right_digit]
               and "redundant_laterality_removed" in cats(v))
-        line2 = {"code": "11750", "modifiers": ["LT", right_digit]}
+        line2 = {"code": "11750", "modifiers": [left_general, right_digit]}
         v.issues = []
         v._check_redundant_laterality([line2], [])
         check(f"LT + {right_digit} (right-side digit) → contradiction ERROR, nothing stripped",
-              "LT" in line2["modifiers"] and "laterality_contradiction" in cats(v))
+              left_general in line2["modifiers"] and "laterality_contradiction" in cats(v))
         line3 = {"code": "11750", "modifiers": [right_digit]}
         v.issues = []
         v._check_redundant_laterality([line3], [])
         check("digit modifier alone → silent", not v.issues)
         if left_digit:
-            line4 = {"code": "11750", "modifiers": ["RT", right_digit, left_digit]}
+            line4 = {"code": "11750", "modifiers": [right_general, right_digit, left_digit]}
             v.issues = []
             v._check_redundant_laterality([line4], [])
             check("digit modifiers spanning both sides → ambiguous, untouched",
-                  "RT" in line4["modifiers"] and not v.issues)
+                  right_general in line4["modifiers"] and not v.issues)
     else:
         check("SKIP: no sided digit modifier in reference data", True)
 
@@ -1880,13 +1882,13 @@ def main():
         [{"code": "11750", "modifiers": ["T5"]}], "No imaging words at all.")
     check("non-radiology code → untouched", not v.issues)
 
-    print("\n[A-code supply RT/LT strip]")
+    print("\n[HCPCS supply laterality does not use a prefix proxy]")
     sup_a = {"code": "A4570", "modifiers": ["RT"]}
     sup_l = {"code": "L3260", "modifiers": ["RT"]}
     v.issues = []
     v._check_supply_laterality_strip([sup_a, sup_l])
-    check("A4570 RT stripped (materials line)",
-          sup_a["modifiers"] == [] and "supply_laterality_removed" in cats(v))
+    check("A4570 side modifier preserved without a sourced applicability field",
+          sup_a["modifiers"] == ["RT"])
     check("L3260 (L-code fitted device) untouched", sup_l["modifiers"] == ["RT"])
 
     print("\n[ICD laterality corrected to the claim's own side]")
@@ -3204,13 +3206,13 @@ def main():
         fw4, [], fw_icd, note_shoe, date(2026, 5, 29), "2020-01-01")
     check("pediatric patient → bracket ambiguity, no add", not fw4)
 
-    print("\n[supply digit-modifier strip (A-codes)]")
+    print("\n[supply digit-modifier authority gate]")
     sup = [{"code": "A4570", "modifiers": ["T6"], "units": 1}]
     v.issues = []
     v._check_supply_laterality_strip(sup)
-    check("digit modifier stripped from plain supply (A4570 'Splint')",
-          sup[0]["modifiers"] == []
-          and "supply_laterality_removed" in cats(v))
+    check("digit modifier preserved when no authoritative applicability field exists",
+          sup[0]["modifiers"] == ["T6"]
+          and "supply_laterality_removed" not in cats(v))
 
     print("\n[consistency: satisfied instructional groups]")
     from app.validation.consistency import _icd_flip_is_claim_inert

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import unittest
 import sqlite3
+import json
 from datetime import date, timedelta
 from unittest.mock import patch
 
@@ -10,11 +11,12 @@ from app.compliance.agents.base import ComplianceAgent
 from app.compliance.agents.ncci_ptp import NCCIPTPAgent
 from app.compliance.agents.specificity import SpecificityAgent
 from app.compliance.engine import ClaimScrubber
-from app.compliance.datastore.store import ComplianceDataStore
+from app.compliance.datastore.store import ComplianceDataStore, cpt_edition_window
 from app.compliance.models import (
     Claim, ClaimLine, DenialRisk, Disposition, Finding, ScrubResult, Status,
 )
 from app.rag.code_reference import CodeReferenceDB
+from app.validation.consistency import compare_runs
 
 
 class _CrashAgent(ComplianceAgent):
@@ -50,8 +52,96 @@ class _NCCIStore:
     def anatomic_modifiers(self):
         return set()
 
+    def is_em_code(self, code, dos=None):
+        return False
+
+    def modifier_codes_for_role(self, role):
+        return set()
+
 
 class TestFailClosedRelease(unittest.TestCase):
+    def test_zero_consistency_runs_is_not_unanimous(self):
+        report = compare_runs([])
+        self.assertFalse(report["unanimous"])
+        self.assertFalse(report["input_consistent"])
+
+    def test_structural_code_classes_come_from_edition_bound_authority(self):
+        store = ComplianceDataStore()
+        store.build_or_load()
+        self.assertTrue(store.is_external_cause("W01.0XXA"))
+        self.assertFalse(store.is_external_cause("S93.401A"))
+        self.assertTrue(store.is_injury_or_poisoning("S93.401A"))
+        self.assertTrue(store.exclude_from_assessment_completion("R26.2"))
+        self.assertTrue(store.is_performance_measure_tracking(
+            "4269F", date(2026, 6, 1)))
+        self.assertFalse(store.is_performance_measure_tracking(
+            "4269F", date(2025, 6, 1)))
+        self.assertEqual(store.icd_with_extension(
+            "S93.401D", "sequela", date(2026, 6, 1)), "S93.401S")
+
+    def test_cpt_category_membership_matches_the_licensed_edition(self):
+        from app.compliance.datastore.store import CPT_CATEGORIES_FILE
+        from app.core.config import CPT_FILE
+        categories = json.loads(CPT_CATEGORIES_FILE.read_text())
+        cpt = json.loads(CPT_FILE.read_text())
+        expected = {
+            row["code"] for row in cpt["codes"]
+            if len(row["code"]) == 5 and row["code"][:-1].isdigit()
+            and row["code"].endswith("F")
+        }
+        self.assertEqual(
+            set(categories["categories"]["performance_measure_tracking"]),
+            expected,
+        )
+
+    def test_cpt_authority_is_limited_to_the_licensed_edition(self):
+        edition = {"metadata": {"year": "2026"}}
+        self.assertEqual(
+            cpt_edition_window(edition, {"effective_date": "20240101"}),
+            ("2026-01-01", "2026-12-31", True),
+        )
+        self.assertEqual(
+            cpt_edition_window(edition, {"effective_date": "20260701"}),
+            ("2026-07-01", "2026-12-31", True),
+        )
+        self.assertEqual(
+            cpt_edition_window({}, {"effective_date": "20260701"})[2], False)
+
+    def test_identical_codes_do_not_mask_extraction_drift(self):
+        base = {
+            "icd_codes": [], "supporting_conditions": [], "cpt_codes": [],
+            "hcpcs_codes": [], "snomed_codes": [],
+            "final_disposition": "CLEAN", "auto_coding_tier": "AUTO",
+            "note_integrity": {
+                "complete": True, "page_count": 2, "extracted_page_count": 2,
+                "source_pdf_sha256": "sha256:source",
+                "extracted_text_sha256": "sha256:first",
+            },
+            "patient_metadata": {"date_of_service": "2026-02-01"},
+        }
+        changed = {**base, "note_integrity": {
+            **base["note_integrity"], "extracted_text_sha256": "sha256:second"}}
+        report = compare_runs([base, changed])
+        self.assertFalse(report["unanimous"])
+        self.assertFalse(report["input_consistent"])
+        self.assertEqual(report["input_disagreements"][0]["field"],
+                         "extracted_text_sha256")
+
+    def test_identical_codes_do_not_mask_procedure_extraction_drift(self):
+        base = {
+            "icd_codes": [], "supporting_conditions": [], "cpt_codes": [],
+            "hcpcs_codes": [], "snomed_codes": [],
+            "final_disposition": "CLEAN", "auto_coding_tier": "AUTO",
+            "rag_context": {"vision_context": {
+                "procedures_performed_today": ["documented procedure"]}},
+        }
+        changed = {**base, "rag_context": {"vision_context": {
+            "procedures_performed_today": []}}}
+        report = compare_runs([base, changed])
+        self.assertFalse(report["unanimous"])
+        self.assertIn("procedures", {
+            row["field"] for row in report["input_disagreements"]})
+
     def test_unknown_and_execution_error_are_blocking(self):
         for status in (Status.UNKNOWN, Status.ERROR):
             with self.subTest(status=status):

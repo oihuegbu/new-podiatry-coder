@@ -23,10 +23,10 @@ This extracted data feeds a medical billing pipeline where a single misread char
 - ACCURACY over completeness: if you cannot read text with confidence, write [UNCLEAR] rather than guessing
 - Medical codes have ZERO tolerance for character substitution:
   - The letter O and the digit 0 are different — re-read every code
-  - The letter I and the digit 1 are different — e.g., "I10" (hypertension) vs "110"
+  - The letter I and the digit 1 are different
   - The letter S and the digit 5, the letter B and the digit 8 are easily confused in print
 - Re-read every code character by character before writing it
-- Laterality is critical — RT, LT, bilateral, right, left must be read exactly as written; never assume or infer laterality
+- Laterality is critical — side and bilateral wording must be read exactly as written; never assume or infer laterality
 - Drug names, dosages, injection amounts, and measurements must be verbatim — do NOT round or estimate
 - Digit/toe numbers (1st, 2nd, 3rd, 4th, 5th) must be exact — these determine which CPT code applies
 
@@ -64,10 +64,15 @@ This extracted data feeds a medical billing pipeline where a single misread char
     "provider": "Dr. Name, Credentials",
     "npi": "number or null",
     "mrn": "number or null",
+    "gender": "gender/sex value exactly as printed, else null",
     "insurance": "full insurance line or null",
     "insurance_plan": "plan/product name exactly as printed, else null",
+    "member_id": "member/policy identifier exactly as printed, else null",
+    "group_number": "group identifier exactly as printed, else null",
+    "authorization_number": "prior-authorization identifier exactly as printed, else null",
     "note_type": "e.g., NEW PATIENT – OFFICE VISIT",
-    "place_of_service": "2-digit CMS POS code if stated or clearly inferable from the note's own setting language (office/clinic letterhead → 11, hospital → 21/22, ASC → 24, patient's home → 12, SNF → 31), else null — never guess between settings",
+    "place_of_service": "CMS POS code only when explicitly printed, else null",
+    "care_setting": "setting language exactly as printed (office, hospital, facility, home, etc.), else null; do not translate it to a code",
     "service_facility": {
       "name": "facility/practice name from the letterhead or footer, else null",
       "address": "street address exactly as printed, else null",
@@ -96,15 +101,15 @@ This extracted data feeds a medical billing pipeline where a single misread char
     "is_post_op_visit": true,
     "days_post_op": 14,
     "prior_surgery_description": "Austin/Chevron bunionectomy right foot",
-    "prior_surgery_cpt": "28296"
+    "prior_surgery_cpt": "verbatim code if explicitly printed, else null"
   },
   "physician_documented_codes": [
     {
-      "code": "E11.42",
+      "code": "verbatim code",
       "system": "icd10",
-      "description": "Type 2 DM with polyneuropathy",
+      "description": "verbatim description",
       "section": "ASSESSMENT",
-      "raw_text": "E11.42 - Type 2 DM with polyneuropathy"
+      "raw_text": "complete verbatim line"
     }
   ]
 }
@@ -112,12 +117,13 @@ This extracted data feeds a medical billing pipeline where a single misread char
 ## IMPORTANT RULES FOR physician_documented_codes:
 - Extract ONLY codes explicitly written by the physician in the document — no inferred codes
 - Look in: Assessment/Diagnoses section, Plan section, header fields, anywhere codes appear
-- ICD-10-CM codes: one capital letter followed by digits and optional decimal (e.g., E11.42, M20.11, L84, B35.1, I10)
-- CPT codes: exactly 5 digits (e.g., 11721, 99213, 28296) — if you count 4 or 6 digits, re-read
-- HCPCS codes: exactly one capital letter followed by exactly 4 digits (e.g., A5513, L3020, J3301, J0702)
+- ICD-10-CM codes: one capital letter followed by digits and an optional decimal
+- CPT codes: exactly 5 digits — if you count 4 or 6 digits, re-read
+- HCPCS codes: exactly one capital letter followed by exactly 4 digits
 - CHARACTER ACCURACY CHECK before including any code:
-  - Verify letter vs digit in every position (I10 not 110, L84 not 184, O not 0)
-  - Verify decimal placement in ICD-10 codes (E11.42 not E114.2)
+  - Compare every letter, digit, and decimal with the source glyph by glyph
+  - Never normalize an uncertain letter into a digit or an uncertain digit into a letter
+  - Preserve the source's ICD-10-CM decimal placement exactly
   - Verify digit count in CPT codes (exactly 5)
 - If the physician wrote NO explicit codes, return an empty array []
 - If a code is partially obscured or unclear, skip it — do NOT guess
@@ -126,7 +132,7 @@ This extracted data feeds a medical billing pipeline where a single misread char
 - Set is_post_op_visit=true ONLY if the note explicitly documents a follow-up after a prior surgery
 - Look for: "post-op day X", "s/p [procedure]", "post-operative visit", "follow-up after surgery", "surgical follow-up"
 - days_post_op: exact number if stated (e.g., "Day 14 post-op" → 14), else null
-- prior_surgery_cpt: best estimate CPT for the prior surgery, or null if unknown
+- prior_surgery_cpt: copy the code only when it is explicitly printed; otherwise null
 - If NOT a post-op visit: {"is_post_op_visit": false, "days_post_op": null, "prior_surgery_description": null, "prior_surgery_cpt": null}
 
 CRITICAL: Return ONLY valid JSON with no markdown code fences. Every character in every medical code must be verified before output. When uncertain about any character, re-read it; if still uncertain, use [UNCLEAR] or skip the code."""

@@ -15,19 +15,19 @@ from collections import defaultdict
 from app.compliance.agents.base import ComplianceAgent
 from app.compliance.models import Claim, DenialRisk, Finding, Status
 
-# anatomic modifiers that legitimately distinguish repeats of the same code
-_DISTINCT_SITE = {"RT", "LT", "50",
-                  "TA", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9",
-                  "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "FA",
-                  "76", "77", "59", "XE", "XS", "XP", "XU", "91"}
-
-
 class FrequencyAgent(ComplianceAgent):
     filter_id = "FREQUENCY"
     filter_name = "Frequency / lifetime / duplicate"
 
     def check(self, claim: Claim) -> list[Finding]:
         findings: list[Finding] = []
+        distinct_site = (
+            self.store.anatomic_modifiers()
+            | self.store.modifier_codes_for_role("bilateral")
+            | self.store.modifier_codes_for_role("repeat_service")
+            | self.store.modifier_codes_for_role("laboratory_repeat")
+            | self.store.modifier_codes_for_role("ncci_procedure_separation")
+        )
         groups: dict[str, list] = defaultdict(list)
         for line in claim.lines:
             groups[line.code].append(line)
@@ -36,7 +36,7 @@ class FrequencyAgent(ComplianceAgent):
             if len(lines) < 2:
                 continue
             # If every repeat carries a distinguishing site/repeat modifier, it's fine.
-            distinguished = all(set(ln.modifiers) & _DISTINCT_SITE for ln in lines)
+            distinguished = all(set(ln.modifiers) & distinct_site for ln in lines)
             if distinguished:
                 # but identical modifier sets across the repeats are still duplicates
                 seen = set()
@@ -53,8 +53,11 @@ class FrequencyAgent(ComplianceAgent):
                 status=Status.FAIL, codes=[code], denial_risk=DenialRisk.MEDIUM,
                 reason=f"{code} appears on {len(lines)} lines with no distinguishing "
                        f"site/repeat modifier — likely a duplicate.",
-                recommendation="Combine into one line with the correct units, or add anatomic/"
-                               "repeat modifiers (RT/LT, T1–T9, 76/77) if the services are distinct.",
+                recommendation=(
+                    "Combine into one line with the correct units, or add an applicable "
+                    f"authoritative anatomic/repeat modifier ({ '/'.join(sorted(distinct_site)) }) "
+                    "only if the services are distinct."
+                ),
                 source_rule="duplicate-line edit",
             ))
         return findings

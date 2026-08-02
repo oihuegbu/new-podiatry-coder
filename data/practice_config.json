@@ -72,13 +72,11 @@
 
   "claim_defaults": {
     "_comment": "837P claim-level indicators. claim_filing_code is resolved per payer: payer_overrides (by payer_id from data/codes/payers.json), then by_kind, then 'default'.",
-    "place_of_service_default": "11",
     "claim_frequency_code": "1",
     "signature_indicator": "Y",
     "plan_participation_code": "A",
     "release_information_code": "Y",
     "benefits_assignment_certification_indicator": "Y",
-    "patient_gender_default": "U",
     "claim_filing_code": {
       "by_kind": {
         "medicare_ffs": "MB",
