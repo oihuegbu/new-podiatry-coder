@@ -17,6 +17,7 @@ from pathlib import Path
 from app.core.config import DATA_DIR
 
 DEFAULT_SCOPE_REGISTRY = DATA_DIR / "release" / "autonomous_scopes.json"
+_MIN_SIGNING_KEY_BYTES = 32
 
 
 def _canonical(value) -> bytes:
@@ -41,14 +42,16 @@ def _registry_path() -> Path:
 
 
 def _matches(allowed, actual: str) -> bool:
-    return bool(allowed) and str(actual or "") in {str(v) for v in allowed}
+    values = {str(v) for v in (allowed or [])}
+    actual = str(actual or "")
+    return bool(actual) and (actual in values or "*" in values)
 
 
 def approved_scope(context: dict, on_date: date | None = None
                    ) -> tuple[dict | None, str]:
     key = os.getenv("AUTONOMOUS_SCOPE_SIGNING_KEY", "")
-    if not key:
-        return None, "autonomous scope signing key is not configured"
+    if len(key.encode()) < _MIN_SIGNING_KEY_BYTES:
+        return None, "autonomous scope signing key is absent or shorter than 32 bytes"
     try:
         raw = json.loads(_registry_path().read_text())
     except Exception as exc:
@@ -69,10 +72,18 @@ def approved_scope(context: dict, on_date: date | None = None
         if not start <= today <= end:
             continue
         dimensions = scope.get("dimensions") or {}
+        # Every release-relevant operational dimension is explicit. A scope
+        # may deliberately use "*", but an absent encounter value never
+        # matches a wildcard and can never silently broaden authorization.
         required = {
             "payer_kinds": context.get("payer_kind"),
+            "payer_ids": context.get("payer_id"),
+            "plans": context.get("plan"),
             "provider_specialties": context.get("provider_specialty"),
+            "rendering_npis": context.get("rendering_npi"),
+            "billing_npis": context.get("billing_npi"),
             "places_of_service": context.get("place_of_service"),
+            "jurisdictions": context.get("jurisdiction"),
             "note_categories": context.get("note_category"),
             "claim_families": context.get("claim_family"),
         }

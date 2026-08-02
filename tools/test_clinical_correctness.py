@@ -274,7 +274,10 @@ _DATA = [{"category": "mue_exceeded", "code": "28118",
 class RegistryGateTest(unittest.TestCase):
     def _eligible(self, result):
         from tools.claims_registry import eligible_for_auto
-        return eligible_for_auto(result)
+        with mock.patch(
+                "app.release.claim_readiness.verify_readiness_certificate",
+                return_value=(True, "")):
+            return eligible_for_auto(result)
 
     def test_interpretive_corrections_require_audit(self):
         ok, why = self._eligible(_result(_INTERP))

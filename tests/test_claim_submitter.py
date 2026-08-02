@@ -88,6 +88,7 @@ def _result(**overrides) -> dict:
             {"code": "A4570", "description": "Splint", "units": 1},
         ],
         "consistency": {"runs": 3, "unanimous": True},
+        "claim_readiness_certificate": {"test_certificate": True},
     }
     r.update(overrides)
     return r
@@ -281,16 +282,21 @@ class SubmitAllTest(unittest.TestCase):
         self.result = _result()
         (self.results_dir / "note_x_results.json").write_text(
             json.dumps(self.result))
-        reg.append_events([_reg_event(self.result)], self.registry)
 
         self.patches = [
             mock.patch.object(cs, "LEDGER_PATH", self.ledger),
             mock.patch.object(cs, "REGISTRY_PATH", self.registry),
             mock.patch.dict("os.environ",
                             {"PRACTICE_CONFIG_PATH": str(self.cfg_path)}),
+            mock.patch(
+                "app.release.claim_readiness.verify_readiness_certificate",
+                return_value=(True, "")),
         ]
         for p in self.patches:
             p.start()
+        # Registry binding includes the active submission configuration, so
+        # create the event only after the test configuration is active.
+        reg.append_events([_reg_event(self.result)], self.registry)
 
     def tearDown(self):
         for p in self.patches:

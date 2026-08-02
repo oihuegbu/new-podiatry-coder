@@ -19,17 +19,17 @@ from app.release.scope_registry import sign_scope
 class ClaimReadinessTest(unittest.TestCase):
     def setUp(self):
         self.note = "Documented diagnosis and performed service with side."
-        self.scope_key = "test-only-scope-key"
+        self.scope_key = "test-only-scope-key-with-32-bytes-minimum"
         scope = {
             "id": "test-scope", "approved": True,
             "approved_by": "safety-reviewer",
             "effective_from": "2020-01-01", "effective_to": "2099-12-31",
             "dimensions": {
-                "payer_kinds": ["commercial"],
-                "provider_specialties": ["podiatry"],
-                "places_of_service": ["office"],
-                "note_categories": ["established_visit"],
-                "claim_families": ["professional"],
+                "payer_kinds": ["*"], "payer_ids": ["*"],
+                "plans": ["*"], "provider_specialties": ["*"],
+                "rendering_npis": ["*"], "billing_npis": ["*"],
+                "places_of_service": ["*"], "jurisdictions": ["*"],
+                "note_categories": ["*"], "claim_families": ["*"],
             },
         }
         scope["signature"] = sign_scope(scope, self.scope_key)
@@ -39,6 +39,7 @@ class ClaimReadinessTest(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {
             "AUTONOMOUS_SCOPE_REGISTRY": str(self.scope_path),
             "AUTONOMOUS_SCOPE_SIGNING_KEY": self.scope_key,
+            "CLAIM_READINESS_SIGNING_KEY": "test-certificate-key-with-32-bytes-minimum",
         })
         self.env.start()
 
@@ -55,21 +56,22 @@ class ClaimReadinessTest(unittest.TestCase):
                 "insurance": "UnitedHealthcare Choice Plus",
                 "date_of_service": "2026-01-05",
                 "provider_specialty": "podiatry", "place_of_service": "office",
+                "insurance_plan": "Choice Plus", "member_id": "member-1",
+                "provider_npi": "1888888882", "billing_npi": "1999999984",
+                "state": "FL",
             },
             "rag_context": {"note_full_text": self.note,
                             "vision_context": {
                                 "note_category": "established_visit"}},
             "consistency": {"runs": 3, "unanimous": True},
-            "claim_scrub": {"clean": True, "disposition": "CLEAN",
-                            "expected_filter_count": 1,
-                            "filter_results": [
-                                {"filter_id": "test", "status": "PASS"}]},
+            "claim_scrub": {"clean": True, "disposition": "CLEAN"},
             "icd_codes": [{
                 "code": "DX", "type": "primary",
                 "evidence_spans": ["Documented diagnosis"],
                 "source_record_ids": ["icd10_codes:DX"],
                 "source_effective_from": "2020-01-01",
                 "source_effective_to": "2099-12-31",
+                "source_temporal_authority": True,
             }],
             "cpt_codes": [{
                 "code": "SERVICE", "units": 1,
@@ -78,30 +80,29 @@ class ClaimReadinessTest(unittest.TestCase):
                 "source_record_ids": ["cpt_codes:SERVICE"],
                 "source_effective_from": "2020-01-01",
                 "source_effective_to": "2099-12-31",
+                "source_temporal_authority": True,
             }],
             "hcpcs_codes": [], "material_corrections": [],
             "note_integrity": {
                 "complete": True, "page_count": 3,
                 "extracted_page_count": 3,
-                "source_pdf_sha256": "sha256:source",
+                "source_pdf_sha256": "sha256:" + "a" * 64,
                 "extracted_text_sha256": text_hash,
-            },
-            "authoritative_source_manifest": {
-                "records": [
-                    {"source_id": "icd10_codes", "sha256": "sha256:a"},
-                    {"source_id": "cpt_codes", "sha256": "sha256:b"},
-                    {"source_id": "validator_rules", "sha256": "sha256:c"},
-                    {"source_id": "hcpcs_codes", "sha256": "sha256:d"},
-                    {"source_id": "ncci_edits", "sha256": "sha256:e"},
-                    {"source_id": "mue_limits", "sha256": "sha256:f"},
-                    {"source_id": "coverage_policy", "sha256": "sha256:g"},
+                "page_coverage": [
+                    {"page_number": n, "status": "extracted",
+                     "text_sha256": "sha256:" + str(n) * 64}
+                    for n in range(1, 4)
                 ],
-                "errors": [],
             },
         }
-        from app.release.source_manifest import manifest_fingerprint
-        result["authoritative_source_manifest"]["fingerprint"] = \
-            manifest_fingerprint(result["authoritative_source_manifest"])
+        from app.compliance.agents import build_default_agents
+        required = [a.filter_id for a in build_default_agents(None)]
+        result["claim_scrub"]["expected_filter_count"] = len(required)
+        result["claim_scrub"]["filter_results"] = [
+            {"filter_id": filter_id, "status": "PASS"}
+            for filter_id in required]
+        from app.release.source_manifest import build_source_manifest
+        result["authoritative_source_manifest"] = build_source_manifest()
         result["candidate_claim"] = {
             "icd_codes": deepcopy(result["icd_codes"]),
             "cpt_codes": deepcopy(result["cpt_codes"]), "hcpcs_codes": [],
@@ -136,6 +137,26 @@ class ClaimReadinessTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("source document changed", why)
 
+    def test_submission_configuration_change_invalidates_context(self):
+        from app.release.claim_readiness import encounter_context_fingerprint
+        result = self.result()
+        with mock.patch("tools.claim_submitter.load_practice_config",
+                        return_value={"billing_provider": {"npi": "1"},
+                                      "fee_schedule": {"version": "one"}}):
+            first = encounter_context_fingerprint(result)
+        with mock.patch("tools.claim_submitter.load_practice_config",
+                        return_value={"billing_provider": {"npi": "1"},
+                                      "fee_schedule": {"version": "two"}}):
+            second = encounter_context_fingerprint(result)
+        self.assertNotEqual(first, second)
+
+    def test_artifact_refresh_is_idempotent_when_inputs_are_unchanged(self):
+        from app.release.claim_readiness import refresh_release_artifacts
+        result = self.result()
+        first = refresh_release_artifacts(result).model_dump(mode="json")
+        second = refresh_release_artifacts(result).model_dump(mode="json")
+        self.assertEqual(first, second)
+
     def test_tampered_source_manifest_blocks(self):
         result = self.result()
         result["authoritative_source_manifest"]["records"][0]["sha256"] = \
@@ -149,6 +170,12 @@ class ClaimReadinessTest(unittest.TestCase):
         cert = build_readiness_certificate(result)
         self.assertEqual(cert.disposition.value, "BLOCKED")
 
+    def test_filter_fail_cannot_be_hidden_by_clean_summary(self):
+        result = self.result()
+        result["claim_scrub"]["filter_results"][0]["status"] = "FAIL"
+        cert = build_readiness_certificate(result)
+        self.assertEqual(cert.disposition.value, "BLOCKED")
+
     def test_incomplete_document_blocks(self):
         result = self.result()
         result["note_integrity"]["extracted_page_count"] = 2
@@ -158,6 +185,18 @@ class ClaimReadinessTest(unittest.TestCase):
     def test_unresolved_mutation_blocks(self):
         result = self.result()
         result["cpt_codes"][0]["units"] = 2
+        cert = build_readiness_certificate(result)
+        self.assertEqual(cert.disposition.value, "BLOCKED")
+
+    def test_unstructured_ledger_entry_blocks_even_without_a_diff(self):
+        result = self.result()
+        result["mutation_ledger"] = ["not a provenance record"]
+        cert = build_readiness_certificate(result)
+        self.assertEqual(cert.disposition.value, "BLOCKED")
+
+    def test_temporal_window_without_authority_blocks(self):
+        result = self.result()
+        result["cpt_codes"][0]["source_temporal_authority"] = False
         cert = build_readiness_certificate(result)
         self.assertEqual(cert.disposition.value, "BLOCKED")
 

@@ -470,7 +470,10 @@ class RegistryTierTest(unittest.TestCase):
                 "verdict": "upheld",
                 "fingerprint": corrections_fingerprint(payload)}
             (results / "n_results.json").write_text(json.dumps(payload))
-            stats = reg.ingest(results, path)
+            with mock.patch(
+                    "app.release.claim_readiness.verify_readiness_certificate",
+                    return_value=(True, "")):
+                stats = reg.ingest(results, path)
             self.assertEqual(stats["recorded"], 0)
             self.assertEqual(stats["human_protected"], 1)
             view = reg.current_view(reg.load_events(path))

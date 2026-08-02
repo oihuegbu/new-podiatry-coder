@@ -50,6 +50,13 @@ This extracted data feeds a medical billing pipeline where a single misread char
 
 ## OUTPUT — Return valid JSON with no markdown fences:
 {
+  "page_texts": [
+    {
+      "page_number": 1,
+      "status": "extracted",
+      "text": "complete verbatim transcription of this page, including header and footer"
+    }
+  ],
   "patient_metadata": {
     "patient_name": "full name",
     "date_of_birth": "MM/DD/YYYY",
@@ -58,6 +65,7 @@ This extracted data feeds a medical billing pipeline where a single misread char
     "npi": "number or null",
     "mrn": "number or null",
     "insurance": "full insurance line or null",
+    "insurance_plan": "plan/product name exactly as printed, else null",
     "note_type": "e.g., NEW PATIENT – OFFICE VISIT",
     "place_of_service": "2-digit CMS POS code if stated or clearly inferable from the note's own setting language (office/clinic letterhead → 11, hospital → 21/22, ASC → 24, patient's home → 12, SNF → 31), else null — never guess between settings",
     "service_facility": {
@@ -68,7 +76,8 @@ This extracted data feeds a medical billing pipeline where a single misread char
       "zip": "ZIP code, else null",
       "phone": "phone number, else null"
     },
-    "signature_block": "verbatim closing signature block (provider name, credentials, and any title/NPI printed with the signature), else null"
+    "signature_block": "verbatim closing signature block (provider name, credentials, and any title/NPI printed with the signature), else null",
+    "provider_specialty": "specialty explicitly printed in the document, or podiatry when DPM credentials are printed, else null"
   },
   "sections": {
     "chief_complaint": "exact verbatim text",
@@ -232,6 +241,29 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
             logger.warning(f"  Vision extraction attempt {attempt}: {last_err} — retrying")
             continue
 
+        # A complete per-page transcription is the extraction contract. The
+        # old implementation equated "image sent" with "page extracted" and
+        # could certify a page the model silently omitted.
+        page_texts = parsed.get("page_texts") or []
+        page_numbers = sorted(
+            int(p.get("page_number")) for p in page_texts
+            if isinstance(p, dict) and
+            str(p.get("page_number") or "").isdigit())
+        page_valid = (
+            len(page_texts) == len(images) and
+            page_numbers == list(range(1, len(images) + 1)) and
+            all(isinstance(p, dict) and
+                p.get("status") in {"extracted", "blank"} and
+                (str(p.get("text") or "").strip()
+                 if p.get("status") == "extracted" else
+                 not str(p.get("text") or "").strip())
+                for p in page_texts)
+        )
+        if not page_valid:
+            last_err = "per-page transcription coverage is absent or incomplete"
+            logger.warning(f"  Vision extraction attempt {attempt}: {last_err} — retrying")
+            continue
+
         # Valid-but-empty JSON is the same failure as unparseable JSON: a
         # note with no metadata and no sections produces a garbage claim
         # downstream (observed live: 'category=?, procedures=[]' run).
@@ -260,15 +292,11 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
     metadata = result.get("patient_metadata", {})
     sections = result.get("sections", {})
 
-    # Build full_text from all sections for downstream compatibility
-    full_text_parts = []
-    for key in ["chief_complaint", "hpi", "pmh_medications_allergies",
-                "physical_examination", "imaging_diagnostics",
-                "assessment_diagnoses", "plan"]:
-        text = sections.get(key, "")
-        if text:
-            full_text_parts.append(text)
-    sections["full_text"] = "\n\n".join(full_text_parts)
+    # The complete per-page transcription, not a reconstruction from selected
+    # clinical sections, is the evidence corpus used by every downstream gate.
+    page_texts = sorted(result["page_texts"], key=lambda p: int(p["page_number"]))
+    sections["full_text"] = "\n\n".join(
+        str(p.get("text") or "") for p in page_texts)
     text_digest = hashlib.sha256(sections["full_text"].encode()).hexdigest()
 
     logger.info(
@@ -303,8 +331,18 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
         "note_integrity": {
             "complete": True,
             "page_count": len(images),
-            "extracted_page_count": len(images),
+            "extracted_page_count": len(page_texts),
             "source_pdf_sha256": f"sha256:{source_digest}",
             "extracted_text_sha256": f"sha256:{text_digest}",
+            "page_coverage": [
+                {
+                    "page_number": int(p["page_number"]),
+                    "status": p["status"],
+                    "text_sha256": ("sha256:" + hashlib.sha256(
+                        str(p.get("text") or "").encode()).hexdigest()
+                        if p["status"] == "extracted" else ""),
+                }
+                for p in page_texts
+            ],
         },
     }

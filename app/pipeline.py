@@ -128,6 +128,7 @@ class MedicalCodingPipeline:
                     scrub_payload["note_text"] = cached_note_text
                     scrub = self.scrubber.scrub(scrub_payload)
                     self._apply_scrub_verdict(r, scrub)
+                    self._refresh_release_artifacts(r)
                     self._print_summary(r)
                     logger.info(f"  [cache] VERDICT: {r.final_disposition} — {r.final_summary}")
                     return r
@@ -274,6 +275,8 @@ class MedicalCodingPipeline:
                     if ref else []
                 line["source_effective_from"] = ref.get("effective_from")
                 line["source_effective_to"] = ref.get("effective_to")
+                line["source_temporal_authority"] = bool(
+                    ref.get("temporal_authority", False))
                 if not line.get("evidence_spans"):
                     span = line.get("supporting_text") or line.get("source") or ""
                     line["evidence_spans"] = [span] if span else []
@@ -372,15 +375,7 @@ class MedicalCodingPipeline:
         # after every deterministic layer has run.  Incomplete legacy
         # correction records remain explicitly unresolved and therefore
         # cannot produce AUTO_READY.
-        from app.release.mutation_ledger import reconcile_mutation_ledger
-        from app.release.source_manifest import build_source_manifest
-        result.mutation_ledger = reconcile_mutation_ledger(
-            result.candidate_claim, result.model_dump(),
-            result.material_corrections)
-        result.authoritative_source_manifest = build_source_manifest()
-        from app.release.claim_readiness import build_readiness_certificate
-        result.claim_readiness_certificate = build_readiness_certificate(
-            result.model_dump()).model_dump(mode="json")
+        self._refresh_release_artifacts(result)
         logger.info(f"  VERDICT: {result.final_disposition} — {result.final_summary}")
 
         # Fix 4 — Store to cache (only on success, so failed runs don't get
@@ -393,6 +388,18 @@ class MedicalCodingPipeline:
 
         self._print_summary(result)
         return result
+
+    @staticmethod
+    def _refresh_release_artifacts(result: CodingResult) -> None:
+        """Attach one internally consistent release snapshot to the model."""
+        from app.release.claim_readiness import refresh_release_artifacts
+        payload = result.model_dump(mode="json")
+        refresh_release_artifacts(payload)
+        result.mutation_ledger = payload["mutation_ledger"]
+        result.authoritative_source_manifest = payload[
+            "authoritative_source_manifest"]
+        result.claim_readiness_certificate = payload[
+            "claim_readiness_certificate"]
 
     # Review-reason marker for a scrub-CLEAN claim held back pending the
     # clinical-correctness audit — the audit's uphold verdict removes

@@ -780,6 +780,8 @@ def audit_result(doc: str, result: dict, note: str, rep,
     result["clinical_audit"] = block
     _enforce_verdict(result, block, mats, disputed,
                      block["claim_level_concerns"])
+    from app.release.claim_readiness import refresh_release_artifacts
+    refresh_release_artifacts(result)
     return block
 
 
@@ -944,6 +946,8 @@ def audit_batch(results_dir: Path, docs: list[str] | None = None,
                         and 0 <= i["index"] < len(mats)}
             _enforce_verdict(result, prior, mats, disputed,
                              str(prior.get("claim_level_concerns") or ""))
+            from app.release.claim_readiness import refresh_release_artifacts
+            refresh_release_artifacts(result)
             if json.dumps(result, sort_keys=True, default=str) != before:
                 f.write_text(json.dumps(result, indent=2, default=str))
             stats["skipped"] += 1

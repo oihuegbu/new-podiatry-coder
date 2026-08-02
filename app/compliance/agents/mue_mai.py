@@ -23,11 +23,29 @@ class MUEAgent(ComplianceAgent):
     def check(self, claim: Claim) -> list[Finding]:
         findings: list[Finding] = []
         dos = claim.date_of_service
+        if not dos or not self.store.mue_data_available(dos):
+            return [self.finding(
+                status=Status.UNKNOWN, denial_risk=DenialRisk.HIGH,
+                reason="The loaded MUE release does not authoritatively cover the "
+                       "claim date of service.",
+                recommendation="Load the CMS Practitioner MUE release covering the DOS "
+                               "before autonomous release.",
+                source_rule="CMS NCCI Practitioner MUE quarterly release",
+            )]
 
         for line in claim.lines:
             mue = self.store.mue(line.code, dos)
             if not mue:
-                continue  # no MUE published for this code
+                findings.append(self.finding(
+                    status=Status.UNKNOWN, codes=[line.code],
+                    denial_risk=DenialRisk.MEDIUM,
+                    reason=f"{line.code}: no authoritative MUE row proves the "
+                           "applicable unit edit for this claim type and DOS.",
+                    recommendation="Verify the code against the complete CMS MUE release "
+                                   "or route the claim for human review.",
+                    source_rule="CMS NCCI Practitioner MUE quarterly release",
+                ))
+                continue
             cap = mue["mue_value"]
             mai = mue.get("mai") or ""
             if cap == 0:

@@ -66,6 +66,7 @@ class ICDCode(BaseModel):
     source_record_ids: list[str] = Field(default_factory=list)
     source_effective_from: str | None = None
     source_effective_to: str | None = None
+    source_temporal_authority: bool = False
 
 
 class CPTCode(BaseModel):
@@ -89,6 +90,7 @@ class CPTCode(BaseModel):
     source_record_ids: list[str] = Field(default_factory=list)
     source_effective_from: str | None = None
     source_effective_to: str | None = None
+    source_temporal_authority: bool = False
 
 
 class HCPCSCode(BaseModel):
@@ -115,6 +117,7 @@ class HCPCSCode(BaseModel):
     source_record_ids: list[str] = Field(default_factory=list)
     source_effective_from: str | None = None
     source_effective_to: str | None = None
+    source_temporal_authority: bool = False
 
 
 class SNOMEDCode(BaseModel):

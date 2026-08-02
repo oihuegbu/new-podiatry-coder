@@ -22,6 +22,11 @@ class PdfIntegrityTest(unittest.TestCase):
             "procedures_performed_today": ["Performed service"],
             "imaging_performed_today": [], "supplies_dispensed_today": [],
             "prior_surgery_info": {}, "physician_documented_codes": [],
+            "page_texts": [
+                {"page_number": 1, "status": "extracted", "text": "Page one text"},
+                {"page_number": 2, "status": "blank", "text": ""},
+                {"page_number": 3, "status": "extracted", "text": "Page three text"},
+            ],
         }
         response = SimpleNamespace(
             stop_reason="end_turn",
@@ -46,6 +51,37 @@ class PdfIntegrityTest(unittest.TestCase):
         self.assertTrue(result["note_integrity"]["complete"])
         self.assertTrue(result["note_integrity"]["source_pdf_sha256"].startswith(
             "sha256:"))
+        self.assertEqual(
+            [p["page_number"] for p in result["note_integrity"]["page_coverage"]],
+            [1, 2, 3])
+
+    def test_missing_page_proof_fails_closed(self):
+        parsed = {
+            "patient_metadata": {}, "sections": {}, "note_category": "other",
+            "procedures_performed_today": [], "imaging_performed_today": [],
+            "supplies_dispensed_today": [], "prior_surgery_info": {},
+            "physician_documented_codes": [],
+            "page_texts": [
+                {"page_number": 1, "status": "extracted", "text": "Only first page"},
+            ],
+        }
+        response = SimpleNamespace(
+            stop_reason="end_turn",
+            content=[SimpleNamespace(type="text", text=json.dumps(parsed))],
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+        images = [Image.new("RGB", (2, 2)) for _ in range(2)]
+        with tempfile.TemporaryDirectory() as td:
+            pdf = Path(td) / "note.pdf"
+            pdf.write_bytes(b"source-document")
+            with mock.patch.object(pdf_parser, "convert_from_path",
+                                   return_value=images), \
+                    mock.patch("app.core.llm_client.get_anthropic_client",
+                               return_value=object()), \
+                    mock.patch("app.core.llm_client._claude_message_via_batch",
+                               return_value=response):
+                with self.assertRaisesRegex(RuntimeError, "coverage"):
+                    pdf_parser.extract_from_pdf(pdf)
 
 
 if __name__ == "__main__":

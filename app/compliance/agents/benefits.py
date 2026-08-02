@@ -4,11 +4,11 @@ The patient must be eligible on the DOS and the service a covered benefit. This
 agent calls the clearinghouse adapter (Stedi today) when the claim carries the
 subscriber identifiers needed for a 270 inquiry.
 
-Graceful degradation (so the gate is never blocked by infrastructure):
-  * no member id / payer        → cannot check at coding stage → no finding
-  * clearinghouse not configured → advisory WARN (verify eligibility manually)
+Fail-closed behavior (unverified eligibility never becomes a pass):
+  * no member id / payer        → UNKNOWN (blocks autonomous release)
+  * clearinghouse not configured → UNKNOWN
   * coverage returned INACTIVE   → FAIL (patient responsibility, not payer-billable)
-  * lookup errored               → advisory WARN
+  * lookup errored               → UNKNOWN
 """
 from __future__ import annotations
 
@@ -32,11 +32,18 @@ class BenefitsAgent(ComplianceAgent):
         # payer_id ("bcbs_fl"); they're resolved together in payers.json but are
         # different ID systems. See payer_registry.py.
         if not (sub.member_id and claim.payer.stedi_trading_partner_id):
-            return []  # not enough identifiers to run a 270 at this stage
+            return [self.finding(
+                status=Status.UNKNOWN, denial_risk=DenialRisk.HIGH,
+                reason="Eligibility could not be checked because the member or "
+                       "clearinghouse payer identifier is absent.",
+                recommendation="Resolve payer identity and subscriber identifiers, then "
+                               "run a 270/271 eligibility inquiry.",
+                source_rule="eligibility (270/271)",
+            )]
 
         if not self.adapter.is_configured():
             return [self.finding(
-                status=Status.WARN, denial_risk=DenialRisk.MEDIUM,
+                status=Status.UNKNOWN, denial_risk=DenialRisk.HIGH,
                 reason="Clearinghouse not configured — eligibility could not be verified.",
                 recommendation="Verify patient eligibility/benefits before submission.",
                 source_rule="eligibility (270/271)",
@@ -58,7 +65,7 @@ class BenefitsAgent(ComplianceAgent):
         if res.active is None:
             msg = "; ".join(res.errors) or "indeterminate response"
             return [self.finding(
-                status=Status.WARN, denial_risk=DenialRisk.MEDIUM,
+                status=Status.UNKNOWN, denial_risk=DenialRisk.HIGH,
                 reason=f"Eligibility could not be confirmed ({msg}).",
                 recommendation="Manually verify eligibility before submission.",
                 source_rule="271 eligibility response",

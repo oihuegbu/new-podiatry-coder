@@ -8,12 +8,12 @@ whether an authorization number is present on the claim.
 The PA-required code/category list comes from each payer's published Required
 Prior Authorization list — see data/codes/prior_auth_<payer>.json (Medicare
 DMEPOS is exact-code, Tricare is category-based via HCPCS prefix). Payers with
-no file loaded simply produce no findings — no false positives.
+no file loaded produce UNKNOWN and block autonomous release.
 
 Payer identity comes from Claim.payer.payer_id (canonical key from
 payers.json, resolved from the note's free-text insurance field by
 payer_registry.parse_insurance_text — see engine.build_claim). Unrecognized
-payers have payer_id=None and are skipped, not defaulted to Medicare.
+payers have payer_id=None and fail closed, never defaulting to Medicare.
 """
 from __future__ import annotations
 
@@ -30,7 +30,22 @@ class PriorAuthAgent(ComplianceAgent):
         payer_id = claim.payer.payer_id
         payer_label = claim.payer.name or "the payer"
         if not payer_id:
-            return []  # unrecognized payer — no PA data to check against
+            return [self.finding(
+                status=Status.UNKNOWN, denial_risk=DenialRisk.HIGH,
+                reason="Payer identity is unresolved, so prior-authorization policy "
+                       "cannot be selected.",
+                recommendation="Resolve the canonical payer and plan before release.",
+                source_rule="payer-specific prior-authorization policy",
+            )]
+        if not self.store.prior_auth_policy_available(payer_id):
+            return [self.finding(
+                status=Status.UNKNOWN, denial_risk=DenialRisk.HIGH,
+                reason=f"No authoritative prior-authorization corpus is loaded for "
+                       f"{payer_label}.",
+                recommendation="Load and version the payer's current PA policy or route "
+                               "the claim for human review.",
+                source_rule=f"{payer_label} prior-authorization policy availability",
+            )]
         auth_on_file = bool(claim.subscriber.authorization_number)
 
         for line in claim.lines:

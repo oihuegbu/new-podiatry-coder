@@ -87,6 +87,7 @@ class CodeReferenceDB:
                     "status": entry.get("status", "active"),
                     "effective_from": _clean_date(entry.get("effective_from")),
                     "effective_to": _clean_date(entry.get("effective_to")) if entry.get("effective_to") else _OPEN,
+                    "temporal_authority": True,
                 }
         logger.info(f"Loaded {len(self.icd10)} ICD-10-CM codes")
 
@@ -117,6 +118,11 @@ class CodeReferenceDB:
                     "long_description": entry.get("long_description", ""),
                     "effective_from": "1900-01-01",
                     "effective_to": _OPEN,
+                    # Presence in this snapshot proves identity, not that the
+                    # code was active on an arbitrary historical DOS.  The
+                    # release gate must not turn the wide-open compatibility
+                    # window above into a temporal-authority assertion.
+                    "temporal_authority": False,
                 }
         logger.info(f"Loaded {len(self.cpt)} CPT codes")
 
@@ -145,6 +151,7 @@ class CodeReferenceDB:
                         "long_description": entry.get("long_description", ""),
                         "effective_from": _clean_date(entry.get("add_date")),
                         "effective_to": _clean_date(eff_to) if eff_to else _OPEN,
+                        "temporal_authority": True,
                     }
         logger.info(f"Loaded {len(self.hcpcs)} HCPCS codes")
 

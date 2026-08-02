@@ -94,6 +94,9 @@ class ComplianceDataStore:
         self._conn: sqlite3.Connection | None = None
         self._ncci_release_window_loaded = False
         self._ncci_release_window: tuple[date, date] | None = None
+        self._mue_release_window_loaded = False
+        self._mue_release_window: tuple[date, date] | None = None
+        self._mue_release_windows: tuple[tuple[date, date], ...] = ()
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -1116,6 +1119,9 @@ class ComplianceDataStore:
         logger.info(f"  ncci_ptp: {len(rows)} pairs ({skipped} junk rows filtered)")
 
     def _ingest_mue(self) -> None:
+        self._mue_release_window_loaded = False
+        self._mue_release_window = None
+        self._mue_release_windows = ()
         with open(MUE_FILE) as f:
             data = json.load(f)
         rows = []
@@ -2356,6 +2362,21 @@ class ComplianceDataStore:
                 return dict(row)
         return None
 
+    def prior_auth_policy_available(self, payer_id: str | None) -> bool:
+        """Whether this payer has an authoritative PA policy loaded.
+
+        A missing code row only means "PA not required" after the payer's
+        policy corpus is known to be present.  Without this distinction the
+        absence of an entire payer feed silently became a pass.
+        """
+        if not payer_id:
+            return False
+        row = self.conn.execute(
+            "SELECT 1 FROM prior_auth_required WHERE payer=? LIMIT 1",
+            (payer_id,),
+        ).fetchone()
+        return row is not None
+
     @staticmethod
     def _dos(dos: date | str | None) -> str:
         if dos is None:
@@ -2483,10 +2504,67 @@ class ComplianceDataStore:
                         "modifier_indicator": row["modifier_indicator"]}
         return None
 
+    def _mue_release_bounds(self) -> tuple[date, date] | None:
+        if getattr(self, "_mue_release_window_loaded", False):
+            return getattr(self, "_mue_release_window", None)
+        rows = self.conn.execute(
+            "SELECT DISTINCT effective_from AS release_start FROM mue "
+            "WHERE effective_from IS NOT NULL AND effective_from<>''",
+        ).fetchall()
+        windows = []
+        for row in rows:
+            try:
+                release_date = date.fromisoformat(row["release_start"])
+            except (TypeError, ValueError):
+                continue
+            quarter_index = (release_date.month - 1) // 3
+            quarter_end_month = (quarter_index + 1) * 3
+            quarter_end = date(
+                release_date.year, quarter_end_month,
+                calendar.monthrange(release_date.year, quarter_end_month)[1])
+            # CMS MUE exports can label a release with the prior quarter's
+            # closing date (03-31 for the release governing 04-01 onward).
+            if release_date == quarter_end:
+                start = (date(release_date.year + 1, 1, 1)
+                         if quarter_end_month == 12 else
+                         date(release_date.year, quarter_end_month + 1, 1))
+            else:
+                start = date(release_date.year, quarter_index * 3 + 1, 1)
+            end_month = (((start.month - 1) // 3) + 1) * 3
+            windows.append((
+                start,
+                date(start.year, end_month,
+                     calendar.monthrange(start.year, end_month)[1]),
+            ))
+        windows = sorted(set(windows))
+        bounds = windows[-1] if windows else None
+        self._mue_release_windows = tuple(windows)
+        self._mue_release_window = bounds
+        self._mue_release_window_loaded = True
+        return bounds
+
+    def mue_data_available(self, dos=None) -> bool:
+        """True only when the loaded quarterly MUE release covers DOS."""
+        if dos is None:
+            return False
+        try:
+            d = date.fromisoformat(dos) if isinstance(dos, str) else dos
+        except (TypeError, ValueError):
+            return False
+        self._mue_release_bounds()
+        return any(start <= d <= end for start, end in
+                   getattr(self, "_mue_release_windows", ()))
+
     def mue(self, code: str, dos=None) -> dict | None:
-        row = self._asof(
-            "mue", "mue_value, mai, rationale", "code=?", (_norm(code),), self._dos(dos),
-        )
+        if not self.mue_data_available(dos):
+            return None
+        d = self._dos(dos)
+        row = self.conn.execute(
+            "SELECT mue_value, mai, rationale FROM mue WHERE code=? "
+            "AND effective_from<=? AND effective_to>=? "
+            "ORDER BY effective_from DESC LIMIT 1",
+            (_norm(code), d, d),
+        ).fetchone()
         return dict(row) if row else None
 
     def global_period(self, code: str, dos=None) -> str | None:
@@ -2792,6 +2870,13 @@ class ComplianceDataStore:
              len(rows), file_name),
         )
         self.conn.commit()
+        if table == "mue":
+            self._mue_release_window_loaded = False
+            self._mue_release_window = None
+            self._mue_release_windows = ()
+        elif table == "ncci_ptp":
+            self._ncci_release_window_loaded = False
+            self._ncci_release_window = None
         logger.info(f"  refresh[{source_id}]: +{len(rows)} rows (eff {effective_from})")
         return len(rows)
 

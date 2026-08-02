@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -55,6 +56,11 @@ def _result(doc: str, *, success=True, runs=3, unanimous=True,
 
 
 def main():
+    # This script exercises registry precedence/idempotence; certificate
+    # cryptography and replay are covered in test_claim_readiness.py.
+    mock.patch(
+        "app.release.claim_readiness.verify_readiness_certificate",
+        return_value=(True, "")).start()
     tmp = Path(tempfile.mkdtemp())
     reg = tmp / "claims_registry.jsonl"
     results_dir = tmp / "results"

@@ -8,6 +8,11 @@ import json
 import sys
 from pathlib import Path
 
+if __name__ != "__main__":
+    import pytest
+    pytest.skip("script harness; run with python tests/test_feedback_consistency.py",
+                allow_module_level=True)
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.validation.consistency import (

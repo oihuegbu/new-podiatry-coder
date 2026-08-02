@@ -35,11 +35,14 @@ class ClaimReadinessCertificate(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    certificate_version: int = 1
+    certificate_version: int = 2
     document_id: str
     created_at: str
     disposition: ReadinessDisposition
     certificate_fingerprint: str
+    certificate_signature: str
+    readiness_input_fingerprint: str
+    encounter_context_fingerprint: str
     note_fingerprint: str
     source_document_fingerprint: str
     context_fingerprint: str

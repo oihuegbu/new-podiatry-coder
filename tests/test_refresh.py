@@ -4,6 +4,11 @@ Run:  python -m tests.test_refresh
 """
 from __future__ import annotations
 
+if __name__ != "__main__":
+    import pytest
+    pytest.skip("script harness; run with python tests/test_refresh.py",
+                allow_module_level=True)
+
 from app.compliance.datastore.store import ComplianceDataStore
 from app.compliance.refresh import parsers as P
 from app.compliance.refresh.runner import refresh_source, download

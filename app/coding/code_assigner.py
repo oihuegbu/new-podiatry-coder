@@ -958,6 +958,11 @@ CRITICAL: Return ONLY valid JSON. No markdown, no code blocks."""
 _EVIDENCE_MIN_LEN = 14
 
 
+def _candidate_code(system: str, code) -> str:
+    value = str(code or "").strip().upper()
+    return value.replace(".", "") if system == "icd10" else value
+
+
 def _evidence_norm(text: str) -> str:
     """Whitespace/case/punctuation-normalized text for verbatim matching —
     the same normalization the validator's downstream check uses, so the two
@@ -980,8 +985,8 @@ def _strip_nonverbatim_spans(result: dict, note_text: str) -> None:
 
     def _verbatim(sp) -> bool:
         sn = _evidence_norm(sp)
-        return (len(sn) < _EVIDENCE_MIN_LEN or sn in note_n
-                or sn.replace(" ", "") in note_ns)
+        return (len(sn) >= _EVIDENCE_MIN_LEN and
+                (sn in note_n or sn.replace(" ", "") in note_ns))
 
     stripped = 0
     for arr_key, field, is_list in (("cpt_codes", "evidence_spans", True),
@@ -1045,6 +1050,26 @@ def assign_codes(
     vision_block = _format_vision_context(vision_context) if vision_context else ""
     global_block = _format_global_period_context(prior_surgery_info) if prior_surgery_info else ""
 
+    # A generative pass may select only from the immutable retrieval set or
+    # an exact code visibly documented by the physician.  Reference-database
+    # existence alone is not a candidate source: otherwise a model can emit
+    # any currently valid code from memory and still pass the old DB gate.
+    allowed_codes = {
+        system: {
+            _candidate_code(system, row.get("code"))
+            for row in rag_candidates.get(system, [])[:25]
+            if isinstance(row, dict)
+        }
+        for system in ("icd10", "cpt", "hcpcs")
+    }
+    for row in physician_documented_codes or []:
+        if not isinstance(row, dict):
+            continue
+        system = str(row.get("system") or "").strip().lower()
+        code = _candidate_code(system, row.get("code"))
+        if system in allowed_codes and code:
+            allowed_codes[system].add(code)
+
     # --- PASS 1: ICD-10-CM ---
     logger.info("  Pass 1/4: ICD-10-CM diagnosis coding...")
     icd_prompt = f"""{note_context}
@@ -1069,8 +1094,12 @@ managed at this encounter (e.g. Z79.84 alongside diabetes) — omit it if nothin
     _add_usage(total_usage, usage)
     icd_result = _safe_parse(icd_raw, "icd10_codes")
     # Hard DB gate — remove any hallucinated/invalid ICD codes immediately
-    icd_result["icd10_codes"] = _hard_db_gate(icd_result.get("icd10_codes", []), "icd10", db)
-    icd_result["supporting_conditions"] = _hard_db_gate(icd_result.get("supporting_conditions", []), "icd10", db)
+    icd_result["icd10_codes"] = _hard_db_gate(
+        icd_result.get("icd10_codes", []), "icd10", db,
+        allowed_codes["icd10"])
+    icd_result["supporting_conditions"] = _hard_db_gate(
+        icd_result.get("supporting_conditions", []), "icd10", db,
+        allowed_codes["icd10"])
     logger.info(f"    → {len(icd_result.get('icd10_codes', []))} ICD-10-CM codes, "
                 f"{len(icd_result.get('supporting_conditions', []))} supporting conditions")
 
@@ -1120,7 +1149,9 @@ Check EVERY CPT pair for NCCI bundling before finalizing."""
                                      max_tokens=2500, json_schema=_pass_schema(CPT_PASS_SCHEMA))
     _add_usage(total_usage, usage)
     cpt_result = _safe_parse(cpt_raw, "cpt_codes")
-    cpt_result["cpt_codes"] = _hard_db_gate(cpt_result.get("cpt_codes", []), "cpt", db)
+    cpt_result["cpt_codes"] = _hard_db_gate(
+        cpt_result.get("cpt_codes", []), "cpt", db,
+        allowed_codes["cpt"])
     logger.info(f"    → {len(cpt_result.get('cpt_codes', []))} CPT codes")
 
     # --- PASS 3: HCPCS + SNOMED ---
@@ -1150,7 +1181,9 @@ data. Do not code ordered, prescribed, recommended, historical, or continued ite
                                        max_tokens=2500, json_schema=_pass_schema(HCPCS_PASS_SCHEMA))
     _add_usage(total_usage, usage)
     hcpcs_result = _safe_parse(hcpcs_raw, "hcpcs_codes")
-    hcpcs_result["hcpcs_codes"] = _hard_db_gate(hcpcs_result.get("hcpcs_codes", []), "hcpcs", db)
+    hcpcs_result["hcpcs_codes"] = _hard_db_gate(
+        hcpcs_result.get("hcpcs_codes", []), "hcpcs", db,
+        allowed_codes["hcpcs"])
     logger.info(f"    → {len(hcpcs_result.get('hcpcs_codes', []))} HCPCS, {len(hcpcs_result.get('snomed_codes', []))} SNOMED")
 
     # --- PASS 4: Constrained Self-Verification (Anchor-and-Audit) ---
@@ -1372,7 +1405,8 @@ data. Do not code ordered, prescribed, recommended, historical, or continued ite
     # line with modifiers). Same gate policy as Passes 1-3: a code must
     # either have survived its own pass's gate (present pre-verification) or
     # validate in its claimed system now.
-    final_result = _gate_verify_additions(final_result, combined, db, store)
+    final_result = _gate_verify_additions(
+        final_result, combined, db, store, allowed_codes)
 
     # Pass 4 rewrites whole entries and routinely omits fields it wasn't
     # asked to change — observed live: every ICD entry came back without
@@ -1894,18 +1928,27 @@ def _safe_parse(raw: str, required_key: str) -> dict:
 # Fix 6 — Hard Database Gate
 # ---------------------------------------------------------------------------
 
-def _hard_db_gate(entries: list[dict], code_system: str, db) -> list[dict]:
+def _hard_db_gate(entries: list[dict], code_system: str, db,
+                  allowed_codes: set[str] | None = None) -> list[dict]:
     """Immediately remove codes that are NOT in the reference database.
 
     This prevents invalid/hallucinated codes from ever reaching the verification
     pass, and ensures every output code is defensible in an audit.
     """
-    if db is None:
-        return entries
     valid = []
+    if db is None:
+        logger.error(f"    [DB GATE] {code_system.upper()} reference database "
+                     "is unavailable — removed every proposed code")
+        return valid
     for entry in entries:
         code = entry.get("code", "").strip()
         if not code:
+            continue
+        if (allowed_codes is not None and
+                _candidate_code(code_system, code) not in allowed_codes):
+            logger.warning(
+                f"    [CANDIDATE GATE] {code_system.upper()} {code!r} was "
+                "not retrieved or physician-documented — removed")
             continue
         found = False
         if code_system == "icd10":
@@ -2075,7 +2118,8 @@ def _strip_invalid_cpt_modifiers(verified: dict, store=None) -> dict:
 _CORRECTION_CODE_RE = re.compile(r"\b([A-Z]\d{2}(?:\.[0-9A-Z]{1,4})?|\d{5}|[A-Z]\d{4})\b")
 
 
-def _gate_verify_additions(final_result: dict, combined: dict, db, store=None) -> dict:
+def _gate_verify_additions(final_result: dict, combined: dict, db, store=None,
+                           allowed_codes: dict[str, set[str]] | None = None) -> dict:
     """Reference-DB gate for codes INTRODUCED by the verification pass.
 
     Passes 1-3 are hard-gated (_hard_db_gate), but Pass 4's output never
@@ -2094,12 +2138,21 @@ def _gate_verify_additions(final_result: dict, combined: dict, db, store=None) -
       * known nowhere in any reference data → remove (hallucination).
     """
     if db is None:
+        for key in ("icd10_codes", "supporting_conditions", "cpt_codes",
+                    "hcpcs_codes"):
+            final_result[key] = []
         return final_result
     checks = {
         "icd10_codes": ("ICD10", db.validate_icd10),
         "supporting_conditions": ("ICD10", db.validate_icd10),
         "cpt_codes": ("CPT", db.validate_cpt),
         "hcpcs_codes": ("HCPCS", db.validate_hcpcs),
+    }
+    allowed_by_key = {
+        "icd10_codes": (allowed_codes or {}).get("icd10"),
+        "supporting_conditions": (allowed_codes or {}).get("icd10"),
+        "cpt_codes": (allowed_codes or {}).get("cpt"),
+        "hcpcs_codes": (allowed_codes or {}).get("hcpcs"),
     }
     for key, (system, validate) in checks.items():
         pre = {
@@ -2111,6 +2164,14 @@ def _gate_verify_additions(final_result: dict, combined: dict, db, store=None) -
         for e in entries:
             code = (e.get("code") or "").strip()
             if not code:
+                continue
+            allowed = allowed_by_key.get(key)
+            normalized_system = "icd10" if system == "ICD10" else system.lower()
+            if (allowed is not None and
+                    _candidate_code(normalized_system, code) not in allowed):
+                logger.warning(
+                    f"    [VERIFY CANDIDATE GATE] {key}: '{code}' was not "
+                    "retrieved or physician-documented — removed")
                 continue
             if code.upper() in pre or validate(code):
                 kept.append(e)

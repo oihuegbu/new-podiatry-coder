@@ -118,9 +118,10 @@ def _rank(verification: str) -> int:
 # The fields that make a claim billable — exactly what benchmark_ab.py
 # scores and what a CMS-1500 carries. Everything else in a result
 # (rationale, evidence spans, audit trails) stays in output/results.
-_ICD_FIELDS = ("code", "type", "description")
+_ICD_FIELDS = ("code", "type", "description", "laterality")
 _LINE_FIELDS = ("code", "modifiers", "units", "dx_pointers",
-                "diagnosis_pointers", "linked_diagnoses", "description")
+                "diagnosis_pointers", "linked_diagnoses", "description",
+                "laterality", "place_of_service", "ndc")
 
 
 # --------------------------------------------------------------------------
@@ -224,6 +225,7 @@ def make_fingerprint(result: dict) -> dict:
 
 def make_finalized_event(document_id: str, result: dict, verification: str,
                          verified_by: str, source: str) -> dict:
+    from app.release.claim_readiness import encounter_context_fingerprint
     return {
         "registry_version": REGISTRY_VERSION,
         "event": "finalized",
@@ -239,6 +241,9 @@ def make_finalized_event(document_id: str, result: dict, verification: str,
         },
         "fingerprint": make_fingerprint(result),
         "claim": extract_claim(result),
+        "encounter_context_fingerprint": encounter_context_fingerprint(result),
+        "claim_readiness_certificate": (
+            result.get("claim_readiness_certificate") or {}),
     }
 
 
@@ -325,6 +330,13 @@ def eligible_for_auto(result: dict) -> tuple[bool, str]:
         violations = [f"coherence gate could not run ({exc})"]
     if violations:
         return False, ("record contradicts itself: " + "; ".join(violations))
+    try:
+        from app.release.claim_readiness import verify_readiness_certificate
+        ready, reason = verify_readiness_certificate(result)
+    except Exception as exc:
+        return False, f"claim readiness authorization could not run ({exc})"
+    if not ready:
+        return False, f"claim readiness authorization failed: {reason}"
     return True, ""
 
 

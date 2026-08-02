@@ -99,6 +99,20 @@ class MedicalNecessityAgent(ComplianceAgent):
         # point to a diagnosis. This also guards against upstream coding failures
         # that drop the diagnoses (e.g. an LLM pass that fails to parse).
         billable = [ln for ln in claim.lines if ln.code]
+        non_em_billable = [ln for ln in billable if not _is_em(ln.code)]
+        if non_em_billable and (claim.payer.kind == "unknown" or
+                                not claim.payer.follows_medicare_coverage):
+            return [self.finding(
+                status=Status.UNKNOWN,
+                codes=[ln.code for ln in non_em_billable],
+                denial_risk=DenialRisk.HIGH,
+                reason=("Payer-specific medical-necessity coverage authority is "
+                        "unavailable for this claim; Medicare LCD/NCD data cannot "
+                        "be treated as the payer's policy."),
+                recommendation="Load the identified payer and plan's effective-dated "
+                               "coverage policy or route for human review.",
+                source_rule="payer-specific medical-necessity policy availability",
+            )]
         if billable and not claim_dx:
             findings.append(self.finding(
                 status=Status.FAIL, codes=[ln.code for ln in billable],

@@ -1,16 +1,19 @@
-"""Build and verify fail-closed claim-readiness certificates.
+"""Deterministic, signed authorization for one exact autonomous claim.
 
-This is the deterministic artifact intended for the autonomous release
-boundary. Existing CLEAN/REVIEW values remain internal validator outcomes.
-The artifact is emitted inertly until an explicitly approved integration
-connects it to an external release action.
+The certificate is the release boundary, not an informational annotation.
+It binds the billable claim, encounter context, full note/source identity,
+every control input, the source snapshot, and the authenticated operating
+scope. Registry ingest and claim submission both verify this same artifact.
 """
 
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
-from datetime import datetime, timezone
+import os
+import re
+from datetime import date, datetime, timezone
 
 from app.release.certificate_models import (
     ClaimReadinessCertificate, ControlOutcome, ControlResult,
@@ -18,6 +21,12 @@ from app.release.certificate_models import (
 )
 from app.release.mutation_ledger import normalize_claim
 from app.release.scope_registry import approved_scope, scope_fingerprint
+
+
+_EVIDENCE_MIN_LEN = 14
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_CERTIFICATE_KEY_ENV = "CLAIM_READINESS_SIGNING_KEY"
+_MIN_SIGNING_KEY_BYTES = 32
 
 
 def _canonical(value) -> bytes:
@@ -30,13 +39,15 @@ def _fingerprint(value) -> str:
 
 
 def claim_payload(result: dict) -> dict:
-    """Canonical billable content, without non-billable model rationale."""
+    """Canonical content that can affect a professional claim transaction."""
     fields = {
-        "icd_codes": ("code", "type", "description"),
+        "icd_codes": ("code", "type", "description", "laterality"),
         "cpt_codes": ("code", "modifiers", "units", "dx_pointers",
-                      "diagnosis_pointers", "linked_diagnoses", "description"),
+                      "diagnosis_pointers", "linked_diagnoses", "description",
+                      "laterality", "place_of_service", "ndc"),
         "hcpcs_codes": ("code", "modifiers", "units", "dx_pointers",
-                        "diagnosis_pointers", "linked_diagnoses", "description"),
+                        "diagnosis_pointers", "linked_diagnoses", "description",
+                        "laterality", "place_of_service", "ndc"),
     }
     payload = {}
     for array, keep in fields.items():
@@ -50,25 +61,103 @@ def claim_payload(result: dict) -> dict:
     return payload
 
 
+def _derived_specialty(meta: dict) -> str:
+    explicit = str(meta.get("provider_specialty") or "").strip().lower()
+    if explicit:
+        return explicit
+    provider = " ".join(str(meta.get(k) or "") for k in
+                        ("provider", "signature_block")).upper()
+    return "podiatry" if re.search(r"\bD\.?P\.?M\.?\b", provider) else ""
+
+
 def _context(result: dict) -> dict:
     meta = result.get("patient_metadata") or {}
-    payer_kind = ""
+    parsed = None
     try:
         from app.compliance.payer_registry import parse_insurance_text
-        payer_kind = parse_insurance_text(
-            str(meta.get("insurance") or "")).kind
+        parsed = parse_insurance_text(str(meta.get("insurance") or ""))
+    except Exception:
+        pass
+    facility = meta.get("service_facility") or {}
+    if not isinstance(facility, dict):
+        facility = {}
+    billing_npi = meta.get("billing_npi") or ""
+    if not billing_npi:
+        try:
+            from tools.claim_submitter import load_practice_config
+            billing_npi = ((load_practice_config().get("billing_provider") or {})
+                           .get("npi") or "")
+        except Exception:
+            billing_npi = ""
+    practice_config_fingerprint = ""
+    try:
+        from tools.claim_submitter import load_practice_config
+        practice_config_fingerprint = _fingerprint(load_practice_config())
     except Exception:
         pass
     return {
         "date_of_service": meta.get("date_of_service") or "",
-        "payer_kind": payer_kind,
+        "payer_kind": getattr(parsed, "kind", "") or "",
+        "payer_id": getattr(parsed, "payer_id", "") or "",
         "payer_identity": meta.get("insurance") or "",
-        "provider_specialty": meta.get("provider_specialty") or "",
+        "plan": meta.get("plan") or meta.get("insurance_plan") or "",
+        "member_id": meta.get("member_id") or meta.get("insurance_id") or
+                     getattr(parsed, "member_id", "") or "",
+        "provider_specialty": _derived_specialty(meta),
+        "provider": meta.get("provider") or "",
+        "rendering_npi": meta.get("provider_npi") or meta.get("npi") or "",
+        "billing_npi": billing_npi,
+        "submission_configuration_fingerprint": practice_config_fingerprint,
         "place_of_service": meta.get("place_of_service") or "",
+        "jurisdiction": facility.get("state") or meta.get("state") or "",
+        "service_facility": facility,
         "note_category": ((result.get("rag_context") or {})
                           .get("vision_context") or {}).get(
                               "note_category") or "",
         "claim_family": result.get("claim_family") or "professional",
+    }
+
+
+def encounter_context_payload(result: dict) -> dict:
+    """Submission-relevant encounter identity, excluding the note text itself."""
+    integrity = result.get("note_integrity") or {}
+    return {
+        "document_id": str(result.get("document_id") or ""),
+        "patient_metadata": result.get("patient_metadata") or {},
+        "context": _context(result),
+        "source_pdf_sha256": integrity.get("source_pdf_sha256") or "",
+        "extracted_text_sha256": integrity.get("extracted_text_sha256") or "",
+    }
+
+
+def encounter_context_fingerprint(result: dict) -> str:
+    return _fingerprint(encounter_context_payload(result))
+
+
+def readiness_input_payload(result: dict) -> dict:
+    """Every mutable input capable of changing a readiness control outcome."""
+    rag = result.get("rag_context") or {}
+    return {
+        "document_id": result.get("document_id") or "",
+        "success": bool(result.get("success")),
+        "encounter": encounter_context_payload(result),
+        "note_full_text": rag.get("note_full_text") or "",
+        "vision_context": rag.get("vision_context") or {},
+        "claim": claim_payload(result),
+        "candidate_claim": result.get("candidate_claim") or {},
+        "mutation_ledger": result.get("mutation_ledger") or [],
+        "material_corrections": result.get("material_corrections") or [],
+        "consistency": result.get("consistency") or {},
+        "claim_scrub": result.get("claim_scrub") or {},
+        "clinical_audit": result.get("clinical_audit") or {},
+        "note_integrity": result.get("note_integrity") or {},
+        "authoritative_source_manifest": (
+            result.get("authoritative_source_manifest") or {}),
+        "procedures_performed_today": (
+            result.get("procedures_performed_today") or []),
+        "validation_issues": result.get("validation_issues") or [],
+        "review_routing": result.get("review_routing") or "",
+        "adjudication": result.get("adjudication") or {},
     }
 
 
@@ -91,10 +180,20 @@ def _note_control(result: dict) -> ControlResult:
     if not note or integrity.get("extracted_text_sha256") != expected:
         return _control("note_integrity", ControlOutcome.BLOCKED,
                         "extracted note is absent or its checksum changed")
-    if not integrity.get("source_pdf_sha256"):
+    if not _SHA256_RE.fullmatch(str(integrity.get("source_pdf_sha256") or "")):
         return _control("note_integrity", ControlOutcome.NOT_CHECKED,
-                        "source PDF checksum is absent")
-    if integrity.get("page_count") != integrity.get("extracted_page_count"):
+                        "source PDF checksum is absent or malformed")
+    pages = integrity.get("page_coverage") or []
+    expected_pages = int(integrity.get("page_count") or 0)
+    covered = sorted(int(p.get("page_number")) for p in pages
+                     if isinstance(p, dict) and
+                     str(p.get("page_number") or "").isdigit() and
+                     p.get("status") in {"extracted", "blank"} and
+                     (p.get("text_sha256") or p.get("status") == "blank"))
+    if expected_pages < 1 or covered != list(range(1, expected_pages + 1)):
+        return _control("note_integrity", ControlOutcome.BLOCKED,
+                        "per-page extraction coverage is absent or incomplete")
+    if integrity.get("extracted_page_count") != expected_pages:
         return _control("note_integrity", ControlOutcome.BLOCKED,
                         "not every source page was extracted")
     return _control("note_integrity", ControlOutcome.PASS)
@@ -109,17 +208,25 @@ def _source_control(result: dict) -> ControlResult:
     if not records or not manifest.get("fingerprint"):
         return _control("authoritative_sources", ControlOutcome.NOT_CHECKED,
                         "authoritative source manifest is absent")
-    from app.release.source_manifest import manifest_fingerprint
+    from app.release.source_manifest import (
+        build_source_manifest, manifest_fingerprint, valid_record,
+    )
     if manifest.get("fingerprint") != manifest_fingerprint(manifest):
         return _control("authoritative_sources", ControlOutcome.ERROR,
                         "authoritative source manifest fingerprint is invalid")
-    if any(not r.get("source_id") or not str(r.get("sha256", "")).startswith(
-            "sha256:") for r in records):
+    if any(not valid_record(r) for r in records):
         return _control("authoritative_sources", ControlOutcome.ERROR,
-                        "source manifest has an unchecksummed record")
+                        "source manifest contains an invalid record identity")
+    current = build_source_manifest()
+    if current.get("fingerprint") != manifest.get("fingerprint"):
+        return _control("authoritative_sources", ControlOutcome.BLOCKED,
+                        "authoritative sources changed or are not the live snapshot")
     present = {str(r.get("source_id")) for r in records}
     mandatory = {"icd10_codes", "cpt_codes", "hcpcs_codes", "ncci_edits",
-                 "mue_limits", "coverage_policy", "validator_rules"}
+                 "mue_limits", "coverage_policy", "validator_rules",
+                 "compliance_database", "validator_implementation",
+                 "scrubber_implementation", "release_gate_implementation",
+                 "submission_configuration"}
     missing = sorted(mandatory - present)
     if missing:
         return _control("authoritative_sources", ControlOutcome.NOT_CHECKED,
@@ -127,30 +234,47 @@ def _source_control(result: dict) -> ControlResult:
     return _control("authoritative_sources", ControlOutcome.PASS)
 
 
+def _parse_iso(value) -> date | None:
+    try:
+        return date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _line_controls(result: dict) -> tuple[ControlResult, ControlResult]:
     note = ((result.get("rag_context") or {}).get("note_full_text") or "")
-    meta = result.get("patient_metadata") or {}
     try:
         from app.compliance.engine import _parse_dos
-        dos = _parse_dos(meta)
+        dos = _parse_dos(result.get("patient_metadata") or {})
     except Exception:
         dos = None
-    dos_text = dos.isoformat() if hasattr(dos, "isoformat") else str(dos or "")
     evidence_errors, temporal_errors = [], []
-    diagnoses = {str(row.get("code") or "").upper()
-                 for row in result.get("icd_codes") or []}
+    diagnoses = [str(row.get("code") or "").upper()
+                 for row in result.get("icd_codes") or []]
+    diagnosis_set = set(diagnoses)
+    manifest_ids = {str(r.get("source_id")) for r in
+                    (result.get("authoritative_source_manifest") or {})
+                    .get("records") or []}
+    expected_source = {"icd_codes": "icd10_codes", "cpt_codes": "cpt_codes",
+                       "hcpcs_codes": "hcpcs_codes"}
     for array in ("icd_codes", "cpt_codes", "hcpcs_codes"):
         for row in result.get(array) or []:
             code = str(row.get("code") or "").upper()
             spans = row.get("evidence_spans") or []
-            if not spans or any(str(span) not in note for span in spans):
-                evidence_errors.append(f"{array}:{code} lacks verbatim evidence")
-            if not row.get("source_record_ids"):
-                evidence_errors.append(f"{array}:{code} lacks source records")
-            start, end = row.get("source_effective_from"), row.get(
-                "source_effective_to")
-            if not dos_text or not start or not end or not (
-                    str(start) <= dos_text <= str(end)):
+            normalized = [str(span).strip() for span in spans]
+            if (not normalized or any(len(span) < _EVIDENCE_MIN_LEN or
+                                      span not in note for span in normalized)):
+                evidence_errors.append(f"{array}:{code} lacks substantive verbatim evidence")
+            source_ids = row.get("source_record_ids") or []
+            prefix = expected_source[array] + ":"
+            expected_id = prefix + code
+            if ({str(v).upper() for v in source_ids} != {expected_id.upper()}
+                    or expected_source[array] not in manifest_ids):
+                evidence_errors.append(f"{array}:{code} lacks a bound source record")
+            start = _parse_iso(row.get("source_effective_from"))
+            end = _parse_iso(row.get("source_effective_to"))
+            if (not row.get("source_temporal_authority") or not dos or
+                    not start or not end or not start <= dos <= end):
                 temporal_errors.append(
                     f"{array}:{code} not proven active for date of service")
             if array != "icd_codes":
@@ -165,8 +289,7 @@ def _line_controls(result: dict) -> tuple[ControlResult, ControlResult]:
                             row.get("diagnosis_pointers") or [])
                 if not linked and not pointers:
                     evidence_errors.append(f"{array}:{code} lacks diagnosis linkage")
-                elif linked and any(str(v).upper() not in diagnoses
-                                    for v in linked):
+                if linked and any(str(v).upper() not in diagnosis_set for v in linked):
                     evidence_errors.append(f"{array}:{code} links an absent diagnosis")
                 if pointers:
                     try:
@@ -201,21 +324,54 @@ def _mutation_control(result: dict) -> ControlResult:
     from app.release.mutation_ledger import claim_diff
     diffs = claim_diff(candidate, normalize_claim(result))
     ledger = result.get("mutation_ledger") or []
-    if not diffs:
-        return _control("mutation_resolution", ControlOutcome.PASS)
-    if len(ledger) != len(diffs) or any(
-            row.get("state") != "applied" for row in ledger):
+    normalized_ledger = [
+        {k: row.get(k) for k in
+         ("array", "code", "occurrence", "before", "after")}
+        for row in ledger if isinstance(row, dict)
+    ]
+    if (len(normalized_ledger) != len(ledger) or normalized_ledger != diffs or any(
+            row.get("state") != "applied" or not row.get("reason") or
+            not row.get("rule_id") or not row.get("effective_on") or
+            not row.get("evidence_spans") or not row.get("source_record_ids")
+            for row in ledger if isinstance(row, dict))):
         return _control("mutation_resolution", ControlOutcome.BLOCKED,
-                        "one or more claim mutations are unresolved")
+                        "mutation ledger does not exactly account for every claim diff")
     return _control("mutation_resolution", ControlOutcome.PASS)
 
 
+def _mandatory_filter_control(result: dict) -> ControlResult:
+    scrub = result.get("claim_scrub") or {}
+    rows = scrub.get("filter_results") or []
+    try:
+        from app.compliance.agents import build_default_agents
+        required = [a.filter_id for a in build_default_agents(None)]
+    except Exception as exc:
+        return _control("mandatory_filter_execution", ControlOutcome.ERROR,
+                        f"required filter registry is unavailable ({exc})")
+    observed = [str(row.get("filter_id") or "") for row in rows
+                if isinstance(row, dict)]
+    if observed != required or scrub.get("expected_filter_count") != len(required):
+        return _control("mandatory_filter_execution", ControlOutcome.NOT_CHECKED,
+                        "filter execution trail does not exactly match the active registry")
+    unverified = [observed[i] for i, row in enumerate(rows)
+                  if str(row.get("status") or "").upper() in
+                  {"ERROR", "UNKNOWN", "NOT_CHECKED", ""}]
+    failed = [observed[i] for i, row in enumerate(rows)
+              if str(row.get("status") or "").upper() == "FAIL"]
+    if unverified:
+        return _control("mandatory_filter_execution", ControlOutcome.ERROR,
+                        "unverified filters: " + ", ".join(unverified))
+    if failed:
+        return _control("mandatory_filter_execution", ControlOutcome.BLOCKED,
+                        "blocking filters: " + ", ".join(failed))
+    return _control("mandatory_filter_execution", ControlOutcome.PASS)
+
+
 def _legacy_controls(result: dict) -> list[ControlResult]:
-    controls = []
-    controls.append(_control(
+    controls = [_control(
         "pipeline_execution",
         ControlOutcome.PASS if result.get("success") else ControlOutcome.ERROR,
-        "" if result.get("success") else "pipeline did not succeed"))
+        "" if result.get("success") else "pipeline did not succeed")]
     cons = result.get("consistency") or {}
     repeatable = (cons.get("runs") or 0) >= 2 and bool(cons.get("unanimous"))
     controls.append(_control(
@@ -223,26 +379,14 @@ def _legacy_controls(result: dict) -> list[ControlResult]:
         ControlOutcome.REVIEW_REQUIRED,
         "" if repeatable else "claim is not unanimous across independent runs"))
     clean = str(result.get("final_disposition") or "").upper() == "CLEAN"
-    controls.append(_control(
-        "compliance_scrub", ControlOutcome.PASS if clean else
-        ControlOutcome.BLOCKED,
-        "" if clean else "compliance scrub did not return CLEAN"))
     scrub = result.get("claim_scrub") or {}
-    filter_results = scrub.get("filter_results")
-    expected_count = int(scrub.get("expected_filter_count") or 0)
-    if not filter_results or not expected_count or \
-            len(filter_results) != expected_count:
-        controls.append(_control(
-            "mandatory_filter_execution", ControlOutcome.NOT_CHECKED,
-            "per-filter execution trail is absent or incomplete"))
-    else:
-        bad = [str(row.get("filter_id") or "unknown") for row in filter_results
-               if not isinstance(row, dict) or str(row.get("status") or "").upper()
-               in {"ERROR", "UNKNOWN", "NOT_CHECKED", ""}]
-        controls.append(_control(
-            "mandatory_filter_execution",
-            ControlOutcome.ERROR if bad else ControlOutcome.PASS,
-            "unverified filters: " + ", ".join(bad) if bad else ""))
+    scrub_clean = bool(scrub.get("clean")) or str(
+        scrub.get("disposition") or "").upper() == "CLEAN"
+    controls.append(_control(
+        "compliance_scrub", ControlOutcome.PASS if clean and scrub_clean else
+        ControlOutcome.BLOCKED,
+        "" if clean and scrub_clean else "compliance scrub did not return CLEAN"))
+    controls.append(_mandatory_filter_control(result))
     has_dx = bool(result.get("icd_codes"))
     has_service = bool(result.get("cpt_codes") or result.get("hcpcs_codes"))
     controls.append(_control(
@@ -276,15 +420,34 @@ def _legacy_controls(result: dict) -> list[ControlResult]:
 
 def _certificate_fingerprint(payload: dict) -> str:
     return _fingerprint({k: v for k, v in payload.items()
-                         if k != "certificate_fingerprint"})
+                         if k not in {"certificate_fingerprint",
+                                      "certificate_signature"}})
 
 
-def build_readiness_certificate(result: dict) -> ClaimReadinessCertificate:
+def _certificate_signature(payload: dict) -> str:
+    key = os.getenv(_CERTIFICATE_KEY_ENV, "")
+    if len(key.encode()) < _MIN_SIGNING_KEY_BYTES:
+        return ""
+    return "hmac-sha256:" + hmac.new(
+        key.encode(), _certificate_fingerprint(payload).encode(),
+        hashlib.sha256).hexdigest()
+
+
+def build_readiness_certificate(
+        result: dict, *, created_at: str | None = None
+) -> ClaimReadinessCertificate:
     context = _context(result)
     controls = _legacy_controls(result)
     controls += [_note_control(result), _source_control(result)]
     controls.extend(_line_controls(result))
     controls.append(_mutation_control(result))
+    signing_key = os.getenv(_CERTIFICATE_KEY_ENV, "")
+    strong_signing_key = len(signing_key.encode()) >= _MIN_SIGNING_KEY_BYTES
+    controls.append(_control(
+        "certificate_signing", ControlOutcome.PASS if strong_signing_key else
+        ControlOutcome.NOT_CHECKED,
+        "" if strong_signing_key else
+        "claim readiness signing key is absent or shorter than 32 bytes"))
     scope, scope_reason = approved_scope(context)
     controls.append(_control(
         "autonomous_scope", ControlOutcome.PASS if scope else
@@ -304,11 +467,16 @@ def build_readiness_certificate(result: dict) -> ClaimReadinessCertificate:
     rules = next((r for r in manifest.get("records") or []
                   if r.get("source_id") == "validator_rules"), {})
     payload = {
-        "certificate_version": 1,
+        "certificate_version": 2,
         "document_id": str(result.get("document_id") or ""),
-        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "created_at": created_at or datetime.now(timezone.utc).isoformat(
+            timespec="seconds"),
         "disposition": disposition.value,
         "certificate_fingerprint": "",
+        "certificate_signature": "",
+        "readiness_input_fingerprint": _fingerprint(
+            readiness_input_payload(result)),
+        "encounter_context_fingerprint": encounter_context_fingerprint(result),
         "note_fingerprint": str(integrity.get("extracted_text_sha256") or ""),
         "source_document_fingerprint": str(
             integrity.get("source_pdf_sha256") or ""),
@@ -318,17 +486,37 @@ def build_readiness_certificate(result: dict) -> ClaimReadinessCertificate:
         "rule_pack_fingerprint": str(rules.get("sha256") or ""),
         "autonomous_scope_id": str((scope or {}).get("id") or ""),
         "autonomous_scope_fingerprint": scope_fingerprint(scope) if scope else "",
-        "system_versions": {"release_gate": "1"},
+        "system_versions": {"release_gate": "2"},
         "claim_payload": claim,
         "controls": [c.model_dump(mode="json") for c in controls],
         "assumptions": [],
     }
     payload["certificate_fingerprint"] = _certificate_fingerprint(payload)
+    payload["certificate_signature"] = _certificate_signature(payload)
     return ClaimReadinessCertificate.model_validate(payload)
 
 
-def verify_readiness_certificate(result: dict, certificate: dict | None = None
-                                 ) -> tuple[bool, str]:
+def refresh_release_artifacts(result: dict) -> ClaimReadinessCertificate:
+    """Rebuild provenance, mutation accounting, and the final certificate."""
+    from app.release.mutation_ledger import reconcile_mutation_ledger
+    from app.release.source_manifest import build_source_manifest
+    prior = result.get("claim_readiness_certificate") or {}
+    result["mutation_ledger"] = reconcile_mutation_ledger(
+        result.get("candidate_claim") or {}, result,
+        result.get("material_corrections") or [])
+    result["authoritative_source_manifest"] = build_source_manifest()
+    current_input = _fingerprint(readiness_input_payload(result))
+    created_at = (prior.get("created_at")
+                  if prior.get("readiness_input_fingerprint") == current_input
+                  else None)
+    cert = build_readiness_certificate(result, created_at=created_at)
+    result["claim_readiness_certificate"] = cert.model_dump(mode="json")
+    return cert
+
+
+def verify_readiness_certificate(
+        result: dict, certificate: dict | None = None
+) -> tuple[bool, str]:
     try:
         cert = ClaimReadinessCertificate.model_validate(
             certificate or result.get("claim_readiness_certificate") or {})
@@ -337,26 +525,32 @@ def verify_readiness_certificate(result: dict, certificate: dict | None = None
     data = cert.model_dump(mode="json")
     if cert.disposition != ReadinessDisposition.AUTO_READY:
         return False, f"readiness disposition is {cert.disposition.value}"
-    if cert.claim_payload != claim_payload(result) or \
-            cert.claim_fingerprint != _fingerprint(claim_payload(result)):
-        return False, "claim changed after readiness certification"
-    integrity = result.get("note_integrity") or {}
-    if cert.note_fingerprint != integrity.get("extracted_text_sha256"):
-        return False, "note changed after readiness certification"
-    if cert.source_document_fingerprint != integrity.get("source_pdf_sha256"):
-        return False, "source document changed after readiness certification"
-    manifest = result.get("authoritative_source_manifest") or {}
-    from app.release.source_manifest import manifest_fingerprint
-    if manifest.get("fingerprint") != manifest_fingerprint(manifest):
-        return False, "authoritative source manifest fingerprint is invalid"
-    if cert.source_manifest_fingerprint != manifest.get("fingerprint"):
-        return False, "authoritative sources changed after certification"
-    if cert.context_fingerprint != _fingerprint(_context(result)):
-        return False, "claim context changed after certification"
+    if len(os.getenv(_CERTIFICATE_KEY_ENV, "").encode()) < _MIN_SIGNING_KEY_BYTES:
+        return False, "claim readiness signing key is absent or too short"
+    if not hmac.compare_digest(cert.certificate_signature,
+                               _certificate_signature(data)):
+        return False, "certificate signature is invalid"
     if cert.certificate_fingerprint != _certificate_fingerprint(data):
         return False, "certificate fingerprint is invalid"
-    current_scope, why = approved_scope(_context(result))
-    if not current_scope or cert.autonomous_scope_fingerprint != \
-            scope_fingerprint(current_scope):
-        return False, why or "autonomous scope changed after certification"
+    integrity = result.get("note_integrity") or {}
+    if cert.source_document_fingerprint != str(
+            integrity.get("source_pdf_sha256") or ""):
+        return False, "source document changed after certification"
+    if cert.note_fingerprint != str(
+            integrity.get("extracted_text_sha256") or ""):
+        return False, "extracted note changed after certification"
+    if cert.claim_fingerprint != _fingerprint(claim_payload(result)):
+        return False, "claim changed after certification"
+    if cert.encounter_context_fingerprint != encounter_context_fingerprint(result):
+        return False, "encounter context changed after certification"
+    if cert.source_manifest_fingerprint != str(
+            (result.get("authoritative_source_manifest") or {}).get(
+                "fingerprint") or ""):
+        return False, "authoritative source manifest changed after certification"
+    if cert.readiness_input_fingerprint != _fingerprint(
+            readiness_input_payload(result)):
+        return False, "one or more readiness control inputs changed"
+    rebuilt = build_readiness_certificate(result, created_at=cert.created_at)
+    if rebuilt.model_dump(mode="json") != data:
+        return False, "readiness controls no longer reproduce the certificate"
     return True, ""

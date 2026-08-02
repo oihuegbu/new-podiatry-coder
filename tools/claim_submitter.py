@@ -51,6 +51,7 @@ Env:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -500,11 +501,12 @@ def append_ledger(event: dict, path: Path | None = None) -> None:
 
 
 def submitted_keys(events: list[dict]) -> dict[str, str]:
-    """document_id -> claim fingerprint of the last SUCCESSFUL submission."""
+    """document_id -> complete payload fingerprint of the last submission."""
     out: dict[str, str] = {}
     for e in events:
         if e.get("event") == "submitted":
-            out[str(e.get("document_id"))] = str(e.get("claim_key") or "")
+            out[str(e.get("document_id"))] = str(
+                e.get("submission_key") or e.get("claim_key") or "")
     return out
 
 
@@ -527,7 +529,7 @@ def _last_block(events: list[dict]) -> dict[str, tuple[str, str]]:
 # orchestration
 # --------------------------------------------------------------------------
 
-def _policy_gate(cfg: dict, reg_event: dict) -> str | None:
+def _policy_gate(cfg: dict, reg_event: dict, result: dict) -> str | None:
     policy = cfg.get("submission_policy") or {}
     tiers = [str(t).lower() for t in
              (policy.get("verification_tiers")
@@ -541,7 +543,29 @@ def _policy_gate(cfg: dict, reg_event: dict) -> str | None:
                    .get("final_disposition") or "").upper()
         if disp != "CLEAN":
             return f"disposition {disp or 'unknown'} != CLEAN"
+    from app.release.claim_readiness import (
+        encounter_context_fingerprint, verify_readiness_certificate,
+    )
+    expected_context = str(reg_event.get("encounter_context_fingerprint") or "")
+    if not expected_context:
+        return "registry event predates immutable encounter binding"
+    if expected_context != encounter_context_fingerprint(result):
+        return "encounter context changed after registry verification"
+    if tier in {"auto", "adjudicated"}:
+        cert = reg_event.get("claim_readiness_certificate") or {}
+        if not cert or cert != (result.get("claim_readiness_certificate") or {}):
+            return "registry and result do not carry the same readiness certificate"
+        ok, reason = verify_readiness_certificate(result, cert)
+        if not ok:
+            return f"claim readiness authorization failed: {reason}"
     return None
+
+
+def _submission_key(payload: dict) -> str:
+    """Fingerprint the exact clearinghouse payload, not only its code arrays."""
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                      default=str).encode()
+    return "sha256:" + hashlib.sha256(body).hexdigest()
 
 
 def submit_all(results_dir: Path = DEFAULT_RESULTS,
@@ -584,26 +608,6 @@ def submit_all(results_dir: Path = DEFAULT_RESULTS,
         if docs is not None and doc not in docs:
             continue
         reg_event = view[doc]
-        why = _policy_gate(cfg, reg_event)
-        if why:
-            stats["blocked"] += 1
-            stats["docs"][doc] = f"blocked: {why}"
-            continue
-
-        key = _claim_key(reg_event.get("claim") or {})
-        if doc in prior:
-            if prior[doc] == key:
-                stats["already_submitted"] += 1
-                stats["docs"][doc] = "already submitted (unchanged claim)"
-            else:
-                stats["blocked"] += 1
-                stats["docs"][doc] = (
-                    "blocked: verified claim changed after a successful "
-                    "submission — requires a replacement claim (frequency "
-                    "code 7), which is a manual decision")
-                _record_block(doc, key, "claim changed after submission")
-            continue
-
         result_file = results_dir / f"{doc}_results.json"
         try:
             result = json.loads(result_file.read_text())
@@ -614,12 +618,39 @@ def submit_all(results_dir: Path = DEFAULT_RESULTS,
                                   f"({result_file.name})")
             continue
 
+        registry_key = _claim_key({
+            "claim": reg_event.get("claim") or {},
+            "encounter_context_fingerprint": reg_event.get(
+                "encounter_context_fingerprint") or "",
+        })
+        why = _policy_gate(cfg, reg_event, result)
+        if why:
+            stats["blocked"] += 1
+            stats["docs"][doc] = f"blocked: {why}"
+            if not dry_run:
+                _record_block(doc, registry_key, why)
+            continue
+
         payload, blocks = build_claim(doc, reg_event, result, cfg)
         if blocks:
             stats["blocked"] += 1
             stats["docs"][doc] = "blocked: " + "; ".join(blocks)
             if not dry_run:
-                _record_block(doc, key, "; ".join(blocks))
+                _record_block(doc, registry_key, "; ".join(blocks))
+            continue
+
+        key = _submission_key(payload)
+        if doc in prior:
+            if prior[doc] == key:
+                stats["already_submitted"] += 1
+                stats["docs"][doc] = "already submitted (unchanged payload)"
+            else:
+                stats["blocked"] += 1
+                stats["docs"][doc] = (
+                    "blocked: verified submission payload changed after a "
+                    "successful submission — requires a replacement claim "
+                    "(frequency code 7), which is a manual decision")
+                _record_block(doc, key, "submission payload changed after submission")
             continue
 
         if dry_run:
@@ -636,7 +667,7 @@ def submit_all(results_dir: Path = DEFAULT_RESULTS,
             stats["docs"][doc] = f"submitted (ref {res.claim_reference})"
             append_ledger({
                 "event": "submitted", "document_id": doc, "at": _now(),
-                "claim_key": key,
+                "claim_key": key, "submission_key": key,
                 "verification": reg_event.get("verification"),
                 "trading_partner": payload["tradingPartnerServiceId"],
                 "usage_indicator": payload["usageIndicator"],

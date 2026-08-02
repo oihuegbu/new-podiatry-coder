@@ -464,17 +464,18 @@ def _finalize(args, holdouts: list[str]) -> None:
     # an unconsolidated (still correct) pack. PACK_CONSOLIDATION=0
     # disables; PACK_CONSOLIDATION_MERGE=0 keeps the scan/tags but skips
     # the LLM merge phase.
-    if os.getenv("PACK_CONSOLIDATION", "1") == "1":
+    if os.getenv("PACK_CONSOLIDATION", "0") == "1":
         try:
             from tools.pack_consolidation import consolidate
             csum = consolidate(
                 RESULTS_DIR,
-                merge=os.getenv("PACK_CONSOLIDATION_MERGE", "1") == "1")
+                merge=os.getenv("PACK_CONSOLIDATION_MERGE", "0") == "1")
             print(f"\nPack consolidation: "
                   f"{len(csum['dormancy'].get('tagged', []))} newly "
                   f"dormant, {len(csum['merges'])} merge(s) accepted, "
                   f"{len(csum['declined']) + len(csum['rejected'])} "
-                  f"declined/rejected", flush=True)
+                  f"declined/rejected (accepted merges remain draft proposals)",
+                  flush=True)
         except Exception as exc:
             print(f"Pack consolidation failed ({exc}) — pack left "
                   f"unconsolidated", flush=True)
