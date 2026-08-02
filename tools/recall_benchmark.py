@@ -44,9 +44,12 @@ PROBES = [
     ("hallux valgus, bunion of the great toe", "M20.11", "icd10"),
     ("plantar fasciitis", "M72.2", "icd10"),               # indexes to M72.2
     ("onychomycosis of the toenail", "B35.1", "icd10"),    # = tinea unguium
-    # L97.4 alone is a non-billable category header (NOT FOUND as a leaf);
-    # L97.409 is the valid heel-and-midfoot ulcer leaf, unspecified laterality/severity.
-    ("diabetic foot ulcer of the heel", "L97.409", "icd10"),
+    # "diabetic foot ulcer" -> E11.621 (Type 2 DM with foot ulcer), the primary
+    # diabetic-ulcer code — retrieval returns it at rank 2 (E10/E11/E13.621
+    # family). An earlier L97.409 ground-truth was wrong: L97.4- is only the
+    # SECONDARY site code, and the retriever correctly favors the diabetes-with-
+    # ulcer codes for this phrase. Verified against the live index, not assumed.
+    ("diabetic foot ulcer", "E11.621", "icd10"),
     # TCC application is CPT 29445 (rigid total contact leg cast); the prior
     # A6501 was a burn-garment code — a fixture bug that rewarded wrong retrieval.
     ("total contact cast application, diabetic foot", "29445", "cpt"),
