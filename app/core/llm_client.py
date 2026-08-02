@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 import time
 
 import uuid
@@ -22,8 +23,19 @@ from app.core.model_profiles import active_profile
 
 logger = get_logger(__name__)
 
-_openai_client: OpenAI | None = None
-_anthropic_client = None  # anthropic.Anthropic, lazy-imported
+# One HTTP client PER THREAD, cached in thread-local storage. The SDK clients
+# wrap httpx, whose httpcore connection pool guards its internal state with a
+# single lock; sharing ONE client across many worker threads serializes on —
+# and, observed live, hard-DEADLOCKS on — that pool lock. A 16-worker
+# batch-synonym run froze indefinitely with every worker parked in
+# httpcore _synchronization.Lock.__enter__ (connection_pool.handle_request),
+# their batches long since ended and nothing actually in flight; the per-
+# request wall-clock timeout could not rescue it because the block is on the
+# pool LOCK, not on a socket read or a connection-slot wait. Giving each
+# thread its own client — hence its own pool and lock — removes the shared
+# state entirely, so concurrency can never deadlock on it. Built once per
+# thread (ThreadPoolExecutor reuses a fixed worker set), not per call.
+_tls = threading.local()
 
 
 # Hard per-request wall clock. The SDKs' own retry layer is disabled
@@ -36,23 +48,27 @@ _REQUEST_TIMEOUT_S = 1200.0
 
 
 def get_openai_client() -> OpenAI:
-    global _openai_client
-    if _openai_client is None:
-        _openai_client = OpenAI(api_key=OPENAI_API_KEY,
-                                timeout=_REQUEST_TIMEOUT_S, max_retries=0)
-        logger.info("OpenAI client initialized")
-    return _openai_client
+    client = getattr(_tls, "openai", None)
+    if client is None:
+        client = OpenAI(api_key=OPENAI_API_KEY,
+                        timeout=_REQUEST_TIMEOUT_S, max_retries=0)
+        _tls.openai = client
+        logger.info("OpenAI client initialized (thread=%s)",
+                    threading.current_thread().name)
+    return client
 
 
 def get_anthropic_client():
-    global _anthropic_client
-    if _anthropic_client is None:
+    client = getattr(_tls, "anthropic", None)
+    if client is None:
         import anthropic  # lazy import so openai-only installs still work
-        _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY,
-                                                timeout=_REQUEST_TIMEOUT_S,
-                                                max_retries=0)
-        logger.info("Anthropic client initialized")
-    return _anthropic_client
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY,
+                                     timeout=_REQUEST_TIMEOUT_S,
+                                     max_retries=0)
+        _tls.anthropic = client
+        logger.info("Anthropic client initialized (thread=%s)",
+                    threading.current_thread().name)
+    return client
 
 
 # Transient provider-side failures: capacity ("Overloaded"), rate limits and
