@@ -32,9 +32,31 @@ class NCCIPTPAgent(ComplianceAgent):
     def check(self, claim: Claim) -> list[Finding]:
         findings: list[Finding] = []
         dos = claim.date_of_service
-        cpt_lines = [ln for ln in claim.lines if ln.code_system == "CPT"]
+        lines = [ln for ln in claim.lines if ln.code_system in {"CPT", "HCPCS"}]
+        if len(lines) < 2:
+            return findings
 
-        for a, b in combinations(cpt_lines, 2):
+        if dos is None:
+            return [self.finding(
+                status=Status.UNKNOWN,
+                denial_risk=DenialRisk.HIGH,
+                reason="NCCI PTP edits cannot be evaluated without a date of service.",
+                recommendation="Verify the date of service and re-run the complete scrub.",
+                source_rule="CMS NCCI PTP effective-date control",
+                clause="data_availability",
+            )]
+        if not self.store.ncci_data_available(dos):
+            return [self.finding(
+                status=Status.UNKNOWN,
+                denial_risk=DenialRisk.HIGH,
+                reason=(f"No local NCCI PTP release covers date of service "
+                        f"{dos.isoformat()}; absence of a pair cannot be treated as no edit."),
+                recommendation="Load and validate the CMS NCCI release covering the DOS, then re-scrub.",
+                source_rule="CMS NCCI PTP effective-date control",
+                clause="data_availability",
+            )]
+
+        for a, b in combinations(lines, 2):
             edit = self.store.ncci_pair(a.code, b.code, dos)
             if not edit:
                 continue

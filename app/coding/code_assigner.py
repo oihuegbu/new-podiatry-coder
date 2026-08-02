@@ -699,195 +699,40 @@ CRITICAL: Return ONLY valid JSON. No markdown, no code blocks."""
 # PASS 3 — HCPCS Level II + SNOMED
 # ---------------------------------------------------------------------------
 
-HCPCS_SNOMED_SYSTEM_PROMPT = """You are an expert medical coder specializing in podiatry HCPCS Level II DME/supply coding and SNOMED CT clinical coding.
+# HCPCS identity and descriptor semantics come from the effective-dated code
+# candidates supplied at runtime. Do not duplicate a changing medical code set
+# in prompt prose: the former prompt did so and contradicted the repository's
+# own authoritative CMS data on construction, fitting, size, and billing-unit
+# axes. That duplicated mapping has been removed rather than retained as a
+# second, stale source of truth.
+HCPCS_SNOMED_SYSTEM_PROMPT = """You are a medical coding assistant selecting HCPCS Level II entries from an authoritative, effective-dated candidate list and optionally mapping documented clinical concepts to SNOMED CT.
 
-## RULE 1: ONLY CODE ITEMS DISPENSED/APPLIED TODAY — DETERMINISTIC RULE
-- Look for ACTION VERBS: "applied", "dispensed", "fitted", "provided", "placed", "replaced", "given"
-- Do NOT code items merely "prescribed", "ordered", or "recommended" but not physically given today
-- "Recommended orthotics" = do NOT code | "Dispensed custom orthotics" = DO code
-- A plan instruction that the patient USE an item ("non-weight bearing in surgical shoe",
-  "continue boot") is NOT dispensing — code the item only when the note documents it was
-  physically provided at THIS encounter. Apply this test identically every run: the same
-  note must always produce the same supply lines
+HCPCS SOURCE-OF-TRUTH RULES
+- Select a HCPCS code only from the authoritative candidates in the user message.
+- Treat each candidate's official descriptor as the definition. Never substitute memorized mappings, infer a code outside the list, or alter its descriptor.
+- A candidate list is evidence of code identity, not evidence that the service is covered, medically necessary, or separately payable.
+- If no candidate descriptor matches every material documented attribute, omit the HCPCS line. Do not guess.
 
-## RULE 2: CUSTOM FOOT ORTHOTICS — L-CODE DECISION TREE (CRITICAL)
+DOCUMENTATION GATE
+- Code only an item, supply, drug, or service explicitly documented as performed, administered, applied, fitted, or physically dispensed at this encounter.
+- An order, prescription, recommendation, future plan, historical use, or instruction to continue an existing item is not current dispensing or administration.
+- Cite a contiguous verbatim note span for every line. Never manufacture or splice evidence.
 
-### Step 1: Custom vs Prefabricated?
-- Custom (molded/cast/3D-scanned to patient's foot) → L3000–L3031 range
-- Prefabricated / off-the-shelf → L3040–L3090 range
+DESCRIPTOR MATCHING
+- Compare the note with every defining descriptor attribute, including item or drug identity, formulation, construction, prefabricated versus custom manufacture, fitting or customization, dimensions, quantity, laterality, and the descriptor's billing unit.
+- Do not invent undocumented attributes to reach a more specific candidate.
+- Compute units only from the documented quantity and the selected descriptor's billing unit. Do not encode drug quantity with laterality or bilateral modifiers.
+- Add a modifier only when the documentation and an applicable authoritative rule support it. Do not infer a blanket modifier rule from a code prefix.
+- If multiple candidates remain plausible, choose none unless one is clearly best supported; otherwise mark the selected line for review and state the unresolved descriptor axis.
 
-### Step 2: For CUSTOM orthotics — What specific design type?
-- **L3000** = UCB (University of California Berkeley) shell ONLY
-  → Specific heel-cup shell used for neurological/pediatric gait; rarely used in general podiatry
-  → DO NOT use L3000 for routine podiatric custom functional orthotics
-- **L3010** = Custom foot orthosis, longitudinal arch support only (no metatarsal component)
-- **L3020** = Custom foot orthosis, longitudinal arch + metatarsal support
-  → Use when: metatarsal pad, Morton's neuroma orthotic, metatarsal support, pressure redistribution
-  → **DEFAULT for custom podiatric orthotics** when arch AND metatarsal elements are present
-- **L3030** = Custom foot orthosis, full-length (heel to toe, full plantar coverage)
-  → Note says "full-length custom orthotic" or "total contact orthotic"
-- **L3031** = Custom foot orthosis, bilateral pair dispensed together
+SNOMED CT
+- Do not invent or recall a concept identifier from memory. Output a SNOMED concept only when an exact concept identifier has been supplied by a controlled terminology lookup in the input.
+- Map only concepts explicitly documented in the current note and use the most specific supplied concept.
 
-### Step 3: Morton's Neuroma orthotics → always L3020
-When custom orthotics dispensed for Morton's neuroma/interdigital neuroma:
-→ L3020 (arch + metatarsal support) — the metatarsal pad is a defining feature
-→ Bilateral: L3020-RT + L3020-LT (two line items)
+OUTPUT
+Return JSON matching the supplied schema. Each HCPCS entry must include code, description, confidence, modifiers, modifier_reasoning, units, linked_diagnoses, rationale, supporting_text, needs_review, and review_reason. Each SNOMED entry must include concept_id, description, entity_text, category, and confidence. Return empty arrays when no defensible entry is available.
 
-### Step 4: Plantar Fasciitis / Heel Pain orthotics → L3020 or L3030
-→ L3020 = heel cup + arch support (most common custom podiatric orthotic)
-→ L3030 = only if explicitly full-length, total-contact design
-
-## RULE 3: WALKING BOOTS / CAM WALKERS
-- **L4360** = Walking boot, non-pneumatic
-- **L4361** = Walking boot, pneumatic and/or vacuum (CAM walker with air bladder)
-  → Keywords: "CAM walker", "pneumatic boot", "air cast", "aircast"
-- **L4386** = Walking boot, non-pneumatic, double upright
-
-## RULE 4: DIABETIC SHOES AND INSERTS
-- **A5500** = Diabetic shoe, custom-molded (male)
-- **A5501** = Diabetic shoe, custom-molded (female)
-- **A5507** = Diabetic shoe, depth shoe (male)
-- **A5508** = Diabetic shoe, depth shoe (female)
-- **A5512** = Full-contact insert for custom-molded diabetic shoe (companion to A5500/A5501)
-- **A5513** = Full-contact insert for depth shoe (companion to A5507/A5508)
-  → Code A5513 when a diabetic shoe insert is REPLACED or dispensed today, even if original
-    shoe was provided at a prior visit — inserts are separately billable per episode
-  → Keywords: "replaced diabetic shoe insert", "new insert", "provided insert", "changed insert"
-  → "Checked and replaced diabetic shoe insert (worn)" = YES, code A5513
-- **KX modifier on diabetic shoes/inserts (Medicare)**: A5500-A5513 require modifier KX
-  ("documentation on file") certifying the therapeutic-shoe coverage criteria are met
-  (diabetes + qualifying foot condition + certifying physician statement). Append KX
-  alongside the RT/LT laterality modifier when the note documents the qualifying condition;
-  if the qualifying documentation is NOT present in the note, set needs_review=true instead
-  of silently omitting KX
-
-## RULE 5: WOUND CARE SUPPLIES
-- **A6196** = Alginate/calcium alginate dressing (Aquacel, Aquacel Ag)
-- **A6212** = Foam dressing ≤16 sq in (Mepilex, Allevyn)
-- **A6213** = Foam dressing >16 sq in
-- **A6248** = Hydrogel dressing (MedHoney, Medihoney, hydrogel gel)
-- **A6020** = Collagen dressing ≤16 sq in
-- **A6021** = Collagen dressing 17–48 sq in
-- **A6022** = Collagen dressing >48 sq in
-
-## RULE 6: BONE STIMULATORS
-- **E0747** = Osteogenesis stimulator, electrical, non-invasive (extremity)
-  → Keywords: "bone stimulator", "bone stim", "EBI", "OrthoLogic"
-- **E0748** = Osteogenesis stimulator, electrical, spinal application
-- **E0760** = Osteogenesis stimulator, low intensity ultrasonic (Exogen, LIPUS)
-
-## RULE 7: COMPRESSION
-- **A6531** = Gradient compression stocking, below knee, 30–40 mmHg
-- **A6532** = Gradient compression stocking, below knee, 40–50 mmHg
-- **A6545** = Gradient compression wrap, non-elastic
-
-## RULE 8: INJECTABLE DRUG J-CODES — SEPARATELY BILLABLE (CRITICAL — REVENUE)
-When a provider ADMINISTERS an injectable drug in the office, the drug is separately billable.
-This is revenue LEFT ON THE TABLE if not coded. Look for the drug name + dose in the note.
-
-### Corticosteroids (most common in podiatry injections)
-- **J3301** = Triamcinolone acetonide, per 10mg (Kenalog)
-  → 10mg injection → J3301 x 1 unit; 20mg → x 2; 40mg → x 4 (most common for neuroma/joint)
-- **J1020** = Methylprednisolone acetate (Depo-Medrol), 20mg
-- **J1030** = Methylprednisolone acetate (Depo-Medrol), 40mg
-- **J1040** = Methylprednisolone acetate (Depo-Medrol), 80mg
-- **J2920** = Methylprednisolone sodium succinate (Solu-Medrol), 20mg/ml
-- **J2930** = Methylprednisolone sodium succinate (Solu-Medrol), 40mg/ml
-- **J1094** = Dexamethasone sodium phosphate, per 1mg
-- **J0702** = Betamethasone acetate + sodium phosphate (Celestone), per 3mg
-- **J3490** = Unclassified drug (when specific J-code does not exist)
-
-### When to code J-codes
-- Note mentions: "injected [drug]", "administered [drug]", "[drug] injection given"
-- Drug examples: "triamcinolone 40mg", "Kenalog 40mg", "Depo-Medrol 40mg", "dexamethasone"
-- Do NOT code a J-code for a drug that was STARTED, ORDERED, or PRESCRIBED but administered
-  elsewhere (IV antibiotics via infusion center/home health, a prescription to fill) — the
-  J-code belongs to whoever administers the drug. "IV vancomycin initiated per ID" with no
-  in-office administration documented = NO J-code. Apply identically every run
-- Bilateral injections of the same drug → DOUBLE the units on one line; NEVER put modifier 50
-  on a J-code (J-codes report drug quantity, not procedures — laterality/bilateral modifiers
-  belong on the injection CPT, not the drug)
-- DO NOT code J-code for: topical drugs, oral prescriptions, drugs "prescribed" but not given today
-
-### Morton's Neuroma Injection — drug identification (CRITICAL)
-- Read the note carefully for the DRUG NAME before assigning a J-code
-- "Triamcinolone" or "Kenalog" → J3301 (per 10mg); 40mg injection = J3301 x 4 units
-- "Betamethasone" or "Celestone" → J0702 (per 3mg); 6mg injection = J0702 x 2 units
-- "Methylprednisolone" or "Depo-Medrol" → J1030 (40mg) or J1020 (20mg)
-- Do NOT default to J3301 if the note says betamethasone — that is J0702
-- If bilateral neuroma injections → multiply the J-code units by 2 (bilateral/50 goes on the
-  injection CPT if applicable, never on the drug J-code)
-
-## RULE 9: LATERALITY MODIFIERS ON L-CODES — CMS MANDATORY
-- ALL HCPCS L-codes for unilateral equipment MUST carry RT or LT modifier
-- CMS REJECTS L-code claims missing laterality — hard billing requirement
-- Match to procedure laterality from CPT codes:
-  - CPT has RT → L-code gets RT | CPT has LT → L-code gets LT
-  - ICD-10 laterality as fallback: G57.61 (right Morton's) → RT; G57.62 (left) → LT
-  - Bilateral dispensing → two line items (L3020-RT + L3020-LT), NOT modifier 50
-- NEVER use modifier 50 on L-codes for bilateral — always list separately with RT and LT
-
-## SNOMED CT RULES
-1. Assign SNOMED for ALL clinical findings, disorders, procedures, and anatomical sites documented
-2. Use the MOST SPECIFIC concept available — never a parent root concept
-
-### SNOMED Concept ID Integrity — CRITICAL
-- ONLY output concept IDs you are HIGHLY CONFIDENT about from established clinical terminology
-- NEVER invent or guess a concept ID — wrong IDs cause downstream mapping failures
-- If uncertain about a specific concept ID, set confidence ≤ 0.4 (the verifier will flag it)
-- **NEVER use 71388002** (Surgical procedure root) — it is too generic to have clinical value; find the specific procedure concept (arthroscopy, fasciotomy, matrixectomy, etc.)
-- AVOID ALL generic root concepts — they are too broad for clinical coding:
-  - 71388002 (Surgical procedure root); 404684003 (Clinical finding root)
-  - 64572001 (Disease root); 123037004 (Body structure root); 125605004 (Fracture disorder root)
-- Use the MOST SPECIFIC concept that matches the clinical term — not a parent category
-3. DEDUPLICATION:
-   - Do NOT assign the same concept_id to two DIFFERENT clinical conditions
-   - If the same condition appears BILATERALLY (right and left), code it ONCE with a bilateral entity_text
-   - For POST-OP visits: do NOT create a SNOMED entry for procedures performed in the PAST. Only code the current post-operative diagnosis — not the past procedure itself
-4. Confidence calibration: parent concept fallback → confidence ≤ 0.4
-
-## MODIFIER REASONING FORMAT — structured, not free text
-modifier_reasoning is a list of objects, one per modifier claim: {"modifier": "<code>", "status":
-"applied"|"not_applicable", "reason": "<explanation>"}. Every L-code's required RT/LT (Rule 9 above)
-needs a status="applied" entry here — "status" is the only thing that determines whether a modifier
-counts as present, so it must exactly match every code actually listed in "modifiers".
-
-## OUTPUT — Return valid JSON:
-{
-  "hcpcs_codes": [
-    {
-      "code": "L3020",
-      "description": "Custom foot orthosis, longitudinal arch and metatarsal support",
-      "confidence": 0.90,
-      "modifiers": ["RT"],
-      "modifier_reasoning": [
-        {"modifier": "RT", "status": "applied", "reason": "unilateral right-foot dispensing per CMS mandatory L-code laterality rule"}
-      ],
-      "units": 1,
-      "linked_diagnoses": ["G57.61"],
-      "rationale": "Custom orthotics with metatarsal pad dispensed for right Morton's neuroma. L3020 = arch + metatarsal (NOT L3000 which is UCB shell only). RT modifier required for unilateral right-foot dispensing.",
-      "supporting_text": "Dispensed custom orthotics with metatarsal pad bilaterally.",
-      "needs_review": false,
-      "review_reason": null
-    }
-  ],
-  "snomed_codes": [
-    {
-      "concept_id": "57709007",
-      "description": "Morton's metatarsalgia",
-      "entity_text": "interdigital neuroma bilateral",
-      "category": "diagnosis",
-      "confidence": 0.9
-    }
-  ]
-}
-
-## EVIDENCE GROUNDING — ANTI-HALLUCINATION
-Every "supporting_evidence" entry MUST be a verbatim quote from the clinical note.
-- Do NOT code HCPCS supplies that are not explicitly documented as dispensed/applied today
-- Do NOT assign SNOMED codes for conditions not mentioned in the note
-
-CRITICAL: Return ONLY valid JSON. No markdown, no code blocks."""
+Return JSON only. No markdown or code fences."""
 
 
 # ---------------------------------------------------------------------------
@@ -944,10 +789,10 @@ Protected anchors will be listed below.
 - The modifier (RT/LT/50) should be preserved when correcting the base code
 
 ### D. HCPCS Laterality Check
-- Every HCPCS L-code must have RT or LT modifier
-- Match to the CPT procedure laterality (28119-RT → L4361-RT; 11750-TA → LT side,
-  because TA = LEFT foot great toe; T5 = RIGHT foot great toe — see toe modifier table above)
-- If an L-code is missing laterality → ADD the correct modifier
+- Apply a laterality modifier only when the selected code, payer rule, and documented item require it.
+- Derive side from direct evidence for that line; do not infer a blanket rule from a code prefix or
+  copy laterality from an unrelated procedure.
+- When laterality is required but the line's side is unresolved, flag review rather than guessing.
 
 ### E. BMI Z-Code Check
 - If E66.x (obesity) is in icd10_codes AND a specific BMI number is documented → ADD Z68.xx
@@ -955,8 +800,9 @@ Protected anchors will be listed below.
 - Z68.xx goes in icd10_codes as secondary (it is a billable secondary code)
 
 ### F. NCCI Bundling
-- 28119 includes plantar fascial release → remove any separate 29893 or 28060
-- Check every CPT pair for inclusion relationships
+- Use only the claim-DOS-specific NCCI PAIR STATUS block supplied below.
+- Never assert bundling from memory, procedure similarity, or a "standard convention."
+- If the applicable release is unavailable, do not remove a line or declare a pair unedited; hold review.
 
 ### G. MDM Verification
 - Surgical decision (elective surgery scheduled) = MODERATE risk → 99204/99205
@@ -1003,25 +849,14 @@ When a same-day procedure with [global=000] or [global=010] is performed:
 - Exception 2: If a [global=090] CPT is present → use -57 on the E/M, NOT -25 (see Check B above)
 - Exception 2 enforcement: If -25 is currently on E/M AND a [global=090] CPT exists → CHANGE -25 to -57
 
-### K. Orthotic L-Code Type Verification
-- L3000 is ONLY for UCB (University of California Berkeley) shell orthotics — RARELY used in podiatry
-- If L3000 is coded for:
-  - Morton's neuroma / interdigital neuroma → CHANGE to L3020 (arch + metatarsal support)
-  - Plantar fasciitis with full-length orthotic → CHANGE to L3030
-  - Generic "custom orthotic" with metatarsal pad → CHANGE to L3020
-  - Bilateral custom orthotics dispensed as pair → CHANGE to L3031 or L3020-RT + L3020-LT
-- Only keep L3000 if note explicitly documents UCB-type shell design
-- **LINKED DIAGNOSES on L-codes**: Link HCPCS codes to ALL supporting ICD codes, not just the primary.
-  Any secondary diagnosis that clinically supports the orthotic (e.g., pes planus, neuropathy) should be
-  included in linked_diagnoses so every billed ICD has procedure linkage on the claim.
-
-### N. Walking Boot Type Verification — CRITICAL REVENUE ERROR
-- **L4360** = Walking boot, NON-PNEUMATIC only
-- **L4361** = Walking boot, PNEUMATIC and/or vacuum (CAM walker with air bladder)
-- If L4360 is coded BUT the note mentions any of: "CAM walker", "CAM boot", "pneumatic", "air cast",
-  "aircast", "air bladder" → CHANGE to L4361. CAM walkers are ALWAYS pneumatic → L4361, never L4360.
-- This is a common undercoding error. L4361 is the correct code for the vast majority of walking boots
-  dispensed in podiatry practice.
+### K. HCPCS Descriptor and Evidence Verification
+- Use the effective-dated authoritative candidate list and database descriptions as the only source
+  of HCPCS identity. Do not use memorized product, construction, fitting, size, dose, or unit mappings.
+- Confirm every selected line matches all material descriptor attributes documented in the note.
+- Never add or substitute a HCPCS code that is absent from the authoritative candidates.
+- If the exact documented item or drug is absent or ambiguous, do not guess; retain a review flag.
+- Confirm current-encounter dispensing or administration, exact billing units, diagnosis linkage,
+  and only those modifiers supported by documentation and an applicable rule.
 
 ### O. PMH-Only Conditions in icd10_codes — MUST REMOVE
 Per ICD-10-CM outpatient coding guidelines: ONLY code conditions that were addressed, evaluated,
@@ -1036,19 +871,13 @@ be in supporting_conditions — NOT in icd10_codes.
 - Exception: HTN (I10) is billable as secondary when it appears in Assessment OR when the provider
   explicitly addresses it at the visit
 
-### L. J-Code Drug Billing Audit
-When an injection CPT (64455, 64632, 20600–20610, 20550) is in cpt_codes:
-- Check note for drug name and dose: triamcinolone, methylprednisolone, Kenalog, Depo-Medrol, dexamethasone, betamethasone
-- If drug administered today and NO J-code in hcpcs_codes → ADD the appropriate J-code
-- **Drug identification — read carefully:**
-  - "triamcinolone" / "Kenalog" → J3301 (per 10mg); 40mg = x 4 units
-  - "betamethasone" / "Celestone" → J0702 (per 3mg); do NOT use J3301 for betamethasone
-  - "methylprednisolone" / "Depo-Medrol" → J1030 (40mg) or J1020 (20mg)
-- This is revenue left on the table — do NOT omit J-codes for administered injectable drugs
-- **MANDATORY OUTPUT RULE**: When you determine a J-code should be added, it MUST appear in BOTH:
-  1. `corrections_made` as type="ADDED" (documentation of the correction)
-  2. `hcpcs_codes` array (actual billable code in the output)
-  - A J-code listed only in corrections_made but absent from hcpcs_codes will NOT be billed — this is a coding failure
+### L. Administered Drug and Supply Audit
+- When the note documents administration today, compare the documented ingredient, formulation,
+  route, dose, and quantity against the effective-dated HCPCS candidates and official descriptors.
+- Add a drug or supply line only when one authoritative candidate matches those attributes.
+- Calculate units from the candidate descriptor's billing unit and the documented administered dose.
+- Do not code drugs merely ordered, prescribed, or administered by another entity.
+- If no exact candidate is available, do not guess or use an unclassified code by default; flag review.
 
 ### M. Over-Coding — CRITICAL OVERRIDE (supersedes anchor protection)
 - Remove a Z79.x long-term-drug-therapy code (Z79.84, Z79.4, Z79.01, etc.) ONLY if no condition
@@ -1060,9 +889,6 @@ When an injection CPT (64455, 64632, 20600–20610, 20550) is in cpt_codes:
   DM code. This rule OVERRIDES anchor protection — even if the assessment lists "T2DM without
   complications", it MUST be removed when a combination code is present. List as correction:
   type=REMOVED, reason="Redundant DM generic code — combination code already captures diabetes"
-- **DIABETIC SHOE INSERT**: "replaced" = dispensed/given today. If plan says "replaced diabetic
-  shoe insert" or "new insert" → A5512 or A5513 MUST be coded. Do NOT remove it.
-  Keywords that confirm dispensed: "replaced", "new insert", "gave", "provided new", "dispense"
 
 ### P. Bilateral-Defined Code Family — Modifier 52 for Unilateral Performance
 Some CPT codes are defined as inherently bilateral in their own descriptor (the code's RVU/payment
@@ -1160,6 +986,7 @@ def _strip_nonverbatim_spans(result: dict, note_text: str) -> None:
     stripped = 0
     for arr_key, field, is_list in (("cpt_codes", "evidence_spans", True),
                                     ("hcpcs_codes", "evidence_spans", True),
+                                    ("hcpcs_codes", "supporting_text", False),
                                     ("icd10_codes", "supporting_text", False)):
         for e in result.get(arr_key, []) or []:
             if not isinstance(e, dict):
@@ -1313,9 +1140,11 @@ Check EVERY CPT pair for NCCI bundling before finalizing."""
 ## HCPCS CANDIDATE CODES (from official database via semantic search)
 {_format_candidates_for_system(rag_candidates, 'hcpcs')}
 
-Assign HCPCS codes for supplies dispensed today and SNOMED codes for all clinical concepts.
-CRITICAL: All HCPCS L-codes MUST carry RT or LT modifier matching the procedure/surgical side above.
-Only code supplies PHYSICALLY given/applied today — not ordered or prescribed."""
+Assign HCPCS codes only from the authoritative candidates for items or drugs documented as
+physically dispensed, applied, fitted, or administered today. Match every defining descriptor
+attribute and billing unit. Apply modifiers only when documentation and an applicable rule support
+them. For SNOMED, omit any concept whose identifier was not supplied by controlled terminology
+data. Do not code ordered, prescribed, recommended, historical, or continued items."""
 
     hcpcs_raw, usage = chat_completion(HCPCS_SNOMED_SYSTEM_PROMPT, hcpcs_prompt, temperature=CODING_TEMPERATURE,
                                        max_tokens=2500, json_schema=_pass_schema(HCPCS_PASS_SCHEMA))
@@ -1343,7 +1172,8 @@ Only code supplies PHYSICALLY given/applied today — not ordered or prescribed.
     _enrich_with_db_descriptions(combined["hcpcs_codes"],  "hcpcs",  db)
     db_description_block = _build_db_description_block(combined)
     ncci_pair_block = _build_ncci_pair_block(
-        combined["cpt_codes"], rag_candidates.get("cpt", []), store
+        combined["cpt_codes"], rag_candidates.get("cpt", []), store,
+        patient_metadata.get("date_of_service"),
     )
     billability_block = _build_billability_block(
         combined["cpt_codes"], combined["hcpcs_codes"], store
@@ -1452,7 +1282,9 @@ Only code supplies PHYSICALLY given/applied today — not ordered or prescribed.
     Record it as {{"type": "CHANGED", "code": "<old>", "to_code": "<new>"}} in corrections_made.
 7. **IMAGE GUIDANCE (Section I)**: Search note for fluoroscopic/ultrasound guidance words. If injection present AND guidance documented AND 77002/76942 missing → ADD the guidance code. This is MANDATORY.
 8. **MODIFIER -25 vs -57 (Sections B + J)**: Check [global=090/010/000] annotations on CPT candidates. If [global=090] CPT present → E/M gets -57 (change -25 to -57 if needed). If only [global=000/010] procedures present AND E/M lacks -25 → ADD -25. These are MANDATORY corrections.
-9. **ORTHOTIC L-CODES (Section K)**: If L3000 is coded for Morton's neuroma or custom functional orthotic → CHANGE to L3020. If L3000 for full-length → CHANGE to L3030.
+9. **HCPCS DESCRIPTORS (Sections K + L)**: Verify every line against the effective-dated
+    authoritative candidate descriptor. Remove or flag any line whose material attributes or
+    billing unit are not explicitly supported; never substitute a memorized code.
 10. Check Z79.x long-term-drug-therapy codes: remove ONLY if no condition it treats is
     documented/managed here — keep it when the condition IS present (e.g. Z79.84 alongside
     diabetes is correct ICD-10-CM "use additional code" guidance, not an over-code).
@@ -1460,14 +1292,13 @@ Only code supplies PHYSICALLY given/applied today — not ordered or prescribed.
 12. Pass supporting_conditions through unchanged — do NOT move them to icd10_codes. The ONE
     permitted edit is a wrong-code correction (e.g. a category-sibling mismatch per 6f): update
     the entry's "code" field in place and record a CHANGED correction with "to_code".
-13. **CAM WALKER (Section N)**: If L4360 is coded and note mentions "CAM walker" → CHANGE to L4361.
-14. **PMH CONDITIONS (Section O)**: Scan icd10_codes for PMH-only conditions not in Assessment → MOVE to supporting_conditions.
-15. Whenever you add, remove, or change a modifier on a CPT/HCPCS code (items 2, 8, 9 above, or any
+13. **PMH CONDITIONS (Section O)**: Scan icd10_codes for PMH-only conditions not in Assessment → MOVE to supporting_conditions.
+14. Whenever you add, remove, or change a modifier on a CPT/HCPCS code (items 2, 8, 9 above, or any
     other correction), keep modifier_reasoning in sync using the structured {{"modifier", "status",
     "reason"}} format (see MODIFIER REASONING FORMAT above) — every code in "modifiers" needs a
     matching status="applied" entry, and "modifiers" must contain every entry with status="applied".
     These two fields must never disagree; do not write a free-text sentence in place of this format.
-16. Return COMPLETE corrected code set with ALL original codes (corrected as needed)."""
+15. Return COMPLETE corrected code set with ALL original codes (corrected as needed)."""
 
     # Elastic max_tokens: scale with note complexity so simple notes are fast
     # and complex notes get enough room without hitting API limits.
@@ -1922,7 +1753,9 @@ def _build_icd_excludes1_block(icd_codes: list[dict], store) -> str:
     )
 
 
-def _build_ncci_pair_block(cpt_codes: list[dict], cpt_candidates: list[dict], store) -> str:
+def _build_ncci_pair_block(
+    cpt_codes: list[dict], cpt_candidates: list[dict], store, dos=None,
+) -> str:
     """Real, authoritative NCCI PTP pairwise status for every pair among the
     currently-assigned CPT codes, plus each assigned code against the top
     not-yet-assigned candidates — computed fresh from compliance.db every
@@ -1939,6 +1772,12 @@ def _build_ncci_pair_block(cpt_codes: list[dict], cpt_candidates: list[dict], st
     """
     if not store or not cpt_codes:
         return ""
+    if not dos or not store.ncci_data_available(dos):
+        return (
+            "## NCCI PAIR STATUS\n"
+            "The applicable NCCI release is unavailable for this date of service. "
+            "Do not infer that any pair is unedited; downstream release must remain on hold."
+        )
     assigned = [c.get("code", "") for c in cpt_codes if c.get("code")]
     candidate_codes = [
         c.get("code", "") for c in cpt_candidates[:15]
@@ -1955,7 +1794,7 @@ def _build_ncci_pair_block(cpt_codes: list[dict], cpt_candidates: list[dict], st
         if key in seen:
             return
         seen.add(key)
-        edit = store.ncci_pair(c1, c2)
+        edit = store.ncci_pair(c1, c2, dos)
         if edit:
             indicator = str(edit.get("modifier_indicator", ""))
             meaning = {
@@ -2004,7 +1843,8 @@ def _format_candidates_for_system(rag_candidates: dict, system: str, store=None)
             glob = store.global_period(code)
             if glob:
                 global_tag = f" [global={glob}]"
-        lines.append(f"  {code}{global_tag} (relevance: {score:.3f}) — {desc[:150]}")
+        max_desc = 500 if system == "hcpcs" else 150
+        lines.append(f"  {code}{global_tag} (relevance: {score:.3f}) — {desc[:max_desc]}")
     return "\n".join(lines)
 
 
@@ -2074,10 +1914,6 @@ def _hard_db_gate(entries: list[dict], code_system: str, db) -> list[dict]:
             found = bool(db.validate_cpt(code))
         elif code_system == "hcpcs":
             found = bool(db.validate_hcpcs(code))
-            if not found:
-                # HCPCS codes are sometimes unlisted but valid — keep as INFO, don't remove
-                valid.append(entry)
-                continue
         if found:
             valid.append(entry)
         else:
@@ -2250,8 +2086,6 @@ def _gate_verify_additions(final_result: dict, combined: dict, db, store=None) -
 
     Policy per entry not present before verification:
       * validates in its claimed system → keep (legitimate audit addition);
-      * HCPCS that doesn't validate → keep (unlisted-but-valid policy,
-        matching _hard_db_gate);
       * a real Tabular/code-set entry at the WRONG level or date (category
         header with billable children, or a code active on some other
         date) → keep — the specificity filter FAILs it with an actionable
@@ -2278,7 +2112,7 @@ def _gate_verify_additions(final_result: dict, combined: dict, db, store=None) -
             code = (e.get("code") or "").strip()
             if not code:
                 continue
-            if code.upper() in pre or validate(code) or system == "HCPCS":
+            if code.upper() in pre or validate(code):
                 kept.append(e)
                 continue
             known_elsewhere = store is not None and (

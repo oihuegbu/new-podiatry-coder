@@ -1515,7 +1515,8 @@ ENGINE API available through the `engine` parameter:
   v.store.use_additional_code_groups(code) / v.store.code_also_groups(code)
   v.store.code_first_etiology_refs(code)   # ICD Tabular conventions
   v.store.mue(code) -> int|None      # Medicare units-of-service limit
-  v.store.ncci_pair(c1, c2) -> {"col1","col2","modifier_indicator"}|None
+  v.store.ncci_data_available(dos) -> bool
+  v.store.ncci_pair(c1, c2, dos) -> {"col1","col2","modifier_indicator"}|None
       # the NCCI PTP edit between two claim lines, if one exists — THE
       # authority on whether two procedures bundle (modifier_indicator
       # "1" = a distinct-service modifier may bypass; "0" = never)

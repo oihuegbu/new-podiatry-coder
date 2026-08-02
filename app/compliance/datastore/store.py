@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import calendar
 from datetime import date
 from pathlib import Path
 
@@ -2405,13 +2406,48 @@ class ComplianceDataStore:
             f"{base} ORDER BY effective_from ASC LIMIT 1", params,
         ).fetchone()
 
+    def ncci_data_available(self, dos=None) -> bool:
+        """Whether an NCCI release in the local store actually covers DOS.
+
+        The imported CMS file is a quarterly snapshot, not a complete edit
+        history: active rows commonly have an open-ended effective_to. The
+        newest effective_from in the snapshot identifies its release quarter;
+        open-ended rows must not make that one snapshot appear valid forever.
+        """
+        if dos is None:
+            return False
+        try:
+            d = date.fromisoformat(dos) if isinstance(dos, str) else dos
+        except (TypeError, ValueError):
+            return False
+        row = self.conn.execute(
+            "SELECT MAX(effective_from) AS release_start FROM ncci_ptp",
+        ).fetchone()
+        if not row or not row["release_start"]:
+            return False
+        try:
+            start = date.fromisoformat(row["release_start"])
+        except (TypeError, ValueError):
+            return False
+        quarter_index = (start.month - 1) // 3
+        start = date(start.year, quarter_index * 3 + 1, 1)
+        quarter_end_month = (quarter_index + 1) * 3
+        end = date(start.year, quarter_end_month,
+                   calendar.monthrange(start.year, quarter_end_month)[1])
+        return start <= d <= end
+
     def ncci_pair(self, c1: str, c2: str, dos=None) -> dict | None:
-        d = self._dos(dos)
+        """Return an NCCI edit only from the release covering the claim DOS."""
+        if not self.ncci_data_available(dos):
+            return None
+        d = dos if isinstance(dos, str) else dos.isoformat()
         for a, b in ((c1, c2), (c2, c1)):
-            row = self._asof(
-                "ncci_ptp", "col1, col2, modifier_indicator",
-                "col1=? AND col2=?", (_norm(a), _norm(b)), d,
-            )
+            row = self.conn.execute(
+                "SELECT col1, col2, modifier_indicator FROM ncci_ptp "
+                "WHERE col1=? AND col2=? AND effective_from<=? AND effective_to>=? "
+                "ORDER BY effective_from DESC LIMIT 1",
+                (_norm(a), _norm(b), d, d),
+            ).fetchone()
             if row:
                 return {"col1": row["col1"], "col2": row["col2"],
                         "modifier_indicator": row["modifier_indicator"]}

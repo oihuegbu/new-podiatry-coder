@@ -43,7 +43,7 @@ PROBES = [
     ("plantar fasciitis", "M72.2", "icd10"),
     ("onychomycosis of the toenail", "B35.1", "icd10"),
     ("diabetic foot ulcer of the heel", "L97.4", "icd10"),
-    ("total contact cast application, diabetic foot", "A6501", "hcpcs"),
+    ("compression burn garment, bodysuit", "A6501", "hcpcs"),
     ("therapeutic diabetic shoe, custom molded", "A5501", "hcpcs"),
 ]
 

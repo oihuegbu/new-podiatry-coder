@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import calendar
 from datetime import date
 from app.core.config import (
     ICD10_FILE, CPT_FILE, HCPCS_FILE, MUE_FILE,
@@ -200,16 +201,48 @@ class CodeReferenceDB:
         d = dos if isinstance(dos, str) else (dos.isoformat() if dos else date.today().isoformat())
         return entry["effective_from"] <= d <= entry["effective_to"]
 
-    def check_ncci(self, code1: str, code2: str) -> dict | None:
-        """Look up an NCCI PTP edit pair, any direction, ignoring effective dates
-        (matches the historical no-in-memory-dict behavior this replaced)."""
+    def ncci_data_available(self, dos=None) -> bool:
+        """Return whether the loaded quarterly NCCI snapshot covers DOS."""
+        if dos is None:
+            return False
+        try:
+            d = date.fromisoformat(dos) if isinstance(dos, str) else dos
+        except (TypeError, ValueError):
+            return False
+        conn = sqlite3.connect(f"file:{_COMPLIANCE_DB_PATH}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT MAX(effective_from) FROM ncci_ptp",
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row or not row[0]:
+            return False
+        try:
+            start = date.fromisoformat(row[0])
+        except (TypeError, ValueError):
+            return False
+        quarter_index = (start.month - 1) // 3
+        start = date(start.year, quarter_index * 3 + 1, 1)
+        quarter_end_month = (quarter_index + 1) * 3
+        end = date(start.year, quarter_end_month,
+                   calendar.monthrange(start.year, quarter_end_month)[1])
+        return start <= d <= end
+
+    def check_ncci(self, code1: str, code2: str, dos=None) -> dict | None:
+        """Look up an NCCI PTP pair from the release covering the claim DOS."""
+        if not self.ncci_data_available(dos):
+            return None
+        d = dos if isinstance(dos, str) else dos.isoformat()
         c1, c2 = _norm(code1), _norm(code2)
         conn = sqlite3.connect(f"file:{_COMPLIANCE_DB_PATH}?mode=ro", uri=True)
         try:
             row = conn.execute(
                 "SELECT col1, col2, modifier_indicator FROM ncci_ptp "
-                "WHERE (col1=? AND col2=?) OR (col1=? AND col2=?) LIMIT 1",
-                (c1, c2, c2, c1),
+                "WHERE ((col1=? AND col2=?) OR (col1=? AND col2=?)) "
+                "AND effective_from<=? AND effective_to>=? "
+                "ORDER BY effective_from DESC LIMIT 1",
+                (c1, c2, c2, c1, d, d),
             ).fetchone()
         finally:
             conn.close()

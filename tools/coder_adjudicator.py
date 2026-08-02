@@ -205,6 +205,11 @@ def _claim_lines(run: dict) -> dict:
             for arr in _BILLING_ARRAYS}
 
 
+def _claim_dos(run: dict) -> str:
+    meta = run.get("patient_metadata") or {}
+    return str(meta.get("date_of_service") or run.get("date_of_service") or "").strip()
+
+
 def _ptp_evidence(rep: Replayer, runs: list[dict],
                   disputed_codes: set[str]) -> list[dict]:
     """NCCI PTP edits between every disputed CPT/HCPCS code and every
@@ -215,13 +220,21 @@ def _ptp_evidence(rep: Replayer, runs: list[dict],
                         for arr in ("cpt_codes", "hcpcs_codes")
                         for e in (run.get(arr) or [])
                         if isinstance(e, dict) and e.get("code")})
+    dates = {_claim_dos(run) for run in runs if _claim_dos(run)}
+    if len(dates) != 1:
+        return [{"data_available": False,
+                 "reason": "claim date of service is missing or inconsistent across runs"}]
+    dos = next(iter(dates))
+    if not rep.store.ncci_data_available(dos):
+        return [{"data_available": False,
+                 "reason": f"no loaded NCCI release covers DOS {dos}"}]
     out = []
     for c in sorted(disputed_codes):
         for other in all_codes:
             if other == c:
                 continue
             try:
-                pair = rep.store.ncci_pair(c, other)
+                pair = rep.store.ncci_pair(c, other, dos)
             except Exception:
                 pair = None
             if pair:
@@ -1320,11 +1333,14 @@ def _proposed_code_authoritative_ok(rep: Replayer, arr: str, code: str,
             return False, "no global-period assignment — not an established " \
                           "billable procedure"
     # 4. NO UNBYPASSABLE NCCI CONFLICT with a code already on the claim.
+    dos = _claim_dos(main)
+    if not dos or not db.ncci_data_available(dos):
+        return False, "the NCCI release covering the claim DOS is unavailable"
     for e in (main.get("cpt_codes") or []):
         other = str(e.get("code") or "").upper() if isinstance(e, dict) else ""
         if not other or other == code:
             continue
-        edit = db.check_ncci(other, code)
+        edit = db.check_ncci(other, code, dos)
         if edit and str(edit.get("code2") or "").upper() == code \
                 and str(edit.get("modifier") or "").strip() == "0":
             return False, (f"NCCI hard bundle (indicator 0): {code} is "

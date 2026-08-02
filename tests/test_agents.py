@@ -744,7 +744,8 @@ comp_rows = _STORE.conn.execute(
 sep_pair = None
 for sr in sep_rows:
     for cr in comp_rows:
-        if sr["code"] != cr["code"] and not _STORE.ncci_pair(sr["code"], cr["code"]):
+        if (sr["code"] != cr["code"]
+                and not _STORE.ncci_pair(sr["code"], cr["code"], _NCCI_DOS)):
             sep_pair = (sr["code"], cr["code"])
             break
     if sep_pair:
@@ -790,7 +791,8 @@ _mn = next((r for r in _sr.filter_results if r["filter_id"] == "MEDICAL_NECESSIT
 check("MEDICAL_NECESSITY recorded even when it emits no WARN/FAIL",
       _mn is not None and _mn["status"] == "PASS")
 check("statuses restricted to PASS/WARN/FAIL/ERROR",
-      all(r["status"] in ("PASS", "WARN", "FAIL", "ERROR") for r in _sr.filter_results))
+      all(r["status"] in ("PASS", "WARN", "FAIL", "UNKNOWN", "ERROR")
+          for r in _sr.filter_results))
 
 # --------------------------------------------------------------------- #
 # --- cleanup: remove the PA test row so the shared DB stays pristine ---

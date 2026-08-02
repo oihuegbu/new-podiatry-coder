@@ -462,9 +462,11 @@ def annotate_result(result: dict, report: dict, route: bool = True) -> dict:
         scrub = result.get("claim_scrub")
         if isinstance(scrub, dict) and isinstance(scrub.get("findings"), list):
             scrub["findings"] = _prune(scrub["findings"])
+            blocking_statuses = {"FAIL", "UNKNOWN", "ERROR"}
             scrub["clean"] = not any(
-                str(f.get("status")).upper() == "FAIL"
+                str(f.get("status")).upper() in blocking_statuses
                 for f in scrub["findings"] if isinstance(f, dict))
+            scrub["disposition"] = "CLEAN" if scrub["clean"] else "REVIEW"
 
     reasons = list(result.get("auto_coding_review_reasons") or [])
     summary_bits = []

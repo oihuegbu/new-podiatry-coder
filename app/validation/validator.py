@@ -165,6 +165,7 @@ class CodingValidator:
         # material_corrections so the clinical audit sees a reported
         # decision, never a silently vanished issue.
         self._advisory_suppression_corrections: list[dict] = []
+        self._dos = None
 
     def validate(
         self,
@@ -184,6 +185,7 @@ class CodingValidator:
         self._non_billable_codes_to_suppress = set()
         self._scrub_advisory_suppressions = []
         self._advisory_suppression_corrections = []
+        self._dos = dos
         # Payer context (parsed from the note's own insurance field via
         # payer_registry) — MUE is Medicare/NCCI policy, so the MUE-0
         # auto-suppression below applies only to payers bound to Original
@@ -363,7 +365,7 @@ class CodingValidator:
         # a same-day 090-global E/M+procedure pair before -57 was even
         # added, always reporting "modifier exception allowed but not
         # applied" for a pair that resolved correctly moments later.
-        self._check_ncci(cpt)
+        self._check_ncci(cpt + hcpcs, dos)
         self._check_billability(cpt, hcpcs)
         self._check_imaging_note_evidence(cpt, note_full_text)
         # Context gate after the presence gate: the modality IS in the note,
@@ -652,11 +654,12 @@ class CodingValidator:
             if not code:
                 continue
             if not self.db.validate_hcpcs(code):
+                self._non_billable_codes_to_suppress.add(code)
                 self._add(
-                    "INFO", code, "code_existence",
-                    f"HCPCS {code} not found in database (may still be valid — verify with payer)",
-                    "Verify HCPCS code validity with payer",
-                    denial_risk="MEDIUM",
+                    "ERROR", code, "code_existence",
+                    f"HCPCS {code} is not present in the authoritative local code set",
+                    "Remove the code or load an authoritative code-set record before billing",
+                    denial_risk="HIGH",
                 )
             elif dos and not self.db.is_active_for_dos("hcpcs", code, dos):
                 self._add(
@@ -666,11 +669,33 @@ class CodingValidator:
                     denial_risk="HIGH",
                 )
 
-    def _check_ncci(self, cpt):
-        codes = [c.get("code", "") for c in cpt if c.get("code")]
+    def _ncci(self, code1: str, code2: str):
+        """Date-anchored NCCI lookup used by every validator rule."""
+        return self.db.check_ncci(code1, code2, self._dos)
+
+    def _check_ncci(self, lines, dos=None):
+        codes = [c.get("code", "") for c in lines if c.get("code")]
+        if len(codes) < 2:
+            return
+        if dos is None:
+            self._add(
+                "ERROR", "", "ncci_dos_missing",
+                "NCCI edits cannot be evaluated without a date of service",
+                "Verify the date of service and re-run validation",
+                denial_risk="HIGH",
+            )
+            return
+        if not self.db.ncci_data_available(dos):
+            self._add(
+                "ERROR", "", "ncci_data_unavailable",
+                f"No local NCCI release covers date of service {dos}",
+                "Load the CMS NCCI release covering the DOS and re-run validation",
+                denial_risk="HIGH",
+            )
+            return
         for i in range(len(codes)):
             for j in range(i + 1, len(codes)):
-                conflict = self.db.check_ncci(codes[i], codes[j])
+                conflict = self.db.check_ncci(codes[i], codes[j], dos)
                 if not conflict:
                     continue
 
@@ -696,8 +721,8 @@ class CodingValidator:
                 # elsewhere on the claim.
                 pair_is_em = _is_em(codes[i]) or _is_em(codes[j])
                 sep_modifiers = {"25", "57"} if pair_is_em else {"59", "XE", "XS", "XP", "XU"}
-                code_i_entry = next((c for c in cpt if c.get("code") == codes[i]), {})
-                code_j_entry = next((c for c in cpt if c.get("code") == codes[j]), {})
+                code_i_entry = next((c for c in lines if c.get("code") == codes[i]), {})
+                code_j_entry = next((c for c in lines if c.get("code") == codes[j]), {})
                 has_separator = (
                     bool(set(code_i_entry.get("modifiers", [])) & sep_modifiers)
                     or bool(set(code_j_entry.get("modifiers", [])) & sep_modifiers)
@@ -2153,7 +2178,7 @@ class CodingValidator:
             # matrixectomy); the reverse direction — a billed code bundled
             # into the candidate — is precisely the finding (64776 is the
             # component of 28080) and stays.
-            if any((e := self.db.check_ncci(b, code)) and e.get("code2") == code
+            if any((e := self._ncci(b, code)) and e.get("code2") == code
                    for b in billed_list):
                 continue
             # Category II (xxxxF) codes are $0.00 performance-tracking codes,
@@ -2191,7 +2216,7 @@ class CodingValidator:
             # must still document a strict majority of the descriptor with
             # at least one rare token among the hits.
             if (rare_hits and len(hits) * 2 > len(sig) and len(hits) >= 3
-                    and any((e := self.db.check_ncci(code, b))
+                    and any((e := self._ncci(code, b))
                             and e.get("code1") == code and e.get("code2") == b
                             for b in billed_list)):
                 candidates.append((len(rare_hits), len(hits) / len(sig), code, info,
@@ -2250,7 +2275,7 @@ class CodingValidator:
                 # so an E/M line must never be rewritten into a surgery.
                 and not _is_em(e.get("code", ""))
                 and e.get("code") not in self._non_billable_codes_to_suppress
-                and (edit := self.db.check_ncci(code, e.get("code")))
+                and (edit := self._ncci(code, e.get("code")))
                 and edit.get("code1") == code
                 and edit.get("code2") == e.get("code")
             ]
@@ -2455,8 +2480,8 @@ class CodingValidator:
                     continue
                 if not (own_stems & _struct_stems(cand_desc)):
                     continue  # different structure, not this code's axis
-                edit = (self.db.check_ncci(code, cand_code)
-                        or self.db.check_ncci(cand_code, code))
+                edit = (self._ncci(code, cand_code)
+                        or self._ncci(cand_code, code))
                 if not edit:
                     continue  # not the mutually-exclusive same-structure pair
                 candidates.append((cand_code, cand_info))
@@ -2565,8 +2590,8 @@ class CodingValidator:
                 # mutually exclusive same-session pair per the PTP table —
                 # the structural statement that these are alternative
                 # spellings of work on the same structure
-                edit = (self.db.check_ncci(code, cand_code)
-                        or self.db.check_ncci(cand_code, code))
+                edit = (self._ncci(code, cand_code)
+                        or self._ncci(cand_code, code))
                 if not edit:
                     continue
                 cand_sig = _sig(cand_desc)
@@ -5293,7 +5318,7 @@ class CodingValidator:
                     continue
                 if not (sites - {"RT", "LT"}) and not (other_sites - {"RT", "LT"}):
                     continue  # generic-only pair proves nothing about the site
-                conflict = self.db.check_ncci(code, other_code)
+                conflict = self._ncci(code, other_code)
                 if (not conflict
                         or str(conflict.get("modifier", "")).strip() != "1"):
                     continue
@@ -5420,7 +5445,7 @@ class CodingValidator:
                         continue
                     if _is_em(other_code):
                         continue
-                    conflict = self.db.check_ncci(code, other_code)
+                    conflict = self._ncci(code, other_code)
                     if not conflict or str(conflict.get("modifier", "")).strip() != "1":
                         continue
                     sites_other = {str(m).strip().upper()
@@ -5499,7 +5524,7 @@ class CodingValidator:
                         continue
                     if _is_em(other_code):
                         continue
-                    conflict = self.db.check_ncci(code, other_code)
+                    conflict = self._ncci(code, other_code)
                     if not conflict or str(conflict.get("modifier", "")).strip() != "1":
                         continue
                     sites_other = {str(m).strip().upper()

@@ -19,6 +19,8 @@ class Status(str, Enum):
     PASS = "PASS"      # filter satisfied
     WARN = "WARN"      # advisory; does not block a clean claim on its own
     FAIL = "FAIL"      # blocks the claim → routes to review
+    UNKNOWN = "UNKNOWN"  # required evidence/data unavailable → routes to review
+    ERROR = "ERROR"    # filter did not execute reliably → routes to review
 
 
 class DenialRisk(str, Enum):
@@ -29,8 +31,8 @@ class DenialRisk(str, Enum):
 
 
 class Disposition(str, Enum):
-    CLEAN = "CLEAN"    # zero FAIL findings — billable
-    REVIEW = "REVIEW"  # one or more FAIL findings — human review required
+    CLEAN = "CLEAN"    # zero blocking findings — eligible for downstream release
+    REVIEW = "REVIEW"  # one or more blocking findings — human review required
 
 
 class Finding(BaseModel):
@@ -62,7 +64,7 @@ class Finding(BaseModel):
 
     @property
     def is_blocking(self) -> bool:
-        return self.status == Status.FAIL
+        return self.status in {Status.FAIL, Status.UNKNOWN, Status.ERROR}
 
 
 # --------------------------------------------------------------------------- #
