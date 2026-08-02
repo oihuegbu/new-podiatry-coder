@@ -44,7 +44,7 @@ def run(agent, result: dict):
     return agent.check(build_claim(result))
 
 
-def base(cpt=None, icd=None, dos="2026-02-05", prior=None, insurance=None, dob=None):
+def base(cpt=None, icd=None, dos="2026-07-20", prior=None, insurance=None, dob=None):
     meta = {"date_of_service": dos}
     if insurance:
         meta["insurance"] = insurance
@@ -335,7 +335,11 @@ _STORE.conn.execute("DELETE FROM coverage_icd_noncovered WHERE policy_id='ATEST1
 _STORE.conn.execute("DELETE FROM coverage_policy WHERE policy_id='ATEST1'")
 _STORE.conn.execute("INSERT INTO coverage_cpt VALUES ('ATEST1','97810')")  # acupuncture; no seed policy governs it
 _STORE.conn.execute("INSERT INTO coverage_icd_noncovered VALUES ('ATEST1','I10')")
-_STORE.conn.execute("INSERT INTO coverage_policy (policy_id,title,contractor) VALUES ('ATEST1','Test noncovered-only policy','')")
+_STORE.conn.execute(
+    "INSERT INTO coverage_policy "
+    "(policy_id,title,contractor,states,effective_from,effective_to,temporal_authority) "
+    "VALUES ('ATEST1','Test noncovered-only policy','','','2026-01-01','2026-12-31',1)"
+)
 f = run(a, base(cpt=[{"code": "97810", "linked_diagnoses": ["I10"]}],
                 icd=[{"code": "I10", "type": "primary"}], insurance="Medicare Part B"))
 check("dx on explicit Group-N noncovered list → FAIL",
@@ -371,16 +375,20 @@ check("CPT with no coverage policy → no finding", len(f) == 0)
 f = run(a, base(cpt=[{"code": "99204"}, {"code": "73630"}], icd=[],
                 insurance="Medicare Part B"))
 check("procedures with zero diagnoses → FAIL", any(x.status == Status.FAIL and "NO diagnosis" in x.reason for x in f))
-# Medicare routine foot care (policy identified by its own CMS title) needs a
-# class-findings modifier (Q7/Q8/Q9) even with a qualifying dx → WARN without it
+# One governing source record lacks an authoritative effective date.  The
+# agent must stop before applying even a familiar class-findings rule; another
+# active policy cannot prove that the undated version was in force on the DOS.
 f = run(a, base(cpt=[{"code": "11721", "linked_diagnoses": ["E11.42"]}],
                 icd=[{"code": "E11.42", "type": "primary"}], insurance="Medicare Part B"))
-check("Medicare routine foot care, no Q7/Q8/Q9 → WARN",
-      any(x.status == Status.WARN and "class-findings" in x.reason for x in f))
+check("undated governing coverage article → UNKNOWN, not a guessed rule result",
+      any(x.status == Status.UNKNOWN
+          and x.clause == "coverage_policy_temporal_authority" for x in f)
+      and not any(x.status in (Status.WARN, Status.FAIL) for x in f))
 f = run(a, base(cpt=[{"code": "11721", "linked_diagnoses": ["E11.42"], "modifiers": ["Q8"]}],
                 icd=[{"code": "E11.42", "type": "primary"}], insurance="Medicare Part B"))
-check("Medicare routine foot care WITH Q8 → no class-findings finding",
-      not any("class-findings" in x.reason for x in f))
+check("supplying a modifier cannot bypass missing temporal authority",
+      any(x.status == Status.UNKNOWN
+          and x.clause == "coverage_policy_temporal_authority" for x in f))
 
 print("\n[Medical Necessity — claim-composition (conjunction) gate]")
 # Synthetic grammar policy on 97810 (no seed policy governs it): group 1 is
@@ -397,8 +405,9 @@ _STORE.conn.executemany(
     [(1, "primary_eligible", "", "test primary group"),
      (2, "required_secondary", "", "test secondary group")])
 _STORE.conn.execute(
-    "INSERT INTO coverage_policy (policy_id,title,contractor,states) "
-    "VALUES ('ATEST2','Test composition policy','','')")
+    "INSERT INTO coverage_policy "
+    "(policy_id,title,contractor,states,effective_from,effective_to,temporal_authority) "
+    "VALUES ('ATEST2','Test composition policy','','','2026-01-01','2026-12-31',1)")
 a = MedicalNecessityAgent(_STORE)
 f = run(a, base(cpt=[{"code": "97810", "linked_diagnoses": ["I10"]}],
                 icd=[{"code": "I10", "type": "primary"}], insurance="Medicare Part B"))
@@ -519,10 +528,23 @@ _STORE.conn.execute(
 )
 a = PriorAuthAgent(_STORE)
 f = run(a, base(cpt=[{"code": "J9999"}], insurance="Medicare Part B"))
-check("PA-required code, no auth on file → FAIL", any(x.status == Status.FAIL for x in f))
+check("partial payer corpus → UNKNOWN before individual rules are trusted",
+      any(x.status == Status.UNKNOWN and "complete" in x.reason.lower() for x in f))
+# Exercise rule matching only after the fixture explicitly declares a complete,
+# effective corpus. Production seed files remain incomplete and therefore
+# cannot turn an absent row into an autonomous pass.
+_STORE.conn.execute(
+    "UPDATE prior_auth_policy SET complete=1,effective_from='2026-01-01',"
+    "effective_to='2026-12-31' WHERE payer='medicare' AND plan=''"
+)
+f = run(a, base(cpt=[{"code": "J9999"}], insurance="Medicare Part B"))
+check("PA-required code, no auth on file → FAIL",
+      any(x.status == Status.FAIL for x in f))
 r = base(cpt=[{"code": "J9999"}], insurance="Medicare Part B"); r["patient_metadata"]["prior_auth_number"] = "AUTH123"
 f = run(a, r)
-check("PA-required code WITH auth number → WARN not FAIL", any(x.status == Status.WARN for x in f) and not any(x.status == Status.FAIL for x in f))
+check("bare auth number without code/unit/DOS verification → UNKNOWN",
+      any(x.status == Status.UNKNOWN for x in f)
+      and not any(x.status in (Status.WARN, Status.FAIL) for x in f))
 f = run(a, base(cpt=[{"code": "11721"}], insurance="Medicare Part B"))
 check("code not requiring PA → no finding", len(f) == 0)
 f = run(a, base(cpt=[{"code": "J9999"}]))  # no insurance text -> unrecognized payer
@@ -533,18 +555,37 @@ print("\n[Eligibility #11]")
 from app.compliance.agents.benefits import BenefitsAgent
 from app.compliance.adapters.stedi import ClearinghouseAdapter, EligibilityResult
 class FakeAdapter(ClearinghouseAdapter):
-    def __init__(self, active): self._active = active
+    def __init__(self, active, service_covered=None):
+        self._active = active
+        self._service_covered = service_covered
+        self.calls = []
     def is_configured(self): return True
-    def check_eligibility(self, **kw): return EligibilityResult(configured=True, checked=True, active=self._active)
+    def check_eligibility(self, **kw):
+        self.calls.append(kw)
+        return EligibilityResult(
+            configured=True, checked=True, active=self._active,
+            service_coverage_confirmed=self._service_covered)
 def elig_claim(active_member=True):
     r = base(cpt=[{"code": "11721"}], insurance="Medicare Part B")
-    r["patient_metadata"].update({"member_id": "M123", "patient_last_name": "Doe"})
+    r["patient_metadata"].update({
+        "member_id": "M123", "patient_last_name": "Doe",
+        "provider_npi": "1234567893",
+    })
     return r
-f = BenefitsAgent(_STORE, FakeAdapter(active=False)).check(build_claim(elig_claim()))
+f = BenefitsAgent(_STORE, FakeAdapter(active=False, service_covered=False)).check(build_claim(elig_claim()))
 check("inactive coverage → FAIL", any(x.status == Status.FAIL for x in f))
-f = BenefitsAgent(_STORE, FakeAdapter(active=True)).check(build_claim(elig_claim()))
+adapter = FakeAdapter(active=True, service_covered=True)
+f = BenefitsAgent(_STORE, adapter).check(build_claim(elig_claim()))
 check("active coverage → no finding", len(f) == 0)
-f = BenefitsAgent(_STORE, FakeAdapter(active=True)).check(build_claim(base(cpt=[{"code": "11721"}])))
+check("eligibility request is tied to DOS and exact service",
+      len(adapter.calls) == 1
+      and str(adapter.calls[0]["date_of_service"]) == "2026-07-20"
+      and adapter.calls[0]["procedure_code"] == "11721"
+      and adapter.calls[0]["product_or_service_id_qualifier"] == "CJ")
+f = BenefitsAgent(_STORE, FakeAdapter(active=True)).check(build_claim(elig_claim()))
+check("active plan without service confirmation → UNKNOWN",
+      any(x.status == Status.UNKNOWN for x in f))
+f = BenefitsAgent(_STORE, FakeAdapter(active=True, service_covered=True)).check(build_claim(base(cpt=[{"code": "11721"}])))
 check("no member id → UNKNOWN (cannot check at coding stage)",
       any(x.status == Status.UNKNOWN for x in f))
 
@@ -816,6 +857,9 @@ check("statuses restricted to PASS/WARN/FAIL/UNKNOWN/ERROR",
 # --------------------------------------------------------------------- #
 # --- cleanup: remove the PA test row so the shared DB stays pristine ---
 _STORE.conn.execute("DELETE FROM prior_auth_required WHERE code='J9999'")
+_STORE.conn.execute(
+    "UPDATE prior_auth_policy SET complete=0 WHERE payer='medicare' AND plan=''"
+)
 _STORE.conn.commit()
 
 print(f"\n{'='*50}\nRESULT: {PASS} passed, {FAIL} failed")

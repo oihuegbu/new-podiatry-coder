@@ -6,9 +6,9 @@ is swappable (Stedi sandbox today → the client's clearinghouse or a FHIR payer
 API later) with no change to the compliance logic.
 
 Config: STEDI_API_KEY + STEDI_ELIGIBILITY_URL / STEDI_CLAIMS_URL in .env. If
-the key is absent the client reports `configured=False` and callers degrade
-gracefully (eligibility agents stay non-blocking; claim submission refuses to
-run rather than pretending it did).
+the key is absent the client reports `configured=False`; eligibility remains
+UNKNOWN and blocks autonomous release, while claim submission refuses to run
+rather than pretending either operation succeeded.
 """
 from __future__ import annotations
 
@@ -31,6 +31,9 @@ class EligibilityResult:
     configured: bool = False          # was the clearinghouse reachable/configured
     checked: bool = False             # did we actually perform a check
     active: bool | None = None        # coverage active? None = unknown
+    service_coverage_confirmed: bool | None = None
+    requested_date_of_service: str = ""
+    requested_procedure_code: str = ""
     errors: list[str] = field(default_factory=list)
     raw: dict | None = None
 
@@ -50,7 +53,9 @@ class ClearinghouseAdapter:
         raise NotImplementedError
 
     def check_eligibility(self, *, payer_id, member_id, first_name, last_name,
-                          date_of_birth, npi, service_type_codes=None) -> EligibilityResult:
+                          date_of_birth, npi, service_type_codes=None,
+                          date_of_service=None, procedure_code=None,
+                          product_or_service_id_qualifier=None) -> EligibilityResult:
         raise NotImplementedError
 
     def submit_claim(self, claim_payload: dict) -> SubmissionResult:
@@ -112,14 +117,36 @@ class StediAdapter(ClearinghouseAdapter):
             errors=errors, raw=data)
 
     def check_eligibility(self, *, payer_id, member_id, first_name, last_name,
-                          date_of_birth, npi, service_type_codes=None) -> EligibilityResult:
+                          date_of_birth, npi, service_type_codes=None,
+                          date_of_service=None, procedure_code=None,
+                          product_or_service_id_qualifier=None) -> EligibilityResult:
         if not self.is_configured():
             return EligibilityResult(configured=False)
 
+        def _compact_date(value) -> str:
+            if value is None:
+                return ""
+            if hasattr(value, "strftime"):
+                return value.strftime("%Y%m%d")
+            return str(value).replace("-", "").strip()
+
+        dos = _compact_date(date_of_service)
+        encounter = {}
+        if dos:
+            encounter["dateOfService"] = dos
+        if service_type_codes:
+            encounter["serviceTypeCodes"] = list(service_type_codes)
+        if procedure_code:
+            encounter["procedureCode"] = str(procedure_code).strip().upper()
+            encounter["productOrServiceIDQualifier"] = str(
+                product_or_service_id_qualifier or "").strip().upper()
+
         body = {
             "tradingPartnerServiceId": payer_id,
-            "encounter": {"serviceTypeCodes": service_type_codes or ["30"]},
-            "provider": {"organizationName": "PROVIDER", "npi": npi or "1999999984"},
+            "encounter": encounter,
+            # Never send a fabricated identifier. BenefitsAgent owns the
+            # preflight and returns UNKNOWN when the real claim NPI is absent.
+            "provider": {"organizationName": "PROVIDER", "npi": npi or ""},
             "subscriber": {
                 "dateOfBirth": date_of_birth or "",
                 "firstName": first_name or "",
@@ -158,19 +185,46 @@ class StediAdapter(ClearinghouseAdapter):
         # filtered to the requested set first; a line with no
         # serviceTypeCodes of its own (general coverage info) is kept, since
         # there's nothing to filter it against.
-        requested_types = set(service_type_codes or ["30"])
+        requested_types = set(service_type_codes or [])
         benefits = data.get("benefitsInformation") or []
         relevant = [
             b for b in benefits
-            if not b.get("serviceTypeCodes") or set(b.get("serviceTypeCodes")) & requested_types
+            if not requested_types or not b.get("serviceTypeCodes")
+            or set(b.get("serviceTypeCodes")) & requested_types
         ]
+        negative = any(
+            str(b.get("code") or "").upper() in {"6", "I"}
+            or any(term in str(b.get("name") or "").lower()
+                   for term in ("inactive", "not covered", "non-covered", "excluded"))
+            for b in relevant
+        )
+        positive = any(
+            str(b.get("code") or "").upper() in {"1", "A"}
+            or ("active" in str(b.get("name") or "").lower()
+                and "inactive" not in str(b.get("name") or "").lower())
+            for b in relevant
+        )
         active = None
-        if relevant:
-            active = any(b.get("code") in ("1", "A") or
-                         "active" in str(b.get("name", "")).lower() for b in relevant)
-        elif errors:
-            active = None  # could not determine due to errors
+        if not errors:
+            if negative:
+                active = False
+            elif positive:
+                active = True
+        service_confirmed = None
+        if procedure_code and not errors:
+            if negative:
+                service_confirmed = False
+            elif active is True:
+                # This response was solicited with the procedure code and its
+                # code-system qualifier, rather than the generic plan-coverage
+                # service type.  An active, non-excluded response therefore
+                # establishes the requested service benefit.
+                service_confirmed = True
         return EligibilityResult(configured=True, checked=True, active=active,
+                                 service_coverage_confirmed=service_confirmed,
+                                 requested_date_of_service=dos,
+                                 requested_procedure_code=str(
+                                     procedure_code or "").strip().upper(),
                                  errors=errors, raw=data)
 
 

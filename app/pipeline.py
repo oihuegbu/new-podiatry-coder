@@ -502,27 +502,43 @@ class MedicalCodingPipeline:
             result.auto_coding_confidence = min(result.auto_coding_confidence, 0.84)
 
     def _merge_candidates(self, entity_cands: dict, note_cands: dict) -> dict:
-        merged = {"icd10": [], "cpt": [], "hcpcs": []}
-        seen = {"icd10": set(), "cpt": set(), "hcpcs": set()}
+        """Merge with entity-balanced rank, then deduplicate.
 
-        for key, data in entity_cands.items():
+        Similarity scores produced for different queries are not a shared
+        ranking.  Globally sorting them let one verbose entity consume the
+        entire prompt budget while a different documented diagnosis/service's
+        top candidate fell below the selectable cutoff.  Round-robin preserves
+        each query's local rank: every entity's first result precedes any
+        entity's second result, with full-note retrieval as another source.
+        """
+        systems = ("icd10", "cpt", "hcpcs")
+        sources: dict[str, list[list[dict]]] = {cs: [] for cs in systems}
+        for data in entity_cands.values():
             for cs, cands in data.get("candidates", {}).items():
-                for c in cands:
-                    code = c.get("code", "")
-                    if code not in seen[cs]:
-                        seen[cs].add(code)
-                        merged[cs].append(c)
-
+                if cs in sources and cands:
+                    sources[cs].append(sorted(
+                        cands, key=lambda x: x.get("similarity_score", 0),
+                        reverse=True))
         for cs, cands in note_cands.items():
-            for c in cands:
-                code = c.get("code", "")
-                if code not in seen[cs]:
-                    seen[cs].add(code)
-                    merged[cs].append(c)
+            if cs in sources and cands:
+                sources[cs].append(sorted(
+                    cands, key=lambda x: x.get("similarity_score", 0),
+                    reverse=True))
 
-        for cs in merged:
-            merged[cs].sort(key=lambda x: x.get("similarity_score", 0), reverse=True)
-
+        merged = {cs: [] for cs in systems}
+        for cs in systems:
+            seen: set[str] = set()
+            depth = 0
+            while any(depth < len(rows) for rows in sources[cs]):
+                for rows in sources[cs]:
+                    if depth >= len(rows):
+                        continue
+                    candidate = rows[depth]
+                    code = str(candidate.get("code") or "").strip()
+                    if code and code not in seen:
+                        seen.add(code)
+                        merged[cs].append(candidate)
+                depth += 1
         return merged
 
     def _drop_inactive_candidates(self, merged: dict, dos) -> dict:

@@ -1,6 +1,8 @@
 {
   "payer_id": "medicare",
   "payer_name": "Medicare",
+  "complete": false,
+  "effective_from": "2026-04-13",
   "source": "CMS DMEPOS Required Prior Authorization List",
   "source_urls": [
     "https://www.ossur.com/en-us/professionals/ossur-rr/cmsupdatespriorauthorization-list",

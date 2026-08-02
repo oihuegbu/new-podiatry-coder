@@ -367,6 +367,52 @@ def _mandatory_filter_control(result: dict) -> ControlResult:
     return _control("mandatory_filter_execution", ControlOutcome.PASS)
 
 
+def _validation_control(result: dict) -> ControlResult:
+    """Preserve the deterministic validator's release decision.
+
+    The compliance scrub evaluates a different set of controls and therefore
+    cannot clear a validator defect merely because every scrub agent passed.
+    Errors/critical findings are hard blockers; warnings retain the validator's
+    review requirement.  Informational, already-resolved corrections remain
+    eligible for the normal mutation/audit controls below.
+    """
+    if "validation_issues" not in result:
+        return _control("deterministic_validation",
+                        ControlOutcome.NOT_CHECKED,
+                        "validator execution output is absent")
+    raw_issues = result.get("validation_issues")
+    if not isinstance(raw_issues, list) or any(
+            not isinstance(row, dict) for row in raw_issues):
+        return _control("deterministic_validation", ControlOutcome.ERROR,
+                        "validator issue payload is malformed")
+    issues = list(raw_issues)
+    blocking = [row for row in issues if str(row.get("severity") or "").upper()
+                in {"ERROR", "CRITICAL"}]
+    warnings = [row for row in issues if str(row.get("severity") or "").upper()
+                == "WARNING"]
+    unknown = [row for row in issues if str(row.get("severity") or "").upper()
+               not in {"INFO", "WARNING", "ERROR", "CRITICAL"}]
+
+    def _labels(rows: list[dict]) -> str:
+        return ", ".join(sorted({
+            str(row.get("category") or row.get("code") or "validator_issue")
+            for row in rows
+        }))
+
+    if blocking:
+        return _control("deterministic_validation", ControlOutcome.BLOCKED,
+                        "unresolved validator errors: " + _labels(blocking))
+    if unknown:
+        return _control("deterministic_validation", ControlOutcome.ERROR,
+                        "validator issues have unknown severity: "
+                        + _labels(unknown))
+    if warnings:
+        return _control("deterministic_validation",
+                        ControlOutcome.REVIEW_REQUIRED,
+                        "unresolved validator warnings: " + _labels(warnings))
+    return _control("deterministic_validation", ControlOutcome.PASS)
+
+
 def _legacy_controls(result: dict) -> list[ControlResult]:
     controls = [_control(
         "pipeline_execution",
@@ -387,6 +433,7 @@ def _legacy_controls(result: dict) -> list[ControlResult]:
         ControlOutcome.BLOCKED,
         "" if clean and scrub_clean else "compliance scrub did not return CLEAN"))
     controls.append(_mandatory_filter_control(result))
+    controls.append(_validation_control(result))
     has_dx = bool(result.get("icd_codes"))
     has_service = bool(result.get("cpt_codes") or result.get("hcpcs_codes"))
     controls.append(_control(

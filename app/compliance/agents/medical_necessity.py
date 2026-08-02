@@ -130,6 +130,8 @@ class MedicalNecessityAgent(ComplianceAgent):
             if _is_em(line.code):
                 continue  # E/M necessity is an MDM question, not LCD code-pairing
             all_policies = self.store.coverage_policies_for_cpt(line.code)
+            dated_policies = self.store.coverage_policies_for_cpt(
+                line.code, claim.date_of_service) if claim.date_of_service else []
 
             # LCDs/Articles are LOCAL policies — each governs only the states
             # its issuing MAC adjudicates. Without this filter, a CGS (KY/OH)
@@ -137,9 +139,26 @@ class MedicalNecessityAgent(ComplianceAgent):
             # eight policies cited against CPT 29445 came from non-Florida
             # MACs. Unknown claim state or unknown contractor stays
             # conservative (policy kept).
-            policies = [p for p in all_policies
+            policies = [p for p in dated_policies
                         if self.store.policy_applies_in_state(p, claim.state)]
             excluded = [p for p in all_policies if p not in policies]
+            temporal_gaps = [p for p in all_policies
+                             if p not in dated_policies
+                             and self.store.policy_applies_in_state(p, claim.state)]
+            if all_policies and (claim.date_of_service is None or temporal_gaps):
+                findings.append(self.finding(
+                    status=Status.UNKNOWN, codes=[line.code],
+                    denial_risk=DenialRisk.HIGH,
+                    reason=(f"Coverage policy applicability for {line.code} is not "
+                            f"proven on the claim DOS"
+                            + (f" ({', '.join(temporal_gaps)})" if temporal_gaps else "")
+                            + "."),
+                    recommendation="Load the effective-dated policy version covering the DOS "
+                                   "before autonomous release.",
+                    source_rule="effective-dated LCD/NCD/article coverage authority",
+                    clause="coverage_policy_temporal_authority",
+                ))
+                continue
             if not policies:
                 if excluded:
                     # A previous run may have FAILed this exact line against

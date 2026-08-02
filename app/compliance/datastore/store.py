@@ -85,7 +85,36 @@ def _clean_date(val) -> str:
         return s
     if re.match(r"^\d{8}$", s):
         return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    match = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", s)
+    if match:
+        month, day, year = match.groups()
+        return f"{year}-{int(month):02d}-{int(day):02d}"
     return "1900-01-01"
+
+
+def _is_valid_date(val) -> bool:
+    """Whether *val* carries a syntactically real calendar date.
+
+    `_clean_date` intentionally retains the datastore's historical wide-open
+    fallback for non-temporal code tables.  Temporal policy authority must not
+    confuse that fallback with a sourced effective date, and must also reject
+    impossible dates rather than trusting a regex-shaped value.
+    """
+    if not val:
+        return False
+    try:
+        raw = str(val).strip()
+        if re.match(r"^\d{8}$", raw):
+            raw = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+        else:
+            match = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", raw)
+            if match:
+                month, day, year = match.groups()
+                raw = f"{year}-{int(month):02d}-{int(day):02d}"
+        date.fromisoformat(raw)
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 class ComplianceDataStore:
@@ -200,7 +229,9 @@ class ComplianceDataStore:
             {"id": "ncci_aoc", "paths": [NCCI_AOC_FILE],
              "clear": [("ncci_aoc", None)], "ingest": [self._ingest_ncci_aoc]},
             {"id": "prior_auth", "paths": sorted(CODES_DIR.glob("prior_auth_*.json")),
-             "clear": [("prior_auth_required", None)], "ingest": [self._ingest_prior_auth]},
+             "clear": [("prior_auth_required", None),
+                       ("prior_auth_policy", None)],
+             "ingest": [self._ingest_prior_auth]},
             {"id": "mce_edits", "paths": [MCE_EDITS_FILE],
              "clear": [("mce_edit", None), ("mce_age_range", None)],
              "ingest": [self._ingest_mce_edits]},
@@ -520,6 +551,13 @@ class ComplianceDataStore:
         n_titles = self.conn.execute("SELECT COUNT(*) FROM coverage_policy").fetchone()[0]
         if n_titles == 0:
             self._ingest_lcd()
+            n_titles = self.conn.execute(
+                "SELECT COUNT(*) FROM coverage_policy").fetchone()[0]
+        n_temporal = self.conn.execute(
+            "SELECT COUNT(*) FROM coverage_policy WHERE temporal_authority=1"
+        ).fetchone()[0]
+        if n_titles > 0 and n_temporal == 0:
+            self._ingest_lcd()
 
         # coverage_policy.contractor: added when MedicalNecessityAgent gained
         # MAC-jurisdiction scoping (an LCD from CGS (KY/OH) must not gate a
@@ -620,6 +658,15 @@ class ComplianceDataStore:
         if n_index_terms == 0:
             self._ingest_icd10_index_terms()
 
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS prior_auth_policy ("
+            "payer TEXT NOT NULL, plan TEXT NOT NULL DEFAULT '', "
+            "complete INTEGER NOT NULL DEFAULT 0, "
+            "effective_from TEXT NOT NULL DEFAULT '1900-01-01', "
+            "effective_to TEXT NOT NULL DEFAULT '9999-12-31', "
+            "source TEXT, status TEXT, PRIMARY KEY (payer, plan))"
+        )
+
         # prior_auth_required: was (payer, code, note) — no way to represent
         # category-based payer policies (e.g. Tricare, which publishes broad
         # categories like "Durable Medical Equipment" rather than enumerated
@@ -641,6 +688,15 @@ class ComplianceDataStore:
                 CREATE INDEX IF NOT EXISTS ix_pa_prefix ON prior_auth_required(payer, hcpcs_prefix);
                 """
             )
+            self._ingest_prior_auth()
+
+        # Corpus metadata is separate from individual PA rules.  A payer file
+        # with one or a handful of rows is not proof that absence means
+        # "authorization not required"; only an explicitly complete,
+        # effective-dated corpus may make that assertion.
+        n_pa_policy = self.conn.execute(
+            "SELECT COUNT(*) FROM prior_auth_policy").fetchone()[0]
+        if n_pa_policy == 0:
             self._ingest_prior_auth()
 
     def _is_populated(self) -> bool:
@@ -676,7 +732,11 @@ class ComplianceDataStore:
             DROP TABLE IF EXISTS modifier;
             DROP TABLE IF EXISTS coverage_cpt;
             DROP TABLE IF EXISTS coverage_icd;
+            DROP TABLE IF EXISTS coverage_policy;
+            DROP TABLE IF EXISTS coverage_group;
+            DROP TABLE IF EXISTS coverage_icd_noncovered;
             DROP TABLE IF EXISTS prior_auth_required;
+            DROP TABLE IF EXISTS prior_auth_policy;
             DROP TABLE IF EXISTS icd10_code_first;
             DROP TABLE IF EXISTS icd10_use_additional_code;
             DROP TABLE IF EXISTS icd10_code_also;
@@ -846,6 +906,16 @@ class ComplianceDataStore:
             );
             CREATE INDEX ix_pa_code ON prior_auth_required(payer, code);
             CREATE INDEX ix_pa_prefix ON prior_auth_required(payer, hcpcs_prefix);
+            CREATE TABLE prior_auth_policy (
+                payer          TEXT NOT NULL,
+                plan           TEXT NOT NULL DEFAULT '',
+                complete       INTEGER NOT NULL DEFAULT 0,
+                effective_from TEXT NOT NULL DEFAULT '1900-01-01',
+                effective_to   TEXT NOT NULL DEFAULT '9999-12-31',
+                source         TEXT,
+                status         TEXT,
+                PRIMARY KEY (payer, plan)
+            );
 
             -- ICD-10-CM instructional notes: "code first" (manifestation
             -- must be sequenced after its etiology) and "use additional
@@ -1228,6 +1298,9 @@ class ComplianceDataStore:
                 "contractor": entry.get("contractor", ""),
                 "cpt_codes": entry.get("governed_cpts", []),
                 "covered_icd": qualifying_dx,
+                "effective_from": _clean_date(entry.get("effective_date")),
+                "effective_to": _OPEN,
+                "temporal_authority": _is_valid_date(entry.get("effective_date")),
             })
         for entry in data.get("article", []):
             if entry.get("status") != "A":
@@ -1238,6 +1311,9 @@ class ComplianceDataStore:
                 "contractor": entry.get("contractor", ""),
                 "cpt_codes": entry.get("governed_cpts", []),
                 "covered_icd": entry.get("qualifying_dx", []),
+                "effective_from": _clean_date(entry.get("effective_date")),
+                "effective_to": _OPEN,
+                "temporal_authority": _is_valid_date(entry.get("effective_date")),
                 # seed entries may carry group grammar under this key too
                 "covered_icd_groups": entry.get("qualifying_dx_groups", []),
             })
@@ -1257,6 +1333,22 @@ class ComplianceDataStore:
                 cached = [a for a in cache.get("articles", [])
                           if isinstance(a, dict) and a.get("policy_id")]
                 if cached:
+                    seed_by_id = {a.get("policy_id"): a for a in articles}
+                    cache_date = _clean_date(
+                        str(cache.get("fetched_at") or "")[:10])
+                    cached = [dict(
+                        a,
+                        effective_from=(
+                            a.get("effective_from")
+                            or (seed_by_id.get(a.get("policy_id")) or {}).get(
+                                "effective_from")
+                            or cache_date),
+                        effective_to=(a.get("effective_to") or _OPEN),
+                        temporal_authority=bool(
+                            a.get("temporal_authority")
+                            or (seed_by_id.get(a.get("policy_id")) or {}).get(
+                                "temporal_authority")),
+                    ) for a in cached]
                     articles.extend(cached)
                     logger.info(
                         f"  lcd_qualifying: MCD-export cache overlaid "
@@ -1290,6 +1382,7 @@ class ComplianceDataStore:
         prior_auth_required() for how each is matched against a claim line.
         """
         rows = []
+        policies = []
         files = sorted(CODES_DIR.glob("prior_auth_*.json"))
         for path in files:
             try:
@@ -1300,6 +1393,22 @@ class ComplianceDataStore:
                 continue
             payer_id = data.get("payer_id", "")
             source = data.get("source", "")
+            if not payer_id:
+                logger.warning(f"  prior_auth_required: {path.name} has no payer_id")
+                continue
+            plan = str(data.get("plan") or "").strip()
+            effective_from = _clean_date(
+                data.get("effective_from") or data.get("document_date"))
+            effective_to = _clean_date(data.get("effective_to")) \
+                if data.get("effective_to") else _OPEN
+            policies.append((
+                payer_id, plan, int(data.get("complete") is True
+                                    and _is_valid_date(
+                                        data.get("effective_from")
+                                        or data.get("document_date"))),
+                effective_from, effective_to, source,
+                str(data.get("status") or data.get("note") or "")[:1000],
+            ))
             for c in data.get("codes", []):
                 code = _norm(c.get("code", ""))
                 if not code:
@@ -1314,8 +1423,15 @@ class ComplianceDataStore:
             self.conn.executemany(
                 "INSERT INTO prior_auth_required VALUES (?,?,?,?,?,?)", rows
             )
-            self.conn.commit()
-        logger.info(f"  prior_auth_required: {len(rows)} rule(s) from {len(files)} payer file(s)")
+        if policies:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO prior_auth_policy "
+                "(payer,plan,complete,effective_from,effective_to,source,status) "
+                "VALUES (?,?,?,?,?,?,?)", policies)
+        self.conn.commit()
+        logger.info(f"  prior_auth_required: {len(rows)} rule(s), "
+                    f"{len(policies)} corpus declaration(s) from "
+                    f"{len(files)} payer file(s)")
 
     # MCD's "Not Applicable" placeholder row (description literally "Not
     # Applicable") — present when an article's diagnosis section states that
@@ -1375,10 +1491,20 @@ class ComplianceDataStore:
             if pid in superseded_lcds:
                 art = dict(art, covered_icd=[], covered_icd_groups=[],
                            qualifying_dx_groups=[])
+            effective_from = art.get("effective_from")
+            effective_to = art.get("effective_to") or _OPEN
+            temporal_authority = (
+                art.get("temporal_authority") is True
+                and _is_valid_date(effective_from)
+                and _is_valid_date(effective_to)
+            )
             title_rows.append((pid, art.get("title", "") or "",
                                " ".join(str(art.get("contractor", "") or "").split()),
                                ",".join(s.strip().upper()
-                                        for s in (art.get("states") or []) if s)))
+                                        for s in (art.get("states") or []) if s),
+                               _clean_date(effective_from),
+                               _clean_date(effective_to),
+                               int(temporal_authority)))
             for c in art.get("cpt_codes", []):
                 cpt_rows.append((pid, _norm(c)))
 
@@ -1440,8 +1566,9 @@ class ComplianceDataStore:
         self.conn.executemany("INSERT INTO coverage_group VALUES (?,?,?,?,?)", group_rows)
         self.conn.executemany("INSERT INTO coverage_icd_noncovered VALUES (?,?)", noncov_rows)
         self.conn.executemany(
-            "INSERT INTO coverage_policy (policy_id, title, contractor, states) "
-            "VALUES (?,?,?,?)",
+            "INSERT INTO coverage_policy (policy_id, title, contractor, states, "
+            "effective_from, effective_to, temporal_authority) "
+            "VALUES (?,?,?,?,?,?,?)",
             title_rows,
         )
         self.conn.executemany("INSERT INTO lcd_qualifying VALUES (?,?)", sorted(set(lcd_rows)))
@@ -1459,7 +1586,10 @@ class ComplianceDataStore:
             # issuing MAC — LCDs/Articles are LOCAL policies that only govern
             # claims in the states their contractor adjudicates (resolved via
             # app.compliance.geo + mac_jurisdictions.json)
-            "contractor TEXT NOT NULL DEFAULT '')"
+            "contractor TEXT NOT NULL DEFAULT '', "
+            "effective_from TEXT NOT NULL DEFAULT '1900-01-01', "
+            "effective_to TEXT NOT NULL DEFAULT '9999-12-31', "
+            "temporal_authority INTEGER NOT NULL DEFAULT 0)"
         )
         cols = {row[1] for row in self.conn.execute("PRAGMA table_info(coverage_policy)")}
         if "contractor" not in cols:
@@ -1475,6 +1605,18 @@ class ComplianceDataStore:
             self.conn.execute(
                 "ALTER TABLE coverage_policy ADD COLUMN states TEXT NOT NULL DEFAULT ''"
             )
+        if "effective_from" not in cols:
+            self.conn.execute(
+                "ALTER TABLE coverage_policy ADD COLUMN effective_from TEXT "
+                "NOT NULL DEFAULT '1900-01-01'")
+        if "effective_to" not in cols:
+            self.conn.execute(
+                "ALTER TABLE coverage_policy ADD COLUMN effective_to TEXT "
+                "NOT NULL DEFAULT '9999-12-31'")
+        if "temporal_authority" not in cols:
+            self.conn.execute(
+                "ALTER TABLE coverage_policy ADD COLUMN temporal_authority INTEGER "
+                "NOT NULL DEFAULT 0")
         # Group-N "ICD-10 codes that DO NOT support medical necessity" — the
         # mirror image of coverage_icd. Populated by the MCD bulk-export
         # refresh (the Coverage API seed file exposes only covered lists).
@@ -2245,12 +2387,27 @@ class ComplianceDataStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def coverage_policies_for_cpt(self, cpt_code: str) -> list[str]:
+    def coverage_policies_for_cpt(self, cpt_code: str, dos=None) -> list[str]:
         """Policy IDs whose medical-necessity rules govern this CPT."""
-        rows = self.conn.execute(
-            "SELECT DISTINCT policy_id FROM coverage_cpt WHERE cpt_code=?", (_norm(cpt_code),)
-        ).fetchall()
+        if dos is None:
+            rows = self.conn.execute(
+                "SELECT DISTINCT policy_id FROM coverage_cpt WHERE cpt_code=?",
+                (_norm(cpt_code),)).fetchall()
+        else:
+            d = self._dos(dos)
+            rows = self.conn.execute(
+                "SELECT DISTINCT c.policy_id FROM coverage_cpt c "
+                "JOIN coverage_policy p ON p.policy_id=c.policy_id "
+                "WHERE c.cpt_code=? AND p.temporal_authority=1 "
+                "AND p.effective_from<=? AND p.effective_to>=?",
+                (_norm(cpt_code), d, d)).fetchall()
         return [r["policy_id"] for r in rows]
+
+    def coverage_temporal_gaps_for_cpt(self, cpt_code: str, dos) -> list[str]:
+        """Policies known for the code but not proven applicable on the DOS."""
+        known = set(self.coverage_policies_for_cpt(cpt_code))
+        active = set(self.coverage_policies_for_cpt(cpt_code, dos))
+        return sorted(known - active)
 
     def coverage_icd_covered(self, policy_id: str, icd_code: str) -> bool:
         return self.conn.execute(
@@ -2362,7 +2519,9 @@ class ComplianceDataStore:
                 return dict(row)
         return None
 
-    def prior_auth_policy_available(self, payer_id: str | None) -> bool:
+    def prior_auth_policy_status(self, payer_id: str | None,
+                                 plan: str | None = None,
+                                 dos=None) -> dict:
         """Whether this payer has an authoritative PA policy loaded.
 
         A missing code row only means "PA not required" after the payer's
@@ -2370,12 +2529,33 @@ class ComplianceDataStore:
         absence of an entire payer feed silently became a pass.
         """
         if not payer_id:
-            return False
+            return {"available": False, "reason": "payer_unresolved"}
+        if dos is None or not str(dos).strip():
+            return {"available": False, "reason": "dos_unresolved"}
+        plan_text = str(plan or "").strip()
         row = self.conn.execute(
-            "SELECT 1 FROM prior_auth_required WHERE payer=? LIMIT 1",
-            (payer_id,),
+            "SELECT payer,plan,complete,effective_from,effective_to,source,status "
+            "FROM prior_auth_policy WHERE payer=? AND plan IN ('', ?) "
+            "ORDER BY CASE WHEN plan=? THEN 0 ELSE 1 END LIMIT 1",
+            (payer_id, plan_text, plan_text),
         ).fetchone()
-        return row is not None
+        if row is None:
+            return {"available": False, "reason": "corpus_absent"}
+        result = dict(row)
+        if not bool(row["complete"]):
+            return {**result, "available": False,
+                    "reason": "corpus_incomplete"}
+        d = self._dos(dos)
+        if not (row["effective_from"] <= d <= row["effective_to"]):
+            return {**result, "available": False,
+                    "reason": "corpus_not_effective_for_dos"}
+        return {**result, "available": True, "reason": ""}
+
+    def prior_auth_policy_available(self, payer_id: str | None,
+                                    plan: str | None = None,
+                                    dos=None) -> bool:
+        return bool(self.prior_auth_policy_status(
+            payer_id, plan=plan, dos=dos).get("available"))
 
     @staticmethod
     def _dos(dos: date | str | None) -> str:

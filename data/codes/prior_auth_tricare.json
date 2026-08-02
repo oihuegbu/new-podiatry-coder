@@ -1,6 +1,8 @@
 {
   "payer_id": "tricare",
   "payer_name": "Tricare",
+  "complete": false,
+  "effective_from": "2025-07-24",
   "source": "TriWest Healthcare Alliance Prior Authorization List",
   "source_url": "https://tricare.triwest.com/globalassets/tricare/prior-authorization-list.pdf",
   "source_classification": "TriWest Classification: Proprietary and Confidential",

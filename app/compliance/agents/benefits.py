@@ -49,25 +49,64 @@ class BenefitsAgent(ComplianceAgent):
                 source_rule="eligibility (270/271)",
             )]
 
-        dob = (sub.date_of_birth or "")
-        res = self.adapter.check_eligibility(
-            payer_id=claim.payer.stedi_trading_partner_id, member_id=sub.member_id,
-            first_name=sub.first_name, last_name=sub.last_name,
-            date_of_birth=dob, npi=claim.provider.npi,
-        )
-        if res.active is False:
-            return [self.finding(
-                status=Status.FAIL, denial_risk=DenialRisk.HIGH,
-                reason="Eligibility check returned INACTIVE coverage for the date of service.",
-                recommendation="Confirm active coverage / correct payer; may be patient responsibility.",
-                source_rule="271 eligibility response",
-            )]
-        if res.active is None:
-            msg = "; ".join(res.errors) or "indeterminate response"
+        if not claim.provider.npi:
             return [self.finding(
                 status=Status.UNKNOWN, denial_risk=DenialRisk.HIGH,
-                reason=f"Eligibility could not be confirmed ({msg}).",
-                recommendation="Manually verify eligibility before submission.",
-                source_rule="271 eligibility response",
+                reason="Eligibility could not be checked because the billing/rendering "
+                       "provider NPI is absent.",
+                recommendation="Resolve the claim provider NPI before sending the 270 inquiry.",
+                source_rule="eligibility (270/271) provider identity",
             )]
-        return []  # active coverage confirmed
+
+        if claim.date_of_service is None:
+            return [self.finding(
+                status=Status.UNKNOWN, denial_risk=DenialRisk.HIGH,
+                reason="Eligibility cannot be tied to the claim because the date of "
+                       "service is absent.",
+                recommendation="Resolve the DOS and rerun procedure-specific eligibility.",
+                source_rule="eligibility (270/271) date-of-service requirement",
+            )]
+
+        dob = (sub.date_of_birth or "")
+        findings: list[Finding] = []
+        if not claim.lines:
+            return [self.finding(
+                status=Status.UNKNOWN, denial_risk=DenialRisk.HIGH,
+                reason="No billable service line is available for a service-specific "
+                       "benefit inquiry.",
+                recommendation="Build the service lines before checking benefits.",
+                source_rule="eligibility (270/271) service-specific inquiry",
+            )]
+
+        for line in claim.lines:
+            qualifier = "HC" if str(line.code_system).upper() == "HCPCS" else "CJ"
+            res = self.adapter.check_eligibility(
+                payer_id=claim.payer.stedi_trading_partner_id,
+                member_id=sub.member_id, first_name=sub.first_name,
+                last_name=sub.last_name, date_of_birth=dob,
+                npi=claim.provider.npi, date_of_service=claim.date_of_service,
+                procedure_code=line.code,
+                product_or_service_id_qualifier=qualifier,
+            )
+            if res.active is False or res.service_coverage_confirmed is False:
+                findings.append(self.finding(
+                    status=Status.FAIL, codes=[line.code],
+                    denial_risk=DenialRisk.HIGH,
+                    reason=f"Eligibility/benefits response did not confirm active, "
+                           f"covered benefits for {line.code} on the date of service.",
+                    recommendation="Confirm active coverage and the service benefit with "
+                                   "the payer before submission.",
+                    source_rule="procedure-specific 271 eligibility response",
+                ))
+                continue
+            if res.active is not True or res.service_coverage_confirmed is not True:
+                msg = "; ".join(res.errors) or "procedure benefit not confirmed"
+                findings.append(self.finding(
+                    status=Status.UNKNOWN, codes=[line.code],
+                    denial_risk=DenialRisk.HIGH,
+                    reason=f"Eligibility for {line.code} on the DOS could not be "
+                           f"confirmed ({msg}).",
+                    recommendation="Obtain a procedure-specific 271 response before submission.",
+                    source_rule="procedure-specific 271 eligibility response",
+                ))
+        return findings

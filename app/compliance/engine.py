@@ -174,6 +174,7 @@ def build_claim(result: dict) -> Claim:
             is_medicare=ins.is_medicare,
             kind=ins.kind,
             follows_medicare_coverage=ins.follows_medicare_coverage,
+            plan=meta.get("insurance_plan") or None,
         ),
         subscriber=Subscriber(
             member_id=meta.get("member_id") or meta.get("insurance_id") or ins.member_id,

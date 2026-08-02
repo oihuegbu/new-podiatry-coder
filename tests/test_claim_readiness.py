@@ -83,6 +83,7 @@ class ClaimReadinessTest(unittest.TestCase):
                 "source_temporal_authority": True,
             }],
             "hcpcs_codes": [], "material_corrections": [],
+            "validation_issues": [],
             "note_integrity": {
                 "complete": True, "page_count": 3,
                 "extracted_page_count": 3,
@@ -173,6 +174,53 @@ class ClaimReadinessTest(unittest.TestCase):
     def test_filter_fail_cannot_be_hidden_by_clean_summary(self):
         result = self.result()
         result["claim_scrub"]["filter_results"][0]["status"] = "FAIL"
+        cert = build_readiness_certificate(result)
+        self.assertEqual(cert.disposition.value, "BLOCKED")
+
+    def test_validator_error_cannot_be_hidden_by_clean_scrub_or_upheld_audit(self):
+        result = self.result()
+        result["validation_issues"] = [{
+            "severity": "ERROR", "category": "em_patient_status",
+            "code": "SERVICE", "message": "wrong patient-status family",
+        }]
+        # The audit fingerprint is deliberately current: even an upheld audit
+        # cannot erase a deterministic validation failure.
+        from tools.clinical_auditor import corrections_fingerprint
+        result["clinical_audit"]["fingerprint"] = corrections_fingerprint(result)
+        cert = build_readiness_certificate(result)
+        self.assertEqual(cert.disposition.value, "BLOCKED")
+        self.assertIn("deterministic_validation",
+                      {control.control_id for control in cert.controls
+                       if control.outcome.value == "BLOCKED"})
+
+    def test_validator_warning_requires_review(self):
+        result = self.result()
+        result["validation_issues"] = [{
+            "severity": "WARNING", "category": "physician_code_missing",
+            "code": "DX", "message": "provider code omitted",
+        }]
+        from tools.clinical_auditor import corrections_fingerprint
+        result["clinical_audit"]["fingerprint"] = corrections_fingerprint(result)
+        cert = build_readiness_certificate(result)
+        self.assertEqual(cert.disposition.value, "REVIEW_REQUIRED")
+
+    def test_malformed_validator_issue_blocks(self):
+        result = self.result()
+        result["validation_issues"] = ["not a structured issue"]
+        cert = build_readiness_certificate(result)
+        self.assertEqual(cert.disposition.value, "BLOCKED")
+
+    def test_missing_validator_output_blocks(self):
+        result = self.result()
+        result.pop("validation_issues")
+        cert = build_readiness_certificate(result)
+        self.assertEqual(cert.disposition.value, "BLOCKED")
+
+    def test_unknown_validator_severity_blocks(self):
+        result = self.result()
+        result["validation_issues"] = [{
+            "severity": "MAYBE", "category": "future_validator_state",
+        }]
         cert = build_readiness_certificate(result)
         self.assertEqual(cert.disposition.value, "BLOCKED")
 
