@@ -1,0 +1,11 @@
+{
+  "version": "FY2026",
+  "source": "CDC/NCHS ICD-10-CM Tabular List FY2026",
+  "source_url": "https://ftp.cdc.gov/pub/health_statistics/nchs/publications/ICD10CM/",
+  "description": "Official seventh-character role values. Python asks for a semantic role and validates the resulting code against the active ICD-10-CM set.",
+  "seventh_character_roles": {
+    "initial_encounter": "A",
+    "subsequent_encounter": "D",
+    "sequela": "S"
+  }
+}

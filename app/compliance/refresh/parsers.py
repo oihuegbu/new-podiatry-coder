@@ -356,12 +356,36 @@ def parse_pos(html: str, effective_date: str) -> tuple[list[tuple], list[str]]:
     return uniq, ["code", "name", "facility"]
 
 
+def _mcd_article_window(row: dict) -> tuple[str, str] | None:
+    """Effective window for one latest-version MCD Article export row.
+
+    The official CSV uses article_eff_date/article_end_date, not the display
+    labels previously searched by the parser. Active and retired versions are
+    authoritative for their stated window; proposed rows are not policy.
+    """
+    status = str(row.get("status") or "").strip().upper()
+    if status not in {"A", "R"}:
+        return None
+    start = _norm_date(str(row.get("article_eff_date") or "")[:10], "")
+    if not start:
+        return None
+    if status == "R":
+        end_raw = (row.get("article_end_date")
+                   or row.get("article_rev_end_date") or "")
+        end = _norm_date(str(end_raw)[:10], "")
+        if not end:
+            return None
+    else:
+        end = "9999-12-31"
+    return start, end
+
+
 def parse_mcd_export(raw: bytes) -> list[dict]:
-    """CMS MCD bulk 'current_article.zip' export → coverage article dicts.
+    """CMS MCD bulk 'all_article.zip' export → coverage article dicts.
 
     Verified live format (downloads.cms.gov/medicare-coverage-database/
-    downloads/exports/current_article.zip): an outer zip holding
-    current_article_csv.zip, which holds a RELATIONAL set of CSVs — not one
+    downloads/exports/all_article.zip): an outer zip holding an inner
+    relational CSV archive — not one
     flat file.     Joined here on article_id:
       article.csv                → article_id, title
       article_x_hcpc_code.csv    → article_id, hcpc_code_id (the CPT/HCPCS)
@@ -393,13 +417,17 @@ def parse_mcd_export(raw: bytes) -> list[dict]:
         text = zf.read(name).decode("latin-1", errors="replace")
         return list(csv.DictReader(io.StringIO(text)))
 
-    # Only ACTIVE articles (status 'A') — the export also carries other
-    # statuses (88 'P' rows in the live 2026-07 export); ingesting them
-    # would gate claims on policies that aren't in force. Same filter the
-    # seed-file ingest (_ingest_lcd) applies.
+    # The all-Article dataset exposes the latest active and retired version of
+    # each policy. Proposed rows remain excluded. Older superseded versions
+    # are not present in this CMS download, so DOS windows outside these
+    # exact rows remain UNKNOWN rather than borrowing current policy content.
+    article_rows = [r for r in rows_of("article.csv")
+                    if r.get("article_id") and _mcd_article_window(r)]
     titles = {r["article_id"]: (r.get("title") or "").strip()
-              for r in rows_of("article.csv")
-              if r.get("article_id") and (r.get("status") or "").strip() == "A"}
+              for r in article_rows}
+    effective_windows = {
+        r["article_id"]: _mcd_article_window(r) for r in article_rows
+    }
 
     # contractor.csv keys contractor_id → business name; article_x_contractor
     # links articles to their issuing MAC(s). Header names vary slightly
@@ -483,6 +511,9 @@ def parse_mcd_export(raw: bytes) -> list[dict]:
             "contractor": " ".join(sorted(article_contractors.get(pid, set()))),
             "states": sorted(article_states.get(pid, set())),
             "related_lcds": sorted(article_related_lcds.get(pid, set())),
+            "effective_from": (effective_windows.get(pid) or ("", ""))[0],
+            "effective_to": (effective_windows.get(pid) or ("", ""))[1],
+            "temporal_authority": bool(effective_windows.get(pid)),
             "cpt_codes": set(), "covered_icd": set(), "noncovered_icd": set(),
         })
 
@@ -540,6 +571,9 @@ def parse_mcd_export(raw: bytes) -> list[dict]:
              "contractor": a["contractor"],
              "states": a["states"],
              "related_lcds": a["related_lcds"],
+             "effective_from": a.get("effective_from", ""),
+             "effective_to": a.get("effective_to", "9999-12-31"),
+             "temporal_authority": bool(a.get("temporal_authority")),
              "cpt_codes": sorted(a["cpt_codes"]),
              "covered_icd": sorted(a["covered_icd"]),
              "noncovered_icd": sorted(a["noncovered_icd"]),
@@ -561,7 +595,11 @@ def parse_mcd_articles(text: str, effective_date: str) -> list[dict]:
         pid = _get(r, "article", "policy", "lcd").strip()
         if not pid:
             continue
-        art = articles.setdefault(pid, {"policy_id": pid, "cpt_codes": set(), "covered_icd": set()})
+        art = articles.setdefault(pid, {
+            "policy_id": pid, "cpt_codes": set(), "covered_icd": set(),
+            "effective_from": effective_date, "effective_to": "9999-12-31",
+            "temporal_authority": bool(effective_date),
+        })
         cpt = _get(r, "hcpcs", "cpt", "procedure").replace(".", "").strip().upper()
         icd = _get(r, "icd-10", "icd10", "diagnosis").replace(".", "").strip().upper()
         if _CODE_RE.match(cpt):
@@ -569,7 +607,11 @@ def parse_mcd_articles(text: str, effective_date: str) -> list[dict]:
         if icd:
             art["covered_icd"].add(icd)
     return [{"policy_id": p, "cpt_codes": sorted(a["cpt_codes"]),
-             "covered_icd": sorted(a["covered_icd"])} for p, a in articles.items()]
+             "covered_icd": sorted(a["covered_icd"]),
+             "effective_from": a["effective_from"],
+             "effective_to": a["effective_to"],
+             "temporal_authority": a["temporal_authority"]}
+            for p, a in articles.items()]
 
 
 PARSERS = {

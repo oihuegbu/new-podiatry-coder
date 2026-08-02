@@ -8,17 +8,6 @@ from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
-# E/M section of CPT — same structural-range pattern already used in
-# medical_necessity.py (_is_em/_EM_SECTION), not a hand-picked code list, so
-# it stays correct as CPT adds/removes individual E/M codes within the
-# section. Any E/M subtype (office, hospital, ED, consult) needs -25/-57
-# handling identically for this purpose, so the full section is the right
-# scope, not just office-visit codes.
-_EM_SECTION = range(99202, 99500)
-
-
-def _is_em(code: str) -> bool:
-    return code.isdigit() and int(code) in _EM_SECTION
 # Global period days that actually denote a "procedure" for modifier -25/-57
 # purposes. XXX/YYY/ZZZ/MMM (diagnostic tests, E/M codes, unlisted, etc.) do
 # NOT trigger either — see _check_em_modifier25. Previously approximated via
@@ -33,8 +22,6 @@ def _is_em(code: str) -> bool:
 # get -25 auto-added here, and -57 only got added later by an unrelated check
 # (modifier_reasoning consistency, driven by the LLM's own stated reasoning)
 # — with nothing to remove the now-contradictory -25 once -57 showed up.
-MINOR_PROCEDURE_GLOBAL_DAYS = {"000", "010"}
-MAJOR_PROCEDURE_GLOBAL_DAYS = {"090"}
 # Language lexicon (no codes): how clinical notes phrase each imaging
 # modality. Keys are matched against the guidance CPTs' own descriptors
 # ("Fluoroscopic guidance for needle placement...", "Ultrasonic guidance...",
@@ -61,9 +48,6 @@ IMAGING_MODALITY_LEXICON = {
     "computed tomography": ("ct scan", "computed tomography", "ct of"),
     "magnetic resonance": ("mri", "magnetic resonance"),
 }
-# HCPCS L-code prefixes for unilateral equipment requiring RT/LT
-UNILATERAL_L_PREFIXES = ("L1", "L2", "L3", "L4", "L5")
-
 # Language lexicon (no codes): the patient risk factors the 2021 AMA MDM
 # risk column names for "minor surgery WITH identified patient risk factors"
 # (moderate). Matched against each claim diagnosis's OWN description text
@@ -165,6 +149,20 @@ class CodingValidator:
         # material_corrections so the clinical audit sees a reported
         # decision, never a silently vanished issue.
         self._advisory_suppression_corrections: list[dict] = []
+        self._dos = None
+
+    def _is_em(self, code: str) -> bool:
+        """Authoritative service classification; absence fails closed."""
+        return bool(self.store is not None
+                    and self.store.is_em_code(code, self._dos))
+
+    def _modifiers(self, role: str) -> set[str]:
+        return (self.store.modifier_codes_for_role(role)
+                if self.store is not None else set())
+
+    def _modifier(self, role: str) -> str | None:
+        values = self._modifiers(role)
+        return next(iter(values)) if len(values) == 1 else None
 
     def validate(
         self,
@@ -184,6 +182,7 @@ class CodingValidator:
         self._non_billable_codes_to_suppress = set()
         self._scrub_advisory_suppressions = []
         self._advisory_suppression_corrections = []
+        self._dos = dos
         # Payer context (parsed from the note's own insurance field via
         # payer_registry) — MUE is Medicare/NCCI policy, so the MUE-0
         # auto-suppression below applies only to payers bound to Original
@@ -363,7 +362,7 @@ class CodingValidator:
         # a same-day 090-global E/M+procedure pair before -57 was even
         # added, always reporting "modifier exception allowed but not
         # applied" for a pair that resolved correctly moments later.
-        self._check_ncci(cpt)
+        self._check_ncci(cpt + hcpcs, dos)
         self._check_billability(cpt, hcpcs)
         self._check_imaging_note_evidence(cpt, note_full_text)
         # Context gate after the presence gate: the modality IS in the note,
@@ -652,11 +651,12 @@ class CodingValidator:
             if not code:
                 continue
             if not self.db.validate_hcpcs(code):
+                self._non_billable_codes_to_suppress.add(code)
                 self._add(
-                    "INFO", code, "code_existence",
-                    f"HCPCS {code} not found in database (may still be valid — verify with payer)",
-                    "Verify HCPCS code validity with payer",
-                    denial_risk="MEDIUM",
+                    "ERROR", code, "code_existence",
+                    f"HCPCS {code} is not present in the authoritative local code set",
+                    "Remove the code or load an authoritative code-set record before billing",
+                    denial_risk="HIGH",
                 )
             elif dos and not self.db.is_active_for_dos("hcpcs", code, dos):
                 self._add(
@@ -666,11 +666,35 @@ class CodingValidator:
                     denial_risk="HIGH",
                 )
 
-    def _check_ncci(self, cpt):
-        codes = [c.get("code", "") for c in cpt if c.get("code")]
+    def _ncci(self, code1: str, code2: str):
+        """Date-anchored NCCI lookup used by every validator rule."""
+        return self.db.check_ncci(code1, code2, self._dos)
+
+    def _check_ncci(self, lines, dos=None):
+        codes = [c.get("code", "") for c in lines if c.get("code")]
+        if len(codes) < 2:
+            return
+        if dos is None:
+            self._add(
+                "ERROR", "", "ncci_dos_missing",
+                "NCCI edits cannot be evaluated without a date of service",
+                "Verify the date of service and re-run validation",
+                denial_risk="HIGH",
+                clause="dos_present",
+            )
+            return
+        if not self.db.ncci_data_available(dos):
+            self._add(
+                "ERROR", "", "ncci_data_unavailable",
+                f"No local NCCI release covers date of service {dos}",
+                "Load the CMS NCCI release covering the DOS and re-run validation",
+                denial_risk="HIGH",
+                clause="release_available",
+            )
+            return
         for i in range(len(codes)):
             for j in range(i + 1, len(codes)):
-                conflict = self.db.check_ncci(codes[i], codes[j])
+                conflict = self.db.check_ncci(codes[i], codes[j], dos)
                 if not conflict:
                     continue
 
@@ -694,10 +718,12 @@ class CodingValidator:
                 # 25 wasn't in the accepted set at all, and a procedure/procedure
                 # pair could have been wrongly satisfied by an unrelated 25/57
                 # elsewhere on the claim.
-                pair_is_em = _is_em(codes[i]) or _is_em(codes[j])
-                sep_modifiers = {"25", "57"} if pair_is_em else {"59", "XE", "XS", "XP", "XU"}
-                code_i_entry = next((c for c in cpt if c.get("code") == codes[i]), {})
-                code_j_entry = next((c for c in cpt if c.get("code") == codes[j]), {})
+                pair_is_em = self._is_em(codes[i]) or self._is_em(codes[j])
+                sep_modifiers = self._modifiers(
+                    "ncci_em_separation" if pair_is_em
+                    else "ncci_procedure_separation")
+                code_i_entry = next((c for c in lines if c.get("code") == codes[i]), {})
+                code_j_entry = next((c for c in lines if c.get("code") == codes[j]), {})
                 has_separator = (
                     bool(set(code_i_entry.get("modifiers", [])) & sep_modifiers)
                     or bool(set(code_j_entry.get("modifiers", [])) & sep_modifiers)
@@ -724,7 +750,7 @@ class CodingValidator:
                         denial_risk="LOW",
                     )
                 elif modifier_allowed and not has_separator:
-                    suggestion = "25 or 57" if pair_is_em else "59/XE/XS/XP/XU"
+                    suggestion = "/".join(sorted(sep_modifiers)) or "applicable modifier"
                     self._add(
                         "WARNING", f"{codes[i]}|{codes[j]}", "ncci_edit",
                         f"NCCI conflict: {codes[i]} and {codes[j]} — modifier exception allowed but not applied",
@@ -1266,7 +1292,7 @@ class CodingValidator:
             qualifying: list = []
             for entry in cpt:
                 pcode = entry.get("code", "")
-                if not pcode or _is_em(pcode) or pcode in suppressed:
+                if not pcode or self._is_em(pcode) or pcode in suppressed:
                     continue
                 for pol in self.store.coverage_policies_for_cpt(pcode):
                     if not self.store.coverage_policy_has_dx_rules(pol):
@@ -1292,7 +1318,7 @@ class CodingValidator:
                 anchor_code = _norm(anchor_entry.get("code"))
                 current = next(
                     (e for e in icd if e.get("type") == "primary"), None)
-                if (anchor_code[:1] not in ("V", "W", "X", "Y")
+                if (not self.store.is_external_cause(anchor_code)
                         and (current is None
                              or _norm(current.get("code")) != anchor_code)):
                     old_code = current.get("code", "") if current else "(none)"
@@ -1322,7 +1348,7 @@ class CodingValidator:
 
         def _votes(entry) -> bool:
             code = entry.get("code", "")
-            return (bool(code) and not _is_em(code)
+            return (bool(code) and not self._is_em(code)
                     and code not in suppressed
                     and bool(entry.get("linked_diagnoses")))
 
@@ -1334,7 +1360,7 @@ class CodingValidator:
         if len(first_ptrs) != 1:
             return  # no procedure lines, or they disagree — ambiguous
         anchor = first_ptrs.pop()
-        if anchor[:1] in ("V", "W", "X", "Y"):
+        if self.store is None or self.store.is_external_cause(anchor):
             return  # external-cause codes are never first-listed (I.C.20)
         # etiology/manifestation: the anchored manifestation's codeFirst
         # etiology, when billed, is the true first-listed code
@@ -2153,13 +2179,15 @@ class CodingValidator:
             # matrixectomy); the reverse direction — a billed code bundled
             # into the candidate — is precisely the finding (64776 is the
             # component of 28080) and stays.
-            if any((e := self.db.check_ncci(b, code)) and e.get("code2") == code
+            if any((e := self._ncci(b, code)) and e.get("code2") == code
                    for b in billed_list):
                 continue
-            # Category II (xxxxF) codes are $0.00 performance-tracking codes,
+            # Performance-measure tracking codes are $0.00 services,
             # never a 'dedicated alternative' to a payable service — and the
             # pipeline auto-suppresses them elsewhere for the same reason.
-            if code.endswith("F") and code[:-1].isdigit():
+            # Membership comes from the licensed edition's category table.
+            if (self.store is None
+                    or self.store.is_performance_measure_tracking(code)):
                 continue
             desc = self._EG_PAREN_RE.sub(" ", (info.get("long_description") or "").lower())
             sig = [t for t in self._tokens(desc)
@@ -2191,7 +2219,7 @@ class CodingValidator:
             # must still document a strict majority of the descriptor with
             # at least one rare token among the hits.
             if (rare_hits and len(hits) * 2 > len(sig) and len(hits) >= 3
-                    and any((e := self.db.check_ncci(code, b))
+                    and any((e := self._ncci(code, b))
                             and e.get("code1") == code and e.get("code2") == b
                             for b in billed_list)):
                 candidates.append((len(rare_hits), len(hits) / len(sig), code, info,
@@ -2248,9 +2276,9 @@ class CodingValidator:
                 # relationship) — that edit expresses same-day bundling
                 # policy, not that the procedure 'includes' the E/M work,
                 # so an E/M line must never be rewritten into a surgery.
-                and not _is_em(e.get("code", ""))
+                and not self._is_em(e.get("code", ""))
                 and e.get("code") not in self._non_billable_codes_to_suppress
-                and (edit := self.db.check_ncci(code, e.get("code")))
+                and (edit := self._ncci(code, e.get("code")))
                 and edit.get("code1") == code
                 and edit.get("code2") == e.get("code")
             ]
@@ -2414,7 +2442,7 @@ class CodingValidator:
         billed_codes = {e.get("code", "") for e in cpt}
         for entry in cpt:
             code = entry.get("code", "")
-            if (not code or _is_em(code)
+            if (not code or self._is_em(code)
                     or code in self._non_billable_codes_to_suppress):
                 continue
             own = self.db.validate_cpt(code)
@@ -2455,8 +2483,8 @@ class CodingValidator:
                     continue
                 if not (own_stems & _struct_stems(cand_desc)):
                     continue  # different structure, not this code's axis
-                edit = (self.db.check_ncci(code, cand_code)
-                        or self.db.check_ncci(cand_code, code))
+                edit = (self._ncci(code, cand_code)
+                        or self._ncci(cand_code, code))
                 if not edit:
                     continue  # not the mutually-exclusive same-structure pair
                 candidates.append((cand_code, cand_info))
@@ -2539,7 +2567,7 @@ class CodingValidator:
         billed_codes = {e.get("code", "") for e in cpt}
         for entry in cpt:
             code = entry.get("code", "")
-            if (not code or _is_em(code)
+            if (not code or self._is_em(code)
                     or code in self._non_billable_codes_to_suppress):
                 continue
             own = self.db.validate_cpt(code)
@@ -2565,8 +2593,8 @@ class CodingValidator:
                 # mutually exclusive same-session pair per the PTP table —
                 # the structural statement that these are alternative
                 # spellings of work on the same structure
-                edit = (self.db.check_ncci(code, cand_code)
-                        or self.db.check_ncci(cand_code, code))
+                edit = (self._ncci(code, cand_code)
+                        or self._ncci(cand_code, code))
                 if not edit:
                     continue
                 cand_sig = _sig(cand_desc)
@@ -3062,7 +3090,7 @@ class CodingValidator:
         for entry in icd:
             code = (entry.get("code") or "").strip().upper()
             norm = code.replace(".", "")
-            if not norm or norm[0] in ("S", "T"):
+            if not norm or self.store.is_injury_or_poisoning(code):
                 continue  # injury chapter — 7th-char machinery owns onset
             own = self.db.validate_icd10(code) or {}
             own_desc = (own.get("description")
@@ -3177,8 +3205,10 @@ class CodingValidator:
         S93.321D. Corrects D→S only ('A' alongside a post-traumatic code
         can be a genuinely new same-site injury — not touched), and only
         when the S-variant exists in the code set."""
+        if self.store is None:
+            return
         has_late_effect = any(
-            not (e.get("code") or "").strip().upper().startswith(("S", "T"))
+            not self.store.is_injury_or_poisoning(e.get("code") or "")
             and "post-traumatic" in (self.db.validate_icd10(e.get("code", "")) or {})
             .get("description", "").lower()
             for e in icd)
@@ -3186,11 +3216,18 @@ class CodingValidator:
             return
         for entry in icd:
             code = (entry.get("code") or "").strip().upper()
-            if not code.startswith(("S", "T")) or len(code.replace(".", "")) != 7:
+            if (not self.store.is_injury_or_poisoning(code)
+                    or len(code.replace(".", "")) != 7):
                 continue
-            if code[-1] != "D":
+            subsequent = self.store.icd_extension_for_role(
+                "subsequent_encounter")
+            sequela = self.store.icd_extension_for_role("sequela")
+            if not subsequent or not sequela or code[-1] != subsequent:
                 continue
-            s_variant = code[:-1] + "S"
+            s_variant = self.store.icd_with_extension(
+                code, "sequela", self._dos)
+            if not s_variant:
+                continue
             ref = self.db.validate_icd10(s_variant)
             if not ref:
                 continue
@@ -3200,8 +3237,9 @@ class CodingValidator:
                 "INFO", s_variant, "seventh_char_sequela",
                 f"AUTO-CORRECTED: {code} → {s_variant}. The claim carries a late-effect "
                 f"condition (post-traumatic, per the coexisting code's own ICD-10 "
-                f"description), so the causal injury is reported with 7th character 'S' "
-                f"(sequela), not 'D' (guideline I.B.10).",
+                f"description), so the causal injury is reported with the sourced "
+                f"sequela extension '{sequela}', not the subsequent-encounter "
+                f"extension '{subsequent}' (guideline I.B.10).",
                 "Verify the injury is historical (not an active healing encounter)",
                 denial_risk="LOW",
             )
@@ -3263,14 +3301,15 @@ class CodingValidator:
             if "unilateral" in description:
                 continue
             mods = entry.setdefault("modifiers", [])
-            if "52" in mods:
+            reduced_modifier = self._modifier("reduced_service")
+            if not reduced_modifier or reduced_modifier in mods:
                 continue
-            mods.append("52")
+            mods.append(reduced_modifier)
             self._add(
                 "INFO", code, "modifier_52_added",
-                f"AUTO-CORRECTED: Added modifier -52 to {code} — code is defined as bilateral "
+                f"AUTO-CORRECTED: Added reduced-service modifier {reduced_modifier} to {code} — code is defined as bilateral "
                 f"by its own AMA description but documentation shows only {laterality}-side testing.",
-                "Modifier -52 auto-added (reduced services)",
+                "Reduced-service modifier auto-added",
                 denial_risk="MEDIUM",
             )
 
@@ -3300,7 +3339,7 @@ class CodingValidator:
         wrong = "established patient" if expected == "new patient" else "new patient"
         for entry in cpt:
             code = entry.get("code", "")
-            if not _is_em(code):
+            if not self._is_em(code):
                 continue
             info = self.db.validate_cpt(code) or {}
             desc = f"{info.get('short_description', '')} {info.get('long_description', '')}".lower()
@@ -3386,7 +3425,7 @@ class CodingValidator:
         level_names = ("straightforward", "low", "moderate", "high")
         for entry in cpt:
             code = entry.get("code", "")
-            if not _is_em(code):
+            if not self._is_em(code):
                 continue
             mdm = entry.get("mdm_details") or {}
             claimed = self._mdm_claimed_level(mdm)
@@ -3451,8 +3490,9 @@ class CodingValidator:
         if self.store is None:
             return
         has_minor_surgery = any(
-            not _is_em(c.get("code", ""))
-            and self.store.global_period(c.get("code", "")) in MINOR_PROCEDURE_GLOBAL_DAYS
+            not self._is_em(c.get("code", ""))
+            and self.store.global_period_class(c.get("code", ""), self._dos)
+            == "minor_procedure"
             for c in cpt
         )
         if not has_minor_surgery:
@@ -3476,7 +3516,7 @@ class CodingValidator:
         level_names = ("straightforward", "low", "moderate", "high")
         for entry in cpt:
             code = entry.get("code", "")
-            if not _is_em(code):
+            if not self._is_em(code):
                 continue
             mdm = entry.get("mdm_details") or {}
             claimed = self._mdm_claimed_level(mdm)
@@ -3544,7 +3584,7 @@ class CodingValidator:
 
         for entry in cpt:
             code = entry.get("code", "")
-            if not _is_em(code):
+            if not self._is_em(code):
                 continue
             mdm = entry.get("mdm_details") or {}
             claimed = self._mdm_claimed_level(mdm)
@@ -3631,7 +3671,7 @@ class CodingValidator:
         level_names = ("straightforward", "low", "moderate", "high")
         for entry in cpt:
             code = entry.get("code", "")
-            if not _is_em(code):
+            if not self._is_em(code):
                 continue
             mdm = entry.get("mdm_details") or {}
             claimed = self._mdm_claimed_level(mdm)
@@ -3723,7 +3763,7 @@ class CodingValidator:
 
         for entry in cpt:
             code = entry.get("code", "")
-            if not _is_em(code):
+            if not self._is_em(code):
                 continue
             mdm = entry.get("mdm_details") or {}
             claimed = self._mdm_claimed_level(mdm)
@@ -3790,7 +3830,7 @@ class CodingValidator:
         level_names = ("straightforward", "low", "moderate", "high")
         for entry in cpt:
             code = entry.get("code", "")
-            if not _is_em(code):
+            if not self._is_em(code):
                 continue
             mdm = entry.get("mdm_details") or {}
             claimed = self._mdm_claimed_level(mdm)
@@ -3889,15 +3929,15 @@ class CodingValidator:
             # singleton for the one code this used to be checked against.
             if self.store is not None and self.store.billing_status(code) == "B":
                 continue
-            if _is_em(code):
+            if self._is_em(code):
                 em_entry = c
             elif self.store is not None:
-                gp = self.store.global_period(code)
-                if gp in MINOR_PROCEDURE_GLOBAL_DAYS:
+                period_class = self.store.global_period_class(code, self._dos)
+                if period_class == "minor_procedure":
                     has_minor_procedure = True
-                elif gp in MAJOR_PROCEDURE_GLOBAL_DAYS:
+                elif period_class == "major_procedure":
                     has_major_procedure = True
-                elif gp == "XXX":
+                elif period_class == "diagnostic_or_nonprocedure":
                     has_diagnostic_test = True
 
         if em_entry is None:
@@ -3905,15 +3945,26 @@ class CodingValidator:
 
         em_code = em_entry.get("code", "")
         mods = em_entry.setdefault("modifiers", [])
-        has_mod25 = "25" in mods
-        has_mod57 = "57" in mods
+        same_day_modifier = self._modifier("same_day_em_separation")
+        decision_modifier = self._modifier("decision_for_surgery")
+        if not same_day_modifier or not decision_modifier:
+            self._add(
+                "ERROR", em_code, "modifier_authority_unavailable",
+                "Authoritative E/M separation modifier roles are unavailable.",
+                "Restore the licensed modifier reference before changing or releasing the claim.",
+                denial_risk="HIGH",
+                clause="semantic_role_availability",
+            )
+            return
+        has_mod25 = same_day_modifier in mods
+        has_mod57 = decision_modifier in mods
 
         # A same-day major (090) procedure requires -57, never -25 — settle
         # this first and return, regardless of what has_mod25/has_mod57
         # looked like coming in.
         if has_major_procedure:
             if has_mod25:
-                mods.remove("25")
+                mods.remove(same_day_modifier)
                 self._add(
                     "INFO", em_code, "modifier_25_removed_major_procedure",
                     f"AUTO-CORRECTED: Removed modifier -25 from {em_code} — a same-day major "
@@ -3922,7 +3973,7 @@ class CodingValidator:
                     denial_risk="LOW",
                 )
             if not has_mod57:
-                mods.append("57")
+                mods.append(decision_modifier)
                 self._add(
                     "INFO", em_code, "modifier_57_added",
                     f"AUTO-CORRECTED: Added modifier -57 to {em_code} — same-day major procedure "
@@ -3939,7 +3990,7 @@ class CodingValidator:
         # explicit -57 the coder already determined was correct.
         if has_mod57:
             if has_mod25:
-                mods.remove("25")
+                mods.remove(same_day_modifier)
                 self._add(
                     "INFO", em_code, "modifier_25_removed_57_present",
                     f"AUTO-CORRECTED: Removed modifier -25 from {em_code} — modifier -57 is "
@@ -3960,7 +4011,7 @@ class CodingValidator:
         # -25 back out whenever the only same-day code was a diagnostic
         # test, unconditionally, regardless of documented MDM complexity.
         if has_mod25 and not has_minor_procedure and not has_diagnostic_test:
-            mods.remove("25")
+            mods.remove(same_day_modifier)
             self._add(
                 "INFO", em_code, "modifier_25_removed",
                 f"AUTO-CORRECTED: Removed modifier -25 from {em_code} — no same-day minor/"
@@ -3970,7 +4021,7 @@ class CodingValidator:
             )
 
         if has_minor_procedure and not has_mod25:
-            mods.append("25")
+            mods.append(same_day_modifier)
             self._add(
                 "INFO", em_code, "modifier_25_added",
                 f"AUTO-CORRECTED: Added modifier -25 to {em_code} — same-day minor/intermediate "
@@ -3985,7 +4036,7 @@ class CodingValidator:
         if not note_plan_text:
             return
 
-        em_entry = next((c for c in cpt if _is_em(c.get("code", ""))), None)
+        em_entry = next((c for c in cpt if self._is_em(c.get("code", ""))), None)
         if em_entry is None:
             return
 
@@ -3995,7 +4046,10 @@ class CodingValidator:
             return
 
         em_code = em_entry.get("code", "")
-        has_mod57 = "57" in em_entry.get("modifiers", [])
+        decision_modifier = self._modifier("decision_for_surgery")
+        if not decision_modifier:
+            return
+        has_mod57 = decision_modifier in em_entry.get("modifiers", [])
         if has_mod57:
             return
 
@@ -4008,7 +4062,8 @@ class CodingValidator:
         # was a false ERROR (observed live: 'discussed surgical correction'
         # in a plan with only 000-global codes billed).
         has_major_today = self.store is not None and any(
-            (self.store.global_period(c.get("code", "")) or "").strip() == "090"
+            self.store.global_period_class(c.get("code", ""), self._dos)
+            == "major_procedure"
             for c in cpt if c.get("code")
         )
         if has_major_today:
@@ -4064,15 +4119,15 @@ class CodingValidator:
         if self.store is None:
             return
         minor_on_claim = any(
-            not _is_em(c.get("code", ""))
-            and (self.store.global_period(c.get("code", "")) or "").strip()
-            in MINOR_PROCEDURE_GLOBAL_DAYS
+            not self._is_em(c.get("code", ""))
+            and self.store.global_period_class(c.get("code", ""), self._dos)
+            == "minor_procedure"
             for c in cpt if c.get("code"))
         if not minor_on_claim:
             return
         major_on_claim = any(
-            (self.store.global_period(c.get("code", "")) or "").strip()
-            in MAJOR_PROCEDURE_GLOBAL_DAYS
+            self.store.global_period_class(c.get("code", ""), self._dos)
+            == "major_procedure"
             for c in cpt if c.get("code"))
 
         def _norm_dx(d) -> str:
@@ -4080,12 +4135,12 @@ class CodingValidator:
 
         proc_dx = {
             _norm_dx(d)
-            for c in cpt if c.get("code") and not _is_em(c.get("code", ""))
+            for c in cpt if c.get("code") and not self._is_em(c.get("code", ""))
             for d in c.get("linked_diagnoses") or []
         }
         for entry in cpt:
             code = entry.get("code", "")
-            if not _is_em(code):
+            if not self._is_em(code):
                 continue
             desc = ((self.db.validate_cpt(code) or {})
                     .get("long_description", "")).lower()
@@ -4094,7 +4149,7 @@ class CodingValidator:
             # -57 context: the E/M carrying the decision for a same-day
             # MAJOR procedure is protected by -57, not judged here.
             mods = {str(m).strip().upper() for m in entry.get("modifiers") or []}
-            if "57" in mods and major_on_claim:
+            if (mods & self._modifiers("decision_for_surgery")) and major_on_claim:
                 continue
             em_dx = [d for d in entry.get("linked_diagnoses") or []]
             separate = [d for d in em_dx if _norm_dx(d) not in proc_dx]
@@ -4411,58 +4466,33 @@ class CodingValidator:
         logger.info(f"  Added dispensed supply {code} ('{hit_sentence[:60]}')")
 
     def _check_supply_laterality_strip(self, hcpcs):
-        """Strip RT/LT from HCPCS A-code lines — the A chapter is materials
-        and supplies ('Splint', 'Cast supplies...'), not sided devices; CMS's
-        RT/LT definition ('procedures performed on one side of the body')
-        attaches to procedures and fitted DMEPOS items (the L chapter, which
-        _check_hcpcs_laterality already sides via UNILATERAL_L_PREFIXES),
-        not to consumed materials. A digit modifier derived by the
-        supply-descriptor check is specific siting and is preserved.
+        """Never infer HCPCS modifier applicability from a code prefix.
 
-        Determinism layer: measured live (note 005), A4570 flapped between
-        [] and ['RT'] across runs of an identical note — then, with RT
-        stripped, between [] and ['T6'] — the canonical spelling of a
-        materials line has no site designator at all, so runs converge on
-        it. The one exception is the descriptor's OWN instruction: a supply
-        whose descriptor says 'specify digit by use of modifier' (S8450
-        class) mandates the digit, and _check_digit_supply_modifier owns
-        that spelling — those lines keep their digit here."""
+        When the authoritative source has no applicability indicator, retain
+        the submitted modifier and route it for review instead of silently
+        mutating a potentially valid DMEPOS line.
+        """
+        if self.store is None:
+            return
         for entry in hcpcs:
             code = (entry.get("code") or "").strip().upper()
-            if not code.startswith("A"):
-                continue
             mods = entry.get("modifiers") or []
-            info = self.db.validate_hcpcs(code) or {}
-            desc = ((info.get("long_description")
-                     or info.get("description") or "")).lower()
-            digit_mandated = bool(re.search(r"specify\s+digit", desc))
-            stripped = [
-                m for m in mods
-                if str(m).strip().upper() in ("RT", "LT")
-                or (not digit_mandated
-                    and str(m).strip().upper() in self._digit_site_mods(mods))
-            ]
-            if not stripped:
-                continue
-            for m in stripped:
-                mods.remove(m)
-            self._add(
-                "INFO", code, "supply_laterality_removed",
-                f"AUTO-CORRECTED: Removed {'/'.join(str(m) for m in stripped)} from "
-                f"{code} — an A-code is a materials/supply line, not a sided service; "
-                f"side and digit designators attach to procedures and fitted devices "
-                f"(or to supplies whose own descriptor mandates a digit modifier), "
-                f"not consumed materials.",
-                "No action needed; supply lines carry no site designator",
-                denial_risk="LOW",
-            )
+            sided = [m for m in mods if self.store.modifier_laterality(str(m))]
+            if sided and self.store.bilat_surg(code, self._dos) is None:
+                self._add(
+                    "WARNING", code, "hcpcs_modifier_applicability_unknown",
+                    f"{code} carries side modifier(s) {'/'.join(map(str, sided))}, but the "
+                    "loaded authoritative data has no applicability indicator for this service.",
+                    "Verify modifier applicability against the governing HCPCS/DMEPOS policy.",
+                    denial_risk="MEDIUM",
+                    clause="applicability_authority",
+                )
 
     def _guidance_cpts(self) -> dict[str, str]:
         """{modality key -> guidance CPT} discovered from the CPT reference's
-        own descriptors: every code whose long description reads
-        '<modality> guidance for needle placement' (76942 ultrasonic, 77002
-        fluoroscopic, 77012 CT, 77021 MRI as of 2026 — but derived, not
-        listed, so AMA additions/deletions flow through the data refresh)."""
+        own descriptors: every code whose long description identifies a
+        modality-specific guidance service. AMA additions/deletions flow
+        through the data refresh without a Python code list."""
         if getattr(self, "_guidance_map", None) is not None:
             return self._guidance_map
         out: dict[str, str] = {}
@@ -4626,20 +4656,34 @@ class CodingValidator:
 
         for entry in hcpcs:
             code = entry.get("code", "")
-            if not code.startswith(UNILATERAL_L_PREFIXES):
+            if self.store is None or self.store.bilat_surg(code, self._dos) != "1":
                 continue
 
             mods = entry.setdefault("modifiers", [])
-            has_laterality = "RT" in mods or "LT" in mods or "50" in mods
+            has_laterality = any(
+                self.store.modifier_laterality(str(modifier))
+                or modifier in self.store.modifier_codes_for_role("bilateral")
+                for modifier in mods
+            )
 
             if not has_laterality:
                 if procedure_side:
-                    mods.append(procedure_side)
+                    side_modifier = self.store.modifier_for_laterality(procedure_side)
+                    if not side_modifier:
+                        self._add(
+                            "ERROR", code, "laterality_authority_unavailable",
+                            f"No unique authoritative modifier represents {procedure_side}.",
+                            "Restore the modifier reference before releasing the claim.",
+                            denial_risk="HIGH",
+                            clause="semantic_role_availability",
+                        )
+                        continue
+                    mods.append(side_modifier)
                     self._add(
                         "INFO", code, "hcpcs_laterality_added",
-                        f"AUTO-CORRECTED: Added {procedure_side} modifier to HCPCS {code} — "
+                        f"AUTO-CORRECTED: Added {side_modifier} modifier to HCPCS {code} — "
                         f"inferred from CPT procedure side. CMS requires laterality on unilateral L-codes.",
-                        f"Laterality {procedure_side} auto-added",
+                        f"Laterality {side_modifier} auto-added",
                         denial_risk="LOW",
                     )
                 else:
@@ -4650,9 +4694,9 @@ class CodingValidator:
                     self._add(
                         "ERROR", code, "hcpcs_laterality",
                         f"HCPCS {code} (L-code) is missing a laterality modifier (RT or LT). "
-                        f"CMS requires laterality on unilateral DME/orthotic L-codes — "
+                        "CMS PFS marks the service as bilateral-adjustment eligible; "
                         f"claims are rejected without it ({why}).",
-                        "Manually add RT or LT modifier to match the dispensed side",
+                        "Add the authoritative side modifier matching the dispensed side",
                         denial_risk="HIGH",
                     )
 
@@ -4689,8 +4733,8 @@ class CodingValidator:
         }
         uni_side = claim_sides.pop() if len(claim_sides) == 1 else None
         if uni_side is not None and icd:
-            uni_word = "right" if uni_side == "RT" else "left"
-            wrong_word = "left" if uni_side == "RT" else "right"
+            uni_word = uni_side
+            wrong_word = "left" if uni_side == "right" else "right"
             for dx_entry in icd:
                 code = (dx_entry.get("code") or "").strip().upper()
                 info = self.db.validate_icd10(code)
@@ -4739,8 +4783,8 @@ class CodingValidator:
             if len(sides) != 1:
                 continue  # unsided or explicitly bilateral procedure line
             proc_side = sides.pop()
-            proc_word = "right" if proc_side == "RT" else "left"
-            other_word = "left" if proc_side == "RT" else "right"
+            proc_word = proc_side
+            other_word = "left" if proc_side == "right" else "right"
             for dx in entry.get("linked_diagnoses", []) or []:
                 info = self.db.validate_icd10(str(dx)) or {}
                 desc = (info.get("description") or "").lower()
@@ -4780,12 +4824,14 @@ class CodingValidator:
         """
         if self.store is None:
             return
+        generic_laterality = self._modifiers("laterality")
         for entry in cpt:
             code = entry.get("code", "")
             if not code or self.store.bilat_surg(code) != "1":
                 continue
             mods = entry.setdefault("modifiers", [])
-            if "50" in mods:
+            bilateral_modifiers = self._modifiers("bilateral")
+            if set(mods) & bilateral_modifiers:
                 continue
             # Any modifier whose own AMA/CMS name states a side satisfies the
             # laterality requirement — that includes RT/LT themselves AND the
@@ -4796,7 +4842,10 @@ class CodingValidator:
             if any(self.store.modifier_laterality(str(m)) for m in mods):
                 continue
             laterality = str(entry.get("laterality") or "").strip().upper()
-            side = {"RIGHT": "RT", "LEFT": "LT", "BILATERAL": "50"}.get(laterality)
+            if laterality == "BILATERAL":
+                side = next(iter(bilateral_modifiers)) if len(bilateral_modifiers) == 1 else None
+            else:
+                side = self.store.modifier_for_laterality(laterality.lower())
             if side:
                 mods.append(side)
                 self._add(
@@ -4836,19 +4885,21 @@ class CodingValidator:
         """
         if self.store is None:
             return
+        generic_laterality = self._modifiers("laterality")
         for entry in list(cpt) + list(hcpcs):
             code = entry.get("code", "")
             mods = entry.get("modifiers") or []
             digit_sides = {
                 s for m in mods
-                if str(m).strip().upper() not in ("RT", "LT")
+                if str(m).strip().upper() not in generic_laterality
                 and (s := self.store.modifier_laterality(str(m)))
             }
             if len(digit_sides) != 1:
                 continue  # no digit-side info, or digits span both sides
             digit_side = next(iter(digit_sides))
-            for generic in [m for m in list(mods) if str(m).strip().upper() in ("RT", "LT")]:
-                if str(generic).strip().upper() == digit_side:
+            for generic in [m for m in list(mods)
+                            if str(m).strip().upper() in generic_laterality]:
+                if self.store.modifier_laterality(str(generic)) == digit_side:
                     mods.remove(generic)
                     self._add(
                         "INFO", code, "redundant_laterality_removed",
@@ -4891,6 +4942,7 @@ class CodingValidator:
         plain substring match stripped a legitimate RT from it live."""
         if self.store is None:
             return
+        generic_laterality = self._modifiers("laterality")
         for entry in cpt:
             code = entry.get("code", "")
             desc = ((self.db.validate_cpt(code) or {}).get("long_description")
@@ -4898,7 +4950,8 @@ class CodingValidator:
             if not re.match(r"[a-z() ]*\bguidance\b", desc) or self.store.bilat_surg(code) != "0":
                 continue
             mods = entry.get("modifiers") or []
-            stripped = [m for m in list(mods) if str(m).strip().upper() in ("RT", "LT")]
+            stripped = [m for m in list(mods)
+                        if str(m).strip().upper() in generic_laterality]
             if not stripped:
                 continue
             for m in stripped:
@@ -4934,6 +4987,8 @@ class CodingValidator:
         flagged, never silently rewritten."""
         if self.store is None:
             return
+        generic_laterality = self._modifiers("laterality")
+        bilateral_modifiers = self._modifiers("bilateral")
         applicable = [
             e for e in hcpcs
             if re.search(r"specify\s+digit", (((self.db.validate_hcpcs(e.get("code", "")) or {})
@@ -4945,7 +5000,7 @@ class CodingValidator:
             return
 
         def _is_digit_mod(m: str) -> bool:
-            if m in ("RT", "LT", "50"):
+            if m in generic_laterality | bilateral_modifiers:
                 return False
             name = (self.store.modifier_name(m) or "").lower()
             return bool(self.store.modifier_laterality(m)) and (
@@ -4989,7 +5044,8 @@ class CodingValidator:
             has_digit = any(_is_digit_mod(str(m).strip().upper()) for m in mods)
             if has_digit:
                 continue
-            generic = [m for m in list(mods) if str(m).strip().upper() in ("RT", "LT")]
+            generic = [m for m in list(mods)
+                       if str(m).strip().upper() in generic_laterality]
             if digit is None:
                 self._add(
                     "WARNING", code, "digit_modifier_required",
@@ -5002,7 +5058,10 @@ class CodingValidator:
                 )
                 continue
             digit_side = self.store.modifier_laterality(digit)
-            conflict = [m for m in generic if str(m).strip().upper() != digit_side]
+            conflict = [
+                m for m in generic
+                if self.store.modifier_laterality(str(m)) != digit_side
+            ]
             if conflict:
                 self._add(
                     "ERROR", code, "digit_modifier_side_conflict",
@@ -5071,13 +5130,15 @@ class CodingValidator:
         RT/LT; a side contradiction is flagged, never rewritten."""
         if self.store is None or self.db is None:
             return
+        generic_laterality = self._modifiers("laterality")
+        bilateral_modifiers = self._modifiers("bilateral")
         for entry in cpt:
             code = entry.get("code", "")
-            if not code or _is_em(code):
+            if not code or self._is_em(code):
                 continue
             mods = entry.setdefault("modifiers", [])
             norm_mods = [str(m).strip().upper() for m in mods]
-            generic = [m for m in norm_mods if m in ("RT", "LT")]
+            generic = [m for m in norm_mods if m in generic_laterality]
             # zero RT/LT is handled too (the add-missing arm below): a
             # digit-scoped line with NO side designator at all flapped
             # against its sided twin across runs (note 004, 11730 ['RT']
@@ -5090,7 +5151,8 @@ class CodingValidator:
                 and self.store.modifier_laterality(m)
                 and any(w in (self.store.modifier_name(m) or "").lower()
                         for w in ("digit", "toe", "finger"))
-                for m in norm_mods if m not in ("RT", "LT", "50")
+                for m in norm_mods
+                if m not in generic_laterality | bilateral_modifiers
             )
             if has_digit:
                 continue
@@ -5147,7 +5209,7 @@ class CodingValidator:
                 # no RT/LT on the line, the side comes from the linked
                 # diagnoses' own descriptors instead (and must be unique).
                 if generic:
-                    side_words = [{"RT": "right", "LT": "left"}[generic[0]]]
+                    side_words = [self.store.modifier_laterality(generic[0])]
                 elif len(sides_from_dx) == 1:
                     side_words = list(sides_from_dx)
                 elif len(sides_any_dx) == 1:
@@ -5177,7 +5239,8 @@ class CodingValidator:
                 continue
             digit = digits.pop()
             digit_side = self.store.modifier_laterality(digit)
-            if generic and generic[0] != digit_side:
+            if (generic and
+                    self.store.modifier_laterality(generic[0]) != digit_side):
                 self._add(
                     "ERROR", code, "digit_modifier_side_conflict",
                     f"{code} carries {generic[0]} but its own linked diagnosis names the "
@@ -5188,7 +5251,7 @@ class CodingValidator:
                 )
                 continue
             for m in list(mods):
-                if str(m).strip().upper() in ("RT", "LT"):
+                if str(m).strip().upper() in generic_laterality:
                     mods.remove(m)
             mods.append(digit)
             origin = (f"generic {generic[0]} upgraded to {digit}" if generic
@@ -5231,14 +5294,15 @@ class CodingValidator:
         same side distinguishes nothing."""
         if not sites_a or not sites_b or sites_a == sites_b:
             return False
-        generic = {"RT", "LT"}
+        generic = self._modifiers("laterality")
         spec_a, spec_b = sites_a - generic, sites_b - generic
         if spec_a and spec_b:
             return spec_a != spec_b
         if not spec_a and not spec_b:
             return True  # {RT} vs {LT}
         gen_set, spec_set = (sites_a, spec_b) if not spec_a else (sites_b, spec_a)
-        gen_sides = gen_set & generic
+        gen_sides = {self.store.modifier_laterality(m)
+                     for m in gen_set & generic}
         spec_sides = {self.store.modifier_laterality(m) for m in spec_set
                       if self.store is not None
                       and self.store.modifier_laterality(m)}
@@ -5270,7 +5334,7 @@ class CodingValidator:
         anatomic = self.store.anatomic_modifiers()
         for entry in cpt:
             code = entry.get("code", "")
-            if (not code or _is_em(code)
+            if (not code or self._is_em(code)
                     or code in self._non_billable_codes_to_suppress):
                 continue
             if int(entry.get("units") or 1) != 1:
@@ -5282,7 +5346,7 @@ class CodingValidator:
             for other in cpt:
                 other_code = other.get("code", "")
                 if (other is entry or not other_code or other_code == code
-                        or _is_em(other_code)
+                        or self._is_em(other_code)
                         or other_code in self._non_billable_codes_to_suppress):
                     continue
                 if int(other.get("units") or 1) != 1:
@@ -5291,9 +5355,11 @@ class CodingValidator:
                                for m in (other.get("modifiers") or [])} & anatomic
                 if not other_sites or self._sites_distinct(sites, other_sites):
                     continue
-                if not (sites - {"RT", "LT"}) and not (other_sites - {"RT", "LT"}):
+                generic_laterality = self._modifiers("laterality")
+                if (not (sites - generic_laterality)
+                        and not (other_sites - generic_laterality)):
                     continue  # generic-only pair proves nothing about the site
-                conflict = self.db.check_ncci(code, other_code)
+                conflict = self._ncci(code, other_code)
                 if (not conflict
                         or str(conflict.get("modifier", "")).strip() != "1"):
                     continue
@@ -5338,7 +5404,7 @@ class CodingValidator:
             r"\b(toe|toes|hallux|phalan\w*|digit\w*|\w*ungual|nail\w*)\b")
         for entry in cpt:
             code = entry.get("code", "")
-            if not code or _is_em(code):
+            if not code or self._is_em(code):
                 continue
             mods = entry.setdefault("modifiers", [])
             digits = self._digit_site_mods(mods)
@@ -5361,17 +5427,27 @@ class CodingValidator:
             side = self.store.modifier_laterality(digit)
             if not side:
                 continue
+            side_modifier = self.store.modifier_for_laterality(side)
+            if not side_modifier:
+                self._add(
+                    "ERROR", code, "laterality_authority_unavailable",
+                    f"No unique authoritative modifier represents {side}.",
+                    "Restore the modifier reference before releasing the claim.",
+                    denial_risk="HIGH",
+                    clause="semantic_role_availability",
+                )
+                continue
             norm_mods = [str(m).strip().upper() for m in mods]
             new_mods = [m for m in mods
                         if str(m).strip().upper() != digit]
-            if side not in norm_mods:
-                new_mods.append(side)
+            if side_modifier not in norm_mods:
+                new_mods.append(side_modifier)
             entry["modifiers"] = new_mods
             entry["needs_review"] = True
             self._add(
                 "INFO", code, "digit_modifier_descoped",
                 f"AUTO-CORRECTED: {code}'s {digit} "
-                f"('{self.store.modifier_name(digit)}') normalized to {side} "
+                f"('{self.store.modifier_name(digit)}') normalized to {side_modifier} "
                 f"— neither the procedure's own descriptor nor any linked "
                 f"diagnosis names a digit or nail structure, so the claim's "
                 f"adjudicable record supports side-level, not digit-level, "
@@ -5396,7 +5472,7 @@ class CodingValidator:
         placement left unnecessary."""
         if self.db is None:
             return
-        sep_set = {"59", "XE", "XS", "XP", "XU"}
+        sep_set = self._modifiers("ncci_procedure_separation")
         anatomic = self.store.anatomic_modifiers() if self.store is not None else set()
 
         def _seps(mods):
@@ -5406,7 +5482,7 @@ class CodingValidator:
             code = entry.get("code", "")
             mods = entry.get("modifiers") or []
             seps = _seps(mods)
-            if not code or not seps or _is_em(code):
+            if not code or not seps or self._is_em(code):
                 continue
             sites_self = {str(m).strip().upper() for m in mods} & anatomic
             norm_code = code.strip().upper().replace(".", "")
@@ -5418,9 +5494,9 @@ class CodingValidator:
                     other_code = other.get("code", "")
                     if other is entry or not other_code or other_code == code:
                         continue
-                    if _is_em(other_code):
+                    if self._is_em(other_code):
                         continue
-                    conflict = self.db.check_ncci(code, other_code)
+                    conflict = self._ncci(code, other_code)
                     if not conflict or str(conflict.get("modifier", "")).strip() != "1":
                         continue
                     sites_other = {str(m).strip().upper()
@@ -5478,7 +5554,7 @@ class CodingValidator:
         """
         if self.db is None:
             return
-        sep_set = {"59", "XE", "XS", "XP", "XU"}
+        sep_set = self._modifiers("ncci_procedure_separation")
         anatomic = self.store.anatomic_modifiers() if self.store is not None else set()
         for entry in cpt:
             code = entry.get("code", "")
@@ -5492,14 +5568,14 @@ class CodingValidator:
             # E/M-involved pairs are separated by 25/57, never 59 (same
             # split _check_ncci applies) — an E/M line's 59 is always
             # stripped, and an E/M partner is never a reason to keep one.
-            if not _is_em(code):
+            if not self._is_em(code):
                 for other in cpt:
                     other_code = other.get("code", "")
                     if other is entry or not other_code or other_code == code:
                         continue
-                    if _is_em(other_code):
+                    if self._is_em(other_code):
                         continue
-                    conflict = self.db.check_ncci(code, other_code)
+                    conflict = self._ncci(code, other_code)
                     if not conflict or str(conflict.get("modifier", "")).strip() != "1":
                         continue
                     sites_other = {str(m).strip().upper()
@@ -5702,7 +5778,7 @@ class CodingValidator:
             )
 
     def _check_unjustified_zcodes(self, icd):
-        """Flag a Z79.x (long-term drug therapy) code with no real linkage
+        """Flag a long-term drug-therapy code with no real linkage
         to any other coded condition on the claim, via ICD-10-CM's own
         'use additional code' guidance (icd10cm_instructional_notes.json,
         parsed from CDC/NCHS's icd10cm-tabular-2026.xml).
@@ -5721,15 +5797,19 @@ class CodingValidator:
         if self.store is None:
             return
         codes = [c.get("code", "") for c in icd]
-        z79_codes = [c for c in codes if c.replace(".", "").upper().startswith("Z79")]
-        if not z79_codes:
+        therapy_codes = [
+            entry.get("code", "") for entry in icd
+            if str(entry.get("type") or "").lower() != "primary"
+            and self.store.is_use_additional_target(entry.get("code", ""))
+        ]
+        if not therapy_codes:
             return
 
         recommended_refs = set()
         for c in codes:
             recommended_refs.update(self.store.use_additional_code_refs(c))
 
-        for z in z79_codes:
+        for z in therapy_codes:
             znorm = z.replace(".", "").upper()
             justified = any(
                 znorm.startswith(ref) or ref.startswith(znorm)
@@ -5738,7 +5818,8 @@ class CodingValidator:
             if not justified:
                 self._add(
                     "WARNING", z, "unjustified_zcode",
-                    f"{z} (long-term drug therapy) has no linked condition code on this claim "
+                    f"{z} is an ICD-10-CM use-additional-code target but has no condition "
+                    "on this claim "
                     f"recommending it, per ICD-10-CM's 'use additional code' guidance.",
                     f"Verify {z} is clinically supported, or link it to the condition it treats",
                     denial_risk="LOW",
@@ -6006,7 +6087,7 @@ class CodingValidator:
             if len(codes) != 1:
                 continue  # ambiguous or unknown term — not this check's shape
             code = codes.pop().upper()
-            if code[:1] in ("R", "Z", "V", "W", "X", "Y"):
+            if self.store.exclude_from_assessment_completion(code):
                 continue
             if any(p[:3] == code[:3] for p in present):
                 continue
@@ -6740,12 +6821,12 @@ class CodingValidator:
         # toe/finger modifier's own description terms)? Only silence in the
         # note makes the modifier indefensible.
         note_lower = (note_full_text or "").lower()
-        side_words = {"RT": "right", "LT": "left"}
         for entry in all_codes:
             code = entry.get("code", "")
             mods = entry.get("modifiers", [])
             for m in mods:
-                side = side_words.get(m)
+                side = (self.store.modifier_laterality(m)
+                        if self.store is not None else None)
                 if side is None:
                     continue
                 documented = bool(re.search(rf"\b{side}\b", note_lower))
@@ -7519,8 +7600,8 @@ class CodingValidator:
             return
 
         def _is_major(code: str) -> bool:
-            return (self.store.global_period(code) or "").strip() in (
-                "010", "090")
+            return self.store.global_period_has_class(
+                code, "postoperative_package", self._dos)
 
         # A same-claim major surgery by the operating surgeon must be present;
         # without one there is no global package to fold the splint into.
@@ -7528,7 +7609,7 @@ class CodingValidator:
         if not major:
             return
         gov = (major[0].get("code") or "").strip()
-        _DISTINCT = {"59", "XE", "XS", "XP", "XU"}
+        distinct_modifiers = self._modifiers("ncci_procedure_separation")
         for entry in cpt + hcpcs:
             code = (entry.get("code") or "").strip()
             if not code or code in self._non_billable_codes_to_suppress:
@@ -7543,7 +7624,7 @@ class CodingValidator:
                     w in desc for w in ("cast", "splint", "strap")):
                 continue
             mods = {m.strip().upper() for m in (entry.get("modifiers") or [])}
-            if mods & _DISTINCT:
+            if mods & distinct_modifiers:
                 continue  # supported distinct modifier — separately reportable
             self._non_billable_codes_to_suppress.add(code)
             self._add(

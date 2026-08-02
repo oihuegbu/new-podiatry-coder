@@ -71,7 +71,7 @@ def extract_features(result: dict) -> dict:
     vc = rc.get("vision_context") or {}
     ex = rc.get("exemplars") or {}
     em = next((e for e in cpt
-               if str(e.get("code", "")).startswith(("992", "993"))), None)
+               if str((e.get("mdm_details") or {}).get("mdm_level") or "")), None)
     sims = [m.get("similarity", 0) for m in ex.get("matches") or []]
     return {
         "note_category": vc.get("note_category") or "",

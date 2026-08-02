@@ -138,17 +138,18 @@ def main() -> None:
     # Pack consolidation — same wiring as tools/unanimity_loop.py: scan
     # cached by pack+corpus hash, merges gated on byte-identical corpus
     # replay, never a blocker for finalization.
-    if os.getenv("PACK_CONSOLIDATION", "1") == "1":
+    if os.getenv("PACK_CONSOLIDATION", "0") == "1":
         try:
             from tools.pack_consolidation import consolidate
             csum = consolidate(
                 results_dir,
-                merge=os.getenv("PACK_CONSOLIDATION_MERGE", "1") == "1")
+                merge=os.getenv("PACK_CONSOLIDATION_MERGE", "0") == "1")
             print(f"\nPack consolidation: "
                   f"{len(csum['dormancy'].get('tagged', []))} newly "
                   f"dormant, {len(csum['merges'])} merge(s) accepted, "
                   f"{len(csum['declined']) + len(csum['rejected'])} "
-                  f"declined/rejected", flush=True)
+                  f"declined/rejected (accepted merges remain draft proposals)",
+                  flush=True)
         except Exception as exc:
             print(f"Pack consolidation failed ({exc}) — pack left "
                   f"unconsolidated", flush=True)

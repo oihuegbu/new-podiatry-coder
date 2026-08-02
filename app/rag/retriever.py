@@ -44,11 +44,15 @@ class CandidateRetriever:
         if not code_systems:
             return {}
 
-        query = self._build_query(entity)
         results = {}
 
         for cs in code_systems:
-            candidates = self.store.search(query, cs, top_k=top_k)
+            per_query = [self.store.search(query, cs, top_k=top_k)
+                         for query in self._build_queries(entity)]
+            # Each query form gets equal rank opportunity.  A mistaken model
+            # normalization can no longer crowd out the verbatim phrase or a
+            # governed deterministic expansion before the coder sees it.
+            candidates = self._round_robin(per_query, top_k)
             if candidates:
                 results[cs] = candidates
 
@@ -60,8 +64,10 @@ class CandidateRetriever:
         top_k: int | None = None,
     ) -> dict[str, dict[str, list[dict]]]:
         all_results = {}
-        for entity in entities:
-            key = f"{entity.category}:{entity.clinical_term}"
+        for index, entity in enumerate(entities):
+            # Include ordinal + verbatim span so repeated entities with the
+            # same normalized term cannot overwrite one another.
+            key = f"{index}:{entity.category}:{entity.clinical_term}:{entity.text}"
             candidates = self.retrieve_for_entity(entity, top_k)
             if candidates:
                 all_results[key] = {
@@ -103,17 +109,15 @@ class CandidateRetriever:
             f"Injectable drug injection medication administered: {plan}",
         ]
 
-        icd_candidates = []
-        for q in icd_queries:
-            icd_candidates.extend(self.store.search(q, "icd10", top_k=top_k))
-
-        cpt_candidates = []
-        for q in cpt_queries:
-            cpt_candidates.extend(self.store.search(q, "cpt", top_k=top_k))
-
-        hcpcs_candidates = []
-        for q in hcpcs_queries:
-            hcpcs_candidates.extend(self.store.search(q, "hcpcs", top_k=top_k))
+        icd_candidates = self._round_robin(
+            [self.store.search(q, "icd10", top_k=top_k) for q in icd_queries],
+            top_k)
+        cpt_candidates = self._round_robin(
+            [self.store.search(q, "cpt", top_k=top_k) for q in cpt_queries],
+            top_k)
+        hcpcs_candidates = self._round_robin(
+            [self.store.search(q, "hcpcs", top_k=top_k) for q in hcpcs_queries],
+            top_k)
 
         return {
             "icd10": icd_candidates,
@@ -121,10 +125,45 @@ class CandidateRetriever:
             "hcpcs": hcpcs_candidates,
         }
 
+    def _build_queries(self, entity: ClinicalEntity) -> list[str]:
+        base_terms = entity.retrieval_terms or [entity.clinical_term, entity.text]
+        queries = []
+        seen = set()
+        for term in base_terms:
+            parts = [str(term or "").strip()]
+            if entity.laterality:
+                parts.append(entity.laterality.lower())
+            if entity.specificity:
+                parts.append(entity.specificity)
+            query = " ".join(part for part in parts if part).strip()
+            key = query.casefold()
+            if query and key not in seen:
+                seen.add(key)
+                queries.append(query)
+        return queries
+
+    @staticmethod
+    def _round_robin(per_query: list[list[dict]], limit: int) -> list[dict]:
+        """Fuse separately ranked queries without comparing their scores."""
+        candidates = []
+        seen: set[str] = set()
+        depth = 0
+        while len(candidates) < limit and any(
+                depth < len(rows) for rows in per_query):
+            for rows in per_query:
+                if depth >= len(rows):
+                    continue
+                candidate = dict(rows[depth])
+                code = str(candidate.get("code") or "").strip()
+                if code and code not in seen:
+                    seen.add(code)
+                    candidates.append(candidate)
+                    if len(candidates) >= limit:
+                        break
+            depth += 1
+        return candidates
+
     def _build_query(self, entity: ClinicalEntity) -> str:
-        parts = [entity.clinical_term]
-        if entity.laterality:
-            parts.append(entity.laterality.lower())
-        if entity.specificity:
-            parts.append(entity.specificity)
-        return " ".join(parts)
+        """Backward-compatible primary query; multi-form retrieval uses all."""
+        queries = self._build_queries(entity)
+        return queries[0] if queries else ""

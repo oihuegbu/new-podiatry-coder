@@ -1,0 +1,30 @@
+{
+  "version": "FY2026",
+  "source": "CDC/NCHS ICD-10-CM Tabular List FY2026",
+  "source_url": "https://ftp.cdc.gov/pub/health_statistics/nchs/publications/ICD10CM/",
+  "description": "Official ICD-10-CM chapter boundaries used for structural classification. These are authoritative data, not Python code-family heuristics.",
+  "chapters": [
+    {"id": 1, "title": "Certain infectious and parasitic diseases", "start": "A00", "end": "B99"},
+    {"id": 2, "title": "Neoplasms", "start": "C00", "end": "D49"},
+    {"id": 3, "title": "Diseases of the blood and blood-forming organs and certain disorders involving the immune mechanism", "start": "D50", "end": "D89"},
+    {"id": 4, "title": "Endocrine, nutritional and metabolic diseases", "start": "E00", "end": "E89"},
+    {"id": 5, "title": "Mental, behavioral and neurodevelopmental disorders", "start": "F01", "end": "F99"},
+    {"id": 6, "title": "Diseases of the nervous system", "start": "G00", "end": "G99"},
+    {"id": 7, "title": "Diseases of the eye and adnexa", "start": "H00", "end": "H59"},
+    {"id": 8, "title": "Diseases of the ear and mastoid process", "start": "H60", "end": "H95"},
+    {"id": 9, "title": "Diseases of the circulatory system", "start": "I00", "end": "I99"},
+    {"id": 10, "title": "Diseases of the respiratory system", "start": "J00", "end": "J99"},
+    {"id": 11, "title": "Diseases of the digestive system", "start": "K00", "end": "K95"},
+    {"id": 12, "title": "Diseases of the skin and subcutaneous tissue", "start": "L00", "end": "L99"},
+    {"id": 13, "title": "Diseases of the musculoskeletal system and connective tissue", "start": "M00", "end": "M99"},
+    {"id": 14, "title": "Diseases of the genitourinary system", "start": "N00", "end": "N99"},
+    {"id": 15, "title": "Pregnancy, childbirth and the puerperium", "start": "O00", "end": "O9A"},
+    {"id": 16, "title": "Certain conditions originating in the perinatal period", "start": "P00", "end": "P96"},
+    {"id": 17, "title": "Congenital malformations, deformations and chromosomal abnormalities", "start": "Q00", "end": "Q99"},
+    {"id": 18, "title": "Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified", "start": "R00", "end": "R99"},
+    {"id": 19, "title": "Injury, poisoning and certain other consequences of external causes", "start": "S00", "end": "T88"},
+    {"id": 20, "title": "External causes of morbidity", "start": "V00", "end": "Y99"},
+    {"id": 21, "title": "Factors influencing health status and contact with health services", "start": "Z00", "end": "Z99"},
+    {"id": 22, "title": "Codes for special purposes", "start": "U00", "end": "U85"}
+  ]
+}

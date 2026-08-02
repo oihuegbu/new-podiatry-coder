@@ -15,7 +15,7 @@ define rule families no other filter covers:
     Z codes, B95-B97 organism codes) not permitted as principal. The MCE's
     own carve-out (codes acceptable when a secondary diagnosis is present)
     is honored from the data.
-  * External cause codes as principal — ICD-10-CM Chapter 20 (V00-Y99)
+  * External cause codes as principal — ICD-10-CM Chapter 20
     codes "describe the circumstance causing an injury, not the nature of
     the injury". The chapter boundary is classification structure (like the
     E/M section range), not a hand-picked code list.
@@ -31,10 +31,6 @@ from datetime import date, datetime
 
 from app.compliance.agents.base import ComplianceAgent
 from app.compliance.models import Claim, DenialRisk, Finding, Status
-
-# ICD-10-CM Chapter 20 (External causes of morbidity) spans V00-Y99 —
-# a structural chapter boundary of the classification itself.
-_EXTERNAL_CAUSE_FIRST_CHARS = ("V", "W", "X", "Y")
 
 _AGE_FAMILIES = ("age_newborn", "age_pediatric", "age_maternity", "age_adult")
 
@@ -112,11 +108,11 @@ class MCEAgent(ComplianceAgent):
             ))
 
         # --- external cause code as principal (ICD-10-CM Chapter 20) ---
-        if primary.code[:1].upper() in _EXTERNAL_CAUSE_FIRST_CHARS:
+        if self.store.is_external_cause(primary.code):
             findings.append(self.finding(
                 status=Status.FAIL, codes=[primary.code], denial_risk=DenialRisk.HIGH,
-                reason=f"{primary.code} is an external-cause code (ICD-10-CM Chapter 20, "
-                       f"V00-Y99) — it describes the circumstance causing an injury, not "
+                reason=f"{primary.code} is an external-cause code (ICD-10-CM Chapter 20) "
+                       f"— it describes the circumstance causing an injury, not "
                        f"the injury itself, and cannot be the principal diagnosis.",
                 recommendation="Code the nature of the injury/condition as principal; keep "
                                "the external-cause code as secondary.",

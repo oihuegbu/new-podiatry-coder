@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import re
 import time
@@ -22,10 +23,10 @@ This extracted data feeds a medical billing pipeline where a single misread char
 - ACCURACY over completeness: if you cannot read text with confidence, write [UNCLEAR] rather than guessing
 - Medical codes have ZERO tolerance for character substitution:
   - The letter O and the digit 0 are different — re-read every code
-  - The letter I and the digit 1 are different — e.g., "I10" (hypertension) vs "110"
+  - The letter I and the digit 1 are different
   - The letter S and the digit 5, the letter B and the digit 8 are easily confused in print
 - Re-read every code character by character before writing it
-- Laterality is critical — RT, LT, bilateral, right, left must be read exactly as written; never assume or infer laterality
+- Laterality is critical — side and bilateral wording must be read exactly as written; never assume or infer laterality
 - Drug names, dosages, injection amounts, and measurements must be verbatim — do NOT round or estimate
 - Digit/toe numbers (1st, 2nd, 3rd, 4th, 5th) must be exact — these determine which CPT code applies
 
@@ -49,6 +50,13 @@ This extracted data feeds a medical billing pipeline where a single misread char
 
 ## OUTPUT — Return valid JSON with no markdown fences:
 {
+  "page_texts": [
+    {
+      "page_number": 1,
+      "status": "extracted",
+      "text": "complete verbatim transcription of this page, including header and footer"
+    }
+  ],
   "patient_metadata": {
     "patient_name": "full name",
     "date_of_birth": "MM/DD/YYYY",
@@ -56,9 +64,15 @@ This extracted data feeds a medical billing pipeline where a single misread char
     "provider": "Dr. Name, Credentials",
     "npi": "number or null",
     "mrn": "number or null",
+    "gender": "gender/sex value exactly as printed, else null",
     "insurance": "full insurance line or null",
+    "insurance_plan": "plan/product name exactly as printed, else null",
+    "member_id": "member/policy identifier exactly as printed, else null",
+    "group_number": "group identifier exactly as printed, else null",
+    "authorization_number": "prior-authorization identifier exactly as printed, else null",
     "note_type": "e.g., NEW PATIENT – OFFICE VISIT",
-    "place_of_service": "2-digit CMS POS code if stated or clearly inferable from the note's own setting language (office/clinic letterhead → 11, hospital → 21/22, ASC → 24, patient's home → 12, SNF → 31), else null — never guess between settings",
+    "place_of_service": "CMS POS code only when explicitly printed, else null",
+    "care_setting": "setting language exactly as printed (office, hospital, facility, home, etc.), else null; do not translate it to a code",
     "service_facility": {
       "name": "facility/practice name from the letterhead or footer, else null",
       "address": "street address exactly as printed, else null",
@@ -67,7 +81,8 @@ This extracted data feeds a medical billing pipeline where a single misread char
       "zip": "ZIP code, else null",
       "phone": "phone number, else null"
     },
-    "signature_block": "verbatim closing signature block (provider name, credentials, and any title/NPI printed with the signature), else null"
+    "signature_block": "verbatim closing signature block (provider name, credentials, and any title/NPI printed with the signature), else null",
+    "provider_specialty": "specialty explicitly printed in the document, or podiatry when DPM credentials are printed, else null"
   },
   "sections": {
     "chief_complaint": "exact verbatim text",
@@ -86,15 +101,15 @@ This extracted data feeds a medical billing pipeline where a single misread char
     "is_post_op_visit": true,
     "days_post_op": 14,
     "prior_surgery_description": "Austin/Chevron bunionectomy right foot",
-    "prior_surgery_cpt": "28296"
+    "prior_surgery_cpt": "verbatim code if explicitly printed, else null"
   },
   "physician_documented_codes": [
     {
-      "code": "E11.42",
+      "code": "verbatim code",
       "system": "icd10",
-      "description": "Type 2 DM with polyneuropathy",
+      "description": "verbatim description",
       "section": "ASSESSMENT",
-      "raw_text": "E11.42 - Type 2 DM with polyneuropathy"
+      "raw_text": "complete verbatim line"
     }
   ]
 }
@@ -102,12 +117,13 @@ This extracted data feeds a medical billing pipeline where a single misread char
 ## IMPORTANT RULES FOR physician_documented_codes:
 - Extract ONLY codes explicitly written by the physician in the document — no inferred codes
 - Look in: Assessment/Diagnoses section, Plan section, header fields, anywhere codes appear
-- ICD-10-CM codes: one capital letter followed by digits and optional decimal (e.g., E11.42, M20.11, L84, B35.1, I10)
-- CPT codes: exactly 5 digits (e.g., 11721, 99213, 28296) — if you count 4 or 6 digits, re-read
-- HCPCS codes: exactly one capital letter followed by exactly 4 digits (e.g., A5513, L3020, J3301, J0702)
+- ICD-10-CM codes: one capital letter followed by digits and an optional decimal
+- CPT codes: exactly 5 digits — if you count 4 or 6 digits, re-read
+- HCPCS codes: exactly one capital letter followed by exactly 4 digits
 - CHARACTER ACCURACY CHECK before including any code:
-  - Verify letter vs digit in every position (I10 not 110, L84 not 184, O not 0)
-  - Verify decimal placement in ICD-10 codes (E11.42 not E114.2)
+  - Compare every letter, digit, and decimal with the source glyph by glyph
+  - Never normalize an uncertain letter into a digit or an uncertain digit into a letter
+  - Preserve the source's ICD-10-CM decimal placement exactly
   - Verify digit count in CPT codes (exactly 5)
 - If the physician wrote NO explicit codes, return an empty array []
 - If a code is partially obscured or unclear, skip it — do NOT guess
@@ -116,7 +132,7 @@ This extracted data feeds a medical billing pipeline where a single misread char
 - Set is_post_op_visit=true ONLY if the note explicitly documents a follow-up after a prior surgery
 - Look for: "post-op day X", "s/p [procedure]", "post-operative visit", "follow-up after surgery", "surgical follow-up"
 - days_post_op: exact number if stated (e.g., "Day 14 post-op" → 14), else null
-- prior_surgery_cpt: best estimate CPT for the prior surgery, or null if unknown
+- prior_surgery_cpt: copy the code only when it is explicitly printed; otherwise null
 - If NOT a post-op visit: {"is_post_op_visit": false, "days_post_op": null, "prior_surgery_description": null, "prior_surgery_cpt": null}
 
 CRITICAL: Return ONLY valid JSON with no markdown code fences. Every character in every medical code must be verified before output. When uncertain about any character, re-read it; if still uncertain, use [UNCLEAR] or skip the code."""
@@ -127,7 +143,13 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
     pdf_path = Path(pdf_path)
     logger.info(f"Converting {pdf_path.name} to image for Claude Opus 4.7 Vision...")
 
-    images = convert_from_path(str(pdf_path), dpi=300, first_page=1, last_page=2)
+    # Convert the complete document.  The previous first_page/last_page cap
+    # silently discarded page 3 onward while still returning a successful
+    # extraction — an unacceptable release ambiguity for a medical claim.
+    images = convert_from_path(str(pdf_path), dpi=300)
+    if not images:
+        raise RuntimeError(f"PDF conversion produced no pages: {pdf_path.name}")
+    source_digest = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
 
     image_blocks = []
     for img in images:
@@ -225,6 +247,29 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
             logger.warning(f"  Vision extraction attempt {attempt}: {last_err} — retrying")
             continue
 
+        # A complete per-page transcription is the extraction contract. The
+        # old implementation equated "image sent" with "page extracted" and
+        # could certify a page the model silently omitted.
+        page_texts = parsed.get("page_texts") or []
+        page_numbers = sorted(
+            int(p.get("page_number")) for p in page_texts
+            if isinstance(p, dict) and
+            str(p.get("page_number") or "").isdigit())
+        page_valid = (
+            len(page_texts) == len(images) and
+            page_numbers == list(range(1, len(images) + 1)) and
+            all(isinstance(p, dict) and
+                p.get("status") in {"extracted", "blank"} and
+                (str(p.get("text") or "").strip()
+                 if p.get("status") == "extracted" else
+                 not str(p.get("text") or "").strip())
+                for p in page_texts)
+        )
+        if not page_valid:
+            last_err = "per-page transcription coverage is absent or incomplete"
+            logger.warning(f"  Vision extraction attempt {attempt}: {last_err} — retrying")
+            continue
+
         # Valid-but-empty JSON is the same failure as unparseable JSON: a
         # note with no metadata and no sections produces a garbage claim
         # downstream (observed live: 'category=?, procedures=[]' run).
@@ -253,15 +298,12 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
     metadata = result.get("patient_metadata", {})
     sections = result.get("sections", {})
 
-    # Build full_text from all sections for downstream compatibility
-    full_text_parts = []
-    for key in ["chief_complaint", "hpi", "pmh_medications_allergies",
-                "physical_examination", "imaging_diagnostics",
-                "assessment_diagnoses", "plan"]:
-        text = sections.get(key, "")
-        if text:
-            full_text_parts.append(text)
-    sections["full_text"] = "\n\n".join(full_text_parts)
+    # The complete per-page transcription, not a reconstruction from selected
+    # clinical sections, is the evidence corpus used by every downstream gate.
+    page_texts = sorted(result["page_texts"], key=lambda p: int(p["page_number"]))
+    sections["full_text"] = "\n\n".join(
+        str(p.get("text") or "") for p in page_texts)
+    text_digest = hashlib.sha256(sections["full_text"].encode()).hexdigest()
 
     logger.info(
         f"  Vision extraction complete: "
@@ -292,4 +334,21 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
         "prior_surgery_info": prior_surgery_info,
         "physician_documented_codes": physician_codes,
         "extraction_usage": usage,
+        "note_integrity": {
+            "complete": True,
+            "page_count": len(images),
+            "extracted_page_count": len(page_texts),
+            "source_pdf_sha256": f"sha256:{source_digest}",
+            "extracted_text_sha256": f"sha256:{text_digest}",
+            "page_coverage": [
+                {
+                    "page_number": int(p["page_number"]),
+                    "status": p["status"],
+                    "text_sha256": ("sha256:" + hashlib.sha256(
+                        str(p.get("text") or "").encode()).hexdigest()
+                        if p["status"] == "extracted" else ""),
+                }
+                for p in page_texts
+            ],
+        },
     }

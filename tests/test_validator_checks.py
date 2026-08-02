@@ -36,6 +36,8 @@ def main():
     store = ComplianceDataStore()
     store.build_or_load()
     v = CodingValidator(db, store)
+    ncci_dos = date(2026, 7, 1)
+    v._dos = ncci_dos
 
     print("\n[E/M level vs descriptor MDM]")
     v.issues = []
@@ -418,24 +420,24 @@ def main():
           "modifier_57_missing" in cats(v))
 
     print("\n[NCCI anatomic-modifier separation (validator mirror)]")
-    pair = db.check_ncci("28297", "28285")
+    pair = db.check_ncci("28297", "28285", ncci_dos)
     if pair and str(pair.get("modifier", "")).strip() == "1":
         v.issues = []
         v._check_ncci([{"code": "28297", "modifiers": ["TA"]},
-                       {"code": "28285", "modifiers": ["T6"]}])
+                       {"code": "28285", "modifiers": ["T6"]}], ncci_dos)
         check("differing anatomic modifiers → exception applied (INFO)",
               any(i.category == "ncci_edit" and i.severity == "INFO" for i in v.issues)
               and not any(i.severity in ("WARNING", "ERROR") for i in v.issues))
         v.issues = []
         v._check_ncci([{"code": "28297", "modifiers": ["RT"]},
-                       {"code": "28285", "modifiers": ["RT"]}])
+                       {"code": "28285", "modifiers": ["RT"]}], ncci_dos)
         check("same anatomic modifier both lines → still flagged",
               any(i.category == "ncci_edit" and i.severity == "WARNING" for i in v.issues))
         # generic side vs same-side digit is NOT site separation (note 010):
         # RT names the whole side and T6 lies within it
         v.issues = []
         v._check_ncci([{"code": "28297", "modifiers": ["RT"]},
-                       {"code": "28285", "modifiers": ["RT", "T6"]}])
+                       {"code": "28285", "modifiers": ["RT", "T6"]}], ncci_dos)
         check("generic RT vs same-side digit → still flagged (no bypass)",
               any(i.category == "ncci_edit" and i.severity == "WARNING" for i in v.issues))
     else:
@@ -473,7 +475,8 @@ def main():
     # was the only ungated path onto the claim.
     from app.coding.code_assigner import _gate_verify_additions
     fr = {"icd10_codes": [{"code": "D48.1"}, {"code": "E11.621"}],
-          "supporting_conditions": [], "hcpcs_codes": [{"code": "A9270"}],
+          "supporting_conditions": [],
+          "hcpcs_codes": [{"code": "A9270"}, {"code": "ZZZZZ"}],
           "cpt_codes": [{"code": "20926"}, {"code": "99213"}, {"code": "Q9999"}]}
     _gate_verify_additions(fr, {"icd10_codes": [], "supporting_conditions": [],
                                 "cpt_codes": [], "hcpcs_codes": []}, db, store)
@@ -484,8 +487,12 @@ def main():
           any(e["code"] == "D48.1" for e in fr["icd10_codes"]))
     check("codes known nowhere removed (deleted 20926, fabricated Q9999)",
           not any(e["code"] in ("20926", "Q9999") for e in fr["cpt_codes"]))
-    check("HCPCS unlisted-but-valid policy preserved",
-          any(e["code"] == "A9270" for e in fr["hcpcs_codes"]))
+    check("valid HCPCS kept and unknown HCPCS removed",
+          any(e["code"] == "A9270" for e in fr["hcpcs_codes"])
+          and not any(e["code"] == "ZZZZZ" for e in fr["hcpcs_codes"]))
+    from app.coding.code_assigner import _hard_db_gate
+    check("generation hard gate removes unknown HCPCS",
+          _hard_db_gate([{"code": "ZZZZZ"}], "hcpcs", db) == [])
     # a code that was already on the claim pre-verification is never touched
     fr2 = {"icd10_codes": [{"code": "D48.1"}], "supporting_conditions": [],
            "cpt_codes": [], "hcpcs_codes": []}
@@ -1050,7 +1057,7 @@ def main():
 
     print("\n[telehealth POS ⇄ modifier]")
     from app.compliance.agents.pos_eligibility import POSEligibilityAgent
-    from app.compliance.models import Claim, ClaimLine, Payer
+    from app.compliance.models import Claim, ClaimLine, Payer, Status
     agent = POSEligibilityAgent(store)
     f = agent.check(Claim(place_of_service="10", payer=Payer(),
                           lines=[ClaimLine(code="99213", code_system="CPT", modifiers=[])]))
@@ -1068,10 +1075,12 @@ def main():
     from app.compliance.agents.specificity import SpecificityAgent
     sp = SpecificityAgent(store)
     f = sp.check(Claim(payer=Payer(), date_of_service=None, lines=[], diagnoses=[]))
-    check("missing DOS → WARN", any("missing or unparseable" in x.reason for x in f))
+    check("missing DOS → UNKNOWN/blocking",
+          any(x.status == Status.UNKNOWN and x.is_blocking for x in f))
     f = sp.check(Claim(payer=Payer(), date_of_service=date.today() + timedelta(days=30),
                        lines=[], diagnoses=[]))
-    check("future DOS → WARN", any("in the future" in x.reason for x in f))
+    check("future DOS → FAIL/blocking",
+          any(x.status == Status.FAIL and x.is_blocking for x in f))
 
     print("\n[dx-pointer overflow auto-trim]")
     # 5 linked dxs on one line: keep primary + clinical conditions, drop the
@@ -1397,39 +1406,41 @@ def main():
     # Find a digit modifier whose own reference name states each side —
     # data-driven, no hand-typed T-modifier map (that map was once inverted).
     right_digit = left_digit = None
+    right_general = store.modifier_for_laterality("right")
+    left_general = store.modifier_for_laterality("left")
     for r in store.conn.execute("SELECT code FROM modifier"):
         mod_code = r[0]
-        if mod_code in ("RT", "LT"):
+        if mod_code in {right_general, left_general}:
             continue
         side = store.modifier_laterality(mod_code)
-        if side == "RT" and right_digit is None:
+        if side == "right" and right_digit is None:
             right_digit = mod_code
-        elif side == "LT" and left_digit is None:
+        elif side == "left" and left_digit is None:
             left_digit = mod_code
         if right_digit and left_digit:
             break
     if right_digit:
-        line = {"code": "11750", "modifiers": ["RT", right_digit]}
+        line = {"code": "11750", "modifiers": [right_general, right_digit]}
         v.issues = []
         v._check_redundant_laterality([line], [])
-        check(f"RT stripped when {right_digit} (a right-side digit modifier) present",
+        check(f"general side stripped when {right_digit} (a right-side digit modifier) present",
               line["modifiers"] == [right_digit]
               and "redundant_laterality_removed" in cats(v))
-        line2 = {"code": "11750", "modifiers": ["LT", right_digit]}
+        line2 = {"code": "11750", "modifiers": [left_general, right_digit]}
         v.issues = []
         v._check_redundant_laterality([line2], [])
         check(f"LT + {right_digit} (right-side digit) → contradiction ERROR, nothing stripped",
-              "LT" in line2["modifiers"] and "laterality_contradiction" in cats(v))
+              left_general in line2["modifiers"] and "laterality_contradiction" in cats(v))
         line3 = {"code": "11750", "modifiers": [right_digit]}
         v.issues = []
         v._check_redundant_laterality([line3], [])
         check("digit modifier alone → silent", not v.issues)
         if left_digit:
-            line4 = {"code": "11750", "modifiers": ["RT", right_digit, left_digit]}
+            line4 = {"code": "11750", "modifiers": [right_general, right_digit, left_digit]}
             v.issues = []
             v._check_redundant_laterality([line4], [])
             check("digit modifiers spanning both sides → ambiguous, untouched",
-                  "RT" in line4["modifiers"] and not v.issues)
+                  right_general in line4["modifiers"] and not v.issues)
     else:
         check("SKIP: no sided digit modifier in reference data", True)
 
@@ -1871,13 +1882,13 @@ def main():
         [{"code": "11750", "modifiers": ["T5"]}], "No imaging words at all.")
     check("non-radiology code → untouched", not v.issues)
 
-    print("\n[A-code supply RT/LT strip]")
+    print("\n[HCPCS supply laterality does not use a prefix proxy]")
     sup_a = {"code": "A4570", "modifiers": ["RT"]}
     sup_l = {"code": "L3260", "modifiers": ["RT"]}
     v.issues = []
     v._check_supply_laterality_strip([sup_a, sup_l])
-    check("A4570 RT stripped (materials line)",
-          sup_a["modifiers"] == [] and "supply_laterality_removed" in cats(v))
+    check("A4570 side modifier preserved without a sourced applicability field",
+          sup_a["modifiers"] == ["RT"])
     check("L3260 (L-code fitted device) untouched", sup_l["modifiers"] == ["RT"])
 
     print("\n[ICD laterality corrected to the claim's own side]")
@@ -2093,7 +2104,7 @@ def main():
           em_inc["mdm_details"]["problems_score"] == 4)
 
     print("\n[same-site PTP bundling]")
-    if db.check_ncci("11740", "29550"):
+    if db.check_ncci("11740", "29550", ncci_dos):
         c1 = [{"code": "11740", "modifiers": ["T6"], "units": 1},
               {"code": "29550", "modifiers": ["T6", "59"], "units": 1}]
         v.issues = []
@@ -2128,7 +2139,7 @@ def main():
               not v._non_billable_codes_to_suppress)
     else:
         check("SKIP: 11740/29550 PTP edit not in dataset", True)
-    if db.check_ncci("11730", "11740"):
+    if db.check_ncci("11730", "11740", ncci_dos):
         c5 = [{"code": "11730", "modifiers": ["TA"], "units": 1},
               {"code": "11740", "modifiers": ["TA", "59"], "units": 1}]
         v.issues = []
@@ -2468,7 +2479,7 @@ def main():
     # Live (notes 001/006): the note documents the comprehensive service
     # (phenol matrixectomy / partial avulsion) but a run bills only its
     # NCCI column-2 component. The line converges on the comprehensive code.
-    edit_1150 = db.check_ncci("11750", "11730")
+    edit_1150 = db.check_ncci("11750", "11730", ncci_dos)
     if edit_1150 and edit_1150.get("code1") == "11750":
         note_matrix = (
             "PROCEDURE(S) PERFORMED: Digital block. Medial one-fifth of nail "
@@ -3195,13 +3206,13 @@ def main():
         fw4, [], fw_icd, note_shoe, date(2026, 5, 29), "2020-01-01")
     check("pediatric patient → bracket ambiguity, no add", not fw4)
 
-    print("\n[supply digit-modifier strip (A-codes)]")
+    print("\n[supply digit-modifier authority gate]")
     sup = [{"code": "A4570", "modifiers": ["T6"], "units": 1}]
     v.issues = []
     v._check_supply_laterality_strip(sup)
-    check("digit modifier stripped from plain supply (A4570 'Splint')",
-          sup[0]["modifiers"] == []
-          and "supply_laterality_removed" in cats(v))
+    check("digit modifier preserved when no authoritative applicability field exists",
+          sup[0]["modifiers"] == ["T6"]
+          and "supply_laterality_removed" not in cats(v))
 
     print("\n[consistency: satisfied instructional groups]")
     from app.validation.consistency import _icd_flip_is_claim_inert

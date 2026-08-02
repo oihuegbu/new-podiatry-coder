@@ -49,9 +49,11 @@ class _PackDir:
         self.pack_path.write_text(json.dumps(
             {"version": "test", "rules": self.rules}))
         self.state_path = d / "rule_exercise.json"
+        self.proposals_dir = d / "proposals"
         self.patches = [
             mock.patch.object(aa, "RULES_PATH", self.pack_path),
             mock.patch.object(pcons, "STATE_PATH", self.state_path),
+            mock.patch.object(pcons, "PROPOSALS_DIR", self.proposals_dir),
         ]
         for p in self.patches:
             p.start()
@@ -157,9 +159,10 @@ class DormancyTest(unittest.TestCase):
                 "r2": {"load_bearing_on": ["docA"]}}})
             self.assertEqual(out["tagged"], ["r1"])
             rules = {r["id"]: r for r in pd.pack()["rules"]}
-            self.assertTrue(rules["r1"]["dormant_on_corpus"])
             self.assertTrue(rules["r1"]["enabled"])
-            self.assertNotIn("dormant_on_corpus", rules["r2"])
+            self.assertNotIn("dormant_on_corpus", rules["r1"])
+            state = json.loads(pd.state_path.read_text())
+            self.assertIn("r1", state["dormancy"])
             # a later scan finds r1 load-bearing -> tag clears
             out = pcons.tag_dormancy({"rules": {
                 "r1": {"load_bearing_on": ["docB"]}}})
@@ -167,6 +170,8 @@ class DormancyTest(unittest.TestCase):
             rules = {r["id"]: r for r in pd.pack()["rules"]}
             self.assertNotIn("dormant_on_corpus", rules["r1"])
             self.assertNotIn("dormant_since", rules["r1"])
+            state = json.loads(pd.state_path.read_text())
+            self.assertNotIn("r1", state["dormancy"])
 
 
 # ---------------------------------------------------------------------------
@@ -231,21 +236,21 @@ class MergeGateTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class ApplyMergeTest(unittest.TestCase):
-    def test_originals_disabled_and_merged_appended(self):
+    def test_merge_is_inert_proposal_and_live_pack_is_unchanged(self):
         with _PackDir([_rule("a1"), _rule("a2"),
                        _rule("hand", auto=False)]) as pd:
-            pcons.apply_merge(_rule("merged-1"),
-                              [_rule("a1"), _rule("a2")])
+            path = pcons.apply_merge(_rule("merged-1"),
+                                     [_rule("a1"), _rule("a2")])
             rules = {r["id"]: r for r in pd.pack()["rules"]}
             for rid in ("a1", "a2"):
-                self.assertFalse(rules[rid]["enabled"])
-                self.assertEqual(
-                    rules[rid]["provenance"]["superseded_by"], "merged-1")
-            m = rules["merged-1"]
-            self.assertTrue(m["enabled"] and m["auto_generated"])
-            self.assertEqual(m["provenance"]["consolidated_from"],
-                             ["a1", "a2"])
+                self.assertTrue(rules[rid]["enabled"])
+            self.assertNotIn("merged-1", rules)
             self.assertTrue(rules["hand"]["enabled"])
+            proposal = json.loads(path.read_text())
+            self.assertEqual(proposal["status"], "draft")
+            self.assertFalse(proposal["rule"]["enabled"])
+            self.assertEqual(proposal["rule"]["provenance"]
+                             ["consolidated_from"], ["a1", "a2"])
 
 
 # ---------------------------------------------------------------------------
@@ -288,31 +293,27 @@ class ConsolidateDriverTest(unittest.TestCase):
                 and_then(pd)
             return summary, pack, state
 
-    def test_accepted_merge_lands_in_pack(self):
+    def test_accepted_merge_creates_proposal_only(self):
         summary, pack, _ = self._drive(
             {"decision": "merge", "rule": _rule("merged-1")},
             [{"docA": ["base"]},   # baseline
-             {"docA": ["base"]},   # gate_merge replay
-             {"docA": ["base"]}])  # post-write live verification
-        self.assertEqual(summary["merges"],
-                         [{"rule_ids": ["a1", "a2"],
-                           "merged_id": "merged-1"}])
+             {"docA": ["base"]}])  # gate_merge replay
+        self.assertEqual(summary["merges"][0]["status"], "draft")
+        self.assertEqual(summary["merges"][0]["merged_id"], "merged-1")
         rules = {r["id"]: r for r in pack["rules"]}
-        self.assertTrue(rules["merged-1"]["enabled"])
-        self.assertFalse(rules["a1"]["enabled"])
+        self.assertNotIn("merged-1", rules)
+        self.assertTrue(rules["a1"]["enabled"])
 
-    def test_post_write_mismatch_rolls_back(self):
+    def test_no_post_write_live_pack_mutation_occurs(self):
         with mock.patch.object(aa, "_disable_rule") as dis, \
                 mock.patch.object(aa, "_reenable_rule") as ren:
             summary, _, _ = self._drive(
                 {"decision": "merge", "rule": _rule("merged-1")},
                 [{"docA": ["base"]},        # baseline
-                 {"docA": ["base"]},        # gate_merge replay: identical
-                 {"docA": ["DIFFERENT"]}])  # live verification: differs!
-        self.assertEqual(summary["merges"], [])
-        self.assertEqual(len(summary["rejected"]), 1)
-        dis.assert_called_once()
-        self.assertEqual(ren.call_count, 2)
+                 {"docA": ["base"]}])       # proposal gate
+        self.assertEqual(len(summary["merges"]), 1)
+        dis.assert_not_called()
+        ren.assert_not_called()
 
     def test_proposer_decline_is_ledgered_and_not_reasked(self):
         def second_run(pd):

@@ -1,48 +1,17 @@
 """Filter #6 — Global surgical period.
 
-Each surgical CPT carries a global indicator (000/010/090/MMM/XXX/YYY/ZZZ).
+Each surgical service carries a CMS PFS global indicator.
 Care related to the surgery billed within that window is bundled into the
 surgical package unless an appropriate modifier applies:
-  * 24 — unrelated E/M during a postoperative period
-  * 58 — staged/planned related procedure
-  * 78 — return to OR for a complication (related)
-  * 79 — unrelated procedure during the postoperative period
-
 Scope: within a PRIOR surgery's global window, detect (a) a separately-billed
-E/M with no qualifying modifier (should be 99024, no-charge, or carry 24), and
-(b) a separately-billed PROCEDURE (a line the PFS data itself marks 000/010/090)
-with none of 58/78/79 — related procedures are part of the surgical package.
-
-NOTE on "no hardcoding": the E/M section boundary (99202–99499) and the global-
-period modifier meanings are *structural facts of the CPT/HCPCS grammar*, not
-medical-rule code lists. The actual global-day values come 100% from the data
-store (PFS GLOB DAYS).
+E/M with no qualifying modifier, and (b) a separately-billed procedure with
+no applicable postoperative modifier.  Both service and modifier roles are
+resolved from the authoritative CPT/HCPCS/PFS data.
 """
 from __future__ import annotations
 
 from app.compliance.agents.base import ComplianceAgent
 from app.compliance.models import Claim, DenialRisk, Finding, Status
-
-# CPT structural section boundaries (AMA code-system grammar, not a medical list)
-_EM_SECTION = range(99202, 99500)
-_POSTOP_NOCHARGE = "99024"
-# Modifiers that legitimately allow billing within a POSTOPERATIVE global
-# period (the four listed in the module docstring above). 25 and 57 are
-# deliberately excluded even though they're both real "separate E/M"
-# modifiers elsewhere in the codebase: 25 marks an E/M as separately
-# identifiable from a SAME-DAY procedure (nothing to do with a PRIOR
-# surgery's postop window), and 57 marks the decision for a NEW surgery
-# (pre-op, not postop). Neither establishes that today's E/M is unrelated
-# to (or a planned stage of) the OLD surgery this check is evaluating —
-# only 24/58/78/79 do that. Including 25/57 here previously let a routine,
-# unrelated modifier 25 downgrade a genuine "E/M bundled into the surgical
-# package" FAIL to a WARN with no real postop-bypass justification present.
-_GLOBAL_BYPASS_MODIFIERS = {"24", "58", "78", "79"}
-
-
-def _is_em(code: str) -> bool:
-    return code.isdigit() and int(code) in _EM_SECTION
-
 
 def _global_days_int(glob: str | None) -> int | None:
     """Map a GLOB DAYS indicator to a number of postoperative days, or None."""
@@ -88,8 +57,14 @@ class GlobalPeriodAgent(ComplianceAgent):
             return []  # outside any global window — separately billable
 
         findings: list[Finding] = []
+        em_bypass_modifiers = self.store.modifier_codes_for_role("postoperative_em")
+        procedure_bypass_modifiers = self.store.modifier_codes_for_role(
+            "postoperative_procedure")
+        no_charge_followup = self.store.postoperative_followup_code(claim.date_of_service)
         for line in claim.lines:
-            if not _is_em(line.code):
+            if no_charge_followup and line.code == no_charge_followup:
+                continue
+            if not self.store.is_em_code(line.code, claim.date_of_service):
                 # PROCEDURES during the postop window are bundled too — the
                 # global surgical package covers related return procedures,
                 # not just visits. A procedure line needs 58 (staged/planned),
@@ -101,15 +76,15 @@ class GlobalPeriodAgent(ComplianceAgent):
                 line_glob = self.store.global_period(line.code, claim.date_of_service)
                 if _global_days_int(line_glob) is None:
                     continue
-                proc_bypass = set(line.modifiers) & (_GLOBAL_BYPASS_MODIFIERS - {"24"})
+                proc_bypass = set(line.modifiers) & procedure_bypass_modifiers
                 if proc_bypass:
                     findings.append(self.finding(
                         status=Status.WARN, codes=[line.code], denial_risk=DenialRisk.MEDIUM,
                         reason=f"Procedure {line.code} billed on post-op day {days_post_op} of "
                                f"{prior_desc} (CPT {prior_cpt}, {gdays}-day global) with modifier "
                                f"{'/'.join(sorted(proc_bypass))} — ensure the note documents it as "
-                               f"staged (58), a complication return (78), or unrelated (79).",
-                        recommendation="Verify the 58/78/79 modifier is supported by the documentation.",
+                               "supported by its authoritative postoperative meaning.",
+                        recommendation="Verify the modifier is supported by the documentation.",
                         source_rule=f"PFS GLOB DAYS={glob} for {prior_cpt}",
                     ))
                 else:
@@ -119,31 +94,49 @@ class GlobalPeriodAgent(ComplianceAgent):
                                f"{prior_desc} (CPT {prior_cpt}, {gdays}-day global period) with no "
                                f"qualifying modifier — related procedures within the global window "
                                f"are included in the surgical package.",
-                        recommendation="Add modifier 58 (staged/planned), 78 (unplanned return to "
-                                       "OR for complication), or 79 (unrelated procedure) if "
-                                       "documented; otherwise do not bill separately.",
+                        recommendation=(
+                            f"Use an applicable postoperative modifier "
+                            f"({ '/'.join(sorted(procedure_bypass_modifiers)) }) only when its "
+                            "authoritative meaning is documented; otherwise do not bill separately."
+                            if procedure_bypass_modifiers else
+                            "Authoritative postoperative modifier roles are unavailable; do not "
+                            "bill separately until the reference data is restored."
+                        ),
                         source_rule=f"PFS GLOB DAYS={glob} for {prior_cpt}",
                     ))
                 continue
-            if set(line.modifiers) & _GLOBAL_BYPASS_MODIFIERS:
+            if set(line.modifiers) & em_bypass_modifiers:
                 findings.append(self.finding(
                     status=Status.WARN, codes=[line.code], denial_risk=DenialRisk.MEDIUM,
                     reason=f"E/M {line.code} billed on post-op day {days_post_op} of {prior_desc} "
                            f"(CPT {prior_cpt}, {gdays}-day global) with a global-period modifier — "
                            f"ensure it is documented as unrelated/staged.",
-                    recommendation="Verify the modifier (24/58/78/79) is supported by the note.",
+                    recommendation="Verify the modifier's authoritative meaning is supported by the note.",
                     source_rule=f"PFS GLOB DAYS={glob} for {prior_cpt}",
                 ))
             else:
+                recommendation = (
+                    f"Use {no_charge_followup} when the documented service matches its CPT "
+                    "descriptor, or use an authoritative unrelated-postoperative E/M modifier "
+                    f"({ '/'.join(sorted(em_bypass_modifiers)) }) when supported."
+                    if no_charge_followup and em_bypass_modifiers else
+                    "Do not bill separately until the authoritative postoperative service and "
+                    "modifier references are available and documentation supports them."
+                )
+                finding_kwargs = {}
+                if no_charge_followup:
+                    finding_kwargs = {
+                        "auto_fixable": True,
+                        "suggested_fix": {"replace_code": line.code,
+                                          "with_code": no_charge_followup},
+                    }
                 findings.append(self.finding(
                     status=Status.FAIL, codes=[line.code], denial_risk=DenialRisk.HIGH,
                     reason=f"E/M {line.code} billed on post-op day {days_post_op} of {prior_desc} "
                            f"(CPT {prior_cpt}, {gdays}-day global period) with no qualifying modifier — "
                            f"this visit is included in the surgical package.",
-                    recommendation=f"Use {_POSTOP_NOCHARGE} (post-op follow-up, no charge), or add "
-                                   f"modifier 24 if the E/M is unrelated and documented.",
+                    recommendation=recommendation,
                     source_rule=f"PFS GLOB DAYS={glob} for {prior_cpt}",
-                    auto_fixable=True,
-                    suggested_fix={"replace_code": line.code, "with_code": _POSTOP_NOCHARGE},
+                    **finding_kwargs,
                 ))
         return findings

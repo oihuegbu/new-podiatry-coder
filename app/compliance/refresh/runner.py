@@ -117,7 +117,7 @@ def _resolve_pfs(url: str) -> tuple[list[str], str | None]:
 # The MCD bulk export lives at a STABLE url (verified live) — the landing
 # page in sources.py is javascript-rendered and exposes no scrapeable link.
 _MCD_EXPORT_URL = ("https://downloads.cms.gov/medicare-coverage-database/"
-                   "downloads/exports/current_article.zip")
+                   "downloads/exports/all_article.zip")
 
 
 def _resolve_mcd(url: str) -> tuple[list[str], str | None]:

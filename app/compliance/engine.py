@@ -2,7 +2,7 @@
 
 Flow:  CodingResult dict  ──build_claim──▶  Claim
        Claim  ──[agent.check() for each agent]──▶  Findings
-       Findings  ──gate──▶  ScrubResult (CLEAN only if zero FAIL)
+       Findings  ──gate──▶  ScrubResult (CLEAN only if zero blocking findings)
 """
 from __future__ import annotations
 
@@ -113,7 +113,8 @@ def build_claim(result: dict) -> Claim:
             modifiers=list(c.get("modifiers", []) or []),
             place_of_service=c.get("place_of_service") or pos,
             linked_diagnoses=list(c.get("linked_diagnoses", []) or []),
-            supporting_text=c.get("supporting_text", ""),
+            supporting_text=" ".join(c.get("evidence_spans", []) or []) or c.get("supporting_text", ""),
+            evidence_spans=list(c.get("evidence_spans", []) or []),
         ))
 
     # patient_metadata has no "payer"/"member_id" keys — the LLM extracts a
@@ -173,6 +174,7 @@ def build_claim(result: dict) -> Claim:
             is_medicare=ins.is_medicare,
             kind=ins.kind,
             follows_medicare_coverage=ins.follows_medicare_coverage,
+            plan=meta.get("insurance_plan") or None,
         ),
         subscriber=Subscriber(
             member_id=meta.get("member_id") or meta.get("insurance_id") or ins.member_id,
@@ -279,17 +281,33 @@ class ClaimScrubber:
                 logger.error(f"agent {agent.filter_id} crashed: {exc}", exc_info=True)
                 # A crashed filter is NOT a passed filter — record it so the
                 # output never presents an unchecked claim as fully checked.
+                failure = Finding(
+                    filter_id=agent.filter_id,
+                    filter_name=agent.filter_name,
+                    status=Status.ERROR,
+                    denial_risk=DenialRisk.HIGH,
+                    reason=(f"Compliance filter {agent.filter_id} did not complete; "
+                            "this claim has not passed all required checks."),
+                    recommendation=("Hold the claim, correct the filter execution "
+                                    "failure, and re-run the complete scrub."),
+                    source_rule="internal compliance execution control",
+                    clause="agent_execution",
+                )
+                out.findings.append(failure)
                 out.filter_results.append({
                     "filter_id": agent.filter_id, "filter_name": agent.filter_name,
-                    "status": "ERROR", "findings": 0,
+                    "status": Status.ERROR.value, "findings": 1,
                 })
                 continue
             findings = _apply_advisory_suppressions(
                 findings, suppressions, agent.filter_id)
             out.findings.extend(findings)
             statuses = {f.status for f in findings}
-            status = ("FAIL" if Status.FAIL in statuses
-                      else "WARN" if Status.WARN in statuses else "PASS")
+            status = (Status.ERROR.value if Status.ERROR in statuses
+                      else Status.FAIL.value if Status.FAIL in statuses
+                      else Status.UNKNOWN.value if Status.UNKNOWN in statuses
+                      else Status.WARN.value if Status.WARN in statuses
+                      else Status.PASS.value)
             out.filter_results.append({
                 "filter_id": agent.filter_id, "filter_name": agent.filter_name,
                 "status": status, "findings": len(findings),

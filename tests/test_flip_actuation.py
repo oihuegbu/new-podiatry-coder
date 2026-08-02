@@ -252,11 +252,14 @@ class PackAuditTest(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self._old = aa.RULES_PATH
         aa.RULES_PATH = Path(self.tmp.name) / "pack.json"
+        self._old_proposals = aa.PROPOSALS_DIR
+        aa.PROPOSALS_DIR = Path(self.tmp.name) / "proposals"
         self._old_dir = at.AUTO_TEMPLATES_DIR
         at.AUTO_TEMPLATES_DIR = Path(self.tmp.name) / "auto_templates"
 
     def tearDown(self):
         self.aa.RULES_PATH = self._old
+        self.aa.PROPOSALS_DIR = self._old_proposals
         self.at.AUTO_TEMPLATES_DIR = self._old_dir
         self.tmp.cleanup()
 
@@ -319,14 +322,17 @@ class PackAuditTest(unittest.TestCase):
         self.assertIn("template t.py", problems)
         self.assertIn("11720", problems)
 
-    def test_disable_rule_rolls_back_in_place(self):
+    def test_disable_rule_creates_inert_retirement_proposal(self):
         self._write([{"id": "a", "template": "context_gate",
                       "auto_generated": True, "enabled": True}])
         self.aa._disable_rule("a")
         pack = json.loads(self.aa.RULES_PATH.read_text())
-        self.assertFalse(pack["rules"][0]["enabled"])
-        self.assertIn("audit", pack["rules"][0]["provenance"]
-                      ["disabled_reason"])
+        self.assertTrue(pack["rules"][0]["enabled"])
+        drafts = list(self.aa.PROPOSALS_DIR.glob("*.json"))
+        self.assertEqual(len(drafts), 1)
+        proposal = json.loads(drafts[0].read_text())
+        self.assertEqual(proposal["status"], "draft")
+        self.assertEqual(proposal["rule"]["target_rule_id"], "a")
 
 
 class PerCodeTargetGateTest(unittest.TestCase):
@@ -500,11 +506,14 @@ class ImplicatedRulesTest(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self._old = aa.RULES_PATH
         aa.RULES_PATH = Path(self.tmp.name) / "pack.json"
+        self._old_proposals = aa.PROPOSALS_DIR
+        aa.PROPOSALS_DIR = Path(self.tmp.name) / "proposals"
         self.results = Path(self.tmp.name) / "results"
         (self.results / "consistency_runs").mkdir(parents=True)
 
     def tearDown(self):
         self.aa.RULES_PATH = self._old
+        self.aa.PROPOSALS_DIR = self._old_proposals
         self.tmp.cleanup()
 
     def test_selects_enabled_matching_rules_only(self):
@@ -561,23 +570,26 @@ class AmendDisableHelpersTest(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self._old = aa.RULES_PATH
         aa.RULES_PATH = Path(self.tmp.name) / "pack.json"
+        self._old_proposals = aa.PROPOSALS_DIR
+        aa.PROPOSALS_DIR = Path(self.tmp.name) / "proposals"
         aa.RULES_PATH.write_text(json.dumps({"rules": [
             {"id": "old-rule", "auto_generated": True, "enabled": True,
              "template": "context_gate"}]}))
 
     def tearDown(self):
         self.aa.RULES_PATH = self._old
+        self.aa.PROPOSALS_DIR = self._old_proposals
         self.tmp.cleanup()
 
-    def test_disable_records_reason_and_successor(self):
+    def test_disable_proposes_reason_and_successor_without_live_change(self):
         self.aa._disable_rule("old-rule",
                               reason="superseded by amendment",
                               superseded_by="old-rule-r2")
         r = json.loads(self.aa.RULES_PATH.read_text())["rules"][0]
-        self.assertFalse(r["enabled"])
-        self.assertEqual(r["provenance"]["disabled_reason"],
-                         "superseded by amendment")
-        self.assertEqual(r["provenance"]["superseded_by"], "old-rule-r2")
+        self.assertTrue(r["enabled"])
+        draft = json.loads(next(self.aa.PROPOSALS_DIR.glob("*.json")).read_text())
+        self.assertEqual(draft["rule"]["reason"], "superseded by amendment")
+        self.assertEqual(draft["rule"]["superseded_by"], "old-rule-r2")
 
     def test_reenable_restores_the_rule(self):
         self.aa._disable_rule("old-rule", reason="x",
@@ -1173,11 +1185,12 @@ class GraduationTest(unittest.TestCase):
         self.gt, self.at, self.ft = gt, at, ft
         self.tmp = TemporaryDirectory()
         base = Path(self.tmp.name)
-        self._saved = (gt.RULES_PATH, gt.GRADUATED_DIR, gt.MIN_DAYS,
+        self._saved = (gt.RULES_PATH, gt.GRADUATED_DIR, gt.PROPOSALS_DIR, gt.MIN_DAYS,
                        gt.MIN_DOCS, at.AUTO_TEMPLATES_DIR, ft.QUEUE_PATH)
         gt.RULES_PATH = base / "pack.json"
         gt.GRADUATED_DIR = base / "graduated"
         gt.GRADUATED_DIR.mkdir()
+        gt.PROPOSALS_DIR = base / "proposals"
         at.AUTO_TEMPLATES_DIR = base / "auto_templates"
         at.AUTO_TEMPLATES_DIR.mkdir()
         at._cache.clear()
@@ -1187,7 +1200,7 @@ class GraduationTest(unittest.TestCase):
         gt.MIN_DAYS, gt.MIN_DOCS = 14.0, 3
 
     def tearDown(self):
-        (self.gt.RULES_PATH, self.gt.GRADUATED_DIR, self.gt.MIN_DAYS,
+        (self.gt.RULES_PATH, self.gt.GRADUATED_DIR, self.gt.PROPOSALS_DIR, self.gt.MIN_DAYS,
          self.gt.MIN_DOCS, self.at.AUTO_TEMPLATES_DIR,
          self.ft.QUEUE_PATH) = self._saved
         self.at._cache.clear()
@@ -1246,26 +1259,22 @@ class GraduationTest(unittest.TestCase):
         self.assertFalse(rep["eligible"])
         self.assertEqual(rep["checks"]["held"]["reopened_classes"], ["k1"])
 
-    def test_graduates_when_proven_and_is_transactional(self):
+    def test_graduation_creates_inert_proposal(self):
         self._install()
         self._fresh_results(5)
         summary = self.gt.graduate(self.results)
         self.assertEqual([p["template"] for p in summary["promoted"]],
                          ["sorted_marker"])
-        dest = self.gt.GRADUATED_DIR / "sorted_marker.py"
-        self.assertTrue(dest.exists())
-        promoted = dest.read_text()
-        self.assertIn("GRADUATED self-authored template", promoted)
-        self.assertIn(_GOOD_TEMPLATE, promoted)  # verbatim, header only
-        # sandbox copy retired; rules untouched
-        self.assertFalse((self.at.AUTO_TEMPLATES_DIR / "m.py").exists())
+        self.assertFalse((self.gt.GRADUATED_DIR / "sorted_marker.py").exists())
+        proposals = list(self.gt.PROPOSALS_DIR.glob("graduate-*.json"))
+        self.assertEqual(len(proposals), 1)
+        proposal = json.loads(proposals[0].read_text())
+        self.assertEqual(proposal["status"], "draft")
+        self.assertEqual(proposal["proposal_type"], "graduate_template")
+        # sandbox copy and live rules are untouched
+        self.assertTrue((self.at.AUTO_TEMPLATES_DIR / "m.py").exists())
         pack = json.loads(self.gt.RULES_PATH.read_text())
         self.assertTrue(pack["rules"][0]["enabled"])
-        # promoted module loads as plain Python and honors the contract
-        ns: dict = {}
-        exec(compile(promoted, str(dest), "exec"), ns)
-        self.assertEqual(ns["TEMPLATE_NAME"], "sorted_marker")
-        self.assertTrue(callable(ns["execute"]))
 
     def test_promotion_collision_rolls_back(self):
         self._install()
@@ -1277,9 +1286,7 @@ class GraduationTest(unittest.TestCase):
         # sandbox copy stays authoritative
         self.assertTrue((self.at.AUTO_TEMPLATES_DIR / "m.py").exists())
 
-    def test_implied_re_import_is_materialized(self):
-        # the sandbox injects `re` without an import; graduation must add
-        # the import so the promoted module runs as plain Python
+    def test_proposal_fingerprints_exact_sandbox_source(self):
         src = (
             'TEMPLATE_NAME = "sorted_marker"\n'
             'SCHEMA_DOC = "d"\n'
@@ -1294,20 +1301,11 @@ class GraduationTest(unittest.TestCase):
         self._fresh_results(5)
         summary = self.gt.graduate(self.results)
         self.assertEqual(len(summary["promoted"]), 1, summary)
-        promoted = (self.gt.GRADUATED_DIR / "sorted_marker.py").read_text()
-        ns: dict = {}
-        exec(compile(promoted, "promoted", "exec"), ns)
-
-        class _V:
-            added = []
-
-            def _add(self, *a, **k):
-                self.added.append(a)
-
-        class _Eng:
-            v = _V()
-        ns["execute"](_Eng(), {}, [], [], [], {}, "plantar ulcer", "")
-        self.assertEqual(len(_V.added), 1)
+        proposal = json.loads(next(self.gt.PROPOSALS_DIR.glob(
+            "graduate-*.json")).read_text())
+        import hashlib
+        expected = "sha256:" + hashlib.sha256(src.encode()).hexdigest()
+        self.assertEqual(proposal["source_sha256"], expected)
 
     def test_dry_run_promotes_nothing(self):
         self._install()

@@ -28,15 +28,14 @@ For each OPEN class in the flip queue (tools/flip_triage.py):
                     no-harm      …never increases them on any document, and
                     inertness    leaves every already-unanimous note's
                                  replayed claim byte-identical.
-  4. ACTUATE    — accepted rules append to data/rules/validator_rules.json
-                  with auto_generated=true + full provenance; the class is
-                  marked "actuated". Failed proposals mark it "escalated"
-                  (the human queue) with the rejection reason.
+  4. PROPOSE    — accepted candidates are written as immutable DRAFT
+                  proposal artifacts. They never modify the active rule
+                  pack or install executable templates. Human approval,
+                  signing, shadow deployment, and rollback rehearsal are
+                  separate required lifecycle stages.
 
-Verified claims then close the loop with no further wiring: the next batch
-run executes accepted rules inside the validator, notes that now come back
-unanimous + CLEAN auto-record to the finalized-claims registry via the
-existing ingest.
+Drafts remain inert until an independent promotion workflow reviews and
+signs a pack, validates it in shadow mode, and explicitly deploys it.
 
 Runs inside the app container (needs the reference DB + compliance store):
   docker compose run --rm app python tools/auto_actuate.py --limit 5
@@ -53,9 +52,11 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import re
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -69,6 +70,7 @@ from tools import flip_triage  # noqa: E402
 import os  # noqa: E402
 
 RULES_PATH = ROOT / "data" / "rules" / "validator_rules.json"
+PROPOSALS_DIR = ROOT / "data" / "rules" / "proposals"
 NOTES_DIR = Path(os.getenv("NOTES_DIR", str(ROOT / "doctors_notes")))
 
 BUILTIN_TEMPLATES = ("context_gate", "tiered_family_arbitration",
@@ -1515,7 +1517,8 @@ ENGINE API available through the `engine` parameter:
   v.store.use_additional_code_groups(code) / v.store.code_also_groups(code)
   v.store.code_first_etiology_refs(code)   # ICD Tabular conventions
   v.store.mue(code) -> int|None      # Medicare units-of-service limit
-  v.store.ncci_pair(c1, c2) -> {"col1","col2","modifier_indicator"}|None
+  v.store.ncci_data_available(dos) -> bool
+  v.store.ncci_pair(c1, c2, dos) -> {"col1","col2","modifier_indicator"}|None
       # the NCCI PTP edit between two claim lines, if one exists — THE
       # authority on whether two procedures bundle (modifier_indicator
       # "1" = a distinct-service modifier may bypass; "0" = never)
@@ -1704,13 +1707,16 @@ def design_template(hint: dict, dossiers: list[dict], pack: dict,
 def _gate_template_pair(code: str, rule: dict, cls: dict, queue: list[dict],
                         rep: Replayer, results_dir: Path,
                         scope: tuple[str, ...],
-                        baseline_cache: dict) -> tuple[str, dict, Path]:
-    """All gates for a (template module, first rule) pair. Installs the
-    module so the engine can execute it during the replay gate; on ANY
-    failure the file is removed before returning. Returns
-    (failure_reason, replay_detail, installed_path_or_None)."""
+                        baseline_cache: dict) -> tuple[str, dict, str | None]:
+    """All gates for a (template module, first rule) pair.
+
+    Candidate source is executable only inside an isolated temporary loader
+    directory for the duration of replay. It is never placed in the live
+    auto-template directory, even briefly.
+    """
+    import app.validation.auto_templates as auto_templates
     from app.validation.auto_templates import (
-        AUTO_TEMPLATES_DIR, load_auto_templates, template_name_of,
+        load_auto_templates, template_name_of,
         validate_template_clause_tagging, validate_template_source)
 
     problems = validate_template_source(code)
@@ -1736,26 +1742,29 @@ def _gate_template_pair(code: str, rule: dict, cls: dict, queue: list[dict],
         return (f"rule.template {rule.get('template')!r} != "
                 f"TEMPLATE_NAME {name!r}", {}, None)
 
-    AUTO_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
-    path = AUTO_TEMPLATES_DIR / f"{name}.py"
-    path.write_text(code, encoding="utf-8")
-    if name not in load_auto_templates():
-        path.unlink(missing_ok=True)
-        return ("template failed to load after passing the static gate "
-                "(missing exports at execution)", {}, None)
-    try:
-        reason = gate_structural(rule) or gate_no_code_literals(rule)
-        detail: dict = {}
-        if not reason:
-            reason, detail = gate_replay(rule, cls, queue, rep,
-                                         results_dir, scope,
-                                         baseline_cache=baseline_cache)
-    except Exception as exc:
-        reason, detail = f"gating raised {exc!r}", {}
+    live_dir = auto_templates.AUTO_TEMPLATES_DIR
+    with tempfile.TemporaryDirectory(prefix="rule-proposal-") as tmp:
+        sandbox_dir = Path(tmp)
+        path = sandbox_dir / f"{name}.py"
+        path.write_text(code, encoding="utf-8")
+        auto_templates.AUTO_TEMPLATES_DIR = sandbox_dir
+        try:
+            if name not in load_auto_templates():
+                return ("template failed to load after passing the static gate "
+                        "(missing exports at execution)", {}, None)
+            reason = gate_structural(rule) or gate_no_code_literals(rule)
+            detail: dict = {}
+            if not reason:
+                reason, detail = gate_replay(
+                    rule, cls, queue, rep, results_dir, scope,
+                    baseline_cache=baseline_cache)
+        except Exception as exc:
+            reason, detail = f"gating raised {exc!r}", {}
+        finally:
+            auto_templates.AUTO_TEMPLATES_DIR = live_dir
     if reason:
-        path.unlink(missing_ok=True)
         return reason, detail, None
-    return "", detail, path
+    return "", detail, code
 
 
 def _clamp_template_name(name: str) -> str:
@@ -1823,7 +1832,7 @@ def synthesize_templates(candidates: list[tuple[dict, dict, dict]],
                 break
             code = str(design.get("template_code") or "")
             rule = design.get("rule") or {}
-            reason, detail, path = _gate_template_pair(
+            reason, detail, template_source = _gate_template_pair(
                 code, rule, cls, queue, rep, results_dir, scope,
                 baseline_cache)
             if reason:
@@ -1831,47 +1840,31 @@ def synthesize_templates(candidates: list[tuple[dict, dict, dict]],
                 feedback = _repair_feedback(reason, detail)
                 continue
             if dry_run:
-                path.unlink(missing_ok=True)
                 logger.info(f"  DRY RUN: template {rule['template']!r} + "
-                            f"rule {rule['id']!r} would deploy")
+                            f"rule {rule['id']!r} would be proposed")
                 installed += 1
                 break
-            # Deploy the pair: rule into the pack (with template
-            # provenance), then the same post-deployment audit every
-            # acceptance gets. Audit failure rolls BOTH back.
+            # Persist source and replay proof in an inert proposal.
             accept_rule(rule, cls, design.get("rationale", ""),
                         dict(detail,
                              proposal_model=design.get("_model"),
                              synthesized_template=rule["template"],
-                             template_path=str(path)))
-            problems = audit_pack()
-            if problems:
-                logger.error(f"  pack audit FAILED after template "
-                             f"deployment: {problems}")
-                _disable_rule(rule["id"])
-                path.unlink(missing_ok=True)
-                flip_triage.set_status(key, "escalated", {
-                    "reason": "synthesized template rolled back: pack "
-                              f"audit failed ({'; '.join(problems)[:300]})",
-                    "templates_available": sorted(all_templates()),
-                    "proposal_protocol": PROPOSAL_PROTOCOL})
-                break
+                             template_source=template_source))
             installed += 1
             summary["templates_created"] = \
                 summary.get("templates_created", 0) + 1
-            summary["actuated"] += 1
+            summary["proposed"] += 1
             summary["escalated"] = max(0, summary["escalated"] - 1)
             for c in summary["classes"]:
                 if c.get("class_key") == key:
-                    c.update(status="actuated", rule_id=rule["id"],
+                    c.update(status="proposed", rule_id=rule["id"],
                              synthesized_template=rule["template"])
-            flip_triage.set_status(key, "actuated", {
+            flip_triage.set_status(key, "proposed", {
                 "rule_id": rule["id"],
                 "synthesized_template": rule["template"],
                 "replay": detail})
             pack = json.loads(RULES_PATH.read_text())
-            baseline_cache.clear()
-            logger.info(f"  -> TEMPLATE DEPLOYED: {rule['template']} "
+            logger.info(f"  -> TEMPLATE PROPOSED: {rule['template']} "
                         f"(rule {rule['id']}) after {attempt} attempt(s)")
             break
     return installed
@@ -1991,13 +1984,12 @@ def baseline_resolves(cls: dict, rep: Replayer, results_dir: Path,
 
 def accept_rule(rule: dict, cls: dict, rationale: str,
                 replay_detail: dict, amends: str = "") -> None:
-    pack = json.loads(RULES_PATH.read_text())
-    if any(r.get("id") == rule["id"] for r in pack["rules"]):
-        rule = dict(rule, id=f"{rule['id']}-{len(pack['rules'])}")
+    """Persist a governed draft; never mutate the production rule pack."""
+    rule = copy.deepcopy(rule)
     rule["auto_generated"] = True
-    rule["enabled"] = True
+    rule["enabled"] = False
     rule["provenance"] = {
-        "actuated_at": _now(),
+        "proposed_at": _now(),
         "flip_class": cls["class_key"],
         "documents": [d["document_id"] for d in cls["documents"]],
         "rationale": rationale,
@@ -2005,39 +1997,47 @@ def accept_rule(rule: dict, cls: dict, rationale: str,
     }
     if amends:
         rule["provenance"]["amends"] = amends
-    pack["rules"].append(rule)
-    RULES_PATH.write_text(json.dumps(pack, indent=1))
+    body = {
+        "proposal_version": 1,
+        "status": "draft",
+        "proposal_type": ("retire_rule" if rule.get("target_rule_id") else
+                          "amend_rule" if amends else "add_rule"),
+        "rule": rule,
+        "required_lifecycle": [
+            "independent_human_review", "signed_pack",
+            "sandbox_replay", "shadow_deployment", "rollback_rehearsal",
+        ],
+    }
+    fingerprint_body = copy.deepcopy(body)
+    fingerprint_body["rule"]["provenance"].pop("proposed_at", None)
+    encoded = json.dumps(fingerprint_body, sort_keys=True, separators=(",", ":"),
+                         default=str).encode()
+    body["proposal_fingerprint"] = "sha256:" + hashlib.sha256(
+        encoded).hexdigest()
+    PROPOSALS_DIR.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(rule["id"]))
+    path = PROPOSALS_DIR / f"{safe}-{body['proposal_fingerprint'][7:19]}.json"
+    if not path.exists():
+        path.write_text(json.dumps(body, indent=2, sort_keys=True,
+                                   default=str))
 
 
 def _disable_rule(rule_id: str,
                   reason: str = "post-deployment pack audit failed",
                   superseded_by: str = "") -> None:
-    """Disable a deployed rule in place (enabled=False, audit trail
-    preserved) — rollback of a just-accepted rule, or retirement of a
-    rule an audit-dispute amendment superseded. The append-only history
-    stays intact and the next batch runs without it."""
-    pack = json.loads(RULES_PATH.read_text())
-    for r in pack.get("rules", []):
-        if r.get("id") == rule_id:
-            r["enabled"] = False
-            r.setdefault("provenance", {})["disabled_reason"] = reason
-            if superseded_by:
-                r["provenance"]["superseded_by"] = superseded_by
-    RULES_PATH.write_text(json.dumps(pack, indent=1))
+    """Create a retirement proposal; never disable a live rule directly."""
+    proposal = {
+        "id": f"retire-{rule_id}", "template": "governance_only",
+        "target_rule_id": rule_id, "reason": reason,
+        "superseded_by": superseded_by,
+    }
+    accept_rule(proposal, {"class_key": "governance/retirement",
+                           "documents": []}, reason, {})
 
 
 def _reenable_rule(rule_id: str) -> None:
-    """Undo a _disable_rule during a failed-amendment rollback: the old
-    rule was healthy before the amendment and must keep running when the
-    replacement is rolled back."""
-    pack = json.loads(RULES_PATH.read_text())
-    for r in pack.get("rules", []):
-        if r.get("id") == rule_id:
-            r["enabled"] = True
-            prov = r.get("provenance") or {}
-            prov.pop("disabled_reason", None)
-            prov.pop("superseded_by", None)
-    RULES_PATH.write_text(json.dumps(pack, indent=1))
+    """No-op: draft proposals never change the live rule's state."""
+    logger.info(f"Rule {rule_id} remained live; no rollback was necessary")
 
 
 def audit_pack() -> list[str]:
@@ -2141,7 +2141,7 @@ def actuate(results_dir: Path, limit: int, dry_run: bool,
     # highest-value fix and the best-evidenced one.
     open_classes.sort(key=lambda c: -len(c["documents"]))
     open_classes = open_classes[:limit]
-    summary = {"considered": len(open_classes), "actuated": 0,
+    summary = {"considered": len(open_classes), "proposed": 0,
                "escalated": 0, "classes": []}
     if not open_classes:
         logger.info("Flip queue has no open classes — nothing to actuate")
@@ -2236,34 +2236,14 @@ def actuate(results_dir: Path, limit: int, dry_run: bool,
     with ThreadPoolExecutor(max_workers=n_workers) as ex:
         proposals = list(ex.map(_propose, to_propose))
 
-    # Phase 3 (sequential): deterministic gates + acceptance, in queue
-    # order — gate_replay swaps the global rule-pack pointer and each
-    # acceptance changes the baseline every later candidate must beat.
-    accepted_this_run = False
+    # Phase 3 (sequential): deterministic gates + draft persistence. The
+    # live baseline never changes during this pass.
     synth_candidates: list[tuple[dict, dict, dict]] = []
     for (cls, dossier), proposal in zip(to_propose, proposals):
         key = cls["class_key"]
         logger.info(f"=== Actuating flip class {key} "
                     f"({len(cls['documents'])} doc(s)) ===")
         outcome = {"class_key": key}
-
-        # A rule accepted earlier in THIS pass may already resolve this
-        # class — its proposal was drafted against the pre-acceptance pack,
-        # and gating it would mislabel a fixed class as 'inert/escalated'.
-        if accepted_this_run and baseline_resolves(
-                cls, rep, results_dir, cache=baseline_cache):
-            outcome.update(
-                status="resolved_baseline",
-                reason="resolved by a rule accepted earlier in this "
-                       "actuation pass")
-            if not dry_run:
-                flip_triage.set_status(key, "resolved_baseline", {
-                    k: v for k, v in outcome.items() if k != "class_key"})
-            summary["classes"].append(outcome)
-            summary["resolved_baseline"] = \
-                summary.get("resolved_baseline", 0) + 1
-            logger.info("  -> RESOLVED by earlier acceptance")
-            continue
 
         if proposal.get("_transient"):
             # Infrastructure failure, not a judgment: the class stays in
@@ -2327,49 +2307,24 @@ def actuate(results_dir: Path, limit: int, dry_run: bool,
                                templates_available=sorted(all_templates()),
                                proposal_protocol=PROPOSAL_PROTOCOL)
             else:
-                outcome.update(status="actuated", replay=detail,
+                outcome.update(status="proposed", replay=detail,
                                amendment=decision,
                                superseded_rule_id=target_id)
                 if decision == "amend_rule":
                     outcome["rule_id"] = rule["id"]
                 if not dry_run:
                     rationale = proposal.get("rationale", "")
-                    _disable_rule(
-                        target_id,
-                        reason=(f"superseded by audit-dispute amendment "
-                                f"({key})" if decision == "amend_rule"
-                                else f"disabled by audit-dispute "
-                                     f"actuation ({key}): "
-                                     f"{str(rationale)[:300]}"),
-                        superseded_by=(rule.get("id", "")
-                                       if decision == "amend_rule" else ""))
                     if decision == "amend_rule":
                         accept_rule(rule, cls, rationale,
                                     dict(detail, proposal_model=proposal
                                          .get("_model")),
                                     amends=target_id)
-                    pack = json.loads(RULES_PATH.read_text())
-                    baseline_cache.clear()  # the baseline pack just moved
-                    accepted_this_run = True
-                    problems = audit_pack()
-                    if problems:
-                        logger.error(f"Pack audit FAILED after "
-                                     f"{decision} of {target_id}: "
-                                     f"{problems}")
-                        if decision == "amend_rule":
-                            _disable_rule(rule["id"])
-                        _reenable_rule(target_id)
-                        pack = json.loads(RULES_PATH.read_text())
-                        outcome.update(
-                            status="escalated",
-                            reason="accepted then rolled back: post-"
-                                   f"deployment pack audit failed "
-                                   f"({'; '.join(problems)[:400]})",
-                            templates_available=sorted(all_templates()),
-                            proposal_protocol=PROPOSAL_PROTOCOL)
-                        outcome.pop("rule_id", None)
-                        outcome.pop("amendment", None)
-                        outcome.pop("superseded_rule_id", None)
+                    else:
+                        _disable_rule(
+                            target_id,
+                            reason=(f"retirement proposed by audit-dispute "
+                                    f"class {key}: "
+                                    f"{str(rationale)[:300]}"))
         elif decision != "rule":
             reason = proposal.get("reason", "model chose to escalate")
             # Record the template vocabulary this escalation was judged
@@ -2410,33 +2365,12 @@ def actuate(results_dir: Path, limit: int, dry_run: bool,
                         outcome["missing_template"] = hint
                         synth_candidates.append((cls, dossier, hint))
             else:
-                outcome.update(status="actuated", rule_id=rule["id"],
+                outcome.update(status="proposed", rule_id=rule["id"],
                                replay=detail)
                 if not dry_run:
                     accept_rule(rule, cls, proposal.get("rationale", ""),
                                 dict(detail,
                                      proposal_model=proposal.get("_model")))
-                    pack = json.loads(RULES_PATH.read_text())
-                    baseline_cache.clear()  # the baseline pack just moved
-                    accepted_this_run = True
-                    # Deployment's own bug check: audit the ENTIRE live
-                    # pack the moment it changes. Problems disable the
-                    # just-accepted rule and escalate instead of leaving a
-                    # defective pack in production.
-                    problems = audit_pack()
-                    if problems:
-                        logger.error(f"Pack audit FAILED after accepting "
-                                     f"{rule['id']}: {problems}")
-                        _disable_rule(rule["id"])
-                        pack = json.loads(RULES_PATH.read_text())
-                        outcome.update(
-                            status="escalated",
-                            reason="accepted then rolled back: post-"
-                                   f"deployment pack audit failed "
-                                   f"({'; '.join(problems)[:400]})",
-                            templates_available=sorted(all_templates()),
-                            proposal_protocol=PROPOSAL_PROTOCOL)
-                        outcome.pop("rule_id", None)
 
         if not dry_run:
             flip_triage.set_status(
@@ -2456,9 +2390,8 @@ def actuate(results_dir: Path, limit: int, dry_run: bool,
         logger.info(f"  -> {outcome['status'].upper()}{tail}")
 
     # Phase 4: escalations whose blocker was VOCABULARY (a structured
-    # missing-template hint) get their template designed, gated, and
-    # deployed right now — the vocabulary grows within the same pass, and
-    # the next scan reopens every sibling escalation against it.
+    # missing-template hint) get their template designed and gated into an
+    # inert proposal. The live vocabulary never changes in this process.
     if synth_candidates and os.getenv("AUTO_TEMPLATE_SYNTH", "1") == "1":
         logger.info(f"{len(synth_candidates)} escalation(s) carry a "
                     f"missing-template hint — entering template synthesis")

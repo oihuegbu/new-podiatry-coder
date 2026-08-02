@@ -4,6 +4,11 @@ Run:  python -m tests.test_refresh
 """
 from __future__ import annotations
 
+if __name__ != "__main__":
+    import pytest
+    pytest.skip("script harness; run with python tests/test_refresh.py",
+                allow_module_level=True)
+
 from app.compliance.datastore.store import ComplianceDataStore
 from app.compliance.refresh import parsers as P
 from app.compliance.refresh.runner import refresh_source, download
@@ -60,6 +65,21 @@ mcd_csv = (
 )
 arts = P.parse_mcd_articles(mcd_csv, "2026-06-01")
 check("groups into one article with 2 cpt + 2 icd", len(arts) == 1 and len(arts[0]["cpt_codes"]) == 2)
+
+check("active MCD row uses version-effective date and open end",
+      P._mcd_article_window({
+          "status": "A", "article_eff_date": "2026-04-01 00:00:00",
+      }) == ("2026-04-01", "9999-12-31"))
+check("retired MCD row preserves its closed authoritative window",
+      P._mcd_article_window({
+          "status": "R", "article_eff_date": "2025-10-01 00:00:00",
+          "article_end_date": "2026-03-05 00:00:00",
+      }) == ("2025-10-01", "2026-03-05"))
+check("proposed or undated MCD row has no policy authority",
+      P._mcd_article_window({
+          "status": "P", "article_eff_date": "2026-04-01 00:00:00",
+      }) is None
+      and P._mcd_article_window({"status": "A"}) is None)
 
 # --- covered-ICD group grammar (roles + scope) --------------------------------
 print("\n[group role grammar]")

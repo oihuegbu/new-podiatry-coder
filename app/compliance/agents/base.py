@@ -22,7 +22,7 @@ class ComplianceAgent(ABC):
 
     @abstractmethod
     def check(self, claim: Claim) -> list[Finding]:
-        """Inspect the claim and return findings (PASS/WARN/FAIL)."""
+        """Inspect the claim and return PASS/WARN/FAIL/UNKNOWN/ERROR findings."""
         raise NotImplementedError
 
     # convenience builder so agents stay terse
