@@ -1,34 +1,35 @@
 #!/usr/bin/env python3
-"""Build data/codes/snomed_icd10_map.json from the authoritative SNOMED CT ->
-ICD-10-CM map (NLM/UMLS).
+"""Build data/codes/snomed_icd10_map.json — the SNOMED CT -> ICD-10-CM term map
+that backs the coder's second authoritative resolution layer.
 
-The ICD-10-CM Alphabetic Index covers many clinician terms, but SNOMED CT is the
-comprehensive clinical terminology — millions of synonyms/eponyms — and NLM
-publishes the authoritative SNOMED CT -> ICD-10-CM map. Joining SNOMED
-DESCRIPTIONS (term -> concept) with that MAP (concept -> ICD-10-CM code) yields a
-term -> code lookup for the long tail the Index lacks (e.g. "Morton's neuroma").
+The ICD-10-CM Alphabetic Index covers many clinician terms; SNOMED CT is the
+comprehensive clinical terminology (millions of synonyms/eponyms), and NLM
+publishes the authoritative SNOMED CT US Edition -> ICD-10-CM map. This tool
+ingests that map — via the public, no-login copy the open-source Tuva Project
+mirrors on S3 (a verbatim redistribution of the NLM SNOMED CT US Edition map) —
+and inverts it to term -> ICD-10-CM code(s). Each row already carries the SNOMED
+term AND the ICD-10-CM mapTarget, so no separate SNOMED description file is
+needed.
 
-Source (free, but requires a UMLS license — https://uts.nlm.nih.gov/):
-  SNOMED CT US Edition RF2 release. Two files:
-    - Descriptions:  sct2_Description_*-en_US*.txt   (conceptId, term)
-    - ICD-10-CM map: der2_iisssccRefset_ExtendedMapFull*_US*.txt
-                     (referencedComponentId = concept, mapTarget = ICD-10-CM)
+Only the UNCONDITIONAL default maps (mapRule TRUE / OTHERWISE TRUE) are kept —
+age/context-conditional rules need patient data the coder resolves elsewhere.
 
-This tool does not download SNOMED (it is license-gated); point it at the RF2
-files you extracted from your UMLS release:
+LICENSING: the underlying content is SNOMED CT (US Edition), free for use within
+the United States under the NLM UMLS license; ICD-10-CM is public domain. Confirm
+the SNOMED CT license applies to your use before deploying.
 
-  python tools/build_snomed_icd10_map.py --desc <sct2_Description...txt> \\
-                                         --map  <der2_...ExtendedMapFull...txt>
-
-Output is provenance-tagged JSON; the coder loads it as the second authoritative
-layer (after the ICD Index, before embedding). Absent the file, that layer is a
-no-op and the coder behaves exactly as today.
+Usage (needs internet; run on the box):
+  python tools/build_snomed_icd10_map.py            # downloads the public map
+  python tools/build_snomed_icd10_map.py --file <local snomed_icd_10_map.csv[.gz]>
 """
 import argparse
 import csv
+import gzip
+import io
 import json
 import re
 import sys
+import urllib.request
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
@@ -36,7 +37,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.core.config import DATA_DIR
 
-_ICD = re.compile(r"^[A-Z]\d{2}(\.[A-Z0-9]{1,4})?$")     # ICD-10-CM shape (dotted)
+DEFAULT_URL = ("https://tuva-public-resources.s3.amazonaws.com/versioned_terminology/"
+               "latest/snomed_icd_10_map.csv_0_0_0.csv.gz")
+# NLM ExtendedMap column order (headerless): ... active(2) ... term(6) ...
+# mapRule(9) mapAdvice(10) mapTarget(11) ...
+_ACTIVE, _TERM, _RULE, _TARGET = 2, 6, 9, 11
+_ICD = re.compile(r"^[A-Z]\d{2}[A-Z0-9]*$")
 
 
 def _norm(s: str) -> str:
@@ -44,53 +50,58 @@ def _norm(s: str) -> str:
                   str(s).lower().replace("'", ""))).strip()
 
 
-def _rows(path: str):
-    with open(path, encoding="utf-8") as fh:
-        r = csv.reader(fh, delimiter="\t")
-        header = next(r)
-        idx = {name: i for i, name in enumerate(header)}
-        for row in r:
-            yield row, idx
+def _dot(code: str) -> str:
+    c = code.upper()
+    return c if len(c) <= 3 else f"{c[:3]}.{c[3:]}"
+
+
+def _open(args):
+    if args.file:
+        raw = Path(args.file).read_bytes()
+    else:
+        print(f"Downloading {args.url} …")
+        req = urllib.request.Request(args.url, headers={"User-Agent": "Mozilla/5.0"})
+        raw = urllib.request.urlopen(req, timeout=180).read()
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    return io.StringIO(raw.decode("utf-8", "replace"))
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--desc", required=True, help="SNOMED sct2_Description RF2 file")
-    ap.add_argument("--map", required=True, help="SNOMED ExtendedMapFull (ICD-10-CM) RF2 file")
+    ap.add_argument("--url", default=DEFAULT_URL)
+    ap.add_argument("--file", help="local SNOMED->ICD map CSV (.gz ok) instead of download")
     args = ap.parse_args()
 
-    # concept -> {ICD-10-CM codes}
-    concept_codes: dict[str, set[str]] = defaultdict(set)
-    for row, idx in _rows(args.map):
-        if row[idx["active"]] != "1":
-            continue
-        target = row[idx.get("mapTarget", -1)].strip().upper() if "mapTarget" in idx else ""
-        if _ICD.match(target):
-            concept_codes[row[idx["referencedComponentId"]]].add(target)
-
-    # term -> {ICD-10-CM codes}, via each concept's descriptions
     terms: dict[str, set[str]] = defaultdict(set)
-    for row, idx in _rows(args.desc):
-        if row[idx["active"]] != "1":
+    rows = kept = 0
+    for row in csv.reader(_open(args)):
+        rows += 1
+        if len(row) <= _TARGET or row[_ACTIVE] != "1":
             continue
-        concept = row[idx["conceptId"]]
-        codes = concept_codes.get(concept)
-        if not codes:
+        rule = row[_RULE].strip().upper()
+        if rule not in ("TRUE", "OTHERWISE TRUE"):   # unconditional default maps only
             continue
-        n = _norm(row[idx["term"]])
-        if n:
-            terms[n].update(codes)
+        target = row[_TARGET].strip().upper()
+        if not _ICD.match(target):                   # skip 'NC'/blank/non-ICD targets
+            continue
+        term = _norm(row[_TERM])
+        if term:
+            terms[term].add(_dot(target))
+            kept += 1
 
     out = DATA_DIR / "codes" / "snomed_icd10_map.json"
     payload = {
-        "source": "NLM SNOMED CT US Edition -> ICD-10-CM map (ExtendedMapFull) + descriptions",
-        "provenance": "authoritative UMLS/SNOMED data, joined verbatim",
+        "source": "NLM SNOMED CT US Edition -> ICD-10-CM map (public Tuva Project mirror)",
+        "url": args.url,
+        "license": "SNOMED CT US Edition (NLM UMLS, free for US use); ICD-10-CM public domain",
+        "provenance": "authoritative NLM map, unconditional default rules, inverted to term->code",
         "generated": date.today().isoformat(),
         "count": len(terms),
         "terms": {t: sorted(c) for t, c in sorted(terms.items())},
     }
     out.write_text(json.dumps(payload, indent=1))
-    print(f"Wrote {len(terms)} terms -> {out}")
+    print(f"Parsed {rows} rows, kept {kept} term-maps -> {len(terms)} distinct terms -> {out}")
     return 0
 
 

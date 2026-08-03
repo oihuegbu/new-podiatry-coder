@@ -28,3 +28,4 @@ data/compliance.db
 
 # stray archive
 repo.zip
+data/codes/snomed_icd10_map.json

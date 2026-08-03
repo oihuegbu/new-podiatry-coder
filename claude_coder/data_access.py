@@ -82,15 +82,23 @@ class AuthoritativeSource:
             try:
                 import json
                 from app.core.config import DATA_DIR
+                from .terminology import TerminologyIndex
                 with open(DATA_DIR / "codes" / "snomed_icd10_map.json") as fh:
-                    self._snomed = json.load(fh).get("terms", {})
+                    term_to_codes = json.load(fh).get("terms", {})
+                # Invert term->codes into code->terms and reuse the SAME robust
+                # matcher as the ICD Index (exact / compound / token-set + plural)
+                # so variant phrasings ('Morton neuroma' vs 'Morton's neuroma') hit.
+                inv: dict[str, list[str]] = {}
+                for term, codes in term_to_codes.items():
+                    for c in codes:
+                        inv.setdefault(c, []).append(term)
+                self._snomed = TerminologyIndex(inv)
             except Exception:
-                self._snomed = {}
+                self._snomed = False
         if not self._snomed:
             return set()
-        from .terminology import _norm
-        cands = self._snomed.get(_norm(description)) or []
-        return {c for c in cands if self.lookup(c, "icd10")}
+        return {c for c in self._snomed.candidates(description)
+                if self.leaf_codes(c, "icd10")}
 
     def index_codes(self, description: str, system: str) -> set[str]:
         """Authoritative ICD-10-CM codes for a clinician term, via the Alphabetic
