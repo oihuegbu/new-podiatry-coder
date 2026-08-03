@@ -14,43 +14,45 @@ from claude_coder.models import CandidateCode, Outcome, ResolutionMethod, Verdic
 from claude_coder.pipeline import code_encounter
 
 # A note whose text contains, verbatim, every evidence span the extractor emits.
+# Fully synthetic — the pipeline's disposition/negation logic turns on the
+# LINGUISTIC markers ('denies …', 'Plan … next visit'), not any clinical term.
 NOTE = (
-    "Procedure: excision of the interdigital neuroma, right third interspace. "
-    "Assessment: interdigital neuroma, right foot. "
-    "Patient denies chest pain. "
-    "Plan hammertoe correction next visit."
+    "Procedure: excision of lesion alpha, right site two. "
+    "Assessment: condition alpha, right side. "
+    "Patient denies finding gamma. "
+    "Plan procedure beta correction next visit."
 )
 
 # What the (stubbed) CLU extractor returns: one performed procedure, one current
 # diagnosis, one PLANNED procedure (must not bill), one NEGATED finding (drop).
 FACTS_JSON = """{"facts":[
- {"kind":"procedure","description":"excision of interdigital neuroma",
-  "attributes":{"laterality":"right","anatomy":"third interspace"},
+ {"kind":"procedure","description":"excision of lesion alpha",
+  "attributes":{"laterality":"right","anatomy":"site two"},
   "disposition":"performed_today","negated":false,
-  "evidence":["excision of the interdigital neuroma, right third interspace"],
+  "evidence":["excision of lesion alpha, right site two"],
   "confidence":0.97},
- {"kind":"diagnosis","description":"interdigital neuroma of the right foot",
+ {"kind":"diagnosis","description":"condition alpha of the right side",
   "attributes":{"laterality":"right"},"disposition":"performed_today","negated":false,
-  "evidence":["interdigital neuroma, right foot"],"confidence":0.98},
- {"kind":"procedure","description":"hammertoe correction","attributes":{},
+  "evidence":["condition alpha, right side"],"confidence":0.98},
+ {"kind":"procedure","description":"procedure beta correction","attributes":{},
   "disposition":"planned","negated":false,
-  "evidence":["Plan hammertoe correction next visit"],"confidence":0.9},
- {"kind":"diagnosis","description":"chest pain","attributes":{},
+  "evidence":["Plan procedure beta correction next visit"],"confidence":0.9},
+ {"kind":"diagnosis","description":"finding gamma","attributes":{},
   "disposition":"performed_today","negated":true,
-  "evidence":["denies chest pain"],"confidence":0.9}
+  "evidence":["denies finding gamma"],"confidence":0.9}
 ]}"""
 
 # Synthetic (non-code) identifiers — no real medical code anywhere in this test.
-PROC = CandidateCode("PROC_NEUROMA_EXC", "cpt",
-                     "Excision, interdigital neuroma, single, each", 0.9, "retrieval")
-DX = CandidateCode("DX_NEUROMA_RIGHT", "icd10",
-                   "interdigital neuroma, right foot", 0.9, "retrieval")
+PROC = CandidateCode("PROC_ALPHA_EXC", "cpt",
+                     "Excision, lesion alpha, single, each", 0.9, "retrieval")
+DX = CandidateCode("DX_ALPHA_RIGHT", "icd10",
+                   "condition alpha, right side", 0.9, "retrieval")
 
 
 def _source():
     return MockSource(
-        records={("PROC_NEUROMA_EXC", "cpt"): {"active": True},
-                 ("DX_NEUROMA_RIGHT", "icd10"): {"active": True}},
+        records={("PROC_ALPHA_EXC", "cpt"): {"active": True},
+                 ("DX_ALPHA_RIGHT", "icd10"): {"active": True}},
         retrieval={("*", "cpt"): [PROC], ("*", "icd10"): [DX]},
     )
 
@@ -72,20 +74,20 @@ class AutonomousCoderTest(unittest.TestCase):
     def test_happy_path_auto_ready(self):
         r = self._run()
         codes = {ln.chosen.code for ln in r.billable_lines}
-        self.assertEqual(codes, {"PROC_NEUROMA_EXC", "DX_NEUROMA_RIGHT"})
+        self.assertEqual(codes, {"PROC_ALPHA_EXC", "DX_ALPHA_RIGHT"})
         self.assertEqual(r.verdict, Verdict.AUTO_READY, r.notes)
 
     def test_planned_work_not_billed(self):
         r = self._run()
         billed = {ln.chosen.code for ln in r.billable_lines}
-        self.assertNotIn("hammertoe", " ".join(billed).lower())
+        self.assertNotIn("beta", " ".join(billed).lower())
         # the planned procedure produced no billable line at all
         self.assertEqual(len(r.billable_lines), 2)
 
     def test_negated_finding_dropped(self):
         r = self._run()
         descs = " ".join(ln.fact.description for ln in r.lines).lower()
-        self.assertNotIn("chest pain", descs)
+        self.assertNotIn("finding gamma", descs)
 
     def test_resolution_is_deterministic(self):
         r = self._run()
@@ -94,7 +96,7 @@ class AutonomousCoderTest(unittest.TestCase):
 
     def test_missing_evidence_blocks_release(self):
         # a note that does NOT contain the procedure's evidence span
-        r = self._run(note="Assessment: interdigital neuroma, right foot.")
+        r = self._run(note="Assessment: condition alpha, right side.")
         ev = next(g for g in r.gates if g.name == "verbatim_evidence")
         self.assertEqual(ev.outcome, Outcome.BLOCKED)
         self.assertEqual(r.verdict, Verdict.BLOCKED)
@@ -198,11 +200,11 @@ class ModifierTest(unittest.TestCase):
                 "ML": {"description": "Left side of the body"},
                 "MB": {"description": "Bilateral procedure"}}
         eng = ModifierEngine(defs=defs)
-        self.assertEqual(eng.assign(self._fact("right"), "Excision, neuroma, each"), ["MR"])
-        self.assertEqual(eng.assign(self._fact("left"), "Excision, neuroma, each"), ["ML"])
-        self.assertEqual(eng.assign(self._fact("bilateral"), "Excision, neuroma", bilat="1"), ["MB"])
+        self.assertEqual(eng.assign(self._fact("right"), "Excision, lesion, each"), ["MR"])
+        self.assertEqual(eng.assign(self._fact("left"), "Excision, lesion, each"), ["ML"])
+        self.assertEqual(eng.assign(self._fact("bilateral"), "Excision, lesion", bilat="1"), ["MB"])
         # descriptor already encodes the side -> no modifier (no double-coding)
-        self.assertEqual(eng.assign(self._fact("right"), "Excision, neuroma, right foot"), [])
+        self.assertEqual(eng.assign(self._fact("right"), "Excision, lesion, right side"), [])
 
 
 class EMLevelingTest(unittest.TestCase):
@@ -342,15 +344,18 @@ class EMSettingTest(unittest.TestCase):
 
 
 class TerminologyIndexTest(unittest.TestCase):
-    """Deterministic ICD-10-CM resolution via the authoritative Alphabetic Index
-    — the permanent fix for the terse-descriptor / eponym gap."""
+    """Deterministic term->code resolution via the authoritative Alphabetic Index.
+    Synthetic codes/terms — the mechanics under test are exact match, order/plural-
+    independent token-set match (the Index's inverted phrasing), synonym->code, and
+    the code-dotting form — none of which depend on any specific condition."""
 
     def test_index_term_to_code(self):
         from claude_coder.terminology import TerminologyIndex
-        idx = TerminologyIndex({"B351": ["tinea unguium", "onychomycosis"],
-                                "G5760": ["neuroma mortons", "mortons metatarsalgia"]})
-        self.assertEqual(idx.candidates("Onychomycosis"), {"B35.1"})      # exact, dotted
-        self.assertEqual(idx.candidates("Morton's neuroma"), {"G57.60"})  # inverted, token-set
+        # AA111 has two synonyms; BB220's term is written in INVERTED order.
+        idx = TerminologyIndex({"AA111": ["condition alpha", "alpha synonym"],
+                                "BB220": ["gamma, entity beta", "beta variant gamma"]})
+        self.assertEqual(idx.candidates("Alpha synonym"), {"AA1.11"})     # exact, dotted
+        self.assertEqual(idx.candidates("entity beta gamma"), {"BB2.20"}) # inverted, token-set
         self.assertEqual(idx.candidates("no such term here"), set())      # -> caller falls back
 
     def test_diagnosis_resolves_via_index_first(self):
@@ -359,14 +364,15 @@ class TerminologyIndexTest(unittest.TestCase):
                                          ResolutionMethod)
         from claude_coder.resolution import resolve
         # Index maps the clinician term; the record supplies the terse descriptor.
-        src = MockSource(records={("B35.1", "icd10"):
-                                  {"long_description": "Tinea unguium", "active": True}},
-                         index={"onychomycosis": {"B35.1"}})
-        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="onychomycosis",
-                            evidence=[EvidenceSpan("onychomycosis")], confidence=0.99)
+        src = MockSource(records={("C11.1", "icd10"):
+                                  {"long_description": "a terse authoritative descriptor",
+                                   "active": True}},
+                         index={"a documented condition": {"C11.1"}})
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="a documented condition",
+                            evidence=[EvidenceSpan("a documented condition")], confidence=0.99)
         line = resolve(fact, src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
-        self.assertEqual(line.chosen.code, "B35.1")
+        self.assertEqual(line.chosen.code, "C11.1")
         self.assertIn("Alphabetic Index", line.rationale)
 
     def test_snomed_layer_resolves_when_index_misses(self):
@@ -374,16 +380,16 @@ class TerminologyIndexTest(unittest.TestCase):
         from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
                                          ResolutionMethod)
         from claude_coder.resolution import resolve
-        # Index has no entry; the SNOMED map resolves the eponym authoritatively.
-        src = MockSource(records={("G57.60", "icd10"):
-                                  {"long_description": "Lesion of plantar nerve, "
-                                   "unspecified lower limb", "active": True}},
-                         index={}, snomed={"Morton's neuroma": {"G57.60"}})
-        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="Morton's neuroma",
-                            evidence=[EvidenceSpan("Morton's neuroma")], confidence=0.95)
+        # Index has no entry; the SNOMED map resolves the term authoritatively.
+        src = MockSource(records={("C22.2", "icd10"):
+                                  {"long_description": "a terse authoritative descriptor",
+                                   "active": True}},
+                         index={}, snomed={"a documented condition": {"C22.2"}})
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="a documented condition",
+                            evidence=[EvidenceSpan("a documented condition")], confidence=0.95)
         line = resolve(fact, src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
-        self.assertEqual(line.chosen.code, "G57.60")
+        self.assertEqual(line.chosen.code, "C22.2")
         self.assertIn("SNOMED", line.rationale)
 
     def test_category_expands_to_leaf_by_laterality(self):
@@ -391,17 +397,19 @@ class TerminologyIndexTest(unittest.TestCase):
         from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
                                          ResolutionMethod)
         from claude_coder.resolution import resolve
-        # Index returns the category M20.4; documented laterality selects the leaf.
-        recs = {("M20.40", "icd10"): {"long_description": "Hammer toe, unspecified foot", "active": True},
-                ("M20.41", "icd10"): {"long_description": "Hammer toe, right foot", "active": True},
-                ("M20.42", "icd10"): {"long_description": "Hammer toe, left foot", "active": True}}
-        src = MockSource(records=recs, index={"hammertoe": {"M20.4"}})
-        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="hammertoe",
+        # Index returns the category DX4; documented laterality selects the leaf.
+        # Synthetic codes/descriptors — the mechanic is category->leaf-by-laterality,
+        # not any specific condition.
+        recs = {("DX40", "icd10"): {"long_description": "some condition, unspecified site", "active": True},
+                ("DX41", "icd10"): {"long_description": "some condition, right site", "active": True},
+                ("DX42", "icd10"): {"long_description": "some condition, left site", "active": True}}
+        src = MockSource(records=recs, index={"a documented condition": {"DX4"}})
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="a documented condition",
                             attributes={"laterality": "right"},
-                            evidence=[EvidenceSpan("hammertoe")], confidence=0.99)
+                            evidence=[EvidenceSpan("a documented condition")], confidence=0.99)
         line = resolve(fact, src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
-        self.assertEqual(line.chosen.code, "M20.41")   # right-foot leaf, not the category
+        self.assertEqual(line.chosen.code, "DX41")     # right-side leaf, not the category
 
 
 def _line(code, kind, descriptor="d", attrs=None, system="cpt"):
@@ -694,11 +702,11 @@ class DrugTableTest(unittest.TestCase):
         from claude_coder.resolution import resolve
         src = MockSource(
             records={("DRUG_KETO", "hcpcs"):
-                     {"long_description": "Injection, ketorolac tromethamine, per 15 mg",
+                     {"long_description": "Injection, substance alpha, per 15 mg",
                       "active": True}},
-            drug_index={"ketorolac tromethamine": {"DRUG_KETO"}})
-        fact = ClinicalFact(kind=FactKind.DRUG, description="ketorolac tromethamine",
-                            evidence=[EvidenceSpan("ketorolac tromethamine 30 mg IV")],
+            drug_index={"substance alpha": {"DRUG_KETO"}})
+        fact = ClinicalFact(kind=FactKind.DRUG, description="substance alpha",
+                            evidence=[EvidenceSpan("substance alpha 30 mg IV")],
                             confidence=0.95)
         line = resolve(fact, src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
@@ -707,7 +715,7 @@ class DrugTableTest(unittest.TestCase):
 
     def test_units_from_documented_dose(self):
         from claude_coder.ontology import drug_billing_units
-        self.assertEqual(drug_billing_units("ketorolac 30 mg IV", {"amount": 15, "unit": "mg"}), 2)
+        self.assertEqual(drug_billing_units("substance 30 mg IV", {"amount": 15, "unit": "mg"}), 2)
         self.assertEqual(drug_billing_units("1 g infused", {"amount": 100, "unit": "mg"}), 10)  # g->mg
         self.assertIsNone(drug_billing_units("two tablets", {"amount": 15, "unit": "mg"}))       # no dose
         self.assertIsNone(drug_billing_units("30 ml", {"amount": 15, "unit": "mg"}))             # unit clash
@@ -730,10 +738,10 @@ class DrugTableParserTest(unittest.TestCase):
 
     def test_dose_and_name(self):
         m = self._mod()
-        self.assertEqual(m._dose_of("Injection, ketorolac tromethamine, per 15 mg"),
+        self.assertEqual(m._dose_of("Injection, substance alpha, per 15 mg"),
                          (15.0, "mg"))
-        self.assertEqual(m._name_of("Injection, ketorolac tromethamine, per 15 mg"),
-                         "ketorolac tromethamine")
+        self.assertEqual(m._name_of("Injection, substance alpha, per 15 mg"),
+                         "substance alpha")
 
     def test_supply_is_not_a_drug(self):
         m = self._mod()
