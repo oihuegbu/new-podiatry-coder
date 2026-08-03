@@ -50,9 +50,33 @@ def walk(node, path, out):
     p = path + [title] if title else path
     code = norm_code(node.findtext("code") or "")
     if code and p:
-        out[code].add(" ".join(p).lower())
+        out[code].add(" ".join(p).lower())       # full navigational path
+        if title:
+            out[code].add(title.lower())           # the leaf clinician term alone,
+        # ...and every suffix sub-path in between, so a note's phrasing matches at
+        # any depth. Generic suffixes that collide across codes are handled by the
+        # resolver's single-code trust rule (a multi-code hit defers to retrieval).
+        for i in range(1, len(p)):
+            out[code].add(" ".join(p[i:]).lower())
     for child in node.findall("term"):
         walk(child, p, out)
+
+
+def navigate(ref, main_terms):
+    """Follow a full 'see' reference path ('Deformity, toe, hammer toe') into the
+    subtree, matching each comma part to a nested term title. Returns the precise
+    target node — NOT the whole main term — so an alias lands only on the referenced
+    codes. Conservative: if any step can't be matched, returns None (no alias)."""
+    parts = [p.strip().lower() for p in ref.split(",") if p.strip()]
+    if not parts:
+        return None
+    node = main_terms.get(parts[0])
+    for part in parts[1:]:
+        if node is None:
+            return None
+        node = next((t for t in node.findall("term")
+                     if plain_title(t).lower() == part), None)
+    return node
 
 
 def subtree_codes(node) -> set[str]:
@@ -89,8 +113,7 @@ def main():
             ref = (mt.findtext("see") or mt.findtext("seeAlso") or "").strip()
             if not ref:
                 continue
-            target_main = ref.split(",")[0].strip().lower()
-            target = main_terms.get(target_main)
+            target = navigate(ref, main_terms)
             if target is None:
                 continue
             for code in subtree_codes(target):
