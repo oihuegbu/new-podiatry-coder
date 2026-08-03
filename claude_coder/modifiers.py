@@ -53,10 +53,16 @@ class ModifierEngine:
         self._right = _discover(self._defs, "right side")
         self._left = _discover(self._defs, "left side")
         self._bilateral = _discover(self._defs, "bilateral")
+        # distinct-service family (X{S,E,U} preferred over 59) and E/M-separate
+        self._x_structure = _discover(self._defs, "separate structure")
+        self._x_encounter = _discover(self._defs, "separate encounter")
+        self._x_unusual = _discover(self._defs, "non-overlapping")
+        self._distinct_59 = _discover(self._defs, "distinct procedural service")
+        self._em_separate = _discover(self._defs, "separately identifiable evaluation")
 
     def assign(self, fact: ClinicalFact, descriptor: str) -> list[str]:
-        """Modifiers a resolved line earns from the documented facts. Empty when
-        the descriptor already encodes the side/bilaterality (no double-coding)."""
+        """Per-line modifiers from documented facts (laterality/bilateral). Empty
+        when the descriptor already encodes the side (no double-coding)."""
         lat = str(fact.attributes.get("laterality", "")).lower().strip()
         desc = descriptor.lower()
         if "bilateral" in desc:
@@ -68,3 +74,48 @@ class ModifierEngine:
         if lat == "left" and "left" not in desc and self._left:
             return [self._left]
         return []
+
+    def _distinct_modifier(self, a, b) -> str | None:
+        """Which distinct-service modifier a pair earns — X preferred over 59,
+        chosen by WHY the services are distinct (different structure/site → XS,
+        else unusual non-overlapping → XU). Values discovered from data."""
+        fa, fb = a.fact.attributes, b.fact.attributes
+        diff_site = (fa.get("laterality") and fb.get("laterality")
+                     and fa.get("laterality") != fb.get("laterality")) or \
+                    (fa.get("anatomy") and fb.get("anatomy")
+                     and fa.get("anatomy") != fb.get("anatomy"))
+        if diff_site and self._x_structure:
+            return self._x_structure
+        return self._x_unusual or self._distinct_59
+
+    def assign_claim(self, result, source) -> None:
+        """Claim-level modifiers that depend on relationships between lines:
+          • E/M-25 when a significant, separately identifiable E/M is billed with
+            a procedure on the same day;
+          • a distinct-service modifier on the column-2 code of an NCCI pair that
+            is bypassable-with-a-modifier (indicator '1'), which also records the
+            bypass so the NCCI gate can clear it.
+        """
+        from .models import FactKind
+        billable = result.billable_lines
+        procs = [ln for ln in billable if ln.fact.kind is not FactKind.EM
+                 and ln.chosen.system in ("cpt", "hcpcs")]
+        ems = [ln for ln in billable if ln.fact.kind is FactKind.EM]
+
+        if procs and self._em_separate:
+            for ln in ems:
+                if self._em_separate not in ln.modifiers:
+                    ln.modifiers.append(self._em_separate)
+
+        for i in range(len(procs)):
+            for j in range(len(procs)):
+                if i == j:
+                    continue
+                ind = source.ncci_indicator(procs[i].chosen.code,
+                                            procs[j].chosen.code, result.date_of_service)
+                if ind == "1":
+                    mod = self._distinct_modifier(procs[i], procs[j])
+                    if mod and mod not in procs[j].modifiers:
+                        procs[j].modifiers.append(mod)
+                    result.bypassed_ncci.append(
+                        frozenset((procs[i].chosen.code, procs[j].chosen.code)))

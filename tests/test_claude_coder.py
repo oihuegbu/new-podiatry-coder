@@ -232,5 +232,43 @@ class EMLevelingTest(unittest.TestCase):
         self.assertEqual(line.chosen.code, "EM_MOD", line.rationale)
 
 
+class UnitsTest(unittest.TestCase):
+    def test_billing_units_from_descriptor(self):
+        from claude_coder.ontology import billing_units
+        # a "2-4 lesions" code is ONE unit for 2 lesions (the bug this fixes)
+        self.assertEqual(billing_units(2, "Paring, 2 to 4 lesions"), 1)
+        # an "each" code bills per item
+        self.assertEqual(billing_units(3, "Excision of lesion, single, each"), 3)
+        self.assertEqual(billing_units(1, "Some procedure"), 1)
+
+
+class ClaimModifierTest(unittest.TestCase):
+    def test_em25_and_distinct_service_from_data(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, CodingResult, EvidenceSpan,
+                                         FactKind, ResolutionMethod, ResolvedLine)
+        from claude_coder.modifiers import ModifierEngine
+        defs = {"M25": {"description": "significant, separately identifiable evaluation and management"},
+                "MXS": {"description": "Separate Structure"}}
+        eng = ModifierEngine(defs=defs)
+
+        def line(code, kind, lat=None):
+            f = ClinicalFact(kind=kind, description="x",
+                             attributes=({"laterality": lat} if lat else {}),
+                             evidence=[EvidenceSpan("x")])
+            return ResolvedLine(fact=f, chosen=CandidateCode(code, "cpt", "d", 0.9),
+                                method=ResolutionMethod.DETERMINISTIC)
+        p1 = line("P1", FactKind.PROCEDURE, "right")
+        p2 = line("P2", FactKind.PROCEDURE, "left")
+        emln = line("EMX", FactKind.EM)
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14",
+                         lines=[p1, p2, emln])
+        src = MockSource(ncci={("P1", "P2"): "1", ("P2", "P1"): "1"})
+        eng.assign_claim(r, src)
+        self.assertIn("M25", emln.modifiers)                       # E/M-25 with a procedure
+        self.assertTrue("MXS" in p1.modifiers or "MXS" in p2.modifiers)  # distinct structure
+        self.assertTrue(r.bypassed_ncci)                          # bypass recorded for the gate
+
+
 if __name__ == "__main__":
     unittest.main()

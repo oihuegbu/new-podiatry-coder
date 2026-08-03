@@ -115,6 +115,48 @@ def parse_descriptor(descriptor: str) -> DescriptorFeatures:
                               interval=interval)
 
 
+_COUNT_RANGE = [
+    re.compile(rf"{_NUM}\s*(?:to|through|-|–)\s*{_NUM}"),   # "2 to 4", "2-4"
+]
+
+
+def count_range(descriptor: str) -> tuple[int, int | None] | None:
+    """A quantity RANGE the descriptor covers as one unit, e.g. '2 to 4 lesions'
+    -> (2, 4), 'up to 4' -> (1, 4), 'N or more' -> (N, None). Parsed from the
+    descriptor — this is how 'one unit for 2-4 lesions' is known without a code
+    list."""
+    d = re.sub(r"\s+", " ", descriptor.lower())
+    for rx in _COUNT_RANGE:
+        m = rx.search(d)
+        if m:
+            return int(float(m.group(1))), int(float(m.group(2)))
+    m = re.search(rf"up to {_NUM}", d)
+    if m:
+        return 1, int(float(m.group(1)))
+    m = re.search(rf"{_NUM}\s*or more", d)
+    if m:
+        return int(float(m.group(1))), None
+    return None
+
+
+def billing_units(documented_count: int, descriptor: str) -> int:
+    """Billing UNITS for a line — not the raw documented count. A descriptor
+    whose quantity RANGE covers the count is a single unit (e.g. a '2-4 lesions'
+    code billed once for 2 lesions); an 'each'/'per' descriptor bills per item;
+    otherwise a single unit. Purely descriptor-driven, so it self-updates."""
+    n = max(1, int(documented_count or 1))
+    rng = count_range(descriptor)
+    if rng:
+        lo, hi = rng
+        if n >= lo and (hi is None or n <= hi):
+            return 1                        # the code IS the range -> one unit
+        return 1                            # outside range -> add-on territory; stay safe
+    d = descriptor.lower()
+    if re.search(r"\beach\b|\bper\b|\bsingle\b", d):
+        return n
+    return 1
+
+
 def measurement_of(attributes: dict) -> float | None:
     """Pull a single numeric measurement out of a fact's attributes (area,
     size, depth, length…). Structural, unit-agnostic here; a production build

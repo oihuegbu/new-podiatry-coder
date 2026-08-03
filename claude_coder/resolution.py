@@ -88,9 +88,21 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -
             fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
             rationale=f"not performed today (disposition={fact.disposition.value}) — not billed")
 
+    # Multi-query RECALL: search the structured query AND the verbatim evidence
+    # (which often carries the eponym / clinician term the descriptor lacks),
+    # then union the pools keeping each code's best relevance. Agnostic recall
+    # boost; the eventual fix for eponyms is index enrichment at the data layer.
     query = fact.description + " " + " ".join(
         str(v) for k, v in fact.attributes.items() if str(k).lower() != "count")
-    pool = source.retrieve(query.strip(), fact.system, top_k=top_k)
+    queries = [query.strip()] + [s.text for s in fact.evidence[:1]]
+    best: dict[str, CandidateCode] = {}
+    for q in queries:
+        if not q.strip():
+            continue
+        for c in source.retrieve(q, fact.system, top_k=top_k):
+            if c.code not in best or c.score > best[c.code].score:
+                best[c.code] = c
+    pool = sorted(best.values(), key=lambda c: c.score, reverse=True)
     if not pool:
         return ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
                             rationale="no candidate retrieved for the concept")

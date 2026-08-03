@@ -13,7 +13,7 @@ method -> authority) so any decision can be explained.
 """
 from __future__ import annotations
 
-from . import arbitration, certificate, em, extraction, gates, resolution
+from . import arbitration, certificate, em, extraction, gates, ontology, resolution
 from .arbitration import LLMFn
 from .autonomy import decide
 from .data_access import AuthoritativeSource, CodeSource
@@ -53,8 +53,15 @@ def code_encounter(
                     line.chosen.code, line.chosen.system, date_of_service) is Outcome.BLOCKED:
                 line.excluded_reason = "not separately reportable per authoritative data"
             else:
-                # Data-driven modifiers (laterality / bilateral) from the facts.
+                # Data-driven per-line modifiers (laterality) + billing units
+                # (descriptor-driven, so a "2-4 lesions" code bills as one unit).
                 line.modifiers = modifier_engine.assign(line.fact, line.chosen.descriptor)
+                cnt = line.fact.attributes.get("count") or line.fact.attributes.get("quantity") or 1
+                try:
+                    cnt = int(cnt)
+                except (TypeError, ValueError):
+                    cnt = 1
+                line.units = ontology.billing_units(cnt, line.chosen.descriptor)
         lines.append(line)
 
     result = CodingResult(
@@ -62,6 +69,8 @@ def code_encounter(
         date_of_service=date_of_service,
         lines=lines,
     )
+    # Claim-level modifiers (E/M-25, distinct-service 59/X) once all lines exist.
+    modifier_engine.assign_claim(result, source)
     result.gates = gates.run_gates(result, note_text, source)
     decide(result)
     result.certificate = certificate.build_certificate(

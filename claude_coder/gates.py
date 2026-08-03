@@ -89,9 +89,13 @@ def ncci_gate(result: CodingResult, source: CodeSource) -> GateResult:
             if ind == "0":                     # not separately reportable, no bypass
                 outcomes.append(Outcome.BLOCKED)
                 detail.append(f"{lines[i].chosen.code}/{lines[j].chosen.code} bundled (0)")
-            elif ind == "1":                   # bypassable only with a justified modifier
-                outcomes.append(Outcome.UNKNOWN)
-                detail.append(f"{lines[i].chosen.code}/{lines[j].chosen.code} needs modifier (1)")
+            elif ind == "1":                   # bypassable with a justified modifier
+                pair = frozenset((lines[i].chosen.code, lines[j].chosen.code))
+                if pair in result.bypassed_ncci:   # a distinct-service modifier was applied
+                    outcomes.append(Outcome.PASS)
+                else:
+                    outcomes.append(Outcome.UNKNOWN)
+                    detail.append(f"{lines[i].chosen.code}/{lines[j].chosen.code} needs modifier (1)")
     if len(lines) < 2:
         return GateResult("ncci_ptp", Outcome.NOT_APPLICABLE, "fewer than two procedures",
                           "NCCI PTP (data)")
@@ -104,7 +108,7 @@ def mue_gate(result: CodingResult, source: CodeSource) -> GateResult:
     outcomes, detail = [], []
     for ln in result.billable_lines:
         limit = source.mue_limit(ln.chosen.code, result.date_of_service)
-        units = int(ln.fact.attributes.get("count", 1) or 1)
+        units = ln.units                        # descriptor-driven billing units
         if limit is None:
             continue                            # no MUE published for this code
         if units > limit:
