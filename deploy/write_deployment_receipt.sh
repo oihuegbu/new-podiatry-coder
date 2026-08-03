@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-""":"
-Write an atomic deployment receipt for an extracted release directory.
-
-Usage: write_deployment_receipt.sh RELEASE_DIR COMMIT_SHA ARTIFACT [INSTALLED_AT]
-":"""
+# Write an atomic deployment receipt for an extracted release directory.
+# Usage: write_deployment_receipt.sh RELEASE_DIR COMMIT_SHA ARTIFACT [INSTALLED_AT]
 set -euo pipefail
 
 release_dir=${1:?release directory is required}
