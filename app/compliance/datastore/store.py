@@ -283,11 +283,14 @@ class ComplianceDataStore:
              "clear": [("code_set", "code_system='HCPCS'"), ("hcpcs_coverage", None)],
              "ingest": [self._ingest_hcpcs]},
             {"id": "ncci", "paths": [NCCI_FILE],
-             "clear": [("ncci_ptp", None)], "ingest": [self._ingest_ncci]},
+             "clear": [("ncci_ptp", None)], "ingest": [self._ingest_ncci],
+             "refresh_history_source": "ncci_ptp"},
             {"id": "mue", "paths": [MUE_FILE],
-             "clear": [("mue", None)], "ingest": [self._ingest_mue]},
+             "clear": [("mue", None)], "ingest": [self._ingest_mue],
+             "refresh_history_source": "mue"},
             {"id": "global_periods", "paths": [GLOBAL_PERIODS_FILE],
-             "clear": [("global_period", None)], "ingest": [self._ingest_global_periods]},
+             "clear": [("global_period", None)], "ingest": [self._ingest_global_periods],
+             "refresh_history_source": "pfs_global"},
             # The MCD-export cache is fingerprinted WITH the seed file: a
             # weekly refresh that rewrites the cache must re-ingest coverage
             # (the cache carries the covered-ICD group roles), and a rebuild
@@ -418,6 +421,17 @@ class ComplianceDataStore:
                     logger.warning(f"  could not clear {table} ({exc}) — skipping re-ingest")
                     break
             else:
+                # Clearing a seed-backed history table also removes every
+                # additively refreshed row in it. Its provenance must be
+                # invalidated in the same transaction; otherwise refresh sees
+                # a ghost "snapshot already present" and permanently skips
+                # reconstructing rows that no longer exist.
+                history_source = src.get("refresh_history_source")
+                if history_source:
+                    self.conn.execute(
+                        "DELETE FROM data_source_version WHERE source_id=?",
+                        (history_source,),
+                    )
                 for ingest in src["ingest"]:
                     ingest()
                 self.conn.execute(

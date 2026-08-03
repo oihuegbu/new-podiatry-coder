@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import filecmp
 import hashlib
 import json
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path, PurePosixPath
 
 
@@ -38,7 +40,8 @@ def _relative(value: object) -> Path:
     return Path(*pure.parts)
 
 
-def _load_manifest(seed_root: Path, manifest_path: Path) -> tuple[list[Path], dict]:
+def _load_manifest(seed_root: Path, manifest_path: Path) \
+        -> tuple[list[Path], list[Path], dict]:
     try:
         manifest = json.loads(manifest_path.read_text())
     except Exception as exc:
@@ -63,22 +66,19 @@ def _load_manifest(seed_root: Path, manifest_path: Path) -> tuple[list[Path], di
                 raise ReferenceSeedError(
                     f"managed source must not contain symlinks: {candidate}")
             if candidate.is_file():
-                relative_candidate = candidate.relative_to(seed_root)
-                if relative_candidate not in runtime_owned:
-                    expanded.add(relative_candidate)
+                expanded.add(candidate.relative_to(seed_root))
     for relative in files:
         source = seed_root / relative
         if source.is_symlink() or not source.is_file():
             raise ReferenceSeedError(f"managed file is unavailable: {relative}")
-        if relative not in runtime_owned:
-            expanded.add(relative)
-    outside_roots = [relative for relative in runtime_owned
-                     if not any(relative == root or root in relative.parents
-                                for root in roots)]
-    if outside_roots:
+        expanded.add(relative)
+    unknown_runtime_paths = runtime_owned - expanded
+    if unknown_runtime_paths:
         raise ReferenceSeedError(
-            "runtime-owned exclusions must be inside a managed root")
-    return sorted(expanded, key=lambda path: path.as_posix()), manifest
+            "runtime-owned files must be declared managed source files")
+    managed = expanded - runtime_owned
+    return (sorted(managed, key=lambda path: path.as_posix()),
+            sorted(runtime_owned, key=lambda path: path.as_posix()), manifest)
 
 
 def _fingerprint(seed_root: Path, paths: list[Path], manifest: dict) -> str:
@@ -113,7 +113,7 @@ def _atomic_copy(source: Path, destination: Path) -> None:
             shutil.copyfileobj(input_file, output, 1024 * 1024)
             output.flush()
             os.fsync(output.fileno())
-        shutil.copymode(source, temporary)
+        shutil.copystat(source, temporary)
         os.replace(temporary, destination)
     finally:
         try:
@@ -158,24 +158,26 @@ def synchronize(seed_root: Path, destination_root: Path,
 def _synchronize_locked(seed_root: Path, destination_root: Path,
                         manifest_path: Path | None) -> dict:
     manifest_path = (manifest_path or seed_root / "reference_seed_manifest.json")
-    paths, manifest = _load_manifest(seed_root, manifest_path)
-    fingerprint = _fingerprint(seed_root, paths, manifest)
+    paths, runtime_owned, manifest = _load_manifest(seed_root, manifest_path)
+    fingerprint = _fingerprint(seed_root, paths + runtime_owned, manifest)
     previous = _read_state(destination_root)
     names = [path.as_posix() for path in paths]
+    runtime_names = {path.as_posix() for path in runtime_owned}
+    previous_managed = set(previous.get("managed_files") or [])
     destinations_intact = all(
         (destination_root / relative).is_file()
         and not (destination_root / relative).is_symlink()
-        for relative in paths)
+        for relative in paths + runtime_owned)
     if (previous.get("fingerprint") == fingerprint
             and previous.get("managed_files") == names
             and destinations_intact):
         return {"changed": False, "fingerprint": fingerprint,
-                "files": len(paths)}
+                "files": len(paths) + len(runtime_owned)}
 
     current = set(names)
-    for old_name in previous.get("managed_files") or []:
+    for old_name in previous_managed:
         old_relative = _relative(old_name)
-        if old_relative.as_posix() in current:
+        if old_relative.as_posix() in current | runtime_names:
             continue
         old_path = destination_root / old_relative
         if old_path.is_symlink():
@@ -184,14 +186,49 @@ def _synchronize_locked(seed_root: Path, destination_root: Path,
         if old_path.is_file():
             old_path.unlink()
     for relative in paths:
-        _atomic_copy(seed_root / relative, destination_root / relative)
+        source = seed_root / relative
+        destination = destination_root / relative
+        if destination.is_symlink():
+            raise ReferenceSeedError(
+                f"managed destination is a symlink: {destination}")
+        if destination.exists() and not destination.is_file():
+            raise ReferenceSeedError(
+                f"managed destination is not a file: {destination}")
+        # An unrelated release input changing must not rewrite every managed
+        # file. ComplianceDataStore keys re-ingestion to file metadata; a
+        # blind rewrite would clear additive NCCI/MUE history even when those
+        # authoritative bytes had not changed.
+        if destination.is_file() and filecmp.cmp(
+                source, destination, shallow=False):
+            continue
+        _atomic_copy(source, destination)
+    for relative in runtime_owned:
+        destination = destination_root / relative
+        if destination.is_symlink():
+            raise ReferenceSeedError(
+                f"runtime-owned destination is a symlink: {destination}")
+        if destination.exists() and not destination.is_file():
+            raise ReferenceSeedError(
+                f"runtime-owned destination is not a file: {destination}")
+        # These sources are autonomously refreshed in place or retained as
+        # additive database history. Seed them only when a volume lacks the
+        # file; a later image must never roll a fresher runtime source back.
+        if not destination.exists():
+            _atomic_copy(seed_root / relative, destination)
+        elif relative.as_posix() in previous_managed:
+            # A prior synchronizer version incorrectly managed this runtime
+            # source. Signal its datastore fingerprint once so the datastore
+            # can discard provenance for history that the old rewrite may
+            # have erased and autonomously reacquire the governing snapshot.
+            now = time.time_ns()
+            os.utime(destination, ns=(now, now))
     _write_state(destination_root, {
         "schema_version": 1,
         "fingerprint": fingerprint,
         "managed_files": names,
     })
     return {"changed": True, "fingerprint": fingerprint,
-            "files": len(paths)}
+            "files": len(paths) + len(runtime_owned)}
 
 
 def main() -> int:

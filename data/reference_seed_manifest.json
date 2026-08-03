@@ -12,6 +12,9 @@
   ],
   "runtime_owned_files": [
     "codes/hcpcs_codes.json",
-    "codes/mcd_coverage_cache.json"
+    "codes/mcd_coverage_cache.json",
+    "codes/mue_practitioner.json",
+    "codes/ncci_data.json",
+    "global_periods.json"
   ]
 }

@@ -564,6 +564,40 @@ def test_historical_ncci_uses_newest_complete_effective_dated_file():
     assert effective == "2026-01-01"
 
 
+def test_seed_reingest_invalidates_erased_refresh_history(tmp_path):
+    store = ComplianceDataStore(tmp_path / "compliance.db")
+    store.conn.executescript(
+        "CREATE TABLE data_file_fingerprint ("
+        "source_id TEXT PRIMARY KEY, fingerprint TEXT);"
+        "CREATE TABLE data_source_version ("
+        "source_id TEXT, effective_from TEXT, ingested_at TEXT, "
+        "row_count INTEGER, file_name TEXT);"
+        "CREATE TABLE history_rows (value TEXT);"
+        "INSERT INTO data_file_fingerprint VALUES ('seed-history', 'old');"
+        "INSERT INTO data_source_version VALUES "
+        "('live-history', '2026-07-01', '', 1, 'current.zip');"
+        "INSERT INTO history_rows VALUES ('refreshed');"
+    )
+    source = {
+        "id": "seed-history",
+        "paths": [],
+        "clear": [("history_rows", None)],
+        "ingest": [lambda: store.conn.execute(
+            "INSERT INTO history_rows VALUES ('seed')")],
+        "refresh_history_source": "live-history",
+    }
+    store._data_sources = lambda: [source]
+    store._fingerprint = lambda _paths: "new"
+    store._record_seed_provenance = lambda _source: None
+    store._refresh_stale_sources()
+    assert store.conn.execute(
+        "SELECT value FROM history_rows").fetchone()[0] == "seed"
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM data_source_version "
+        "WHERE source_id='live-history'").fetchone()[0] == 0
+    store.close()
+
+
 def test_ncci_availability_retains_every_provenance_quarter():
     store = ComplianceDataStore()
     store._conn = sqlite3.connect(":memory:")

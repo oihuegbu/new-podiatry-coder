@@ -96,3 +96,45 @@ def test_reference_seed_preserves_runtime_refreshed_sources(tmp_path):
     assert (destination / "codes" / "static.json").read_text() == "release"
     assert (destination / "codes" / "refreshed.json").read_text() == \
         "new-runtime"
+
+    # A clean or repaired volume still receives a bootstrap copy.
+    (destination / "codes" / "refreshed.json").unlink()
+    synchronize(seed, destination, seed / "manifest.json")
+    assert (destination / "codes" / "refreshed.json").read_text() == \
+        "old-release"
+
+
+def test_reference_seed_does_not_rewrite_unchanged_managed_files(tmp_path):
+    seed = tmp_path / "seed"
+    destination = tmp_path / "data"
+    seed.mkdir()
+    (seed / "unchanged.json").write_text("same")
+    (seed / "changed.json").write_text("first")
+    _manifest(seed / "manifest.json",
+              files=["unchanged.json", "changed.json"])
+    synchronize(seed, destination, seed / "manifest.json")
+    unchanged = destination / "unchanged.json"
+    original_inode = unchanged.stat().st_ino
+
+    (seed / "changed.json").write_text("second")
+    synchronize(seed, destination, seed / "manifest.json")
+    assert unchanged.stat().st_ino == original_inode
+    assert (destination / "changed.json").read_text() == "second"
+
+
+def test_reference_seed_migrates_managed_file_to_runtime_ownership(tmp_path):
+    seed = tmp_path / "seed"
+    destination = tmp_path / "data"
+    seed.mkdir()
+    (seed / "quarterly.json").write_text("release")
+    _manifest(seed / "manifest.json", files=["quarterly.json"])
+    synchronize(seed, destination, seed / "manifest.json")
+    runtime_file = destination / "quarterly.json"
+    runtime_file.write_text("new-runtime")
+    before = runtime_file.stat().st_mtime_ns
+
+    _manifest(seed / "manifest.json", files=["quarterly.json"],
+              runtime_owned=["quarterly.json"])
+    synchronize(seed, destination, seed / "manifest.json")
+    assert runtime_file.read_text() == "new-runtime"
+    assert runtime_file.stat().st_mtime_ns > before
