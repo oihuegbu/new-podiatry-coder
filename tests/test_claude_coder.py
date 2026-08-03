@@ -457,6 +457,24 @@ class SectionApplicabilityTest(unittest.TestCase):
         self.assertTrue(anes.excluded_reason)
         self.assertIn("anesthesia-section", anes.excluded_reason)
 
+    def test_surgical_line_with_incidental_anesthesia_candidate_not_excluded(self):
+        # a SURGICAL procedure whose LEADING candidate is surgical must NOT be
+        # excluded as anesthesia just because an anesthesia neighbour is in the pool.
+        from claude_coder.models import (ClinicalFact, CodingResult, EvidenceSpan,
+                                         FactKind, ResolutionMethod, ResolvedLine)
+        from claude_coder.pipeline import apply_section_applicability
+        surgery = _line("SURG", FactKind.PROCEDURE, "Ostectomy of a structure")
+        sf = ClinicalFact(kind=FactKind.PROCEDURE, description="tendon debridement",
+                          evidence=[EvidenceSpan("tendon debridement")])
+        esc = ResolvedLine(fact=sf, chosen=None, method=ResolutionMethod.ABSTAINED,
+                           alternatives=[CandidateCode("SURGC", "cpt", "Tenolysis of a tendon", 0.8),
+                                         CandidateCode("ANESX", "cpt", "Anesthesia for procedures on the foot", 0.5)])
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14",
+                         lines=[surgery, esc])
+        apply_section_applicability(r)
+        self.assertIsNone(esc.excluded_reason)      # leading candidate is surgical
+        self.assertFalse(esc.resolved)
+
     def test_section_detection_is_descriptor_driven(self):
         # section is read from the descriptor's leading grammar, not any code/term.
         from claude_coder.ontology import code_section

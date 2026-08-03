@@ -201,11 +201,14 @@ def apply_section_applicability(result: CodingResult) -> None:
         if any(ln.fact.attributes.get(k) for k in _SEP):
             continue                    # a separate anesthesia provider is documented
         ln.excluded_reason = _reason
-    # An ESCALATED procedure whose authoritative candidates are the ANESTHESIA
-    # section is an anesthesia service too — decide it DETERMINISTICALLY (exclude)
-    # rather than leaving its handling to depend on which specific code the LLM
-    # happened to resolve. Same authoritative section signal, applied to the
-    # candidates of an unresolved line.
+    # An ESCALATED procedure that is itself an ANESTHESIA service is decided
+    # DETERMINISTICALLY (exclude), rather than leaving its handling to depend on
+    # which specific code the LLM happened to resolve. Signal: the BEST-ranked
+    # candidate is the anesthesia section AND that section DOMINATES the candidate
+    # set. The 'best + dominant' test matters because an anesthesia-section
+    # descriptor ('Anesthesia for procedures on the foot') is a semantic neighbour
+    # of ANY foot procedure and will appear incidentally among a surgical line's
+    # candidates — so mere presence is not enough; it must be the leading match.
     for ln in result.lines:
         if ln.resolved or ln.excluded_reason or not ln.fact.billable:
             continue
@@ -213,10 +216,12 @@ def apply_section_applicability(result: CodingResult) -> None:
             continue
         if any(ln.fact.attributes.get(k) for k in _SEP):
             continue
-        anes = next((c for c in ln.alternatives
-                     if code_section(c.descriptor) == "anesthesia"), None)
-        if anes is not None:
-            ln.chosen = anes
+        alts = ln.alternatives
+        if not alts or code_section(alts[0].descriptor) != "anesthesia":
+            continue                    # the leading match is not anesthesia
+        n_anes = sum(1 for c in alts if code_section(c.descriptor) == "anesthesia")
+        if n_anes * 2 >= len(alts):      # anesthesia dominates the candidate set
+            ln.chosen = alts[0]
             ln.method = ResolutionMethod.DETERMINISTIC
             ln.excluded_reason = _reason
 
