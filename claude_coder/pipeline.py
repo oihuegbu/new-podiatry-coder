@@ -190,16 +190,35 @@ def apply_section_applicability(result: CodingResult) -> None:
                         for ln in proc_lines)
     if not has_operative:
         return                          # e.g. an anesthesia provider's own claim
+    from .models import ResolutionMethod
     _SEP = ("anesthesia_provider", "separate_anesthesia_provider",
             "anesthesia_by_separate_provider", "separate_anesthesia")
-    for ln in proc_lines:
+    _reason = ("anesthesia-section service — not separately reportable by the "
+               "operating provider (no separate anesthesia provider documented)")
+    for ln in proc_lines:                # a RESOLVED anesthesia-section code
         if code_section(ln.chosen.descriptor) != "anesthesia":
             continue
         if any(ln.fact.attributes.get(k) for k in _SEP):
             continue                    # a separate anesthesia provider is documented
-        ln.excluded_reason = ("anesthesia-section service — not separately "
-                              "reportable by the operating provider "
-                              "(no separate anesthesia provider documented)")
+        ln.excluded_reason = _reason
+    # An ESCALATED procedure whose authoritative candidates are the ANESTHESIA
+    # section is an anesthesia service too — decide it DETERMINISTICALLY (exclude)
+    # rather than leaving its handling to depend on which specific code the LLM
+    # happened to resolve. Same authoritative section signal, applied to the
+    # candidates of an unresolved line.
+    for ln in result.lines:
+        if ln.resolved or ln.excluded_reason or not ln.fact.billable:
+            continue
+        if ln.fact.kind not in (FactKind.PROCEDURE, FactKind.IMAGING):
+            continue
+        if any(ln.fact.attributes.get(k) for k in _SEP):
+            continue
+        anes = next((c for c in ln.alternatives
+                     if code_section(c.descriptor) == "anesthesia"), None)
+        if anes is not None:
+            ln.chosen = anes
+            ln.method = ResolutionMethod.DETERMINISTIC
+            ln.excluded_reason = _reason
 
 
 def apply_ncci_bundling(result: CodingResult, source: CodeSource) -> None:

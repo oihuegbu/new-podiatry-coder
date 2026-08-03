@@ -439,6 +439,24 @@ class SectionApplicabilityTest(unittest.TestCase):
         apply_section_applicability(r)
         self.assertIsNone(anes.excluded_reason)
 
+    def test_escalated_anesthesia_excluded_deterministically(self):
+        # an ESCALATED procedure whose candidates are anesthesia-section is excluded
+        # deterministically (not left as a review item), independent of resolution.
+        from claude_coder.models import (ClinicalFact, CodingResult, EvidenceSpan,
+                                         FactKind, ResolutionMethod, ResolvedLine)
+        from claude_coder.pipeline import apply_section_applicability
+        surgery = _line("SURG", FactKind.PROCEDURE, "Ostectomy of a structure")
+        af = ClinicalFact(kind=FactKind.PROCEDURE, description="regional block for anesthesia",
+                          evidence=[EvidenceSpan("regional block for anesthesia")])
+        anes = ResolvedLine(fact=af, chosen=None, method=ResolutionMethod.ABSTAINED,
+                            alternatives=[CandidateCode("ANESX", "cpt",
+                                          "Anesthesia for procedures on the leg", 0.8)])
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14",
+                         lines=[surgery, anes])
+        apply_section_applicability(r)
+        self.assertTrue(anes.excluded_reason)
+        self.assertIn("anesthesia-section", anes.excluded_reason)
+
     def test_section_detection_is_descriptor_driven(self):
         # section is read from the descriptor's leading grammar, not any code/term.
         from claude_coder.ontology import code_section
