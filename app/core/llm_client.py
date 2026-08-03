@@ -179,7 +179,12 @@ def _openai_chat_completion(
             {"role": "user", "content": user_prompt},
         ],
         "temperature": temperature,
-        "max_tokens": max_tokens,
+        # max_tokens is the legacy Chat Completions field and is rejected by
+        # current reasoning models. max_completion_tokens is the provider's
+        # general output-budget field and includes visible plus reasoning
+        # tokens, so the existing truncation retry remains the single owner of
+        # budget growth.
+        "max_completion_tokens": max_tokens,
     }
     if json_schema is not None:
         # strict=True is what makes OpenAI grammar-enforce the schema; without
@@ -400,4 +405,3 @@ def _claude_chat_completion(
             response.usage, "cache_creation_input_tokens", 0) or 0,
     }
     return content, usage
-
