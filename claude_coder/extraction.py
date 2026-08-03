@@ -37,8 +37,10 @@ For each fact return an object with:
         never infer laterality, count, or site that is not written.
         For an evaluation_management fact, also give the medical-decision-making
         elements when documented: "problems", "data", "risk" each as one of
-        straightforward | low | moderate | high, plus "new_patient" (true/false)
-        and "total_time_minutes" if the note records visit time.
+        straightforward | low | moderate | high, plus "new_patient" (true/false),
+        "total_time_minutes" if the note records visit time, and
+        "separately_identifiable" (true only if the note documents E/M work
+        significant and separate from any procedure done the same day).
   - "disposition": performed_today | ordered | planned | discussed |
         historical | unclear  — ONLY performed_today / dispensed work is billable
   - "negated": true if the note denies/rules out this finding, else false

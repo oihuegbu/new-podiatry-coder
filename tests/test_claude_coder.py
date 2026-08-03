@@ -261,6 +261,7 @@ class ClaimModifierTest(unittest.TestCase):
         p1 = line("P1", FactKind.PROCEDURE, "right")
         p2 = line("P2", FactKind.PROCEDURE, "left")
         emln = line("EMX", FactKind.EM)
+        emln.fact.attributes["separately_identifiable"] = True   # 25 only when documented
         r = CodingResult(encounter_id="e", date_of_service="2026-03-14",
                          lines=[p1, p2, emln])
         src = MockSource(ncci={("P1", "P2"): "1", ("P2", "P1"): "1"})
@@ -268,6 +269,41 @@ class ClaimModifierTest(unittest.TestCase):
         self.assertIn("M25", emln.modifiers)                       # E/M-25 with a procedure
         self.assertTrue("MXS" in p1.modifiers or "MXS" in p2.modifiers)  # distinct structure
         self.assertTrue(r.bypassed_ncci)                          # bypass recorded for the gate
+
+
+class GlobalPackageTest(unittest.TestCase):
+    """A same-day E/M is bundled into a procedure's CMS global package unless the
+    note documents separately-identifiable E/M work."""
+
+    def _lines(self, sep_ident):
+        from claude_coder.models import (ClinicalFact, CodingResult, EvidenceSpan,
+                                         FactKind, ResolutionMethod, ResolvedLine)
+
+        def line(code, kind, attrs):
+            f = ClinicalFact(kind=kind, description="x", attributes=attrs,
+                             evidence=[EvidenceSpan("x")])
+            return ResolvedLine(fact=f, chosen=CandidateCode(code, "cpt", "d", 0.9),
+                                method=ResolutionMethod.DETERMINISTIC)
+        proc = line("PROCG", FactKind.PROCEDURE, {})
+        em = line("EMV", FactKind.EM, {"separately_identifiable": sep_ident})
+        return CodingResult(encounter_id="e", date_of_service="2026-03-14",
+                            lines=[proc, em]), em
+
+    def test_em_bundled_when_not_separately_identifiable(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.pipeline import apply_global_package
+        r, em = self._lines(sep_ident=False)
+        apply_global_package(r, MockSource(gp={"PROCG": "090"}))
+        self.assertTrue(em.excluded_reason)
+        self.assertNotIn("EMV", {ln.chosen.code for ln in r.billable_lines})
+
+    def test_em_kept_when_separately_identifiable(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.pipeline import apply_global_package
+        r, em = self._lines(sep_ident=True)
+        apply_global_package(r, MockSource(gp={"PROCG": "090"}))
+        self.assertIsNone(em.excluded_reason)
+        self.assertIn("EMV", {ln.chosen.code for ln in r.billable_lines})
 
 
 if __name__ == "__main__":

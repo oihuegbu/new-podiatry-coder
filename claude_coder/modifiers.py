@@ -102,9 +102,12 @@ class ModifierEngine:
                  and ln.chosen.system in ("cpt", "hcpcs")]
         ems = [ln for ln in billable if ln.fact.kind is FactKind.EM]
 
+        # E/M-25 only when the note DOCUMENTS a significant, separately
+        # identifiable E/M (not merely because a procedure was also done).
         if procs and self._em_separate:
             for ln in ems:
-                if self._em_separate not in ln.modifiers:
+                if ln.fact.attributes.get("separately_identifiable") and \
+                        self._em_separate not in ln.modifiers:
                     ln.modifiers.append(self._em_separate)
 
         for i in range(len(procs)):

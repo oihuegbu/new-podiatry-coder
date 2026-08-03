@@ -71,11 +71,33 @@ def code_encounter(
     )
     # Claim-level modifiers (E/M-25, distinct-service 59/X) once all lines exist.
     modifier_engine.assign_claim(result, source)
+
+    apply_global_package(result, source)
     result.gates = gates.run_gates(result, note_text, source)
     decide(result)
     result.certificate = certificate.build_certificate(
         result, note_text, source_identity={"source": type(source).__name__})
     return result
+
+
+def apply_global_package(result: CodingResult, source: CodeSource) -> None:
+    """Global surgical package (CMS global-period data): an E/M related to a
+    same-day procedure that carries a global period (000/010/090) is included in
+    that procedure's payment. The E/M is separately billable ONLY if the note
+    documents significant, separately identifiable work; otherwise it is bundled
+    — dropped from the claim, kept in the audit trail. Fail-closed."""
+    from .models import FactKind
+    has_global_proc = any(
+        source.global_period(ln.chosen.code) in ("000", "010", "090")
+        for ln in result.billable_lines
+        if ln.fact.kind is not FactKind.EM and ln.chosen.system in ("cpt", "hcpcs"))
+    if not has_global_proc:
+        return
+    for ln in result.lines:
+        if (ln.resolved and ln.fact.kind is FactKind.EM and not ln.excluded_reason
+                and not ln.fact.attributes.get("separately_identifiable")):
+            ln.excluded_reason = ("bundled into the global surgical package "
+                                  "(no separately-identifiable E/M documented)")
 
 
 def render(result: CodingResult) -> str:

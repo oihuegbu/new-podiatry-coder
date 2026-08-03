@@ -36,6 +36,8 @@ class CodeSource(Protocol):
 
     def separately_billable(self, code: str, system: str, dos: str | None) -> Outcome: ...
 
+    def global_period(self, code: str) -> str | None: ...
+
     def ncci_indicator(self, col1: str, col2: str, dos: str | None) -> str | None: ...
 
     def mue_limit(self, code: str, dos: str | None) -> int | None: ...
@@ -56,6 +58,20 @@ class AuthoritativeSource:
     def __init__(self) -> None:
         self._db = None
         self._store = None
+        self._gp: dict | None = None
+
+    def global_period(self, code: str) -> str | None:
+        """CMS global-surgical-package days (000/010/090/XXX/YYY/ZZZ/MMM) from the
+        PFS RVU file (built by tools/build_global_period.py). None if unknown."""
+        if self._gp is None:
+            try:
+                import json
+                from app.core.config import DATA_DIR
+                with open(DATA_DIR / "codes" / "global_period.json") as fh:
+                    self._gp = json.load(fh).get("global_period", {})
+            except Exception:
+                self._gp = {}
+        return self._gp.get(code) or self._gp.get(code.replace(".", ""))
 
     # -- retrieval: RECALL only (concept -> candidate code identities) ---------
     def _vector_store(self):
@@ -176,12 +192,17 @@ class MockSource:
                  retrieval: dict[tuple[str, str], list[CandidateCode]] | None = None,
                  ncci: dict[tuple[str, str], str] | None = None,
                  mue: dict[str, int] | None = None,
-                 nonbillable: set[str] | None = None) -> None:
+                 nonbillable: set[str] | None = None,
+                 gp: dict[str, str] | None = None) -> None:
         self._records = records or {}
         self._retrieval = retrieval or {}
         self._ncci = ncci or {}
         self._mue = mue or {}
         self._nonbillable = nonbillable or set()
+        self._gp = gp or {}
+
+    def global_period(self, code):
+        return self._gp.get(code)
 
     def retrieve(self, description, system, top_k=20):
         hits = (self._retrieval.get((description, system))
