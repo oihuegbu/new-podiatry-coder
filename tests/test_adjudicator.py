@@ -470,7 +470,10 @@ class RegistryTierTest(unittest.TestCase):
                 "verdict": "upheld",
                 "fingerprint": corrections_fingerprint(payload)}
             (results / "n_results.json").write_text(json.dumps(payload))
-            stats = reg.ingest(results, path)
+            with mock.patch(
+                    "app.release.claim_readiness.verify_readiness_certificate",
+                    return_value=(True, "")):
+                stats = reg.ingest(results, path)
             self.assertEqual(stats["recorded"], 0)
             self.assertEqual(stats["human_protected"], 1)
             view = reg.current_view(reg.load_events(path))
@@ -494,7 +497,8 @@ class ProposedCodeValidationTest(unittest.TestCase):
             validate_hcpcs=lambda c: rec,
             validate_icd10=lambda c: rec,
             get_mue=lambda c: mue,
-            check_ncci=lambda a, b: ncci)
+            ncci_data_available=lambda dos: True,
+            check_ncci=lambda a, b, dos=None: ncci)
         store = types.SimpleNamespace(global_period=lambda c, dos=None: gp)
         return types.SimpleNamespace(db=db, store=store)
 
@@ -503,6 +507,7 @@ class ProposedCodeValidationTest(unittest.TestCase):
             claim=None):
         from tools.coder_adjudicator import _proposed_code_authoritative_ok
         main = {"cpt_codes": [{"code": c} for c in (claim or ["27654"])],
+                "patient_metadata": {"date_of_service": "2026-01-05"},
                 "procedures_performed_today": list(procs)}
         return _proposed_code_authoritative_ok(rep, arr, code, main, note)
 

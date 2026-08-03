@@ -56,6 +56,28 @@ def _load_terms(filename: str) -> dict[str, list[str]]:
         return json.load(open(path)).get("terms", {}) or {}
     except Exception:
         return {}
+# (clinical phrase as a note would write it, expected code, code_system).
+# Deliberately note-vocabulary / eponym phrasing — the gap recall must bridge.
+PROBES = [
+    ("retrocalcaneal exostectomy, Haglund resection of the calcaneus",
+     "28118", "cpt"),
+    ("removal of prominent heel bone", "28118", "cpt"),
+    ("Haglund resection", "28118", "cpt"),                 # pure eponym
+    ("Achilles tendon debridement with reattachment using suture anchors",
+     "27654", "cpt"),
+    ("bunionette correction, fifth metatarsal head resection", "28110", "cpt"),
+    ("hammertoe correction with proximal interphalangeal arthrodesis",
+     "28285", "cpt"),
+    ("Morton's neuroma excision, intermetatarsal nerve", "28080", "cpt"),
+    ("Haglund's deformity of the right heel", "M77.31", "icd10"),
+    ("pump bump of the heel", "M77.31", "icd10"),          # eponym/lay term
+    ("hallux valgus, bunion of the great toe", "M20.11", "icd10"),
+    ("plantar fasciitis", "M72.2", "icd10"),
+    ("onychomycosis of the toenail", "B35.1", "icd10"),
+    ("diabetic foot ulcer of the heel", "L97.4", "icd10"),
+    ("compression burn garment, bodysuit", "A6501", "hcpcs"),
+    ("therapeutic diabetic shoe, custom molded", "A5501", "hcpcs"),
+]
 
 
 def main() -> int:

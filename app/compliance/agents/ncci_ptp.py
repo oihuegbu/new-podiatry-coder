@@ -14,16 +14,6 @@ from itertools import combinations
 from app.compliance.agents.base import ComplianceAgent
 from app.compliance.models import Claim, DenialRisk, Finding, Status
 
-# NCCI-associated separation modifiers (CMS prefers the X{EPSU} subset over 59)
-_SEPARATION_MODIFIERS = {"59", "XE", "XS", "XP", "XU"}
-# E/M ↔ procedure pairs are unbundled with 25 (or 57), not 59
-_EM_SEPARATION_MODIFIERS = {"25", "57"}
-_EM_SECTION = range(99202, 99500)
-
-
-def _is_em(code: str) -> bool:
-    return code.isdigit() and int(code) in _EM_SECTION
-
 
 class NCCIPTPAgent(ComplianceAgent):
     filter_id = "NCCI_PTP"
@@ -32,9 +22,31 @@ class NCCIPTPAgent(ComplianceAgent):
     def check(self, claim: Claim) -> list[Finding]:
         findings: list[Finding] = []
         dos = claim.date_of_service
-        cpt_lines = [ln for ln in claim.lines if ln.code_system == "CPT"]
+        lines = [ln for ln in claim.lines if ln.code_system in {"CPT", "HCPCS"}]
+        if len(lines) < 2:
+            return findings
 
-        for a, b in combinations(cpt_lines, 2):
+        if dos is None:
+            return [self.finding(
+                status=Status.UNKNOWN,
+                denial_risk=DenialRisk.HIGH,
+                reason="NCCI PTP edits cannot be evaluated without a date of service.",
+                recommendation="Verify the date of service and re-run the complete scrub.",
+                source_rule="CMS NCCI PTP effective-date control",
+                clause="data_availability",
+            )]
+        if not self.store.ncci_data_available(dos):
+            return [self.finding(
+                status=Status.UNKNOWN,
+                denial_risk=DenialRisk.HIGH,
+                reason=(f"No local NCCI PTP release covers date of service "
+                        f"{dos.isoformat()}; absence of a pair cannot be treated as no edit."),
+                recommendation="Load and validate the CMS NCCI release covering the DOS, then re-scrub.",
+                source_rule="CMS NCCI PTP effective-date control",
+                clause="data_availability",
+            )]
+
+        for a, b in combinations(lines, 2):
             edit = self.store.ncci_pair(a.code, b.code, dos)
             if not edit:
                 continue
@@ -48,10 +60,15 @@ class NCCIPTPAgent(ComplianceAgent):
             col1_line = b if col2_line is a else a
             pair = f"{col1_line.code}/{col2_line.code}"
             mods_present = set(col1_line.modifiers) | set(col2_line.modifiers)
-            # An E/M ↔ procedure pair is separated by 25/57; all others by 59/X{EPSU}.
-            sep_modifiers = set(_SEPARATION_MODIFIERS)
-            if _is_em(col1_line.code) or _is_em(col2_line.code):
-                sep_modifiers |= _EM_SEPARATION_MODIFIERS
+            # Resolve CMS/AMA modifier roles from the ingested reference
+            # names.  No code values or code-family boundaries live here.
+            is_em_pair = (self.store.is_em_code(col1_line.code, dos)
+                          or self.store.is_em_code(col2_line.code, dos))
+            sep_modifiers = self.store.modifier_codes_for_role(
+                "ncci_procedure_separation")
+            if is_em_pair:
+                sep_modifiers |= self.store.modifier_codes_for_role(
+                    "ncci_em_separation")
             has_sep = bool(mods_present & sep_modifiers)
             # CMS's NCCI-associated modifiers also include the ANATOMIC set
             # (RT/LT, FA/F1–F9, TA/T1–T9, E1–E4, coronary) — two lines whose
@@ -90,11 +107,12 @@ class NCCIPTPAgent(ComplianceAgent):
                         source_rule=src,
                     ))
                 else:
-                    is_em_pair = _is_em(col1_line.code) or _is_em(col2_line.code)
-                    fix = ("Add modifier 25 (or 57) to the E/M if it is significant and separately "
-                           "identifiable") if is_em_pair else \
-                          ("Add 59 or (preferred) XE/XS/XP/XU to the component code if the services "
-                           "are genuinely distinct")
+                    role_codes = sorted(sep_modifiers)
+                    role_text = "/".join(role_codes) if role_codes else "the applicable modifier"
+                    fix = (f"Add {role_text} to the E/M if its authoritative meaning is supported"
+                           if is_em_pair else
+                           f"Add {role_text} to the component service only if the services are "
+                           "genuinely distinct")
                     findings.append(self.finding(
                         status=Status.FAIL, codes=[col1_line.code, col2_line.code],
                         denial_risk=DenialRisk.MEDIUM,

@@ -21,11 +21,9 @@ uses — deterministic replay evidence, never judgment:
              evidence the system owns. Results persist in
              data/registry/rule_exercise.json.
 
-  dormancy   Rules load-bearing nowhere are TAGGED dormant_on_corpus in
-             the pack (metadata only — they stay enabled, because "inert
-             on the stored corpus" is not "inert on next week's note").
-             The tag gives a human, and the merge phase, an evidence-
-             backed shortlist; it is cleared automatically the moment a
+  dormancy   Rules load-bearing nowhere are recorded in registry state,
+             never tagged into the executable pack. The observation gives
+             reviewers an evidence-backed shortlist and is cleared when a
              later scan finds the rule load-bearing.
 
   merge      Enabled auto rules sharing a template are candidate
@@ -37,9 +35,8 @@ uses — deterministic replay evidence, never judgment:
              every run of every note. Equivalence is proven, never
              assumed; a proposal that changes anything anywhere is
              rejected and ledgered so it is not re-asked until the pack
-             changes. Accepted merges disable the originals in place
-             (append-only history, superseded_by set) and append the
-             merged rule with full provenance.
+             changes. Accepted merges become inert, fingerprinted proposals;
+             executable policy is never changed by this runtime tool.
 
 Usage:
   python tools/pack_consolidation.py [--results-dir DIR] [--no-merge]
@@ -64,6 +61,7 @@ if str(ROOT) not in sys.path:
 from loguru import logger  # noqa: E402
 
 STATE_PATH = ROOT / "data" / "registry" / "rule_exercise.json"
+PROPOSALS_DIR = ROOT / "data" / "rules" / "proposals"
 RESULTS_DIR = ROOT / "output" / "results"
 # LLM merge proposals per invocation — consolidation runs inside the
 # convergence loop, and a huge pack must not fan out into unbounded
@@ -285,28 +283,27 @@ def exercise_scan(results_dir: Path, rep=None,
 
 
 def tag_dormancy(scan: dict) -> dict:
-    """Write dormant_on_corpus tags into the live pack from scan
-    evidence. Metadata only — enabled flags never change here (a rule
-    inert on the stored corpus may be load-bearing on the next note; only
-    a human, or a superseding merge, retires a rule)."""
-    from tools.auto_actuate import RULES_PATH
+    """Persist dormancy observations in registry state, never the live pack."""
     pack = _pack()
     tagged, cleared = [], []
+    state = _state()
+    previous = state.get("dormancy") or {}
+    current: dict[str, dict] = {}
     for r in pack.get("rules", []):
         rid = r.get("id")
         info = (scan.get("rules") or {}).get(rid)
         if info is None or not r.get("enabled", True):
             continue
         if info["load_bearing_on"]:
-            if r.pop("dormant_on_corpus", None):
-                r.pop("dormant_since", None)
+            if rid in previous:
                 cleared.append(rid)
-        elif not r.get("dormant_on_corpus"):
-            r["dormant_on_corpus"] = True
-            r["dormant_since"] = _now()
-            tagged.append(rid)
+        else:
+            current[rid] = previous.get(rid) or {"observed_at": _now()}
+            if rid not in previous:
+                tagged.append(rid)
+    state["dormancy"] = current
+    _save_state(state)
     if tagged or cleared:
-        RULES_PATH.write_text(json.dumps(pack, indent=1))
         logger.info(f"dormancy: tagged {tagged or '[]'}, "
                     f"cleared {cleared or '[]'}")
     return {"tagged": tagged, "cleared": cleared}
@@ -411,28 +408,36 @@ def gate_merge(merged: dict, family: list[dict], pack: dict,
     return ""
 
 
-def apply_merge(merged: dict, family: list[dict]) -> None:
-    """Disable the originals in place (history preserved, superseded_by
-    set) and append the merged rule with full provenance."""
-    from tools.auto_actuate import RULES_PATH
-    pack = _pack()
+def apply_merge(merged: dict, family: list[dict]) -> Path:
+    """Write an inert, reviewable merge proposal; never mutate live policy."""
     ids = {r["id"] for r in family}
-    for r in pack.get("rules", []):
-        if r.get("id") in ids:
-            r["enabled"] = False
-            prov = r.setdefault("provenance", {})
-            prov["disabled_reason"] = "consolidated into merged rule"
-            prov["superseded_by"] = merged["id"]
-    rule = dict(merged, auto_generated=True, enabled=True)
+    rule = dict(merged, auto_generated=True, enabled=False)
     rule["provenance"] = {
-        "consolidated_at": _now(),
+        "proposed_at": _now(),
         "consolidated_from": sorted(ids),
         "protocol": "behavior-preserving merge; corpus replay "
                     "byte-identical (billing + observable emissions) "
                     "under {originals disabled + merged rule}",
     }
-    pack["rules"].append(rule)
-    RULES_PATH.write_text(json.dumps(pack, indent=1))
+    proposal = {
+        "proposal_version": 1,
+        "status": "draft",
+        "proposal_type": "merge_rules",
+        "rule": rule,
+        "required_lifecycle": ["independent_human_review", "signed_pack",
+                               "sandbox_replay", "shadow_deployment",
+                               "rollback_rehearsal"],
+    }
+    encoded = json.dumps(proposal, sort_keys=True, separators=(",", ":"),
+                         default=str).encode()
+    fingerprint = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    proposal["proposal_fingerprint"] = fingerprint
+    PROPOSALS_DIR.mkdir(parents=True, exist_ok=True)
+    path = PROPOSALS_DIR / f"merge-{merged['id']}-{fingerprint[7:19]}.json"
+    if not path.exists():
+        path.write_text(json.dumps(proposal, indent=2, sort_keys=True,
+                                   default=str))
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -508,30 +513,12 @@ def consolidate(results_dir: Path, merge: bool = True,
             _decline(why, "rejected")
             continue
 
-        apply_merge(proposal["rule"], family)
-        # Post-write verification against the LIVE pack file — the same
-        # paranoia as actuation's audit_pack: prove the written pack
-        # still replays byte-identically, roll back wholesale otherwise.
-        import app.validation.rule_engine as re_mod
-        re_mod.load_rule_pack.cache_clear()
-        after = _fingerprints(rep, scrubber, corpus)
-        if any(after.get(doc) != baseline[doc] for doc in baseline):
-            from tools.auto_actuate import _disable_rule, _reenable_rule
-            _disable_rule(proposal["rule"]["id"],
-                          reason="post-merge live verification failed")
-            for rid in ids:
-                _reenable_rule(rid)
-            re_mod.load_rule_pack.cache_clear()
-            _decline("post-write live verification failed — rolled back",
-                     "rejected")
-            continue
+        proposal_path = apply_merge(proposal["rule"], family)
         summary["merges"].append({"rule_ids": ids,
-                                  "merged_id": proposal["rule"]["id"]})
-        logger.info(f"  -> MERGED into {proposal['rule']['id']}")
-        # pack changed: later families must gate against the new baseline
-        pack = _pack()
-        phash = _pack_hash(pack)
-        baseline = after
+                                  "merged_id": proposal["rule"]["id"],
+                                  "status": "draft",
+                                  "proposal_path": str(proposal_path)})
+        logger.info(f"  -> MERGE PROPOSED as {proposal_path.name}")
 
     _save_state(state)
     return summary

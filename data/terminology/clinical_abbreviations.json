@@ -1,0 +1,412 @@
+{
+  "schema_version": 1,
+  "version": "2026.08.1",
+  "governance": "Terminology normalization and retrieval aid only. It is not a medical-code authority. Every expansion is provenance-bearing; ambiguous or unknown affirmed terms with potential billing impact prevent autonomous release.",
+  "sources": {
+    "project_podiatry_note_conventions": {
+      "name": "Governed podiatry documentation conventions",
+      "version": "2026.08.1",
+      "review_status": "repository-reviewed",
+      "scope": "Common shorthand observed in podiatry clinical and operative notes"
+    },
+    "project_general_clinical_conventions": {
+      "name": "Governed general clinical documentation conventions",
+      "version": "2026.08.1",
+      "review_status": "repository-reviewed",
+      "scope": "Common cross-specialty shorthand needed to interpret podiatry notes"
+    }
+  },
+  "acceptance": {
+    "min_confidence": 0.9,
+    "min_margin": 0.15,
+    "context_window_chars": 120,
+    "evidence_weights": {
+      "required_section": 0.03,
+      "required_context_any": 0.04,
+      "required_context_all": 0.03,
+      "anatomy": 0.03,
+      "laterality": 0.02
+    }
+  },
+  "unknown_detection": {
+    "pattern": "(?<![A-Za-z0-9])(?:[A-Z]{2,10}|[A-Z]/[A-Z]|[A-Z]{1,5}/[A-Z]{1,5})(?![A-Za-z0-9])",
+    "negation_patterns": [
+      "(?:^|[.;:\\n]\\s*)(?:no|denies|denied|without|negative\\s+for|absent|free\\s+of)\\b[^.;:\\n]*$"
+    ],
+    "ignored_terms": [
+      "CC",
+      "DOB",
+      "DOS",
+      "DPM",
+      "FACFAS",
+      "HPI",
+      "ID",
+      "MRN",
+      "NPI",
+      "PE",
+      "PMH"
+    ],
+    "billing_relevant_sections": [
+      "CC",
+      "HPI",
+      "PMH",
+      "PE",
+      "IMAGING",
+      "ASSESSMENT",
+      "PLAN"
+    ]
+  },
+  "entries": [
+    {
+      "id": "with",
+      "patterns": ["(?<![A-Za-z0-9])w/(?![A-Za-z0-9])"],
+      "coding_impact": true,
+      "candidates": [
+        {"expansion": "with", "confidence": 0.995, "source_id": "project_general_clinical_conventions"}
+      ]
+    },
+    {
+      "id": "without",
+      "patterns": ["(?<![A-Za-z0-9])w/o(?![A-Za-z0-9])"],
+      "coding_impact": true,
+      "candidates": [
+        {"expansion": "without", "confidence": 0.995, "source_id": "project_general_clinical_conventions"}
+      ]
+    },
+    {
+      "id": "status_post",
+      "patterns": ["(?<![A-Za-z0-9])s/p(?![A-Za-z0-9])"],
+      "coding_impact": true,
+      "candidates": [
+        {"expansion": "status post", "confidence": 0.99, "source_id": "project_general_clinical_conventions"}
+      ]
+    },
+    {
+      "id": "history_of",
+      "patterns": ["\\bhx\\b", "\\bh/o\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {"expansion": "history of", "confidence": 0.98, "source_id": "project_general_clinical_conventions"}
+      ]
+    },
+    {
+      "id": "bilateral",
+      "patterns": ["(?<![A-Za-z0-9])b/l(?![A-Za-z0-9])", "\\bbilat\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {"expansion": "bilateral", "confidence": 0.995, "source_id": "project_general_clinical_conventions"}
+      ]
+    },
+    {
+      "id": "right_lower_extremity",
+      "patterns": ["\\bRLE\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "right lower extremity",
+          "confidence": 0.99,
+          "source_id": "project_general_clinical_conventions",
+          "allowed_laterality": ["RIGHT"]
+        }
+      ]
+    },
+    {
+      "id": "left_lower_extremity",
+      "patterns": ["\\bLLE\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "left lower extremity",
+          "confidence": 0.99,
+          "source_id": "project_general_clinical_conventions",
+          "allowed_laterality": ["LEFT"]
+        }
+      ]
+    },
+    {
+      "id": "bilateral_lower_extremities",
+      "patterns": ["\\bBLE\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "bilateral lower extremities",
+          "confidence": 0.99,
+          "source_id": "project_general_clinical_conventions",
+          "allowed_laterality": ["BILATERAL"]
+        }
+      ]
+    },
+    {
+      "id": "deep_vein_thrombosis",
+      "patterns": ["\\bDVT\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {"expansion": "deep vein thrombosis", "confidence": 0.995, "source_id": "project_general_clinical_conventions"}
+      ]
+    },
+    {
+      "id": "peripheral_arterial_disease",
+      "patterns": ["\\bPAD\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {"expansion": "peripheral arterial disease", "confidence": 0.99, "source_id": "project_podiatry_note_conventions"}
+      ]
+    },
+    {
+      "id": "peripheral_vascular_disease",
+      "patterns": ["\\bPVD\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {"expansion": "peripheral vascular disease", "confidence": 0.99, "source_id": "project_podiatry_note_conventions"}
+      ]
+    },
+    {
+      "id": "metatarsophalangeal_joint",
+      "patterns": ["\\bMTPJ\\b", "\\bMTP\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {"expansion": "metatarsophalangeal joint", "confidence": 0.99, "source_id": "project_podiatry_note_conventions"}
+      ]
+    },
+    {
+      "id": "interphalangeal_joint",
+      "patterns": ["\\bIPJ\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {"expansion": "interphalangeal joint", "confidence": 0.99, "source_id": "project_podiatry_note_conventions"}
+      ]
+    },
+    {
+      "id": "range_of_motion",
+      "patterns": ["\\bROM\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "range of motion",
+          "confidence": 0.9,
+          "source_id": "project_general_clinical_conventions",
+          "required_context_any": ["joint", "MTP", "IPJ", "ankle", "motion", "pain"]
+        }
+      ]
+    },
+    {
+      "id": "ankle_brachial_index",
+      "patterns": ["\\bABI\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "ankle-brachial index",
+          "confidence": 0.87,
+          "source_id": "project_podiatry_note_conventions",
+          "required_context_any": ["pulse", "vascular", "arterial", "Doppler", "waveform", "ankle", "foot"],
+          "anatomy_any": ["ankle", "foot", "lower extremity"]
+        },
+        {
+          "expansion": "acquired brain injury",
+          "confidence": 0.79,
+          "source_id": "project_general_clinical_conventions",
+          "required_context_any": ["brain", "head trauma", "cognitive", "neurologic", "rehabilitation"]
+        }
+      ]
+    },
+    {
+      "id": "dorsalis_pedis",
+      "patterns": ["\\bDP\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "dorsalis pedis",
+          "confidence": 0.88,
+          "source_id": "project_podiatry_note_conventions",
+          "required_context_any": ["pulse", "pulses", "artery", "vascular", "palpable", "Doppler"],
+          "anatomy_any": ["foot", "ankle", "pedal"]
+        },
+        {
+          "expansion": "data processing",
+          "confidence": 0.7,
+          "source_id": "project_general_clinical_conventions",
+          "required_context_any": ["computer", "system", "information technology"]
+        }
+      ]
+    },
+    {
+      "id": "pt_contextual",
+      "patterns": ["\\bPT\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "posterior tibial",
+          "confidence": 0.84,
+          "source_id": "project_podiatry_note_conventions",
+          "required_context_any": ["pulse", "pulses", "artery", "vascular", "palpable", "Doppler"],
+          "anatomy_any": ["foot", "ankle", "pedal"]
+        },
+        {
+          "expansion": "physical therapy",
+          "confidence": 0.86,
+          "source_id": "project_general_clinical_conventions",
+          "required_context_any": ["therapy", "rehab", "strengthening", "gait", "referral", "evaluate and treat"],
+          "required_sections": ["PLAN", "HPI"]
+        },
+        {
+          "expansion": "prothrombin time",
+          "confidence": 0.86,
+          "source_id": "project_general_clinical_conventions",
+          "required_context_any": ["INR", "coagulation", "anticoagulation", "blood test", "seconds"]
+        }
+      ]
+    },
+    {
+      "id": "weight_bearing",
+      "patterns": ["\\bWB\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "weight bearing",
+          "confidence": 0.9,
+          "source_id": "project_podiatry_note_conventions",
+          "required_context_any": ["heel", "shoe", "boot", "foot", "ambulat", "protected"],
+          "required_sections": ["PLAN"]
+        }
+      ]
+    },
+    {
+      "id": "non_weight_bearing",
+      "patterns": ["\\bNWB\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "non-weight bearing",
+          "confidence": 0.98,
+          "source_id": "project_podiatry_note_conventions",
+          "required_context_any": ["foot", "leg", "boot", "cast", "crutch", "walker"]
+        }
+      ]
+    },
+    {
+      "id": "weight_bearing_as_tolerated",
+      "patterns": ["\\bWBAT\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "weight bearing as tolerated",
+          "confidence": 0.99,
+          "source_id": "project_podiatry_note_conventions"
+        }
+      ]
+    },
+    {
+      "id": "return_to_clinic",
+      "patterns": ["\\bRTC\\b"],
+      "coding_impact": false,
+      "candidates": [
+        {
+          "expansion": "return to clinic",
+          "confidence": 0.94,
+          "source_id": "project_general_clinical_conventions",
+          "required_context_any": ["week", "day", "follow-up", "follow up", "dressing", "suture"],
+          "required_sections": ["PLAN"]
+        }
+      ]
+    },
+    {
+      "id": "ambulatory_surgery_center",
+      "patterns": ["\\bASC\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "ambulatory surgery center",
+          "confidence": 0.91,
+          "source_id": "project_general_clinical_conventions",
+          "required_context_any": ["surgery", "procedure", "facility", "operative"]
+        }
+      ]
+    },
+    {
+      "id": "mac_contextual",
+      "patterns": ["\\bMAC\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "monitored anesthesia care",
+          "confidence": 0.85,
+          "source_id": "project_general_clinical_conventions",
+          "required_context_any": ["anesthesia", "sedation", "block", "operative", "procedure"]
+        },
+        {
+          "expansion": "Medicare Administrative Contractor",
+          "confidence": 0.85,
+          "source_id": "project_general_clinical_conventions",
+          "required_context_any": ["Medicare", "jurisdiction", "coverage", "contractor", "LCD"]
+        }
+      ]
+    },
+    {
+      "id": "open_reduction_internal_fixation",
+      "patterns": ["\\bORIF\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {"expansion": "open reduction and internal fixation", "confidence": 0.995, "source_id": "project_general_clinical_conventions"}
+      ]
+    },
+    {
+      "id": "incision_and_drainage",
+      "patterns": ["(?<![A-Za-z0-9])I&D(?![A-Za-z0-9])"],
+      "coding_impact": true,
+      "candidates": [
+        {"expansion": "incision and drainage", "confidence": 0.99, "source_id": "project_general_clinical_conventions"}
+      ]
+    },
+    {
+      "id": "tender_to_palpation",
+      "patterns": ["\\bTTP\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {"expansion": "tender to palpation", "confidence": 0.99, "source_id": "project_general_clinical_conventions"}
+      ]
+    },
+    {
+      "id": "durable_medical_equipment",
+      "patterns": ["\\bDME\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {"expansion": "durable medical equipment", "confidence": 0.99, "source_id": "project_general_clinical_conventions"}
+      ]
+    },
+    {
+      "id": "controlled_ankle_motion",
+      "patterns": ["\\bCAM\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {
+          "expansion": "controlled ankle motion",
+          "confidence": 0.86,
+          "source_id": "project_podiatry_note_conventions",
+          "required_context_any": ["boot", "walker", "brace", "ankle", "dispensed", "applied"]
+        },
+        {
+          "expansion": "computer-aided manufacturing",
+          "confidence": 0.72,
+          "source_id": "project_general_clinical_conventions",
+          "required_context_any": ["manufacturing", "fabrication", "digital model", "CAD"]
+        }
+      ]
+    },
+    {
+      "id": "day_suffix",
+      "patterns": ["(?<=\\d)d\\b"],
+      "coding_impact": false,
+      "candidates": [
+        {"expansion": " days", "confidence": 0.995, "source_id": "project_general_clinical_conventions"}
+      ]
+    },
+    {
+      "id": "week_suffix",
+      "patterns": ["(?<=\\d)wks?\\b"],
+      "coding_impact": false,
+      "candidates": [
+        {"expansion": " weeks", "confidence": 0.995, "source_id": "project_general_clinical_conventions"}
+      ]
+    }
+  ]
+}

@@ -144,17 +144,24 @@ def audit_note(path: Path, db: CodeReferenceDB, store: ComplianceDataStore):
             add("ERROR", "pfs_nonpayable", f"{code}: PFS status '{status}' — not payable under PFS")
         elif status in PFS_ADVISORY:
             add("WARN", "pfs_advisory", f"{code}: PFS status '{status}' — check billing path")
-    # NCCI PTP among billed CPT pairs (edit direction: col2 is the bundled code)
+    # NCCI PTP among all billed CPT/HCPCS pairs (edit direction: col2 is bundled)
     anatomic = store.anatomic_modifiers()
-    by_code = {code: entry for code, entry in cpt_codes}
+    procedure_codes = cpt_codes + [
+        (str(entry.get("code") or "").strip().upper(), entry)
+        for entry in hcpcs if entry.get("code")
+    ]
+    by_code = {code: entry for code, entry in procedure_codes}
+    if len(procedure_codes) >= 2 and not db.ncci_data_available(dos):
+        add("ERROR", "ncci_data_unavailable",
+            f"no loaded NCCI release covers DOS {dos or 'unknown'}")
     checked = set()
-    for i in range(len(cpt_codes)):
-        for j in range(i + 1, len(cpt_codes)):
-            a, b = cpt_codes[i][0], cpt_codes[j][0]
+    for i in range(len(procedure_codes)):
+        for j in range(i + 1, len(procedure_codes)):
+            a, b = procedure_codes[i][0], procedure_codes[j][0]
             if (a, b) in checked:
                 continue
             checked.add((a, b))
-            edit = db.check_ncci(a, b)
+            edit = db.check_ncci(a, b, dos)
             if not edit:
                 continue
             col1, col2 = edit["code1"], edit["code2"]
@@ -166,8 +173,13 @@ def audit_note(path: Path, db: CodeReferenceDB, store: ComplianceDataStore):
             mods_c1 = set(str(m) for m in (by_code[col1].get("modifiers") or []))
             mods_c2 = set(str(m) for m in (by_code[col2].get("modifiers") or []))
             # NCCI PTP-associated modifiers (CMS: valid on either column code)
-            ptp_assoc = {"24", "25", "27", "57", "58", "59", "78", "79", "91",
-                         "XE", "XP", "XS", "XU"} | anatomic
+            ptp_assoc = (
+                store.modifier_codes_for_role("ncci_procedure_separation")
+                | store.modifier_codes_for_role("ncci_em_separation")
+                | store.modifier_codes_for_role("postoperative_context")
+                | store.modifier_codes_for_role("laboratory_repeat")
+                | anatomic
+            )
             bypass = ptp_assoc & (mods_c1 | mods_c2)
             anat_split = (mods_c1 & anatomic) and (mods_c2 & anatomic) and \
                          (mods_c1 & anatomic) != (mods_c2 & anatomic)

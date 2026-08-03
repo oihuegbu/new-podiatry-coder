@@ -11,8 +11,8 @@ that decide accuracy and billability:
     disposition: CLEAN/REVIEW/REJECT agreement
 
 Modes:
-  freeze   copy the current results into the gold directory (one-time per
-           accepted baseline; re-freeze only after a human-verified upgrade)
+  freeze   materialize only independently human-reviewed result artifacts;
+           raw pipeline output is rejected as a source of truth
   score    score one results dir against gold
   compare  score BASELINE and CANDIDATE dirs against gold; the change is
            ACCEPTED only if the candidate is >= baseline on every aggregate
@@ -27,15 +27,15 @@ Usage:
 from __future__ import annotations
 
 import json
-import shutil
 import sys
 from pathlib import Path
 
 DEFAULT_RESULTS = Path("output/results")
 DEFAULT_GOLD = Path("benchmark/gold")
 
-METRICS = ("icd_f1", "primary_match", "cpt_f1", "cpt_modifiers",
-           "cpt_units", "hcpcs_f1", "hcpcs_modifiers", "disposition")
+METRICS = ("icd_f1", "primary_match", "icd_sequence", "cpt_f1",
+           "cpt_modifiers", "cpt_units", "cpt_linkage", "hcpcs_f1",
+           "hcpcs_modifiers", "hcpcs_linkage", "disposition")
 
 
 def _entries(d: dict, key: str) -> dict[str, dict]:
@@ -71,6 +71,13 @@ def _line_agreement(gold: dict[str, dict], cand: dict[str, dict], field: str) ->
         elif field == "units":
             if (g.get("units") or 1) == (k.get("units") or 1):
                 ok += 1
+        elif field == "linkage":
+            def links(row):
+                return tuple(str(v) for v in (
+                    row.get("dx_pointers") or row.get("diagnosis_pointers")
+                    or row.get("linked_diagnoses") or []))
+            if links(g) == links(k):
+                ok += 1
     return ok / len(shared)
 
 
@@ -88,11 +95,14 @@ def score_note(gold: dict, cand: dict) -> dict[str, float]:
     return {
         "icd_f1": _f1(set(g_icd), set(c_icd)),
         "primary_match": float(_primary(g_icd) == _primary(c_icd)),
+        "icd_sequence": float(list(g_icd) == list(c_icd)),
         "cpt_f1": _f1(set(g_cpt), set(c_cpt)),
         "cpt_modifiers": _line_agreement(g_cpt, c_cpt, "modifiers"),
         "cpt_units": _line_agreement(g_cpt, c_cpt, "units"),
+        "cpt_linkage": _line_agreement(g_cpt, c_cpt, "linkage"),
         "hcpcs_f1": _f1(set(g_hc), set(c_hc)),
         "hcpcs_modifiers": _line_agreement(g_hc, c_hc, "modifiers"),
+        "hcpcs_linkage": _line_agreement(g_hc, c_hc, "linkage"),
         "disposition": float((gold.get("final_disposition") or "")
                              == (cand.get("final_disposition") or "")),
     }
@@ -104,7 +114,7 @@ def score_dir(cand_dir: Path, gold_dir: Path, verbose: bool = True):
     if not gold_files:
         sys.exit(f"No gold results in {gold_dir} — run 'freeze' first.")
     totals = {m: 0.0 for m in METRICS}
-    n = 0
+    n = len(gold_files)
     missing = []
     for name, gf in sorted(gold_files.items()):
         cf = cand_dir / name
@@ -112,7 +122,6 @@ def score_dir(cand_dir: Path, gold_dir: Path, verbose: bool = True):
             missing.append(name)
             continue
         s = score_note(json.loads(gf.read_text()), json.loads(cf.read_text()))
-        n += 1
         imperfect = {m: v for m, v in s.items() if v < 1.0}
         if verbose and imperfect:
             print(f"  {name}: " + ", ".join(f"{m}={v:.2f}" for m, v in imperfect.items()))
@@ -142,14 +151,35 @@ def main():
     if mode == "freeze":
         src = Path(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_RESULTS
         dst = Path(sys.argv[3]) if len(sys.argv) > 3 else DEFAULT_GOLD
-        dst.mkdir(parents=True, exist_ok=True)
-        n = 0
-        for f in sorted(src.glob("*_results.json")):
+        candidates = [f for f in sorted(src.glob("*_results.json"))
+                      if f.name != "all_results.json"]
+        rejected = []
+        payloads = []
+        for f in candidates:
             if f.name == "all_results.json":
                 continue
-            shutil.copy2(f, dst / f.name)
-            n += 1
-        print(f"Froze {n} verified results: {src} -> {dst}")
+            payload = json.loads(f.read_text())
+            provenance = payload.get("gold_provenance") or {}
+            review = provenance.get("independent_review") or {}
+            if provenance.get("verification") != "human" \
+                    or not provenance.get("verified_by") \
+                    or not review.get("approved") \
+                    or not review.get("reviewed_by") \
+                    or review.get("reviewed_by") == provenance.get("verified_by"):
+                rejected.append(f.name)
+            else:
+                payloads.append((f.name, payload))
+        if rejected or not payloads:
+            sys.exit("Refusing to freeze pipeline outputs as truth: every "
+                     "gold case requires human verification plus a distinct "
+                     "independent reviewer. Invalid: " +
+                     ", ".join(rejected[:10]))
+        dst.mkdir(parents=True, exist_ok=True)
+        for name, payload in payloads:
+            (dst / name).write_text(json.dumps(payload, indent=2,
+                                               sort_keys=True))
+        print(f"Froze {len(payloads)} independently reviewed results: "
+              f"{src} -> {dst}")
         return
 
     if mode == "score":

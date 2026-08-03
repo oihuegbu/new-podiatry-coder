@@ -35,6 +35,8 @@ _LOGIC_SOURCES = [
     _APP_DIR / "ingestion" / "pdf_parser.py",
     _APP_DIR / "ner" / "entity_extractor.py",
     _APP_DIR / "ner" / "biomed_ner.py",
+    _APP_DIR / "terminology" / "normalizer.py",
+    BASE_DIR / "data" / "terminology" / "clinical_abbreviations.json",
     _APP_DIR / "rag" / "retriever.py",
     _APP_DIR / "coding" / "code_assigner.py",
     _APP_DIR / "validation" / "validator.py",

@@ -45,7 +45,36 @@ class ClinicalEntity(BaseModel):
     source_section: str = Field(description="Section of note: CC|HPI|PE|IMAGING|ASSESSMENT|PLAN|PMH")
     negated: bool = Field(default=False, description="Whether the entity is negated")
     ner_source: str = Field(default="llm", description="gliner_confirmed|llm_only|llm")
-    ner_confidence: float = Field(default=1.0, description="GLiNER confidence if confirmed")
+    ner_confidence: float = Field(
+        default=0.7,
+        description="GLiNER score when confirmed; conservative LLM-only default otherwise",
+    )
+    # Deterministic terminology provenance is populated after NER.  The raw
+    # LLM span and clinical_term remain untouched; normalized_text is a
+    # retrieval aid whose accepted substitutions are traceable to the
+    # versioned terminology registry below.
+    source_span: dict = Field(
+        default_factory=dict,
+        description="Verified section/document offsets for the verbatim entity span",
+    )
+    terminology_resolutions: list[dict] = Field(
+        default_factory=list,
+        description="Per-abbreviation candidates, decision, confidence, and provenance",
+    )
+    normalized_text: str = Field(
+        default="", description="Raw entity text with accepted terminology expansions"
+    )
+    retrieval_terms: list[str] = Field(
+        default_factory=list,
+        description="Deduplicated raw, model-normalized, and deterministic query forms",
+    )
+    normalization_status: str = Field(
+        default="not_evaluated",
+        description="accepted|ambiguous|unresolved|not_applicable|not_evaluated",
+    )
+    normalization_confidence: float = Field(default=0.0)
+    normalization_registry_version: str = Field(default="")
+    normalization_registry_sha256: str = Field(default="")
 
 
 class ICDCode(BaseModel):
@@ -62,6 +91,11 @@ class ICDCode(BaseModel):
     review_reason: str | None = None
     code_source: str = "ai_inferred"  # physician_documented|ai_confirmed|ai_inferred|ai_replaced_physician
     physician_code_note: str | None = None  # original physician code if AI replaced it
+    evidence_spans: list[str] = Field(default_factory=list)
+    source_record_ids: list[str] = Field(default_factory=list)
+    source_effective_from: str | None = None
+    source_effective_to: str | None = None
+    source_temporal_authority: bool = False
 
 
 class CPTCode(BaseModel):
@@ -82,6 +116,10 @@ class CPTCode(BaseModel):
     mue_limit: int | None = None
     code_source: str = "ai_inferred"
     physician_code_note: str | None = None
+    source_record_ids: list[str] = Field(default_factory=list)
+    source_effective_from: str | None = None
+    source_effective_to: str | None = None
+    source_temporal_authority: bool = False
 
 
 class HCPCSCode(BaseModel):
@@ -104,6 +142,11 @@ class HCPCSCode(BaseModel):
     review_reason: str | None = None
     code_source: str = "ai_inferred"
     physician_code_note: str | None = None
+    evidence_spans: list[str] = Field(default_factory=list)
+    source_record_ids: list[str] = Field(default_factory=list)
+    source_effective_from: str | None = None
+    source_effective_to: str | None = None
+    source_temporal_authority: bool = False
 
 
 class SNOMEDCode(BaseModel):
@@ -182,6 +225,10 @@ class CodingResult(BaseModel):
     missing_physician_codes: list[dict] = Field(default_factory=list)
     cached_result: bool = False
     ner_entities: list[dict] = Field(default_factory=list)
+    # Whole-note/entity terminology audit.  This is release-bound evidence:
+    # an unresolved affirmed shorthand term blocks autonomy only when the
+    # registry marks its context as capable of changing a billed line.
+    terminology_normalization: dict = Field(default_factory=dict)
     # The operative note's documented procedures (vision extraction's
     # procedures_performed_today). Persisted on the record — not just used
     # transiently for the coding prompts — because the completeness
@@ -214,3 +261,11 @@ class CodingResult(BaseModel):
     # source of truth; auto_coding_tier is derived from it for backward compatibility.
     final_disposition: str = "REVIEW"
     final_summary: str = ""
+    # Release-boundary artifacts.  CLEAN remains an internal validation
+    # result; only an immutable AUTO_READY certificate authorizes autonomous
+    # registry ingest/submission.
+    candidate_claim: dict = Field(default_factory=dict)
+    mutation_ledger: list[dict] = Field(default_factory=list)
+    note_integrity: dict = Field(default_factory=dict)
+    authoritative_source_manifest: dict = Field(default_factory=dict)
+    claim_readiness_certificate: dict = Field(default_factory=dict)

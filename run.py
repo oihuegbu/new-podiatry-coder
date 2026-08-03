@@ -566,18 +566,16 @@ def main():
         except Exception as e:
             logger.warning(f"Calibration dataset export skipped: {e}")
 
-        # Template graduation — a synthesized template that has proven
-        # itself (live long enough, enough fresh documents, no rollbacks,
-        # no reopened flip classes) is promoted verbatim out of the
-        # sandbox into app/validation/graduated/ as trusted app code.
-        if os.getenv("AUTO_GRADUATE", "1") == "1":
+        # Template graduation proposal — maturity is evaluated, but runtime
+        # code never writes executable application modules.
+        if os.getenv("AUTO_GRADUATE", "0") == "1":
             try:
                 from tools.graduate_templates import graduate
                 gstats = graduate(OUTPUT_DIR)
                 if gstats["considered"]:
                     logger.info(
                         f"Template graduation: "
-                        f"{len(gstats['promoted'])} promoted, "
+                        f"{len(gstats['promoted'])} proposed, "
                         f"{len(gstats['not_yet'])} not yet eligible, "
                         f"{len(gstats['failed'])} rolled back "
                         f"(of {gstats['considered']} sandboxed)")

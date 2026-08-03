@@ -1,4 +1,5 @@
 import time
+import copy
 from pathlib import Path
 from datetime import datetime
 
@@ -16,6 +17,7 @@ from app.compliance.datastore.store import ComplianceDataStore
 from app.compliance.engine import ClaimScrubber, _parse_dos
 from app.compliance.agents import build_default_agents
 from app.models.schemas import CodingResult
+from app.terminology import TerminologyNormalizer
 
 logger = get_logger(__name__)
 
@@ -67,6 +69,7 @@ class MedicalCodingPipeline:
         self.validator: CodingValidator | None = None
         self.compliance_store: ComplianceDataStore | None = None
         self.scrubber: ClaimScrubber | None = None
+        self.terminology: TerminologyNormalizer | None = None
         self._initialized = False
 
     def initialize(self, force_rebuild_index: bool = False) -> None:
@@ -76,6 +79,9 @@ class MedicalCodingPipeline:
 
         logger.info("Loading code reference database...")
         self.ref_db.load_all()
+
+        logger.info("Loading governed clinical terminology registry...")
+        self.terminology = TerminologyNormalizer()
 
         logger.info("Building/loading Qdrant hybrid vector store...")
         self.vector_store.build_or_load(force_rebuild=force_rebuild_index)
@@ -127,6 +133,7 @@ class MedicalCodingPipeline:
                     scrub_payload["note_text"] = cached_note_text
                     scrub = self.scrubber.scrub(scrub_payload)
                     self._apply_scrub_verdict(r, scrub)
+                    self._refresh_release_artifacts(r)
                     self._print_summary(r)
                     logger.info(f"  [cache] VERDICT: {r.final_disposition} — {r.final_summary}")
                     return r
@@ -145,6 +152,7 @@ class MedicalCodingPipeline:
 
         prior_surgery_info = extraction.get("prior_surgery_info", {}) or {}
         physician_documented_codes = extraction.get("physician_documented_codes", []) or []
+        note_integrity = extraction.get("note_integrity") or {}
 
         logger.info(f"  Patient: {metadata.get('patient_name')} | DOS: {metadata.get('date_of_service')}")
         logger.info(f"  Category: {note_category}")
@@ -161,6 +169,8 @@ class MedicalCodingPipeline:
         # Step 2: NER — extract clinical entities
         logger.info("[2/5] Extracting clinical entities (NER)...")
         entities = extract_entities(sections)
+        entities, terminology_report = self.terminology.normalize_entities(
+            entities, sections)
         logger.info(f"  Found {len(entities)} entities")
         for e in entities:
             logger.info(f"    [{e.category:>14}] {e.clinical_term} {'['+e.laterality+']' if e.laterality else ''}")
@@ -218,6 +228,12 @@ class MedicalCodingPipeline:
             exemplar_block=exemplar_block,
         )
 
+        # Immutable candidate snapshot: deterministic validation may propose
+        # and realize changes, but the pre-validation claim must survive so
+        # every mutation can be accounted for at the release boundary.
+        from app.release.mutation_ledger import normalize_claim
+        candidate_claim = normalize_claim(copy.deepcopy(coding_result))
+
         # Step 5: Validation
         logger.info("[5/5] Validating codes...")
         plan_text = sections.get("plan", "")
@@ -249,6 +265,28 @@ class MedicalCodingPipeline:
             # on the final claim (coded or legitimately excluded).
             procedures_performed=procedures_today,
         )
+
+        # Bind each final line to the exact authoritative database record and
+        # edition window used for date-of-service validation.  Evidence is
+        # normalized into spans but never invented when the coder omitted it.
+        system_rows = (
+            ("icd10_codes", "icd10_codes", self.ref_db.validate_icd10),
+            ("cpt_codes", "cpt_codes", self.ref_db.validate_cpt),
+            ("hcpcs_codes", "hcpcs_codes", self.ref_db.validate_hcpcs),
+        )
+        for array, source_id, lookup in system_rows:
+            for line in coding_result.get(array) or []:
+                code = str(line.get("code") or "").strip()
+                ref = lookup(code) or {}
+                line["source_record_ids"] = [f"{source_id}:{code.upper()}"] \
+                    if ref else []
+                line["source_effective_from"] = ref.get("effective_from")
+                line["source_effective_to"] = ref.get("effective_to")
+                line["source_temporal_authority"] = bool(
+                    ref.get("temporal_authority", False))
+                if not line.get("evidence_spans"):
+                    span = line.get("supporting_text") or line.get("source") or ""
+                    line["evidence_spans"] = [span] if span else []
 
         elapsed = time.time() - start
 
@@ -301,10 +339,13 @@ class MedicalCodingPipeline:
             physician_documented_codes=physician_documented_codes,
             missing_physician_codes=coding_result.get("missing_physician_codes", []),
             ner_entities=entity_dicts,
+            terminology_normalization=terminology_report,
             # Persist the documented procedures so the completeness invariant
             # can re-run when this claim is re-validated on replay/reconcile
             # (the replayer reads it back from the stored payload).
             procedures_performed_today=procedures_today,
+            candidate_claim=candidate_claim,
+            note_integrity=note_integrity,
             **{k: v for k, v in validation.items()
                if k not in ("auto_coding_review_reasons", "auto_coding_summary")},
             auto_coding_review_reasons=(
@@ -337,6 +378,12 @@ class MedicalCodingPipeline:
         scrub_payload["note_text"] = full_text
         scrub = self.scrubber.scrub(scrub_payload)
         self._apply_scrub_verdict(result, scrub)
+
+        # Centralized mutation accounting and source manifest are attached
+        # after every deterministic layer has run.  Incomplete legacy
+        # correction records remain explicitly unresolved and therefore
+        # cannot produce AUTO_READY.
+        self._refresh_release_artifacts(result)
         logger.info(f"  VERDICT: {result.final_disposition} — {result.final_summary}")
 
         # Fix 4 — Store to cache (only on success, so failed runs don't get
@@ -349,6 +396,18 @@ class MedicalCodingPipeline:
 
         self._print_summary(result)
         return result
+
+    @staticmethod
+    def _refresh_release_artifacts(result: CodingResult) -> None:
+        """Attach one internally consistent release snapshot to the model."""
+        from app.release.claim_readiness import refresh_release_artifacts
+        payload = result.model_dump(mode="json")
+        refresh_release_artifacts(payload)
+        result.mutation_ledger = payload["mutation_ledger"]
+        result.authoritative_source_manifest = payload[
+            "authoritative_source_manifest"]
+        result.claim_readiness_certificate = payload[
+            "claim_readiness_certificate"]
 
     # Review-reason marker for a scrub-CLEAN claim held back pending the
     # clinical-correctness audit — the audit's uphold verdict removes
@@ -451,27 +510,43 @@ class MedicalCodingPipeline:
             result.auto_coding_confidence = min(result.auto_coding_confidence, 0.84)
 
     def _merge_candidates(self, entity_cands: dict, note_cands: dict) -> dict:
-        merged = {"icd10": [], "cpt": [], "hcpcs": []}
-        seen = {"icd10": set(), "cpt": set(), "hcpcs": set()}
+        """Merge with entity-balanced rank, then deduplicate.
 
-        for key, data in entity_cands.items():
+        Similarity scores produced for different queries are not a shared
+        ranking.  Globally sorting them let one verbose entity consume the
+        entire prompt budget while a different documented diagnosis/service's
+        top candidate fell below the selectable cutoff.  Round-robin preserves
+        each query's local rank: every entity's first result precedes any
+        entity's second result, with full-note retrieval as another source.
+        """
+        systems = ("icd10", "cpt", "hcpcs")
+        sources: dict[str, list[list[dict]]] = {cs: [] for cs in systems}
+        for data in entity_cands.values():
             for cs, cands in data.get("candidates", {}).items():
-                for c in cands:
-                    code = c.get("code", "")
-                    if code not in seen[cs]:
-                        seen[cs].add(code)
-                        merged[cs].append(c)
-
+                if cs in sources and cands:
+                    # CandidateRetriever already preserves each query form's
+                    # local rank via round-robin. Scores from raw/model/
+                    # expanded queries are not comparable; re-sorting here
+                    # would silently undo that balance.
+                    sources[cs].append(list(cands))
         for cs, cands in note_cands.items():
-            for c in cands:
-                code = c.get("code", "")
-                if code not in seen[cs]:
-                    seen[cs].add(code)
-                    merged[cs].append(c)
+            if cs in sources and cands:
+                sources[cs].append(list(cands))
 
-        for cs in merged:
-            merged[cs].sort(key=lambda x: x.get("similarity_score", 0), reverse=True)
-
+        merged = {cs: [] for cs in systems}
+        for cs in systems:
+            seen: set[str] = set()
+            depth = 0
+            while any(depth < len(rows) for rows in sources[cs]):
+                for rows in sources[cs]:
+                    if depth >= len(rows):
+                        continue
+                    candidate = rows[depth]
+                    code = str(candidate.get("code") or "").strip()
+                    if code and code not in seen:
+                        seen.add(code)
+                        merged[cs].append(candidate)
+                depth += 1
         return merged
 
     def _drop_inactive_candidates(self, merged: dict, dos) -> dict:

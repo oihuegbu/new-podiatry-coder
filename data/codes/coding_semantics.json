@@ -1,0 +1,143 @@
+{
+  "version": 1,
+  "description": "Semantic roles resolved from authoritative CPT/HCPCS modifier names and CMS PFS attributes. Roles contain language and source attributes, never medical-code values.",
+  "sources": [
+    "data/codes/modifiers.json (AMA CPT Appendix A and CMS HCPCS Level II)",
+    "data/global_periods.json (CMS Physician Fee Schedule indicators)",
+    "data/codes/cpt_codes.json (licensed AMA descriptors)",
+    "data/codes/cpt_categories.json (edition-bound licensed AMA category membership)",
+    "data/codes/icd10cm_chapters.json (CDC/NCHS ICD-10-CM chapter structure)"
+  ],
+  "modifier_roles": {
+    "ncci_procedure_separation": {
+      "name_any": ["Distinct Procedural Service", "Separate Encounter", "Separate Practitioner", "Separate Structure", "Unusual Non-Overlapping Service"]
+    },
+    "ncci_legacy_separation": {
+      "name_any": ["Distinct Procedural Service"]
+    },
+    "ncci_specific_separation": {
+      "name_any": ["Separate Encounter", "Separate Practitioner", "Separate Structure", "Unusual Non-Overlapping Service"]
+    },
+    "ncci_em_separation": {
+      "name_any": ["Significant, Separately Identifiable Evaluation and Management Service", "Decision for Surgery"]
+    },
+    "same_day_em_separation": {
+      "name_any": ["Significant, Separately Identifiable Evaluation and Management Service"]
+    },
+    "decision_for_surgery": {
+      "name_any": ["Decision for Surgery"]
+    },
+    "postoperative_context": {
+      "name_any": ["During a Postoperative Period", "During the Postoperative Period", "Following Initial Procedure"]
+    },
+    "postoperative_em": {
+      "name_any": ["Unrelated Evaluation and Management Service"]
+    },
+    "postoperative_procedure": {
+      "name_any": ["Staged or Related Procedure", "Unplanned Return to the Operating/Procedure Room", "Unrelated Procedure or Service"]
+    },
+    "split_care": {
+      "name_any": ["Surgical Care Only", "Postoperative Management Only", "Preoperative Management Only"]
+    },
+    "repeat_service": {
+      "name_any": ["Repeat Procedure or Service", "Repeat Procedure by Another"]
+    },
+    "laboratory_repeat": {
+      "name_any": ["Repeat Clinical Diagnostic Laboratory Test"]
+    },
+    "facility_discontinued": {
+      "name_any": ["Out-Patient Hospital/Ambulatory Surgery Center"]
+    },
+    "reduced_or_discontinued": {
+      "name_any": ["Reduced Services", "Discontinued Procedure"]
+    },
+    "assistant_surgery": {
+      "name_any": ["Assistant Surgeon", "Assistant at surgery"]
+    },
+    "bilateral": {
+      "name_any": ["Bilateral Procedure"]
+    },
+    "multiple_procedure": {
+      "name_any": ["Multiple Procedures"]
+    },
+    "professional_component": {
+      "name_any": ["Professional Component"]
+    },
+    "technical_component": {
+      "name_any": ["Technical component"]
+    },
+    "co_surgeon": {
+      "name_any": ["Two Surgeons"]
+    },
+    "team_surgeon": {
+      "name_any": ["Surgical Team"]
+    },
+    "infant_procedure": {
+      "name_any": ["Procedure Performed on Infants less than 4 kg"]
+    },
+    "teaching_assistant": {
+      "name_any": ["Assistant Surgeon (when qualified resident surgeon not available)"]
+    },
+    "anesthesia_by_surgeon": {
+      "name_any": ["Anesthesia by Surgeon"]
+    },
+    "reduced_service": {
+      "name_any": ["Reduced Services"]
+    },
+    "professional_discontinued": {
+      "name_any": ["Discontinued Procedure"]
+    },
+    "laterality": {
+      "name_any": ["Right side", "Left side"]
+    },
+    "class_findings": {
+      "name_any": ["class a finding", "class b findings", "class b & 2 class c"]
+    },
+    "liability_notice": {
+      "name_any": ["Liability waiver", "liability notice", "Statutorily excluded", "Not reasonable and necessary"]
+    }
+  },
+  "code_classes": {
+    "evaluation_management": {
+      "descriptor_any": [
+        "evaluation and management",
+        "office or other outpatient visit",
+        "hospital inpatient or observation care",
+        "emergency department visit",
+        "nursing facility care",
+        "home or residence service",
+        "preventive medicine evaluation",
+        "consultation for a new or established patient"
+      ]
+    },
+    "anesthesia": {
+      "pfs_status_any": ["J"]
+    },
+    "surgical_procedure": {
+      "global_days_kind": "numeric"
+    },
+    "postoperative_followup": {
+      "descriptor_any": [
+        "postoperative follow-up visit, normally included in the surgical package"
+      ]
+    },
+    "external_cause": {
+      "icd_chapter_ids": [20]
+    },
+    "injury_poisoning": {
+      "icd_chapter_ids": [19]
+    },
+    "assessment_completion_excluded": {
+      "icd_chapter_ids": [18, 20, 21]
+    },
+    "performance_measure_tracking": {
+      "cpt_category": "performance_measure_tracking"
+    }
+  },
+  "global_period_classes": {
+    "minor_procedure": ["000", "010"],
+    "major_procedure": ["090"],
+    "diagnostic_or_nonprocedure": ["XXX"],
+    "postoperative_package": ["010", "090"]
+  }
+}

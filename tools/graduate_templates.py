@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
-"""Graduate proven self-authored templates into the app tree.
+"""Propose graduation of proven self-authored templates.
 
-Synthesized templates live sandboxed in data/rules/auto_templates/,
-re-validated on every load. This tool closes their lifecycle: a template
-that has PROVEN itself in production is promoted verbatim into
-app/validation/graduated/ — static, trusted application code, the same
-standing as the hand-written mechanics — and the sandbox copy retires.
-Rules referencing the template keep working unchanged: graduation moves
-the code's trust category, never its behavior, and the template
-vocabulary (tools/auto_actuate.all_templates) keeps the name throughout,
-so no escalation record churns.
+Synthesized templates live sandboxed in data/rules/auto_templates/ and are
+re-validated on every load. This tool evaluates maturity and writes an inert
+graduation proposal. It never writes app/validation/graduated/, retires the
+sandbox copy, or changes executable policy at runtime.
 
 PROVEN means every deterministic criterion holds (env-tunable):
 
@@ -26,9 +21,9 @@ PROVEN means every deterministic criterion holds (env-tunable):
   static      the source still passes the full safety gate (sandbox
               constraints + no hardcoded medical codes)
 
-Promotion is transactional: write to the graduated package, import-check
-the new module, and only then retire the sandbox file; any failure rolls
-the promotion back and leaves the sandbox copy authoritative.
+Eligibility produces an inert, fingerprinted proposal.  Production code
+is never written by this runtime tool; a separately reviewed, signed build
+must perform deployment.
 
 Runs inside the app container (wired into run.py's post-batch sequence;
 also standalone):
@@ -39,9 +34,9 @@ also standalone):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +48,7 @@ from loguru import logger  # noqa: E402
 
 RULES_PATH = ROOT / "data" / "rules" / "validator_rules.json"
 GRADUATED_DIR = ROOT / "app" / "validation" / "graduated"
+PROPOSALS_DIR = ROOT / "data" / "rules" / "proposals"
 DEFAULT_RESULTS = ROOT / "output" / "results"
 
 MIN_DAYS = float(os.getenv("GRADUATE_MIN_DAYS", "14"))
@@ -156,49 +152,34 @@ def eligibility(template: str, path: Path,
 
 
 def promote(template: str, path: Path, report: dict) -> str:
-    """Transactional promotion; returns '' on success, else the reason
-    the promotion was rolled back."""
-    import importlib.util
-
+    """Create an inert graduation proposal; never write executable app code."""
     dest = GRADUATED_DIR / f"{template}.py"
     if dest.exists():
         return f"{dest.name} already exists in the graduated package"
-    src = path.read_text(encoding="utf-8")
-    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    criteria = json.dumps(report["checks"], default=str)[:600]
-    header = (
-        f"# GRADUATED self-authored template — promoted verbatim from\n"
-        f"# data/rules/auto_templates/{path.name} by "
-        f"tools/graduate_templates.py.\n"
-        f"# graduated_at: {stamp}\n"
-        f"# criteria: {criteria}\n\n")
-    # The sandbox loader injects `re` into every template's namespace, so
-    # sandboxed code may use re.* without importing it. Plain Python has
-    # no such courtesy — materialize the import the sandbox implied.
-    if re.search(r"\bre\s*\.", src) and not re.search(
-            r"^\s*import\s+re\b", src, re.MULTILINE):
-        header += "import re\n\n"
-    dest.write_text(header + src, encoding="utf-8")
     try:
-        # Path-based import: verifies the promoted file loads as ordinary
-        # (unsandboxed) Python and still honors the template contract.
-        spec = importlib.util.spec_from_file_location(
-            f"_graduation_check_{template}", dest)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        assert getattr(mod, "TEMPLATE_NAME", None) == template, \
-            "TEMPLATE_NAME mismatch"
-        assert callable(getattr(mod, "execute", None)), "execute missing"
-    except Exception as exc:
-        dest.unlink(missing_ok=True)
-        return f"import check failed after promotion: {exc!r}"
-    # Import verified: retire the sandbox copy and refresh the in-process
-    # registry so the vocabulary never shrinks between the two steps.
-    path.unlink()
-    from app.validation import graduated
-    graduated.refresh()
-    from app.validation.auto_templates import _cache
-    _cache.pop(str(path), None)
+        source_path = str(path.relative_to(ROOT))
+    except ValueError:
+        source_path = str(path)
+    body = {
+        "proposal_version": 1, "status": "draft",
+        "proposal_type": "graduate_template", "template": template,
+        "source_path": source_path,
+        "source_sha256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+        "template_source": path.read_text(encoding="utf-8"),
+        "eligibility": report,
+        "required_lifecycle": ["independent_human_code_review", "signed_build",
+                               "sandbox_replay", "shadow_deployment",
+                               "rollback_rehearsal"],
+    }
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                         default=str).encode()
+    body["proposal_fingerprint"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    PROPOSALS_DIR.mkdir(parents=True, exist_ok=True)
+    proposal = PROPOSALS_DIR / (
+        f"graduate-{template}-{body['proposal_fingerprint'][7:19]}.json")
+    if not proposal.exists():
+        proposal.write_text(json.dumps(body, indent=2, sort_keys=True,
+                                       default=str))
     return ""
 
 
@@ -233,8 +214,8 @@ def graduate(results_dir: Path = DEFAULT_RESULTS,
         else:
             summary["promoted"].append({"template": name,
                                         "report": report})
-            logger.info(f"GRADUATED: {name} -> app/validation/graduated/ "
-                        f"(trusted app code; sandbox copy retired)")
+            logger.info(f"GRADUATION PROPOSED: {name} (sandbox and live app "
+                        f"code unchanged)")
     return summary
 
 

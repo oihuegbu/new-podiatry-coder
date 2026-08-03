@@ -33,20 +33,22 @@ class SpecificityAgent(ComplianceAgent):
         from datetime import date as _date
         if dos is None:
             findings.append(self.finding(
-                status=Status.WARN, denial_risk=DenialRisk.MEDIUM,
-                reason="Date of service is missing or unparseable — all effective-date "
-                       "checks below ran against TODAY's code sets, not the visit date.",
+                status=Status.UNKNOWN, denial_risk=DenialRisk.HIGH,
+                reason="Date of service is missing or unparseable, so effective-date "
+                       "coding and policy checks cannot be completed reliably.",
                 recommendation="Verify the note's date of service; re-scrub once it parses.",
                 source_rule="claim date-of-service anchor",
+                clause="date_of_service",
             ))
         elif dos > _date.today():
             findings.append(self.finding(
-                status=Status.WARN, denial_risk=DenialRisk.MEDIUM,
+                status=Status.FAIL, denial_risk=DenialRisk.HIGH,
                 reason=f"Date of service {dos.isoformat()} is in the future — almost "
                        f"certainly an extraction/transcription error (claims cannot "
                        f"precede the care they bill).",
                 recommendation="Verify the date of service against the note header.",
                 source_rule="claim date-of-service anchor",
+                clause="date_of_service",
             ))
 
         # --- existence + active-for-DOS for every code on the claim ---
@@ -72,7 +74,12 @@ class SpecificityAgent(ComplianceAgent):
         return findings
 
     def _check_existence(self, findings, system, code, label, dos):
-        if self.store.code_exists(system, code, dos):
+        # With no DOS, existence can still be established but activation for
+        # the encounter cannot. Do not let the store's legacy today-default
+        # turn an UNKNOWN temporal check into a false present-day verdict.
+        if dos is None and self.store.code_active_any_date(system, code):
+            return
+        if dos is not None and self.store.code_exists(system, code, dos):
             return
         if self.store.code_active_any_date(system, code):
             findings.append(self.finding(

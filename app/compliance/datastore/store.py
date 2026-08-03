@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import calendar
 from datetime import date
 from pathlib import Path
 
@@ -31,6 +32,10 @@ ICD10_INDEX_TERMS_FILE = CODES_DIR / "icd10cm_index_terms.json"
 MCE_EDITS_FILE = CODES_DIR / "mce_edits.json"
 ICD10_CHRONIC_FILE = CODES_DIR / "icd10cm_chronic.json"
 EM_MDM_GRID_FILE = CODES_DIR / "em_mdm_grid.json"
+CODING_SEMANTICS_FILE = CODES_DIR / "coding_semantics.json"
+CPT_CATEGORIES_FILE = CODES_DIR / "cpt_categories.json"
+ICD10_CHAPTERS_FILE = CODES_DIR / "icd10cm_chapters.json"
+ICD10_EXTENSIONS_FILE = CODES_DIR / "icd10cm_extensions.json"
 
 # Official CPT phrasing that designates an add-on code (Appendix D)
 _ADDON_PHRASES = ("list separately in addition", "each additional", "add-on code")
@@ -84,13 +89,75 @@ def _clean_date(val) -> str:
         return s
     if re.match(r"^\d{8}$", s):
         return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    match = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", s)
+    if match:
+        month, day, year = match.groups()
+        return f"{year}-{int(month):02d}-{int(day):02d}"
     return "1900-01-01"
+
+
+def _is_valid_date(val) -> bool:
+    """Whether *val* carries a syntactically real calendar date.
+
+    `_clean_date` intentionally retains the datastore's historical wide-open
+    fallback for non-temporal code tables.  Temporal policy authority must not
+    confuse that fallback with a sourced effective date, and must also reject
+    impossible dates rather than trusting a regex-shaped value.
+    """
+    if not val:
+        return False
+    try:
+        raw = str(val).strip()
+        if re.match(r"^\d{8}$", raw):
+            raw = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+        else:
+            match = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", raw)
+            if match:
+                month, day, year = match.groups()
+                raw = f"{year}-{int(month):02d}-{int(day):02d}"
+        date.fromisoformat(raw)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def cpt_edition_window(data: dict, entry: dict) -> tuple[str, str, bool]:
+    """Conservative activation window proven by a licensed CPT edition.
+
+    A snapshot proves membership only within its edition year.  The source's
+    per-row effective date is a revision marker for older rows, but a date
+    later than the edition's first day is still a safe lower bound for
+    mid-year/future additions.  Claims outside the edition fail closed until
+    the corresponding licensed historical/future edition is loaded.
+    """
+    metadata = data.get("metadata") or {} if isinstance(data, dict) else {}
+    year_text = str(metadata.get("year") or "").strip()
+    if not re.fullmatch(r"\d{4}", year_text):
+        return "1900-01-01", _OPEN, False
+    start = f"{year_text}-01-01"
+    end = f"{year_text}-12-31"
+    raw_effective = entry.get("effective_date")
+    if _is_valid_date(raw_effective):
+        candidate = _clean_date(raw_effective)
+        if candidate.startswith(year_text + "-") and candidate > start:
+            start = candidate
+    return start, end, True
 
 
 class ComplianceDataStore:
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
         self._conn: sqlite3.Connection | None = None
+        self._ncci_release_window_loaded = False
+        self._ncci_release_window: tuple[date, date] | None = None
+        self._mue_release_window_loaded = False
+        self._mue_release_window: tuple[date, date] | None = None
+        self._mue_release_windows: tuple[tuple[date, date], ...] = ()
+        self._coding_semantics_cache: dict | None = None
+        self._cpt_categories_cache: dict[str, frozenset[str]] | None = None
+        self._cpt_categories_edition_year: int | None = None
+        self._icd_chapters_cache: tuple[dict, ...] | None = None
+        self._icd_extensions_cache: dict[str, str] | None = None
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -194,7 +261,9 @@ class ComplianceDataStore:
             {"id": "ncci_aoc", "paths": [NCCI_AOC_FILE],
              "clear": [("ncci_aoc", None)], "ingest": [self._ingest_ncci_aoc]},
             {"id": "prior_auth", "paths": sorted(CODES_DIR.glob("prior_auth_*.json")),
-             "clear": [("prior_auth_required", None)], "ingest": [self._ingest_prior_auth]},
+             "clear": [("prior_auth_required", None),
+                       ("prior_auth_policy", None)],
+             "ingest": [self._ingest_prior_auth]},
             {"id": "mce_edits", "paths": [MCE_EDITS_FILE],
              "clear": [("mce_edit", None), ("mce_age_range", None)],
              "ingest": [self._ingest_mce_edits]},
@@ -495,6 +564,19 @@ class ComplianceDataStore:
             self._ingest_hcpcs()
             self.conn.commit()
 
+        # CPT identity is edition-scoped authority.  Stores built before the
+        # edition-window gate retain wide-open CPT rows even though HCPCS has
+        # real dates (so the combined migration above cannot detect them).
+        wide_cpt = self.conn.execute(
+            "SELECT COUNT(*) FROM code_set WHERE code_system='CPT' AND "
+            "(effective_from='1900-01-01' OR effective_to='9999-12-31')"
+        ).fetchone()[0]
+        if wide_cpt:
+            self.conn.execute("DELETE FROM code_set WHERE code_system='CPT'")
+            self.conn.execute("DELETE FROM addon")
+            self._ingest_cpt()
+            self.conn.commit()
+
         # coverage_cpt/coverage_icd: _ingest_lcd() used to expect a single
         # top-level lcd_id/qualifying_dx shape that podiatry_lcd.json never
         # actually had (it's a list of hundreds of LCDs/Articles) — so these
@@ -513,6 +595,13 @@ class ComplianceDataStore:
         self._ensure_coverage_policy_table()
         n_titles = self.conn.execute("SELECT COUNT(*) FROM coverage_policy").fetchone()[0]
         if n_titles == 0:
+            self._ingest_lcd()
+            n_titles = self.conn.execute(
+                "SELECT COUNT(*) FROM coverage_policy").fetchone()[0]
+        n_temporal = self.conn.execute(
+            "SELECT COUNT(*) FROM coverage_policy WHERE temporal_authority=1"
+        ).fetchone()[0]
+        if n_titles > 0 and n_temporal == 0:
             self._ingest_lcd()
 
         # coverage_policy.contractor: added when MedicalNecessityAgent gained
@@ -614,6 +703,15 @@ class ComplianceDataStore:
         if n_index_terms == 0:
             self._ingest_icd10_index_terms()
 
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS prior_auth_policy ("
+            "payer TEXT NOT NULL, plan TEXT NOT NULL DEFAULT '', "
+            "complete INTEGER NOT NULL DEFAULT 0, "
+            "effective_from TEXT NOT NULL DEFAULT '1900-01-01', "
+            "effective_to TEXT NOT NULL DEFAULT '9999-12-31', "
+            "source TEXT, status TEXT, PRIMARY KEY (payer, plan))"
+        )
+
         # prior_auth_required: was (payer, code, note) — no way to represent
         # category-based payer policies (e.g. Tricare, which publishes broad
         # categories like "Durable Medical Equipment" rather than enumerated
@@ -635,6 +733,15 @@ class ComplianceDataStore:
                 CREATE INDEX IF NOT EXISTS ix_pa_prefix ON prior_auth_required(payer, hcpcs_prefix);
                 """
             )
+            self._ingest_prior_auth()
+
+        # Corpus metadata is separate from individual PA rules.  A payer file
+        # with one or a handful of rows is not proof that absence means
+        # "authorization not required"; only an explicitly complete,
+        # effective-dated corpus may make that assertion.
+        n_pa_policy = self.conn.execute(
+            "SELECT COUNT(*) FROM prior_auth_policy").fetchone()[0]
+        if n_pa_policy == 0:
             self._ingest_prior_auth()
 
     def _is_populated(self) -> bool:
@@ -670,7 +777,11 @@ class ComplianceDataStore:
             DROP TABLE IF EXISTS modifier;
             DROP TABLE IF EXISTS coverage_cpt;
             DROP TABLE IF EXISTS coverage_icd;
+            DROP TABLE IF EXISTS coverage_policy;
+            DROP TABLE IF EXISTS coverage_group;
+            DROP TABLE IF EXISTS coverage_icd_noncovered;
             DROP TABLE IF EXISTS prior_auth_required;
+            DROP TABLE IF EXISTS prior_auth_policy;
             DROP TABLE IF EXISTS icd10_code_first;
             DROP TABLE IF EXISTS icd10_use_additional_code;
             DROP TABLE IF EXISTS icd10_code_also;
@@ -840,6 +951,16 @@ class ComplianceDataStore:
             );
             CREATE INDEX ix_pa_code ON prior_auth_required(payer, code);
             CREATE INDEX ix_pa_prefix ON prior_auth_required(payer, hcpcs_prefix);
+            CREATE TABLE prior_auth_policy (
+                payer          TEXT NOT NULL,
+                plan           TEXT NOT NULL DEFAULT '',
+                complete       INTEGER NOT NULL DEFAULT 0,
+                effective_from TEXT NOT NULL DEFAULT '1900-01-01',
+                effective_to   TEXT NOT NULL DEFAULT '9999-12-31',
+                source         TEXT,
+                status         TEXT,
+                PRIMARY KEY (payer, plan)
+            );
 
             -- ICD-10-CM instructional notes: "code first" (manifestation
             -- must be sequenced after its etiology) and "use additional
@@ -1019,20 +1140,8 @@ class ComplianceDataStore:
             if not code:
                 continue
             desc = e.get("long_description") or e.get("short_description") or e.get("description", "")
-            # CPT's effective_date is NOT a code-introduction date — verified
-            # empirically: 99202/99213/99214 (decades-old, unquestionably
-            # not new codes) all carry effective_date 2024-01-01, and the
-            # full distribution of populated values clusters on Jan 1/Jul 1
-            # across 2020-2026 — a periodic descriptor-revision cycle
-            # marker, not a lifecycle date. Using it as an activation gate
-            # would flag huge numbers of long-standing, merely-reworded
-            # codes (e.g. any E/M code touched by the 2021 guideline
-            # overhaul) as "not active" for any older, perfectly valid date
-            # of service. No reliable introduction/retirement signal exists
-            # in this source for CPT, so — unlike ICD-10 and HCPCS, both
-            # verified against real add/discontinue signals — CPT stays
-            # always-open rather than approximating with the wrong field.
-            rows.append(("CPT", code, desc, "1900-01-01", _OPEN, "active"))
+            effective_from, effective_to, _authority = cpt_edition_window(data, e)
+            rows.append(("CPT", code, desc, effective_from, effective_to, "active"))
             # Add-on status is derived from the official CPT descriptor phrasing
             # (Appendix D) — fully data-driven, no hardcoded code list.
             if any(p in (desc or "").lower() for p in _ADDON_PHRASES):
@@ -1088,6 +1197,11 @@ class ComplianceDataStore:
                     f"skipped, {len(cov_rows)} coverage codes)")
 
     def _ingest_ncci(self) -> None:
+        # A refresh can move the authoritative release quarter. Invalidate
+        # the per-store lookup cache before replacing its rows so already-
+        # constructed store instances cannot retain the prior window.
+        self._ncci_release_window_loaded = False
+        self._ncci_release_window = None
         with open(NCCI_FILE) as f:
             data = json.load(f)
         rows, skipped = [], 0
@@ -1108,6 +1222,9 @@ class ComplianceDataStore:
         logger.info(f"  ncci_ptp: {len(rows)} pairs ({skipped} junk rows filtered)")
 
     def _ingest_mue(self) -> None:
+        self._mue_release_window_loaded = False
+        self._mue_release_window = None
+        self._mue_release_windows = ()
         with open(MUE_FILE) as f:
             data = json.load(f)
         rows = []
@@ -1214,6 +1331,9 @@ class ComplianceDataStore:
                 "contractor": entry.get("contractor", ""),
                 "cpt_codes": entry.get("governed_cpts", []),
                 "covered_icd": qualifying_dx,
+                "effective_from": _clean_date(entry.get("effective_date")),
+                "effective_to": _OPEN,
+                "temporal_authority": _is_valid_date(entry.get("effective_date")),
             })
         for entry in data.get("article", []):
             if entry.get("status") != "A":
@@ -1224,6 +1344,9 @@ class ComplianceDataStore:
                 "contractor": entry.get("contractor", ""),
                 "cpt_codes": entry.get("governed_cpts", []),
                 "covered_icd": entry.get("qualifying_dx", []),
+                "effective_from": _clean_date(entry.get("effective_date")),
+                "effective_to": _OPEN,
+                "temporal_authority": _is_valid_date(entry.get("effective_date")),
                 # seed entries may carry group grammar under this key too
                 "covered_icd_groups": entry.get("qualifying_dx_groups", []),
             })
@@ -1243,6 +1366,22 @@ class ComplianceDataStore:
                 cached = [a for a in cache.get("articles", [])
                           if isinstance(a, dict) and a.get("policy_id")]
                 if cached:
+                    seed_by_id = {a.get("policy_id"): a for a in articles}
+                    cache_date = _clean_date(
+                        str(cache.get("fetched_at") or "")[:10])
+                    cached = [dict(
+                        a,
+                        effective_from=(
+                            a.get("effective_from")
+                            or (seed_by_id.get(a.get("policy_id")) or {}).get(
+                                "effective_from")
+                            or cache_date),
+                        effective_to=(a.get("effective_to") or _OPEN),
+                        temporal_authority=bool(
+                            a.get("temporal_authority")
+                            or (seed_by_id.get(a.get("policy_id")) or {}).get(
+                                "temporal_authority")),
+                    ) for a in cached]
                     articles.extend(cached)
                     logger.info(
                         f"  lcd_qualifying: MCD-export cache overlaid "
@@ -1276,6 +1415,7 @@ class ComplianceDataStore:
         prior_auth_required() for how each is matched against a claim line.
         """
         rows = []
+        policies = []
         files = sorted(CODES_DIR.glob("prior_auth_*.json"))
         for path in files:
             try:
@@ -1286,6 +1426,22 @@ class ComplianceDataStore:
                 continue
             payer_id = data.get("payer_id", "")
             source = data.get("source", "")
+            if not payer_id:
+                logger.warning(f"  prior_auth_required: {path.name} has no payer_id")
+                continue
+            plan = str(data.get("plan") or "").strip()
+            effective_from = _clean_date(
+                data.get("effective_from") or data.get("document_date"))
+            effective_to = _clean_date(data.get("effective_to")) \
+                if data.get("effective_to") else _OPEN
+            policies.append((
+                payer_id, plan, int(data.get("complete") is True
+                                    and _is_valid_date(
+                                        data.get("effective_from")
+                                        or data.get("document_date"))),
+                effective_from, effective_to, source,
+                str(data.get("status") or data.get("note") or "")[:1000],
+            ))
             for c in data.get("codes", []):
                 code = _norm(c.get("code", ""))
                 if not code:
@@ -1300,8 +1456,15 @@ class ComplianceDataStore:
             self.conn.executemany(
                 "INSERT INTO prior_auth_required VALUES (?,?,?,?,?,?)", rows
             )
-            self.conn.commit()
-        logger.info(f"  prior_auth_required: {len(rows)} rule(s) from {len(files)} payer file(s)")
+        if policies:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO prior_auth_policy "
+                "(payer,plan,complete,effective_from,effective_to,source,status) "
+                "VALUES (?,?,?,?,?,?,?)", policies)
+        self.conn.commit()
+        logger.info(f"  prior_auth_required: {len(rows)} rule(s), "
+                    f"{len(policies)} corpus declaration(s) from "
+                    f"{len(files)} payer file(s)")
 
     # MCD's "Not Applicable" placeholder row (description literally "Not
     # Applicable") — present when an article's diagnosis section states that
@@ -1361,10 +1524,20 @@ class ComplianceDataStore:
             if pid in superseded_lcds:
                 art = dict(art, covered_icd=[], covered_icd_groups=[],
                            qualifying_dx_groups=[])
+            effective_from = art.get("effective_from")
+            effective_to = art.get("effective_to") or _OPEN
+            temporal_authority = (
+                art.get("temporal_authority") is True
+                and _is_valid_date(effective_from)
+                and _is_valid_date(effective_to)
+            )
             title_rows.append((pid, art.get("title", "") or "",
                                " ".join(str(art.get("contractor", "") or "").split()),
                                ",".join(s.strip().upper()
-                                        for s in (art.get("states") or []) if s)))
+                                        for s in (art.get("states") or []) if s),
+                               _clean_date(effective_from),
+                               _clean_date(effective_to),
+                               int(temporal_authority)))
             for c in art.get("cpt_codes", []):
                 cpt_rows.append((pid, _norm(c)))
 
@@ -1426,8 +1599,9 @@ class ComplianceDataStore:
         self.conn.executemany("INSERT INTO coverage_group VALUES (?,?,?,?,?)", group_rows)
         self.conn.executemany("INSERT INTO coverage_icd_noncovered VALUES (?,?)", noncov_rows)
         self.conn.executemany(
-            "INSERT INTO coverage_policy (policy_id, title, contractor, states) "
-            "VALUES (?,?,?,?)",
+            "INSERT INTO coverage_policy (policy_id, title, contractor, states, "
+            "effective_from, effective_to, temporal_authority) "
+            "VALUES (?,?,?,?,?,?,?)",
             title_rows,
         )
         self.conn.executemany("INSERT INTO lcd_qualifying VALUES (?,?)", sorted(set(lcd_rows)))
@@ -1445,7 +1619,10 @@ class ComplianceDataStore:
             # issuing MAC — LCDs/Articles are LOCAL policies that only govern
             # claims in the states their contractor adjudicates (resolved via
             # app.compliance.geo + mac_jurisdictions.json)
-            "contractor TEXT NOT NULL DEFAULT '')"
+            "contractor TEXT NOT NULL DEFAULT '', "
+            "effective_from TEXT NOT NULL DEFAULT '1900-01-01', "
+            "effective_to TEXT NOT NULL DEFAULT '9999-12-31', "
+            "temporal_authority INTEGER NOT NULL DEFAULT 0)"
         )
         cols = {row[1] for row in self.conn.execute("PRAGMA table_info(coverage_policy)")}
         if "contractor" not in cols:
@@ -1461,6 +1638,18 @@ class ComplianceDataStore:
             self.conn.execute(
                 "ALTER TABLE coverage_policy ADD COLUMN states TEXT NOT NULL DEFAULT ''"
             )
+        if "effective_from" not in cols:
+            self.conn.execute(
+                "ALTER TABLE coverage_policy ADD COLUMN effective_from TEXT "
+                "NOT NULL DEFAULT '1900-01-01'")
+        if "effective_to" not in cols:
+            self.conn.execute(
+                "ALTER TABLE coverage_policy ADD COLUMN effective_to TEXT "
+                "NOT NULL DEFAULT '9999-12-31'")
+        if "temporal_authority" not in cols:
+            self.conn.execute(
+                "ALTER TABLE coverage_policy ADD COLUMN temporal_authority INTEGER "
+                "NOT NULL DEFAULT 0")
         # Group-N "ICD-10 codes that DO NOT support medical necessity" — the
         # mirror image of coverage_icd. Populated by the MCD bulk-export
         # refresh (the Coverage API seed file exposes only covered lists).
@@ -1844,6 +2033,15 @@ class ComplianceDataStore:
         live on three claims)."""
         return self._all_note_refs("icd10_use_additional_code", "ref", code)
 
+    def is_use_additional_target(self, code: str) -> bool:
+        """Whether any Tabular use-additional note names this code/family."""
+        norm = _norm(code)
+        rows = self.conn.execute(
+            "SELECT DISTINCT ref FROM icd10_use_additional_code"
+        ).fetchall()
+        return any(norm.startswith(str(row[0])) or str(row[0]).startswith(norm)
+                   for row in rows if row[0])
+
     def _all_note_refs(self, table: str, col: str, code: str) -> list[str]:
         norm = _norm(code)
         out: list[str] = []
@@ -2124,7 +2322,7 @@ class ComplianceDataStore:
         return self.conn.execute("SELECT COUNT(*) FROM modifier").fetchone()[0]
 
     def modifier_laterality(self, mod: str) -> str | None:
-        """'RT' / 'LT' if this modifier denotes a body side, else None —
+        """Semantic body side (``right``/``left``), else None —
         derived from the modifier's own name in the AMA/CMS reference data
         ('Left foot, great toe' → LT; 'Right side …' → RT), never from a
         hardcoded toe-modifier→side mapping. A prior hand-written mapping in
@@ -2139,10 +2337,25 @@ class ComplianceDataStore:
         name = (row["category"] or "").lower()
         has_left, has_right = "left" in name, "right" in name
         if has_left and not has_right:
-            return "LT"
+            return "left"
         if has_right and not has_left:
-            return "RT"
+            return "right"
         return None
+
+    def modifier_for_laterality(self, side: str) -> str | None:
+        """Unique general side modifier resolved from authoritative names.
+
+        Digit/site-specific modifiers also carry a side.  For automatically
+        appending a general side, restrict to the semantic ``laterality``
+        role and require uniqueness rather than guessing among anatomic
+        alternatives.
+        """
+        target = str(side or "").strip().lower()
+        matches = [
+            code for code in self.modifier_codes_for_role("laterality")
+            if self.modifier_laterality(code) == target
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     def modifier_name(self, mod: str) -> str | None:
         """The modifier's own AMA/CMS name ('Right foot, great toe' for T5),
@@ -2154,6 +2367,203 @@ class ComplianceDataStore:
             "SELECT category FROM modifier WHERE code=? LIMIT 1", (str(mod).strip().upper(),)
         ).fetchone()
         return row["category"] if row else None
+
+    def _coding_semantics(self) -> dict:
+        """Versioned, code-free semantic roles for generic coding mechanics.
+
+        Python owns only the matching mechanism.  The role vocabulary and
+        the authoritative descriptor/PFS attributes that define each role
+        live in ``data/codes/coding_semantics.json`` so a source update can
+        change membership without a code deployment.
+        """
+        cached = getattr(self, "_coding_semantics_cache", None)
+        if cached is not None:
+            return cached
+        try:
+            data = json.loads(CODING_SEMANTICS_FILE.read_text())
+        except (OSError, ValueError) as exc:
+            logger.error("coding semantics unavailable: %s", exc)
+            data = {}
+        self._coding_semantics_cache = data
+        return data
+
+    def modifier_codes_for_role(self, role: str) -> set[str]:
+        """Resolve a semantic modifier role from authoritative modifier names.
+
+        An absent/ambiguous role returns an empty set and therefore fails
+        closed in callers; it never falls back to a Python allow-list.
+        """
+        spec = (self._coding_semantics().get("modifier_roles") or {}).get(role) or {}
+        needles = [str(v).casefold() for v in spec.get("name_any") or [] if str(v).strip()]
+        if not needles:
+            return set()
+        rows = self.conn.execute("SELECT code, category FROM modifier").fetchall()
+        return {
+            row["code"] for row in rows
+            if any(needle in str(row["category"] or "").casefold() for needle in needles)
+        }
+
+    def code_matches_semantic_class(self, code: str, role: str, dos=None) -> bool:
+        """Classify a code using authoritative descriptor/PFS/chapter fields."""
+        spec = (self._coding_semantics().get("code_classes") or {}).get(role) or {}
+        if not spec:
+            return False
+        norm = _norm(code)
+        chapter_ids = {int(v) for v in spec.get("icd_chapter_ids") or []}
+        if chapter_ids and self.icd_chapter_id(norm) in chapter_ids:
+            return True
+        cpt_category = str(spec.get("cpt_category") or "").strip()
+        if cpt_category and norm in self.cpt_category_codes(cpt_category, dos):
+            return True
+        row = self.conn.execute(
+            "SELECT description FROM code_set WHERE code=? "
+            "AND code_system IN ('CPT','HCPCS') LIMIT 1", (norm,),
+        ).fetchone()
+        descriptor = str(row["description"] or "").casefold() if row else ""
+        descriptor_terms = [
+            str(v).casefold() for v in spec.get("descriptor_any") or [] if str(v).strip()
+        ]
+        if descriptor_terms and any(term in descriptor for term in descriptor_terms):
+            return True
+        statuses = {str(v).strip().upper() for v in spec.get("pfs_status_any") or []}
+        if statuses and str(self.billing_status(norm, dos) or "").upper() in statuses:
+            return True
+        if spec.get("global_days_kind") == "numeric":
+            value = str(self.global_period(norm, dos) or "").strip()
+            return bool(value and value.isdigit())
+        return False
+
+    def icd_chapter_id(self, code: str) -> int | None:
+        """Resolve ICD-10-CM chapter membership from the CDC/NCHS ranges.
+
+        The Python mechanic is generic; chapter boundaries remain versioned,
+        checksummed source data so annual classification changes require no
+        code deployment and cannot be hidden in a prefix tuple.
+        """
+        cached = self._icd_chapters_cache
+        if cached is None:
+            try:
+                raw = json.loads(ICD10_CHAPTERS_FILE.read_text())
+                cached = tuple(raw.get("chapters") or [])
+            except (OSError, ValueError) as exc:
+                logger.error("ICD-10-CM chapter authority unavailable: %s", exc)
+                cached = ()
+            self._icd_chapters_cache = cached
+        category = _norm(code)[:3]
+        if len(category) != 3:
+            return None
+        matches = [int(row["id"]) for row in cached
+                   if str(row.get("start") or "") <= category <=
+                   str(row.get("end") or "")]
+        return matches[0] if len(matches) == 1 else None
+
+    def is_external_cause(self, code: str) -> bool:
+        return self.code_matches_semantic_class(code, "external_cause")
+
+    def is_injury_or_poisoning(self, code: str) -> bool:
+        return self.code_matches_semantic_class(code, "injury_poisoning")
+
+    def exclude_from_assessment_completion(self, code: str) -> bool:
+        return self.code_matches_semantic_class(
+            code, "assessment_completion_excluded")
+
+    def icd_extension_for_role(self, role: str) -> str | None:
+        cached = self._icd_extensions_cache
+        if cached is None:
+            try:
+                raw = json.loads(ICD10_EXTENSIONS_FILE.read_text())
+                cached = {
+                    str(name): str(value).strip().upper()
+                    for name, value in
+                    (raw.get("seventh_character_roles") or {}).items()
+                    if len(str(value).strip()) == 1
+                }
+            except (OSError, ValueError) as exc:
+                logger.error("ICD-10-CM extension authority unavailable: %s", exc)
+                cached = {}
+            self._icd_extensions_cache = cached
+        return cached.get(str(role))
+
+    def icd_with_extension(self, code: str, role: str, dos=None) -> str | None:
+        """Return an active code after substituting a sourced extension."""
+        norm = _norm(code)
+        extension = self.icd_extension_for_role(role)
+        if len(norm) != 7 or not extension:
+            return None
+        candidate = norm[:-1] + extension
+        if not self.code_exists("ICD10", candidate, dos):
+            return None
+        return (candidate[:3] + "." + candidate[3:]
+                if "." in str(code) else candidate)
+
+    def cpt_category_codes(self, category: str, dos=None) -> frozenset[str]:
+        """Edition-bound CPT category membership from licensed source data."""
+        cached = self._cpt_categories_cache
+        if cached is None:
+            try:
+                raw = json.loads(CPT_CATEGORIES_FILE.read_text())
+                self._cpt_categories_edition_year = int(raw.get("version"))
+                cached = {
+                    str(name): frozenset(_norm(code) for code in codes or [])
+                    for name, codes in (raw.get("categories") or {}).items()
+                }
+            except (OSError, ValueError) as exc:
+                logger.error("CPT category authority unavailable: %s", exc)
+                cached = {}
+            self._cpt_categories_cache = cached
+        try:
+            service_year = date.fromisoformat(self._dos(dos)).year
+        except (TypeError, ValueError):
+            return frozenset()
+        if service_year != self._cpt_categories_edition_year:
+            return frozenset()
+        return cached.get(str(category), frozenset())
+
+    def is_performance_measure_tracking(self, code: str, dos=None) -> bool:
+        return self.code_matches_semantic_class(
+            code, "performance_measure_tracking", dos)
+
+    def is_em_code(self, code: str, dos=None) -> bool:
+        return self.code_matches_semantic_class(code, "evaluation_management", dos)
+
+    def is_surgical_procedure(self, code: str, dos=None) -> bool:
+        return self.code_matches_semantic_class(code, "surgical_procedure", dos)
+
+    def is_anesthesia_service(self, code: str, dos=None) -> bool:
+        return self.code_matches_semantic_class(code, "anesthesia", dos)
+
+    def postoperative_followup_code(self, dos=None) -> str | None:
+        """Return the unique authoritative no-charge follow-up service code."""
+        spec = ((self._coding_semantics().get("code_classes") or {})
+                .get("postoperative_followup") or {})
+        terms = [str(value).casefold() for value in spec.get("descriptor_any") or []
+                 if str(value).strip()]
+        if not terms:
+            return None
+        service_date = self._dos(dos)
+        matches = [
+            row["code"] for row in self.conn.execute(
+                "SELECT DISTINCT code, description FROM code_set "
+                "WHERE code_system='CPT' AND effective_from<=? "
+                "AND effective_to>=?", (service_date, service_date))
+            if any(term in str(row["description"] or "").casefold()
+                   for term in terms)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def global_period_class(self, code: str, dos=None) -> str | None:
+        value = str(self.global_period(code, dos) or "").strip().upper()
+        for role, values in (
+                self._coding_semantics().get("global_period_classes") or {}).items():
+            if value in {str(item).strip().upper() for item in values or []}:
+                return role
+        return None
+
+    def global_period_has_class(self, code: str, role: str, dos=None) -> bool:
+        value = str(self.global_period(code, dos) or "").strip().upper()
+        values = ((self._coding_semantics().get("global_period_classes") or {})
+                  .get(role) or [])
+        return value in {str(item).strip().upper() for item in values}
 
     def anatomic_modifiers(self) -> set[str]:
         """Modifiers whose OWN AMA/CMS name designates an anatomic site —
@@ -2231,12 +2641,27 @@ class ComplianceDataStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def coverage_policies_for_cpt(self, cpt_code: str) -> list[str]:
+    def coverage_policies_for_cpt(self, cpt_code: str, dos=None) -> list[str]:
         """Policy IDs whose medical-necessity rules govern this CPT."""
-        rows = self.conn.execute(
-            "SELECT DISTINCT policy_id FROM coverage_cpt WHERE cpt_code=?", (_norm(cpt_code),)
-        ).fetchall()
+        if dos is None:
+            rows = self.conn.execute(
+                "SELECT DISTINCT policy_id FROM coverage_cpt WHERE cpt_code=?",
+                (_norm(cpt_code),)).fetchall()
+        else:
+            d = self._dos(dos)
+            rows = self.conn.execute(
+                "SELECT DISTINCT c.policy_id FROM coverage_cpt c "
+                "JOIN coverage_policy p ON p.policy_id=c.policy_id "
+                "WHERE c.cpt_code=? AND p.temporal_authority=1 "
+                "AND p.effective_from<=? AND p.effective_to>=?",
+                (_norm(cpt_code), d, d)).fetchall()
         return [r["policy_id"] for r in rows]
+
+    def coverage_temporal_gaps_for_cpt(self, cpt_code: str, dos) -> list[str]:
+        """Policies known for the code but not proven applicable on the DOS."""
+        known = set(self.coverage_policies_for_cpt(cpt_code))
+        active = set(self.coverage_policies_for_cpt(cpt_code, dos))
+        return sorted(known - active)
 
     def coverage_icd_covered(self, policy_id: str, icd_code: str) -> bool:
         return self.conn.execute(
@@ -2348,6 +2773,44 @@ class ComplianceDataStore:
                 return dict(row)
         return None
 
+    def prior_auth_policy_status(self, payer_id: str | None,
+                                 plan: str | None = None,
+                                 dos=None) -> dict:
+        """Whether this payer has an authoritative PA policy loaded.
+
+        A missing code row only means "PA not required" after the payer's
+        policy corpus is known to be present.  Without this distinction the
+        absence of an entire payer feed silently became a pass.
+        """
+        if not payer_id:
+            return {"available": False, "reason": "payer_unresolved"}
+        if dos is None or not str(dos).strip():
+            return {"available": False, "reason": "dos_unresolved"}
+        plan_text = str(plan or "").strip()
+        row = self.conn.execute(
+            "SELECT payer,plan,complete,effective_from,effective_to,source,status "
+            "FROM prior_auth_policy WHERE payer=? AND plan IN ('', ?) "
+            "ORDER BY CASE WHEN plan=? THEN 0 ELSE 1 END LIMIT 1",
+            (payer_id, plan_text, plan_text),
+        ).fetchone()
+        if row is None:
+            return {"available": False, "reason": "corpus_absent"}
+        result = dict(row)
+        if not bool(row["complete"]):
+            return {**result, "available": False,
+                    "reason": "corpus_incomplete"}
+        d = self._dos(dos)
+        if not (row["effective_from"] <= d <= row["effective_to"]):
+            return {**result, "available": False,
+                    "reason": "corpus_not_effective_for_dos"}
+        return {**result, "available": True, "reason": ""}
+
+    def prior_auth_policy_available(self, payer_id: str | None,
+                                    plan: str | None = None,
+                                    dos=None) -> bool:
+        return bool(self.prior_auth_policy_status(
+            payer_id, plan=plan, dos=dos).get("available"))
+
     @staticmethod
     def _dos(dos: date | str | None) -> str:
         if dos is None:
@@ -2405,22 +2868,137 @@ class ComplianceDataStore:
             f"{base} ORDER BY effective_from ASC LIMIT 1", params,
         ).fetchone()
 
+    def _ncci_release_bounds(self) -> tuple[date, date] | None:
+        """Return the loaded snapshot's quarter, querying SQLite once.
+
+        Pair-heavy validator paths can perform thousands of NCCI lookups for
+        one claim. Re-running ``MAX(effective_from)`` for every pair made the
+        fail-closed availability guard dominate runtime. The release only
+        changes when this store ingests NCCI data, which invalidates the cache.
+        ``getattr`` keeps lightweight ``__new__`` test stores compatible.
+        """
+        if getattr(self, "_ncci_release_window_loaded", False):
+            return getattr(self, "_ncci_release_window", None)
+        row = self.conn.execute(
+            "SELECT MAX(effective_from) AS release_start FROM ncci_ptp",
+        ).fetchone()
+        bounds = None
+        if row and row["release_start"]:
+            try:
+                release_date = date.fromisoformat(row["release_start"])
+            except (TypeError, ValueError):
+                pass
+            else:
+                quarter_index = (release_date.month - 1) // 3
+                start = date(release_date.year, quarter_index * 3 + 1, 1)
+                end_month = (quarter_index + 1) * 3
+                bounds = (
+                    start,
+                    date(start.year, end_month,
+                         calendar.monthrange(start.year, end_month)[1]),
+                )
+        self._ncci_release_window = bounds
+        self._ncci_release_window_loaded = True
+        return bounds
+
+    def ncci_data_available(self, dos=None) -> bool:
+        """Whether an NCCI release in the local store actually covers DOS.
+
+        The imported CMS file is a quarterly snapshot, not a complete edit
+        history: active rows commonly have an open-ended effective_to. The
+        newest effective_from in the snapshot identifies its release quarter;
+        open-ended rows must not make that one snapshot appear valid forever.
+        """
+        if dos is None:
+            return False
+        try:
+            d = date.fromisoformat(dos) if isinstance(dos, str) else dos
+        except (TypeError, ValueError):
+            return False
+        bounds = self._ncci_release_bounds()
+        if bounds is None:
+            return False
+        start, end = bounds
+        return start <= d <= end
+
     def ncci_pair(self, c1: str, c2: str, dos=None) -> dict | None:
-        d = self._dos(dos)
+        """Return an NCCI edit only from the release covering the claim DOS."""
+        if not self.ncci_data_available(dos):
+            return None
+        d = dos if isinstance(dos, str) else dos.isoformat()
         for a, b in ((c1, c2), (c2, c1)):
-            row = self._asof(
-                "ncci_ptp", "col1, col2, modifier_indicator",
-                "col1=? AND col2=?", (_norm(a), _norm(b)), d,
-            )
+            row = self.conn.execute(
+                "SELECT col1, col2, modifier_indicator FROM ncci_ptp "
+                "WHERE col1=? AND col2=? AND effective_from<=? AND effective_to>=? "
+                "ORDER BY effective_from DESC LIMIT 1",
+                (_norm(a), _norm(b), d, d),
+            ).fetchone()
             if row:
                 return {"col1": row["col1"], "col2": row["col2"],
                         "modifier_indicator": row["modifier_indicator"]}
         return None
 
+    def _mue_release_bounds(self) -> tuple[date, date] | None:
+        if getattr(self, "_mue_release_window_loaded", False):
+            return getattr(self, "_mue_release_window", None)
+        rows = self.conn.execute(
+            "SELECT DISTINCT effective_from AS release_start FROM mue "
+            "WHERE effective_from IS NOT NULL AND effective_from<>''",
+        ).fetchall()
+        windows = []
+        for row in rows:
+            try:
+                release_date = date.fromisoformat(row["release_start"])
+            except (TypeError, ValueError):
+                continue
+            quarter_index = (release_date.month - 1) // 3
+            quarter_end_month = (quarter_index + 1) * 3
+            quarter_end = date(
+                release_date.year, quarter_end_month,
+                calendar.monthrange(release_date.year, quarter_end_month)[1])
+            # CMS MUE exports can label a release with the prior quarter's
+            # closing date (03-31 for the release governing 04-01 onward).
+            if release_date == quarter_end:
+                start = (date(release_date.year + 1, 1, 1)
+                         if quarter_end_month == 12 else
+                         date(release_date.year, quarter_end_month + 1, 1))
+            else:
+                start = date(release_date.year, quarter_index * 3 + 1, 1)
+            end_month = (((start.month - 1) // 3) + 1) * 3
+            windows.append((
+                start,
+                date(start.year, end_month,
+                     calendar.monthrange(start.year, end_month)[1]),
+            ))
+        windows = sorted(set(windows))
+        bounds = windows[-1] if windows else None
+        self._mue_release_windows = tuple(windows)
+        self._mue_release_window = bounds
+        self._mue_release_window_loaded = True
+        return bounds
+
+    def mue_data_available(self, dos=None) -> bool:
+        """True only when the loaded quarterly MUE release covers DOS."""
+        if dos is None:
+            return False
+        try:
+            d = date.fromisoformat(dos) if isinstance(dos, str) else dos
+        except (TypeError, ValueError):
+            return False
+        self._mue_release_bounds()
+        return any(start <= d <= end for start, end in
+                   getattr(self, "_mue_release_windows", ()))
+
     def mue(self, code: str, dos=None) -> dict | None:
-        row = self._asof(
-            "mue", "mue_value, mai, rationale", "code=?", (_norm(code),), self._dos(dos),
-        )
+        if not self.mue_data_available(dos):
+            return None
+        d = self._dos(dos)
+        row = self.conn.execute(
+            "SELECT mue_value, mai, rationale FROM mue WHERE code=? "
+            "AND effective_from<=? AND effective_to>=? "
+            "ORDER BY effective_from DESC LIMIT 1",
+            (_norm(code), d, d),
+        ).fetchone()
         return dict(row) if row else None
 
     def global_period(self, code: str, dos=None) -> str | None:
@@ -2620,7 +3198,7 @@ class ComplianceDataStore:
         observed suppressing real DMEPOS revenue. X is surfaced separately
         via pfs_exclusion_advisory() as a review-level signal.
 
-        CPT Category II codes (4 digits + 'F' suffix) are the one universal
+        CPT performance-measure tracking codes are the one universal
         exception to that payer-conditional rule: they're AMA performance-
         measure tracking codes with zero RVU value, carrying no payment under
         ANY payer by design — not a coverage decision like a normal code's
@@ -2629,8 +3207,7 @@ class ComplianceDataStore:
         (active/normally billable) — a 100% pattern across the whole code
         category, not a per-code judgment call.
         """
-        norm = _norm(code)
-        if len(norm) == 5 and norm[:4].isdigit() and norm[4] == "F":
+        if self.is_performance_measure_tracking(code, dos):
             return "CPT Category II code (performance-measure tracking, zero RVU by AMA design)"
         status = self.billing_status(code, dos)
         meanings = {
@@ -2726,6 +3303,13 @@ class ComplianceDataStore:
              len(rows), file_name),
         )
         self.conn.commit()
+        if table == "mue":
+            self._mue_release_window_loaded = False
+            self._mue_release_window = None
+            self._mue_release_windows = ()
+        elif table == "ncci_ptp":
+            self._ncci_release_window_loaded = False
+            self._ncci_release_window = None
         logger.info(f"  refresh[{source_id}]: +{len(rows)} rows (eff {effective_from})")
         return len(rows)
 

@@ -135,7 +135,17 @@ def enrich_entities(entities: list[dict], full_text: str) -> list[dict]:
         return entities
     confirmed = get_confirmed_spans(full_text)
     if not confirmed:
-        return entities  # GLiNER unavailable — entities unchanged
+        # Distinguish "not independently confirmed" from a measured 100%
+        # result.  Downstream provenance must not silently present an
+        # unavailable/empty confirmation layer as certainty.
+        for e in entities:
+            e["ner_source"] = "llm_only"
+            try:
+                e["ner_confidence"] = min(
+                    float(e.get("ner_confidence", 0.7)), 0.7)
+            except (TypeError, ValueError):
+                e["ner_confidence"] = 0.7
+        return entities
     for e in entities:
         term = e.get("clinical_term", "").lower().strip()
         text_span = e.get("text", "").lower().strip()

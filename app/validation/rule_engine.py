@@ -865,8 +865,8 @@ class RuleEngine:
                     for _carrier, refs in groups:
                         mandated.update(r for r, _line in refs)
                 mandated.update(v.store.code_first_etiology_refs(c))
-        has_injury = any((e.get("code") or "").strip().upper()[:1] in ("S", "T")
-                         for e in icd)
+        has_injury = bool(v.store is not None and any(
+            v.store.is_injury_or_poisoning(e.get("code") or "") for e in icd))
         markers = rule["residual_markers"]
         ev = rule.get("anchor_evidence", {})
         d_min = int(ev.get("desc_min_token_len", 3))
@@ -905,7 +905,8 @@ class RuleEngine:
                 continue
             if str(entry.get("source_section", "")).startswith("validator:"):
                 continue
-            if norm[0] in ("V", "W", "X", "Y") and has_injury:
+            if (v.store is not None and v.store.is_external_cause(code)
+                    and has_injury):
                 continue  # external-cause companion of a billed injury
             if any(norm.startswith(m) or m.startswith(norm) for m in mandated):
                 continue
