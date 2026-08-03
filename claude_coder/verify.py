@@ -45,6 +45,24 @@ def default_verify_llm(system: str, user: str) -> str:
     return out
 
 
+def default_corroborate_llm(system: str, user: str) -> str:
+    """The INDEPENDENT second opinion — a different/stronger model (CLAUDE_VERIFY_
+    MODEL/EFFORT, typically the Opus verification tier) so agreement is genuine
+    cross-model corroboration, not the same model re-confirming itself. Falls back
+    to the default model when unset (a weaker same-model second pass)."""
+    from app.core.llm_client import chat_completion
+    model = effort = None
+    try:
+        from app.core import config
+        model = getattr(config, "CLAUDE_VERIFY_MODEL", "") or None
+        effort = getattr(config, "CLAUDE_VERIFY_EFFORT", "") or None
+    except Exception:
+        pass
+    out, _ = chat_completion(system, user, model=model, effort=effort,
+                             temperature=0.0, json_mode=True, use_batch=False)
+    return out
+
+
 def _json(text: str) -> dict:
     text = (text or "").strip()
     if not text.startswith("{"):
@@ -146,3 +164,34 @@ def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
     if isinstance(choice, int) and 1 <= choice <= len(candidates):
         return candidates[choice - 1], reason
     return None, reason
+
+
+_CORROBORATE_SYSTEM = """You INDEPENDENTLY check whether a candidate code is correct
+for documented care. You are given a documented clinical fact and ONE candidate
+code's OFFICIAL descriptor. Decide, skeptically and on the descriptor text alone,
+whether the documentation ENTAILS that exact descriptor, applying general
+principles (any specialty / code set): every clinically distinguishing element the
+descriptor states — the specific act/service, the structure/site, laterality,
+count, approach, and any qualifiers — must be supported; a near-synonym that
+denotes a DIFFERENT act or entity does not qualify; a documented specific value
+satisfies an unspecified or "other than …" descriptor, but a descriptor naming a
+value the documentation contradicts or omits does not. If you are not confident the
+documentation entails it, answer false. Judge only the descriptor text; use no
+knowledge of what a code number 'usually' means. Return JSON only:
+{"entailed": true|false, "reason": "<short>"}"""
+
+
+def corroborate(fact: ClinicalFact, candidate: CandidateCode,
+                source: CodeSource, llm: LLMFn) -> tuple[bool, str]:
+    """An INDEPENDENT second-model entailment check on the already-selected code.
+    True only when this model also finds the documentation entails the descriptor —
+    so a code bills only when TWO independent judgements agree; disagreement -> the
+    caller escalates (fail-closed)."""
+    ev = " | ".join(s.text for s in fact.evidence)
+    user = (f"DOCUMENTED FACT: {fact.description}\n"
+            f"ATTRIBUTES: {json.dumps(fact.attributes)}\n"
+            f"EVIDENCE: {ev}\n\n"
+            f"CANDIDATE OFFICIAL DESCRIPTOR: {_best_descriptor(source, candidate)}\n\n"
+            f"Is this descriptor entailed by the documentation?")
+    ans = _json(llm(_CORROBORATE_SYSTEM, user))
+    return (ans.get("entailed") is True), str(ans.get("reason") or "").strip()

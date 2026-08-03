@@ -774,6 +774,33 @@ class ProposeVerifyTest(unittest.TestCase):
         self.assertEqual([c.code for c in cands], ["CODEALPHA"])   # nonexistent code dropped
         self.assertEqual(cands[0].descriptor, self.ALPHA)          # descriptor from the record
 
+    def _corroborator(self, confirm):
+        import json
+
+        def stub(system, user):
+            return json.dumps({"entailed": bool(confirm), "reason": "second opinion"})
+        return stub
+
+    def test_corroboration_rejection_escalates(self):
+        # primary model selects a code, the INDEPENDENT second model disagrees ->
+        # the line escalates (nothing bills on one model's say-so).
+        from claude_coder.models import ResolutionMethod
+        from claude_coder.resolution import resolve
+        line = resolve(self._fact(), self._src(), llm=self._llm(),
+                       corroborate=self._corroborator(confirm=False))
+        self.assertFalse(line.resolved)
+        self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
+        self.assertIn("second-model", line.rationale)
+
+    def test_corroboration_agreement_accepts(self):
+        from claude_coder.models import ResolutionMethod
+        from claude_coder.resolution import resolve
+        line = resolve(self._fact(), self._src(), llm=self._llm(),
+                       corroborate=self._corroborator(confirm=True))
+        self.assertEqual(line.method, ResolutionMethod.VERIFIED)
+        self.assertEqual(line.chosen.code, "CODEALPHA")
+        self.assertIn("independently confirmed", line.rationale)
+
 
 class LearnedIndexTest(unittest.TestCase):
     """The learned verified-resolution index promotes a phrase->code mapping to

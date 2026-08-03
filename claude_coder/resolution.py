@@ -108,7 +108,7 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
 
 
 def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
-            llm=None) -> ResolvedLine:
+            llm=None, corroborate=None) -> ResolvedLine:
     if not fact.billable:
         return ResolvedLine(
             fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
@@ -242,7 +242,7 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
     # since a validated proposal can rescue a concept retrieval missed. Diagnoses/
     # supplies keep the deterministic path (well served by the ICD index + rules).
     if llm is not None and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING):
-        return _propose_then_verify(fact, source, pool, llm)
+        return _propose_then_verify(fact, source, pool, llm, corroborate)
 
     if not pool:
         return ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
@@ -283,11 +283,13 @@ def _ranked(fact: ClinicalFact, pool: list[CandidateCode],
 
 
 def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
-                         pool: list[CandidateCode], llm) -> ResolvedLine:
+                         pool: list[CandidateCode], llm, corroborate=None) -> ResolvedLine:
     """Recall as candidate GENERATOR, authoritative descriptor + entailment as TRUTH.
-    Widen the pool with validated LLM proposals, then accept the first candidate
-    (proposals first, then retrieval by rank) whose OFFICIAL descriptor the
-    documentation entails; escalate if none do. Nothing bills on recall alone."""
+    Widen the pool with validated LLM proposals, select the candidate whose OFFICIAL
+    descriptor the documentation entails, then (when a corroborator is supplied)
+    require an INDEPENDENT second model to agree before accepting. Escalate if the
+    selection finds nothing OR the second model disagrees. Nothing bills on recall
+    alone, and nothing bills on a single model's say-so."""
     from . import verify as _verify
     proposals = [c for c in _verify.propose_codes(fact, source, llm)
                  if _evaluate(fact, c, source) is not None]
@@ -299,18 +301,27 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
             order.append(c)
     shortlist = order[:VERIFY_K]
     chosen, why = _verify.select_entailed(fact, shortlist, source, llm)
-    if chosen is not None:
+    if chosen is None:
         return ResolvedLine(
-            fact=fact, chosen=chosen,
-            alternatives=[c for c in shortlist if c.code != chosen.code][:4],
-            method=ResolutionMethod.VERIFIED,
-            rationale=f"authoritative descriptor entailed by documentation: {why}"
-                      if why else "authoritative descriptor entailed by documentation")
+            fact=fact, chosen=None, alternatives=shortlist,
+            method=ResolutionMethod.ABSTAINED,
+            rationale="no candidate's authoritative descriptor was entailed by the "
+                      "documentation (verified) — escalate")
+    if corroborate is not None:
+        ok, why2 = _verify.corroborate(fact, chosen, source, corroborate)
+        if not ok:
+            return ResolvedLine(
+                fact=fact, chosen=None, alternatives=[chosen] + shortlist[:4],
+                method=ResolutionMethod.ABSTAINED,
+                rationale=f"selected code not confirmed by independent second-model "
+                          f"verification ({why2}) — escalate")
+        why = f"{why}; independently confirmed" if why else "independently confirmed"
     return ResolvedLine(
-        fact=fact, chosen=None, alternatives=shortlist,
-        method=ResolutionMethod.ABSTAINED,
-        rationale="no candidate's authoritative descriptor was entailed by the "
-                  "documentation (verified) — escalate")
+        fact=fact, chosen=chosen,
+        alternatives=[c for c in shortlist if c.code != chosen.code][:4],
+        method=ResolutionMethod.VERIFIED,
+        rationale=f"authoritative descriptor entailed by documentation: {why}"
+                  if why else "authoritative descriptor entailed by documentation")
 
 
 def _decide(fact: ClinicalFact, pool: list[CandidateCode],

@@ -28,6 +28,7 @@ def code_encounter(
     extract_llm: LLMFn | None = None,
     arbitrate_llm: LLMFn | None = None,
     verify_llm: LLMFn | None = None,
+    corroborate_llm: LLMFn | None = None,
     modifier_engine: "ModifierEngine | None" = None,
 ) -> CodingResult:
     from .models import Outcome
@@ -37,11 +38,15 @@ def code_encounter(
 
     # Propose-then-verify is enabled in real mode (no stubbed LLMs). It grounds every
     # procedure code in an authoritative descriptor the documentation entails — the
-    # license-clean substitute for the CPT Index. Tests pass stub LLMs and leave
-    # verify_llm None, so they keep the deterministic path unchanged.
+    # license-clean substitute for the CPT Index. In real mode it is also corroborated
+    # by an INDEPENDENT second model, so a procedure bills only when two independent
+    # judgements agree. Tests pass stub LLMs and leave these None -> deterministic
+    # path unchanged, no corroboration.
     if verify_llm is None and arbitrate_llm is None:
-        from .verify import default_verify_llm
+        from .verify import default_corroborate_llm, default_verify_llm
         verify_llm = default_verify_llm
+        if corroborate_llm is None:
+            corroborate_llm = default_corroborate_llm
 
     from .models import FactKind
     facts = extraction.extract_facts(note_text, extract_llm)
@@ -51,7 +56,8 @@ def code_encounter(
         if fact.kind is FactKind.EM:
             line = em.resolve_em(fact, source)      # MDM-driven leveling
         else:
-            line = resolution.resolve(fact, source, llm=verify_llm)
+            line = resolution.resolve(fact, source, llm=verify_llm,
+                                      corroborate=corroborate_llm)
         # A procedure that went through propose-then-verify is already resolved-or-
         # escalated on authoritative entailment; don't second-guess it with the
         # weaker arbitration fallback. Other kinds still arbitrate residual ambiguity.
