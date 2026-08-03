@@ -7,5 +7,17 @@ stedi_api_key     = ""
 
 # Non-secret overrides (defaults already match .env)
 # instance_type = "r6i.xlarge"
-# claude_model  = "claude-sonnet-5"
+# claude_model  = "claude-opus-4-8"
+# openai_model  = "gpt-5.6-sol"
+#
+# Adding an API key alone does not authorize PHI routing. Explicitly list each
+# approved provider and its execution profile after the applicable privacy,
+# security, and business-associate review:
+# authorized_model_providers = ["claude", "openai"]
+# coding_execution_profiles = [
+#   { profile_id = "primary", provider = "claude", model = "claude-opus-4-8" },
+#   { profile_id = "corroborator", provider = "openai", model = "gpt-5.6-sol" },
+# ]
+# coder_adjudicator_model = "claude-fable-5"
+# clinical_auditor_model  = "claude-sonnet-5"
 # claude_effort = "high"

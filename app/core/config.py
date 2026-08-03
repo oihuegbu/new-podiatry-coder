@@ -15,13 +15,12 @@ LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "claude").lower()
 
 # --- OpenAI ---
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
+OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
 
 # --- Anthropic / Claude ---
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
-# Default matches .env.example's verified model — the previous default
-# (an Opus slug) diverged from every documented configuration.
-CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+# Default matches the deployment's quality-first primary coding profile.
+CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "claude-opus-4-8")
 # Reasoning effort. "xhigh" = deepest (Opus); Sonnet supports high/low/max/medium.
 # Default "high" works on every current model; override per model via env.
 CLAUDE_EFFORT: str = os.getenv("CLAUDE_EFFORT", "high")

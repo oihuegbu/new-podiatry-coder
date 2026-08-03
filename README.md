@@ -1054,14 +1054,14 @@ LLM_PROVIDER=claude
 
 # Anthropic — required when LLM_PROVIDER=claude
 ANTHROPIC_API_KEY=sk-ant-REPLACE_ME
-# Verified: claude-sonnet-4-6  |  Opus models also supported
-CLAUDE_MODEL=claude-sonnet-4-6
+# Quality-first primary coding profile
+CLAUDE_MODEL=claude-opus-4-8
 # Reasoning effort: high | low | max | medium  (Opus also supports xhigh)
 CLAUDE_EFFORT=high
 
-# OpenAI — required when LLM_PROVIDER=openai
+# OpenAI — required when OpenAI is primary or an authorized corroborator
 OPENAI_API_KEY=sk-REPLACE_ME
-OPENAI_MODEL=gpt-4o
+OPENAI_MODEL=gpt-5.6-sol
 
 # ── Vector store (Qdrant) ──────────────────────────────────────────────────────
 # Docker mode: http://qdrant:6333 is set automatically by docker compose
@@ -1096,10 +1096,10 @@ LOG_LEVEL=INFO
 
 | Setting | Default | Notes |
 |---|---|---|
-| `LLM_PROVIDER` | `openai` | Switch to `claude` for Anthropic |
-| `CLAUDE_MODEL` | `claude-opus-4-7` | Vision extraction always uses Claude regardless of provider |
+| `LLM_PROVIDER` | `claude` | Primary provider; independent profiles can add OpenAI without changing it |
+| `CLAUDE_MODEL` | `claude-opus-4-8` | Primary Claude coding model; vision extraction always uses Claude |
 | `CLAUDE_EFFORT` | `high` | Works on every current model; use `xhigh` for Opus on critical batches |
-| `OPENAI_MODEL` | `gpt-4o` | Used for NER + coding passes when `LLM_PROVIDER=openai` |
+| `OPENAI_MODEL` | `gpt-5.6-sol` | Used for NER + coding passes when OpenAI is primary or an authorized corroborator |
 | `CODING_TEMPERATURE` | `0.0` | All 4 coding passes run deterministically |
 | `CODING_MAX_TOKENS` | `4096` | Per coding pass |
 | `RAG_TOP_K` | `15` | Candidates retrieved per query |

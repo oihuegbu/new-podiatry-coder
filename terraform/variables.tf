@@ -36,7 +36,7 @@ variable "anthropic_api_key" {
 }
 
 variable "openai_api_key" {
-  description = "OpenAI API key (fallback/compat, may be unused)"
+  description = "OpenAI API key for explicitly authorized independent coding profiles"
   type        = string
   sensitive   = true
   default     = ""
@@ -56,9 +56,72 @@ variable "llm_provider" {
   default = "claude"
 }
 
+variable "openai_model" {
+  description = "OpenAI model used by an explicitly configured OpenAI execution profile"
+  type        = string
+  default     = "gpt-5.6-sol"
+}
+
+variable "authorized_model_providers" {
+  description = "Providers explicitly approved to receive clinical-note data"
+  type        = set(string)
+  default     = ["claude"]
+
+  validation {
+    condition = (
+      length(var.authorized_model_providers) > 0 &&
+      alltrue([for provider in var.authorized_model_providers : contains(["claude", "openai"], provider)])
+    )
+    error_message = "authorized_model_providers must contain only claude and/or openai."
+  }
+}
+
+variable "coding_execution_profiles" {
+  description = "Ordered, explicitly authorized provider/model profiles used for independent coding runs"
+  type = list(object({
+    profile_id = string
+    provider   = string
+    model      = string
+  }))
+  default = []
+
+  validation {
+    condition = alltrue([
+      for profile in var.coding_execution_profiles :
+      contains(["claude", "openai"], profile.provider) &&
+      trimspace(profile.profile_id) != "" &&
+      trimspace(profile.model) != ""
+    ])
+    error_message = "Every coding profile must name a claude/openai provider, profile_id, and model."
+  }
+}
+
+variable "min_independent_model_domains" {
+  description = "Minimum provider-level independence domains required for autonomous release"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.min_independent_model_domains >= 2
+    error_message = "Autonomous release requires at least two independent model domains."
+  }
+}
+
+variable "coder_adjudicator_model" {
+  description = "Primary-provider model used for deterministic-dispute adjudication"
+  type        = string
+  default     = "claude-fable-5"
+}
+
+variable "clinical_auditor_model" {
+  description = "Primary-provider model reserved for whole-claim clinical audit"
+  type        = string
+  default     = "claude-sonnet-5"
+}
+
 variable "claude_model" {
   type    = string
-  default = "claude-sonnet-5"
+  default = "claude-opus-4-8"
 }
 
 variable "claude_effort" {
