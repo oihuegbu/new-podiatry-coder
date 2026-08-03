@@ -23,10 +23,19 @@ _MIN_CONFIDENCE = 0.6
 _SYSTEM = """You are disambiguating a medical-coding candidate. You are given a
 documented clinical fact and a numbered list of candidate code DESCRIPTORS that
 were retrieved from the authoritative code set. Choose the single option whose
-descriptor is most fully supported by the fact and its evidence — matching site,
-laterality, count, depth, and specificity. Do not use any knowledge of code
-numbers; judge only the descriptor text against the fact. If no option is
-clearly supported, choose 0. Return JSON only:
+descriptor is ENTAILED by the fact and its evidence, applying these principles
+generally (they hold for any specialty, service, or code set — reason from the
+words, not from examples):
+  - every clinically distinguishing element the descriptor states must be supported
+    by the documentation (the specific act/service, the structure/site, laterality,
+    count/quantity, approach or technique, and any qualifiers);
+  - near-synonyms that denote clinically DIFFERENT acts or entities are not a match
+    unless the documentation supports that exact meaning;
+  - a documented specific value satisfies a descriptor that is unspecified or that
+    is defined as "other than" a DIFFERENT specific value; a descriptor that names a
+    value the documentation contradicts, or omits, is not entailed.
+Do not use any knowledge of code numbers; judge only the descriptor text against
+the fact. If no option is clearly entailed, choose 0. Return JSON only:
 {"choice": <int>, "confidence": 0.0-1.0, "reason": "<short>"}"""
 
 
