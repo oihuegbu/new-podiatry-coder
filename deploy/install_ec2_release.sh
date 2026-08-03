@@ -64,17 +64,31 @@ runtime_paths=(
   data/rules
   benchmark
 )
-if [[ -d $target_dir ]]; then
-  for relative_path in "${runtime_paths[@]}"; do
-    source_path="$target_dir/$relative_path"
-    destination_path="$stage_dir/$relative_path"
-    if [[ -e $source_path ]]; then
+for relative_path in "${runtime_paths[@]}"; do
+  source_path="$target_dir/$relative_path"
+  destination_path="$stage_dir/$relative_path"
+  if [[ -d $target_dir ]]; then
+    if [[ -L $source_path ]]; then
+      echo "runtime path must not be a symlink: $source_path" >&2
+      exit 65
+    elif [[ -d $source_path ]]; then
       rm -rf -- "$destination_path"
       mkdir -p -- "$(dirname -- "$destination_path")"
       cp -a -- "$source_path" "$destination_path"
+    elif [[ -e $source_path ]]; then
+      echo "runtime path must be a directory: $source_path" >&2
+      exit 65
     fi
-  done
-fi
+  fi
+  if [[ -L $destination_path ]]; then
+    echo "release runtime path must not be a symlink: $destination_path" >&2
+    exit 65
+  fi
+  # A clean source artifact legitimately has no uploaded notes, output, or
+  # logs.  Create every bind-mount target before activation so the release
+  # is runnable without Docker creating root-owned directories on first use.
+  mkdir -p -- "$destination_path"
+done
 
 aws secretsmanager get-secret-value \
   --secret-id "$secret_arn" \
