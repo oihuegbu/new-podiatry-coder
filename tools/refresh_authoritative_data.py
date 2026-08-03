@@ -148,6 +148,13 @@ SOURCES: dict[str, dict] = {
         "fetch": fetch_cpt_index,
         "prepare": lambda tmp, f: [PY, "tools/parse_cpt_index.py", str(f)],
     },
+    "learned_index": {
+        # Promote propose-then-verify observations into the deterministic crosswalk.
+        # Local, no fetch; safe to re-run any time (idempotent over the log).
+        "output": "learned_cpt_index.json",
+        "optional": True,   # empty until the coder has accreted enough observations
+        "prepare": lambda tmp, f: [PY, "tools/build_learned_index.py"],
+    },
 }
 
 
@@ -189,8 +196,12 @@ def run_source(name: str, args) -> dict:
         rec.update(_verify(spec["output"]))
         print(f"  OK: {rec['codes']} codes, {rec['bytes']} bytes")
     except Exception as exc:                          # a source failing never aborts the rest
-        rec["status"] = f"ERROR: {exc}"
-        print(f"  {rec['status']}")
+        if spec.get("optional") and "empty" in str(exc).lower():
+            rec["status"] = "ok (nothing to promote yet)"
+            print("  " + rec["status"])
+        else:
+            rec["status"] = f"ERROR: {exc}"
+            print(f"  {rec['status']}")
     return rec
 
 
@@ -221,7 +232,8 @@ def main() -> int:
               + (f"  ({r.get('codes')} codes)" if r.get("codes") else ""))
     # non-zero exit only if a NON-licensed source hard-errored
     hard = [n for n, r in manifest.items()
-            if str(r["status"]).startswith("ERROR") and not SOURCES[n].get("licensed")]
+            if str(r["status"]).startswith("ERROR")
+            and not SOURCES[n].get("licensed") and not SOURCES[n].get("optional")]
     return 1 if hard else 0
 
 

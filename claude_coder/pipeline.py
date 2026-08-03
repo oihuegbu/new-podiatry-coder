@@ -59,6 +59,16 @@ def code_encounter(
                            and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING))
         if (not line.resolved) and line.alternatives and fact.billable and not went_through_pv:
             line = arbitration.arbitrate(line, arbitrate_llm)
+        # OBSERVE: feed a propose-then-verify success into the learned index so that,
+        # once the same phrase->code is confirmed across enough distinct encounters,
+        # it resolves deterministically next time. Real mode only; fail-safe.
+        if (verify_llm is not None and line.resolved
+                and line.method is ResolutionMethod.VERIFIED
+                and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING)):
+            from . import learned
+            learned.observe(encounter_id, fact.description, line.chosen.code,
+                            line.chosen.system, line.chosen.descriptor,
+                            [s.text for s in fact.evidence])
         if line.resolved and line.fact.billable:
             # Data-driven bundling filter: a resolved code the source declares
             # NOT separately reportable (bundled / non-covered / MUE 0) is kept

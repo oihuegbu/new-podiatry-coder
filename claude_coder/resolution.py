@@ -188,6 +188,24 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
             if line.resolved:
                 return line
 
+        # LEARNED verified-resolution index: a phrase this coder has resolved and had
+        # confirmed across enough distinct encounters resolves DETERMINISTICALLY here
+        # (no LLM), with provenance — the buildable, license-clean path toward the
+        # Index's determinism. Self-invalidating in data_access; empty until promoted.
+        lidx = source.learned_index_codes(fact.description, fact.system)
+        if len(lidx) == 1:
+            code = next(iter(lidx))
+            rec = source.lookup(code, fact.system) or {}
+            desc = (rec.get("long_description") or rec.get("description")
+                    or rec.get("short_description") or "")
+            cand = CandidateCode(code=code, system=fact.system, descriptor=str(desc),
+                                 score=1.0, source="learned-verified-index",
+                                 authority={"source": "learned verified-resolution index"})
+            line = _decide(fact, [cand],
+                           authority="learned verified-resolution index", source=source)
+            if line.resolved:
+                return line
+
         pidx = source.procedure_index_codes(fact.description, fact.system)
         if len(pidx) == 1:
             code = next(iter(pidx))

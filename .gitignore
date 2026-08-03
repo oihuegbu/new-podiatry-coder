@@ -29,3 +29,5 @@ data/compliance.db
 # stray archive
 repo.zip
 data/codes/snomed_icd10_map.json
+data/codes/learned_observations.jsonl
+data/codes/learned_cpt_index.json

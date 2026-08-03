@@ -771,5 +771,87 @@ class ProposeVerifyTest(unittest.TestCase):
         self.assertEqual(cands[0].descriptor, self.OSTEO)      # descriptor from the record
 
 
+class LearnedIndexTest(unittest.TestCase):
+    """The learned verified-resolution index promotes a phrase->code mapping to
+    deterministic trust only when confirmed across >= PROMOTE_AT DISTINCT encounters
+    and unambiguous — the automated gate (no human sign-off). Synthetic codes."""
+
+    def _obs(self, phrase, code, enc):
+        return {"phrase": phrase, "code": code, "system": "cpt",
+                "descriptor": "d", "evidence": ["e"], "enc": enc}
+
+    def test_promote_on_distinct_encounters(self):
+        from claude_coder import learned
+        obs = [self._obs("phrase one", "PROC_A", f"n{i}") for i in range(3)]
+        entries = learned.promote(obs, promote_at=3)
+        self.assertIn("phrase one", entries)
+        self.assertEqual(entries["phrase one"]["code"], "PROC_A")
+        self.assertEqual(entries["phrase one"]["encounters"], 3)
+
+    def test_no_promote_under_threshold(self):
+        from claude_coder import learned
+        obs = [self._obs("phrase two", "PROC_A", f"n{i}") for i in range(2)]
+        self.assertEqual(learned.promote(obs, promote_at=3), {})
+
+    def test_dedup_by_encounter(self):
+        from claude_coder import learned
+        # same encounter observed 3x is ONE vote — cannot self-promote
+        obs = [self._obs("phrase three", "PROC_A", "same") for _ in range(3)]
+        self.assertEqual(learned.promote(obs, promote_at=3), {})
+
+    def test_no_promote_when_contested(self):
+        from claude_coder import learned
+        # PROC_A in 3 encounters, PROC_B in 2 -> 3 < 2*2, ambiguous -> no promotion
+        obs = ([self._obs("phrase four", "PROC_A", f"a{i}") for i in range(3)]
+               + [self._obs("phrase four", "PROC_B", f"b{i}") for i in range(2)])
+        self.assertEqual(learned.promote(obs, promote_at=3), {})
+
+    def test_promote_when_dominant(self):
+        from claude_coder import learned
+        # PROC_A in 4 encounters, PROC_B in 1 -> 4 >= 2*1 -> promote PROC_A
+        obs = ([self._obs("phrase five", "PROC_A", f"a{i}") for i in range(4)]
+               + [self._obs("phrase five", "PROC_B", "b0")])
+        entries = learned.promote(obs, promote_at=3)
+        self.assertEqual(entries.get("phrase five", {}).get("code"), "PROC_A")
+
+    def test_load_observations_roundtrip(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from claude_coder import learned
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "obs.jsonl"
+            p.write_text("\n".join(json.dumps(self._obs("p", "PROC_A", f"n{i}"))
+                                   for i in range(3)) + "\n")
+            self.assertEqual(len(learned.load_observations(p)), 3)
+
+    def test_entry_self_invalidates_on_descriptor_change(self):
+        from claude_coder import learned
+        e = {"descriptor": "Osteotomy of the metatarsal"}
+        self.assertTrue(learned.entry_current(e, "Osteotomy of the metatarsal"))   # unchanged
+        self.assertFalse(learned.entry_current(e, "Ostectomy of the metatarsal"))  # revised
+        self.assertTrue(learned.entry_current(e, ""))                              # current unknown
+        self.assertTrue(learned.entry_current({"descriptor": ""}, "anything"))     # nothing stored
+
+    def test_resolution_uses_learned_index(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        from claude_coder.resolution import resolve
+        src = MockSource(
+            records={("PROC_OSTEO", "cpt"):
+                     {"long_description": "Osteotomy, metatarsal; other than first",
+                      "active": True}},
+            learned_index={"osteotomy of the fifth metatarsal": "PROC_OSTEO"})
+        fact = ClinicalFact(kind=FactKind.PROCEDURE,
+                            description="osteotomy of the fifth metatarsal",
+                            evidence=[EvidenceSpan("osteotomy of the fifth metatarsal")],
+                            confidence=0.95)
+        line = resolve(fact, src)                    # no LLM -> deterministic hit
+        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
+        self.assertEqual(line.chosen.code, "PROC_OSTEO")
+        self.assertIn("learned verified-resolution index", line.rationale)
+
+
 if __name__ == "__main__":
     unittest.main()

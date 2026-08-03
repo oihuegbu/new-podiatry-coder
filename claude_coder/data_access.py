@@ -48,6 +48,8 @@ class CodeSource(Protocol):
 
     def cpt_index_codes(self, description: str, system: str) -> set[str]: ...
 
+    def learned_index_codes(self, description: str, system: str) -> set[str]: ...
+
     def drug_index_codes(self, description: str, system: str) -> set[str]: ...
 
     def drug_unit(self, code: str) -> dict | None: ...
@@ -92,6 +94,7 @@ class AuthoritativeSource:
         self._idx = None
         self._snomed = None
         self._cptidx = None
+        self._learned = None
         self._drug = None
         self._drug_units: dict | None = None
         self._rich: dict | None = None
@@ -212,6 +215,37 @@ class AuthoritativeSource:
         except Exception:
             self._drug = False
             self._drug_units = {}
+
+    def learned_index_codes(self, description: str, system: str) -> set[str]:
+        """DETERMINISTIC phrase -> code via the LEARNED verified-resolution index
+        (data/codes/learned_cpt_index.json, promoted by tools/build_learned_index.py
+        from prior propose-then-verify results). Self-invalidating: a promoted entry
+        is honored only while the code still exists AND its CURRENT authoritative
+        descriptor still matches the descriptor that was verified — so a deleted or
+        revised code silently falls back to re-verification instead of resolving to
+        a stale mapping. Empty until mappings are promoted."""
+        if getattr(self, "_learned", None) is None:
+            try:
+                import json
+                from app.core.config import DATA_DIR
+                with open(DATA_DIR / "codes" / "learned_cpt_index.json") as fh:
+                    self._learned = json.load(fh).get("entries", {}) or {}
+            except Exception:
+                self._learned = {}
+        if not self._learned:
+            return set()
+        from .terminology import _norm
+        entry = self._learned.get(_norm(description))
+        if not entry or entry.get("system") != system:
+            return set()
+        code = str(entry.get("code") or "")
+        if not code or not self.lookup(code, system):
+            return set()                        # code deleted -> invalidate
+        from . import learned
+        current = (self.descriptions(code, system) or [""])[0]
+        if not learned.entry_current(entry, current):
+            return set()                        # descriptor revised -> re-verify
+        return {code}
 
     def drug_index_codes(self, description: str, system: str) -> set[str]:
         """AUTHORITATIVE drug NAME -> HCPCS code, via the CMS Table of Drugs &
@@ -500,7 +534,8 @@ class MockSource:
                  proc_index: dict[str, set] | None = None,
                  cpt_index: dict[str, set] | None = None,
                  drug_index: dict[str, set] | None = None,
-                 drug_units: dict[str, dict] | None = None) -> None:
+                 drug_units: dict[str, dict] | None = None,
+                 learned_index: dict[str, set] | None = None) -> None:
         self._records = records or {}
         self._retrieval = retrieval or {}
         self._ncci = ncci or {}
@@ -514,6 +549,7 @@ class MockSource:
         self._cpt_index = cpt_index or {}
         self._drug_map = drug_index or {}
         self._drug_units = drug_units or {}
+        self._learned_map = learned_index or {}
 
     def global_period(self, code):
         return self._gp.get(code)
@@ -529,6 +565,10 @@ class MockSource:
 
     def cpt_index_codes(self, description, system):
         return set(self._cpt_index.get(description, set())) if system == "cpt" else set()
+
+    def learned_index_codes(self, description, system):
+        got = self._learned_map.get(description)
+        return {got} if isinstance(got, str) else set(got or set())
 
     def drug_index_codes(self, description, system):
         return set(self._drug_map.get(description, set())) if system == "hcpcs" else set()
