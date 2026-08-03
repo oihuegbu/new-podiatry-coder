@@ -112,5 +112,51 @@ class AutonomousCoderTest(unittest.TestCase):
         self.assertEqual(len(a), 64)
 
 
+class OntologyResolutionTest(unittest.TestCase):
+    """The deterministic resolver decides by descriptor STRUCTURE (RAG only
+    supplies the pool). Synthetic codes; the ranges/laterality come from the
+    descriptors — so this also proves the size-family selection needs no
+    hardcoded code table."""
+
+    def test_measurement_range_selects_leaf(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, Disposition, EvidenceSpan,
+                                         FactKind, ResolutionMethod)
+        from claude_coder.resolution import resolve
+
+        small = CandidateCode("SUP_SMALL", "hcpcs",
+                              "Wound dressing, sterile, size 16 sq. in. or less, each", 0.9)
+        med = CandidateCode("SUP_MED", "hcpcs",
+                            "Wound dressing, sterile, size more than 16 sq. in. but less "
+                            "than or equal to 48 sq. in., each", 0.9)
+        large = CandidateCode("SUP_LARGE", "hcpcs",
+                              "Wound dressing, sterile, size more than 48 sq. in., each", 0.9)
+        src = MockSource(retrieval={("*", "hcpcs"): [small, med, large]})
+        fact = ClinicalFact(kind=FactKind.SUPPLY, description="wound dressing",
+                            attributes={"size_sqin": 30}, disposition=Disposition.PERFORMED,
+                            evidence=[EvidenceSpan("wound dressing 30 sq in applied")],
+                            confidence=0.99)
+        line = resolve(fact, src)
+        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
+        self.assertEqual(line.chosen.code, "SUP_MED", line.rationale)
+
+    def test_laterality_contradiction_eliminated(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        from claude_coder.resolution import resolve
+
+        left = CandidateCode("DX_LEFT", "icd10", "interdigital neuroma, left foot", 0.9)
+        right = CandidateCode("DX_RIGHT", "icd10", "interdigital neuroma, right foot", 0.9)
+        src = MockSource(retrieval={("*", "icd10"): [left, right]})
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="interdigital neuroma",
+                            attributes={"laterality": "right"},
+                            evidence=[EvidenceSpan("interdigital neuroma right")],
+                            confidence=0.99)
+        line = resolve(fact, src)
+        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
+        self.assertEqual(line.chosen.code, "DX_RIGHT", line.rationale)
+
+
 if __name__ == "__main__":
     unittest.main()

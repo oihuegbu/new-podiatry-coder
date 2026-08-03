@@ -1,34 +1,44 @@
-"""Stage 2 — Ontological linking (deterministic fact -> code).
+"""Stage 2 — Deterministic ontological resolution.
 
-A performed fact is mapped to a code by RETRIEVING candidates from the
-authoritative source and keeping only those whose data descriptor is consistent
-with, and entailed by, the documented attributes. When exactly one candidate
-clearly entails the fact it is chosen deterministically; genuine ambiguity is
-handed to bounded arbitration; nothing plausible means abstain-for-review.
+The DECISION is made by structured rules over descriptor features, not by vector
+rank. Retrieval is demoted to what it is good at — RECALL: it narrows ~10^5 codes
+to a small candidate pool. The resolver then evaluates each candidate field by
+field against the documented fact and applies coding-guideline MECHANICS:
 
-All discrimination is against the DATA descriptor (e.g. the candidate's own
-"...right foot" text vs the fact's documented laterality). No medical code, and
-no code-specific rule, appears here — only generic clinical words (left/right,
-token overlap). Swapping the data changes the outcome with no code change.
+  • laterality contradiction   → eliminate  (a "left" descriptor for a right foot)
+  • measurement out of range   → eliminate  (size 30 vs a "≤16 sq in" descriptor)
+  • concept entailment floor    → eliminate  (the core action/site must match)
+  • specificity preference      → rank       (a descriptor that positively matches
+                                              more documented attributes wins)
+
+The surviving code is chosen deterministically when it is the unique survivor or
+dominates on specificity; genuine ties go to bounded arbitration. Every decision
+carries a per-field rationale (the audit trail). None of the mechanics reference
+a code — they operate on features parsed from the authoritative descriptors, so
+the size-family selection the old pipeline HARDCODED is here derived from data.
 """
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 
 from .data_access import CodeSource
-from .models import ClinicalFact, ResolutionMethod, ResolvedLine
+from .models import CandidateCode, ClinicalFact, ResolutionMethod, ResolvedLine
+from .ontology import DescriptorFeatures, measurement_of, parse_descriptor
 
 _LATERALITY = {"left", "right", "bilateral"}
-_DET_MIN_OVERLAP = 0.5      # the chosen descriptor must cover half the fact's tokens
-_DET_MARGIN = 0.15          # …and clearly beat the runner-up
-
-
-def _norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9 ]", " ", str(s).lower())
+_STOP = _LATERALITY | {
+    "of", "the", "and", "or", "with", "without", "to", "for", "a", "an", "in",
+    "on", "by", "per", "each", "single", "size", "sterile", "unspecified",
+}
+_MIN_CONCEPT = 0.34        # the core concept must overlap at least this much
+_DET_MARGIN = 0.15         # …and clearly beat the runner-up when specificity ties
+_RECALL_POOL = 40
 
 
 def _tokens(s: str) -> set[str]:
-    return {t for t in _norm(s).split() if len(t) > 2}
+    return {t for t in re.findall(r"[a-z0-9]+", str(s).lower())
+            if len(t) > 2 and t not in _STOP}
 
 
 def _fact_laterality(fact: ClinicalFact) -> str:
@@ -36,61 +46,100 @@ def _fact_laterality(fact: ClinicalFact) -> str:
     return lat if lat in _LATERALITY else ""
 
 
-def _descriptor_sides(descriptor: str) -> set[str]:
-    d = _norm(descriptor)
-    return {w for w in _LATERALITY if re.search(rf"\b{w}\b", d)}
+def _fact_concept(fact: ClinicalFact) -> set[str]:
+    toks = _tokens(fact.description)
+    for k, v in fact.attributes.items():
+        if str(k).lower() in ("laterality", "count", "quantity"):
+            continue
+        toks |= _tokens(str(v))
+    return toks
 
 
-def _consistent(fact: ClinicalFact, descriptor: str) -> bool:
-    """Reject a candidate whose descriptor states a DIFFERENT side than the note.
-    A descriptor that is silent on laterality is not a contradiction."""
+@dataclass
+class _Match:
+    candidate: CandidateCode
+    features: DescriptorFeatures
+    concept: float
+    specificity: int
+    rationale: list[str] = field(default_factory=list)
+
+
+def _evaluate(fact: ClinicalFact, cand: CandidateCode) -> _Match | None:
+    """Apply the guideline mechanics. Return None if the candidate is
+    eliminated, else a scored match with its per-field reasons."""
+    feats = parse_descriptor(cand.descriptor)
+    reasons: list[str] = []
+
+    # RULE — laterality contradiction eliminates.
     fl = _fact_laterality(fact)
-    if not fl or fl == "bilateral":
-        return True
-    sides = _descriptor_sides(descriptor)
-    return (not sides) or (fl in sides)
+    if fl and fl != "bilateral" and feats.laterality and fl not in feats.laterality:
+        return None
+
+    # RULE — a documented measurement must fall in the descriptor's interval.
+    measure = measurement_of(fact.attributes)
+    if measure is not None and feats.interval and feats.interval.bounded():
+        if not feats.interval.contains(measure):
+            return None
+        reasons.append(f"measure {measure:g} in descriptor range")
+
+    # RULE — concept entailment floor.
+    fc = _fact_concept(fact)
+    concept = (len(fc & feats.core_tokens) / len(fc)) if fc else 0.0
+    if concept < _MIN_CONCEPT:
+        return None
+    reasons.append(f"concept {concept:.2f}")
+
+    # specificity — count the constraining attributes the descriptor POSITIVELY
+    # accounts for (a more specific code wins per ICD-10-CM specificity guidance).
+    spec = 0
+    if fl and fl in feats.laterality:
+        spec += 1
+        reasons.append(f"laterality {fl}")
+    if measure is not None and feats.interval and feats.interval.bounded():
+        spec += 1
+
+    return _Match(cand, feats, concept, spec, reasons)
 
 
-def _overlap(fact: ClinicalFact, descriptor: str) -> float:
-    ft = _tokens(fact.description)
-    ft |= _tokens(" ".join(str(v) for v in fact.attributes.values()))
-    if not ft:
-        return 0.0
-    return len(ft & _tokens(descriptor)) / len(ft)
-
-
-def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = 20) -> ResolvedLine:
+def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -> ResolvedLine:
     if not fact.billable:
         return ResolvedLine(
             fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
             rationale=f"not performed today (disposition={fact.disposition.value}) — not billed")
 
+    # Retrieval is RECALL ONLY — generate a candidate pool for the concept.
     query = fact.description + " " + " ".join(
-        f"{k} {v}" for k, v in fact.attributes.items())
-    candidates = source.retrieve(query.strip(), fact.system, top_k=top_k)
+        str(v) for k, v in fact.attributes.items() if str(k).lower() != "count")
+    pool = source.retrieve(query.strip(), fact.system, top_k=top_k)
+    if not pool:
+        return ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
+                            rationale="no candidate retrieved for the concept")
 
-    consistent = [c for c in candidates if _consistent(fact, c.descriptor)]
-    if not consistent:
+    # STRUCTURED decision over the pool.
+    matches = [m for m in (_evaluate(fact, c) for c in pool) if m is not None]
+    if not matches:
         return ResolvedLine(
-            fact=fact, chosen=None, alternatives=candidates[:5],
+            fact=fact, chosen=None, alternatives=pool[:5],
             method=ResolutionMethod.ABSTAINED,
-            rationale="no retrieved code is consistent with the documented attributes")
+            rationale="no retrieved code satisfies the documented attributes")
 
-    scored = sorted(consistent, key=lambda c: (_overlap(fact, c.descriptor), c.score),
-                    reverse=True)
-    top_ov = _overlap(fact, scored[0].descriptor)
-    second_ov = _overlap(fact, scored[1].descriptor) if len(scored) > 1 else 0.0
+    matches.sort(key=lambda m: (m.specificity, m.concept), reverse=True)
+    top = matches[0]
+    if len(matches) == 1:
+        deterministic = True
+    else:
+        nxt = matches[1]
+        deterministic = (top.specificity > nxt.specificity
+                         or top.concept - nxt.concept >= _DET_MARGIN)
 
-    if top_ov >= _DET_MIN_OVERLAP and (len(scored) == 1 or top_ov - second_ov >= _DET_MARGIN):
+    if deterministic:
         return ResolvedLine(
-            fact=fact, chosen=scored[0], alternatives=scored[1:4],
+            fact=fact, chosen=top.candidate,
+            alternatives=[m.candidate for m in matches[1:4]],
             method=ResolutionMethod.DETERMINISTIC,
-            rationale=(f"descriptor entails fact — token overlap {top_ov:.2f}, "
-                       f"margin over next {top_ov - second_ov:.2f}"))
+            rationale="; ".join(top.rationale))
 
-    # Real ambiguity: several descriptors fit comparably. Hand the shortlist to
-    # bounded arbitration rather than guess.
     return ResolvedLine(
-        fact=fact, chosen=None, alternatives=scored[:5],
+        fact=fact, chosen=None, alternatives=[m.candidate for m in matches[:5]],
         method=ResolutionMethod.ABSTAINED,
-        rationale=f"{len(scored)} candidates within margin — needs arbitration")
+        rationale=f"{len(matches)} candidates tie on structure — needs arbitration")

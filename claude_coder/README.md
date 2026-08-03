@@ -21,10 +21,13 @@ note ─► 1. EXTRACT   Clinical Language Understanding: the LLM emits evidence
         │            count, depth, product, dose, performed-vs-planned, negation).
         │            It is never asked for, and never outputs, a code.
         ▼
-        2. RESOLVE   Deterministic ontological linking: each performed fact is
-        │            mapped to a code by RETRIEVING candidates from the
-        │            authoritative data and keeping those whose descriptor is
-        │            consistent with (and entails) the documented attributes.
+        2. RESOLVE   Deterministic ontological linking. The DECISION is made by
+        │            structured rules over features PARSED FROM the authoritative
+        │            descriptors (laterality, measurement intervals, cardinality,
+        │            core concept) — not by vector rank. Retrieval is demoted to
+        │            RECALL: it only narrows ~10^5 codes to a candidate pool; the
+        │            rules then eliminate contradictions (wrong side, size out of
+        │            the descriptor's range) and pick the most specific survivor.
         ▼
         3. ARBITRATE Only on residual ambiguity: the LLM picks among the
         │            RETRIEVED candidate descriptors — it can never recall or
@@ -88,13 +91,15 @@ python -m claude_coder.cli note.txt --dos 2026-03-14
 
 ## Honest boundaries (scaffolded, not yet complete)
 
-- **Resolution** uses laterality-consistency + token-entailment as the
-  deterministic discriminator; a production build would add more attribute axes
-  (depth, area arithmetic for wounds, units) and richer descriptor parsing.
+- **Resolution** decides on laterality, measurement-interval containment,
+  cardinality and concept entailment parsed from descriptors; a production build
+  would add more axes (wound-depth families, multi-measurement area arithmetic,
+  unit conversion) and a richer descriptor grammar.
 - **Medical necessity** enforces the structural floor (a procedure needs a
   diagnosis); full LCD/NCD dx→procedure coverage linkage would query policy data.
-- **Modifiers** (25/59/RT/LT/X{ESPU}) are not yet assigned; NCCI "needs modifier"
-  currently surfaces as UNKNOWN (fail-closed) rather than auto-appending one.
+- **Modifiers** are not yet assigned; when NCCI reports a pair as bypassable-with-
+  a-modifier the line surfaces as UNKNOWN (fail-closed) rather than auto-appending
+  one — a modifier engine would resolve it from the documented facts.
 - **Certificate** provides an integrity hash; an HMAC with a private key would add
   non-repudiation.
 
