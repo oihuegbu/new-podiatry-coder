@@ -120,19 +120,37 @@ So: a working, safe, genuinely autonomous pipeline whose decisions are agnostic
 mechanisms over authoritative data — it codes what it can defend and blocks the
 rest. A sound spine, not a production-accuracy coder yet.
 
-## Honest boundaries (scaffolded, not yet complete)
+## Subsystems now implemented (data-driven, verified on the box)
 
-- **Resolution** decides on laterality, measurement-interval containment,
-  cardinality and concept entailment parsed from descriptors; a production build
-  would add more axes (wound-depth families, multi-measurement area arithmetic,
-  unit conversion) and a richer descriptor grammar.
-- **Medical necessity** enforces the structural floor (a procedure needs a
-  diagnosis); full LCD/NCD dx→procedure coverage linkage would query policy data.
-- **Modifiers** are not yet assigned; when NCCI reports a pair as bypassable-with-
-  a-modifier the line surfaces as UNKNOWN (fail-closed) rather than auto-appending
-  one — a modifier engine would resolve it from the documented facts.
-- **Certificate** provides an integrity hash; an HMAC with a private key would add
+- **Modifiers** (`modifiers.py`): laterality (RT/LT) and bilateral (50) applied
+  from the documented facts — the modifier values are *discovered* from
+  modifiers.json by descriptor, never named in code. Verified: a right-foot
+  procedure whose descriptor omits laterality gets `+RT`.
+- **E/M leveling** (`em.py`): the MDM level is computed from the documented
+  problems/data/risk via the grid's 2-of-3 rule, then the E/M code whose
+  descriptor states that level (and new/established setting) is selected — no
+  codes in the logic (the grid is code-free by design).
+- **NCCI & MUE gates now functional**: the adapter was calling non-existent
+  methods, so both silently did nothing; fixed to the real `check_ncci` and the
+  `mue` table. Verified: NCCI evaluates real pairs; MUE enforces real limits.
+
+## Honest boundaries (still open)
+
+- **Units semantics**: MUE now runs, but units are taken from a documented count;
+  for a "2–4 lesions" code that count is not the billing unit. A units model
+  (per-code unit definition) is the next refinement — today it fails *closed*.
+- **Modifiers**: distinct-service (59 / X{EPSU}) and E/M-with-procedure (25) are
+  assigned the same data-driven way from NCCI/relationship signals — next, not
+  yet wired.
+- **Global surgical package** (post-op visits bundled) needs global-period data
+  and surgical history not cleanly exposed here — deliberately not faked.
+- **ICD diagnosis recall** for eponyms/terse descriptors is a retrieval/data-layer
+  concern (the synonym-enrichment work), not the coder logic.
+- **Certificate** is an integrity hash; an HMAC with a private key adds
   non-repudiation.
+- **"Production-accurate"** is a VALIDATION milestone (adjudicated dual-coder gold
+  sets + prospective shadow testing), not a code milestone — that is the real
+  path to the ~95% hands-off bar, and it is not claimed here.
 
 Each boundary fails *closed* — it escalates to review rather than guessing — so
 the system is safe to run today and improves by adding gates and attribute axes,

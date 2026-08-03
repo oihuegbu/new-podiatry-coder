@@ -35,6 +35,7 @@ def build_certificate(result: CodingResult, note_text: str,
     lines = [{
         "system": ln.chosen.system,
         "code": ln.chosen.code,
+        "modifiers": ln.modifiers,
         "descriptor": ln.chosen.descriptor,
         "method": ln.method.value,
         "evidence": [s.text for s in ln.fact.evidence],

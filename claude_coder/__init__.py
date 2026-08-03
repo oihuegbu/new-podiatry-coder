@@ -6,7 +6,9 @@ is consulted only for residual ambiguity; positive gates decide billability; and
 an autonomy controller releases only what it can defend. No medical code is
 hardcoded anywhere in this package.
 """
+from . import em
 from .data_access import AuthoritativeSource, CodeSource, MockSource
+from .modifiers import ModifierEngine
 from .models import (
     CandidateCode,
     ClinicalFact,
@@ -23,7 +25,7 @@ from .models import (
 from .pipeline import code_encounter, render
 
 __all__ = [
-    "code_encounter", "render",
+    "code_encounter", "render", "em", "ModifierEngine",
     "AuthoritativeSource", "MockSource", "CodeSource",
     "ClinicalFact", "FactKind", "Disposition", "EvidenceSpan",
     "CandidateCode", "ResolvedLine", "ResolutionMethod",

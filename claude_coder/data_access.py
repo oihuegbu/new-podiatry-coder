@@ -137,24 +137,35 @@ class AuthoritativeSource:
         return Outcome.UNKNOWN
 
     def ncci_indicator(self, col1: str, col2: str, dos: str | None) -> str | None:
+        """PTP modifier indicator ('0' no bypass, '1' bypass-with-modifier, '9'
+        deleted) via the real edit method `check_ncci`. None = no edit for the
+        pair. Robust to the edit's return shape."""
         db = self._reference()
-        fn = getattr(db, "ncci_ptp_indicator", None) or getattr(db, "ncci_edit", None)
-        if fn is None:
-            return None
         try:
-            return fn(col1, col2, dos)          # type: ignore[misc]
+            edit = db.check_ncci(col1, col2)     # type: ignore[attr-defined]
         except Exception:
             return None
+        if not edit:
+            return None
+        if isinstance(edit, dict):
+            for k in ("modifier_indicator", "indicator", "mi", "ptp_modifier"):
+                if k in edit:
+                    return str(edit[k])
+            return "0"                            # an edit exists but no bypass field -> treat as hard
+        return str(edit)
 
     def mue_limit(self, code: str, dos: str | None) -> int | None:
+        """Max medically-unlikely units from the MUE table (a dict keyed by
+        code -> {'mue_value': N})."""
         db = self._reference()
-        fn = getattr(db, "mue_limit", None) or getattr(db, "mue", None)
-        if fn is None:
+        table = getattr(db, "mue", None)
+        if not isinstance(table, dict):
             return None
-        try:
-            return fn(code, dos)                # type: ignore[misc]
-        except Exception:
-            return None
+        rec = table.get(code) or table.get(code.replace(".", ""))
+        if isinstance(rec, dict):
+            val = rec.get("mue_value")
+            return int(val) if val is not None else None
+        return int(rec) if isinstance(rec, int) else None
 
 
 class MockSource:

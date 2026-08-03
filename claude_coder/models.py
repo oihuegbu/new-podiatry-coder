@@ -110,6 +110,7 @@ class ResolvedLine:
     alternatives: list[CandidateCode] = field(default_factory=list)
     method: ResolutionMethod = ResolutionMethod.ABSTAINED
     rationale: str = ""
+    modifiers: list[str] = field(default_factory=list)   # data-driven, e.g. RT/LT/50
     # set when a resolved code is NOT a separately reportable line (bundled /
     # non-covered per data): it is kept for the audit trail but not billed.
     excluded_reason: str | None = None

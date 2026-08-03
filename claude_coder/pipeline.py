@@ -13,7 +13,7 @@ method -> authority) so any decision can be explained.
 """
 from __future__ import annotations
 
-from . import arbitration, certificate, extraction, gates, resolution
+from . import arbitration, certificate, em, extraction, gates, resolution
 from .arbitration import LLMFn
 from .autonomy import decide
 from .data_access import AuthoritativeSource, CodeSource
@@ -27,25 +27,34 @@ def code_encounter(
     source: CodeSource | None = None,
     extract_llm: LLMFn | None = None,
     arbitrate_llm: LLMFn | None = None,
+    modifier_engine: "ModifierEngine | None" = None,
 ) -> CodingResult:
+    from .models import Outcome
+    from .modifiers import ModifierEngine
     source = source or AuthoritativeSource()
+    modifier_engine = modifier_engine or ModifierEngine()
 
+    from .models import FactKind
     facts = extraction.extract_facts(note_text, extract_llm)
 
     lines = []
     for fact in facts:
-        line = resolution.resolve(fact, source)
+        if fact.kind is FactKind.EM:
+            line = em.resolve_em(fact, source)      # MDM-driven leveling
+        else:
+            line = resolution.resolve(fact, source)
         if (not line.resolved) and line.alternatives and fact.billable:
             line = arbitration.arbitrate(line, arbitrate_llm)
-        # Data-driven bundling filter: a resolved code the source declares NOT
-        # separately reportable (bundled / non-covered / MUE 0) is kept for the
-        # audit trail but dropped from the claim. Agnostic — any such code, not
-        # a named one.
         if line.resolved and line.fact.billable:
-            from .models import Outcome
+            # Data-driven bundling filter: a resolved code the source declares
+            # NOT separately reportable (bundled / non-covered / MUE 0) is kept
+            # for the audit trail but dropped from the claim. Agnostic.
             if source.separately_billable(
                     line.chosen.code, line.chosen.system, date_of_service) is Outcome.BLOCKED:
                 line.excluded_reason = "not separately reportable per authoritative data"
+            else:
+                # Data-driven modifiers (laterality / bilateral) from the facts.
+                line.modifiers = modifier_engine.assign(line.fact, line.chosen.descriptor)
         lines.append(line)
 
     result = CodingResult(
@@ -71,7 +80,8 @@ def render(result: CodingResult) -> str:
             out.append(f"  ∅ excluded {ln.chosen.system.upper()} {ln.chosen.code}  "
                        f"«{f.description}» — {ln.excluded_reason}")
         elif ln.resolved:
-            out.append(f"  ✓ {ln.chosen.system.upper()} {ln.chosen.code}  "
+            mods = f"  +{','.join(ln.modifiers)}" if ln.modifiers else ""
+            out.append(f"  ✓ {ln.chosen.system.upper()} {ln.chosen.code}{mods}  "
                        f"[{ln.method.value}]  «{f.description}»")
             out.append(f"      descriptor: {ln.chosen.descriptor[:70]}")
             out.append(f"      why: {ln.rationale}")

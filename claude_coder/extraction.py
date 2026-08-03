@@ -35,6 +35,10 @@ For each fact return an object with:
         area/size, product/material, drug + dose + wasted amount, approach,
         contrast, technical_vs_professional. Omit what the note does not state;
         never infer laterality, count, or site that is not written.
+        For an evaluation_management fact, also give the medical-decision-making
+        elements when documented: "problems", "data", "risk" each as one of
+        straightforward | low | moderate | high, plus "new_patient" (true/false)
+        and "total_time_minutes" if the note records visit time.
   - "disposition": performed_today | ordered | planned | discussed |
         historical | unclear  — ONLY performed_today / dispensed work is billable
   - "negated": true if the note denies/rules out this finding, else false

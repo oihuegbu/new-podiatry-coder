@@ -182,5 +182,55 @@ class BundlingExclusionTest(unittest.TestCase):
         self.assertTrue(any(ln.excluded_reason for ln in r.lines))
 
 
+class ModifierTest(unittest.TestCase):
+    """Modifiers are discovered from data by descriptor and applied from the
+    documented laterality — no modifier literal in the engine."""
+
+    def _fact(self, laterality):
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        return ClinicalFact(kind=FactKind.PROCEDURE, description="excision",
+                            attributes={"laterality": laterality},
+                            evidence=[EvidenceSpan("x")])
+
+    def test_laterality_and_bilateral_from_data(self):
+        from claude_coder.modifiers import ModifierEngine
+        defs = {"MR": {"description": "Right side of the body"},
+                "ML": {"description": "Left side of the body"},
+                "MB": {"description": "Bilateral procedure"}}
+        eng = ModifierEngine(defs=defs)
+        self.assertEqual(eng.assign(self._fact("right"), "Excision, neuroma, each"), ["MR"])
+        self.assertEqual(eng.assign(self._fact("left"), "Excision, neuroma, each"), ["ML"])
+        self.assertEqual(eng.assign(self._fact("bilateral"), "Excision, neuroma"), ["MB"])
+        # descriptor already encodes the side -> no modifier (no double-coding)
+        self.assertEqual(eng.assign(self._fact("right"), "Excision, neuroma, right foot"), [])
+
+
+class EMLevelingTest(unittest.TestCase):
+    def test_mdm_two_of_three(self):
+        from claude_coder.em import mdm_level
+        self.assertEqual(mdm_level("moderate", "moderate", "low"), "moderate")
+        self.assertEqual(mdm_level("high", "low", "low"), "low")
+        self.assertEqual(mdm_level("high", "high", "low"), "high")
+        self.assertIsNone(mdm_level("moderate", "", "low"))   # incomplete -> review
+
+    def test_resolve_em_picks_level_and_setting(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.em import resolve_em
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        low = CandidateCode("EM_LOW", "cpt",
+                            "Office visit, established patient, low level medical decision making", 0.9)
+        mod = CandidateCode("EM_MOD", "cpt",
+                            "Office visit, established patient, moderate level medical decision making", 0.9)
+        src = MockSource(retrieval={("*", "cpt"): [low, mod]})
+        fact = ClinicalFact(kind=FactKind.EM, description="office visit",
+                            attributes={"problems": "moderate", "data": "moderate",
+                                        "risk": "low", "new_patient": False},
+                            evidence=[EvidenceSpan("office visit")], confidence=0.9)
+        line = resolve_em(fact, src)
+        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
+        self.assertEqual(line.chosen.code, "EM_MOD", line.rationale)
+
+
 if __name__ == "__main__":
     unittest.main()
