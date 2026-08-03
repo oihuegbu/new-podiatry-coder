@@ -25,16 +25,22 @@ from .models import (
 # Autonomy floor. The category benchmark for hands-off release is ~95% coding
 # confidence; below it, a human reviews. Tune per cohort/payer, never per code.
 AUTONOMY_CONFIDENCE = 0.95
-# Model tie-breaks are trusted less than a deterministic descriptor entailment.
+# A single model tie-break is trusted less than a deterministic descriptor
+# entailment or a cross-model-confirmed one.
 _ARBITRATED_DISCOUNT = 0.9
 
 
 def _line_confidence(line: ResolvedLine) -> float:
     if not line.resolved:
         return 0.0
-    if line.method is ResolutionMethod.DETERMINISTIC:
+    # DETERMINISTIC = authoritative index / structural descriptor entailment;
+    # VERIFIED = propose-then-verify confirmed by an INDEPENDENT second model. Both
+    # are high-trust groundings of the code itself, so both are gated only by how
+    # well the underlying fact is documented (fact.confidence) — a cross-model-
+    # confirmed line is not penalized to 0 just because an LLM was in the loop.
+    if line.method in (ResolutionMethod.DETERMINISTIC, ResolutionMethod.VERIFIED):
         return line.fact.confidence
-    if line.method is ResolutionMethod.ARBITRATED:
+    if line.method is ResolutionMethod.ARBITRATED:      # single-model tie-break
         return line.fact.confidence * _ARBITRATED_DISCOUNT
     return 0.0
 

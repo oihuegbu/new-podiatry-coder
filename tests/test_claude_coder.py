@@ -989,5 +989,34 @@ class RecommendationsTest(unittest.TestCase):
         self.assertEqual(recs, [])
 
 
+class AutonomyVerifiedTest(unittest.TestCase):
+    """A cross-model-confirmed (VERIFIED) line clears the autonomy floor like a
+    deterministic one — gated only by how well the underlying fact is documented."""
+
+    def _result(self, method, fact_conf):
+        from claude_coder.models import (ClinicalFact, CodingResult, EvidenceSpan,
+                                         FactKind, GateResult, Outcome, ResolvedLine)
+        f = ClinicalFact(kind=FactKind.PROCEDURE, description="a service",
+                         evidence=[EvidenceSpan("a service")], confidence=fact_conf)
+        ln = ResolvedLine(fact=f, chosen=CandidateCode("PROC_X", "cpt", "d", 0.9),
+                          method=method)
+        return CodingResult(encounter_id="e", date_of_service="2026-03-14", lines=[ln],
+                            gates=[GateResult("g", Outcome.PASS)])
+
+    def test_verified_line_clears_floor(self):
+        from claude_coder.autonomy import decide
+        from claude_coder.models import ResolutionMethod, Verdict
+        r = self._result(ResolutionMethod.VERIFIED, fact_conf=0.98)
+        decide(r)
+        self.assertEqual(r.verdict, Verdict.AUTO_READY, r.notes)
+
+    def test_verified_line_low_fact_confidence_reviews(self):
+        from claude_coder.autonomy import decide
+        from claude_coder.models import ResolutionMethod, Verdict
+        r = self._result(ResolutionMethod.VERIFIED, fact_conf=0.80)   # weakly documented
+        decide(r)
+        self.assertEqual(r.verdict, Verdict.REVIEW_REQUIRED)
+
+
 if __name__ == "__main__":
     unittest.main()
