@@ -82,7 +82,11 @@ def code_encounter(
             if source.separately_billable(
                     line.chosen.code, line.chosen.system, date_of_service) is Outcome.BLOCKED:
                 line.excluded_reason = "not separately reportable per authoritative data"
-            else:
+            elif line.chosen.system in ("cpt", "hcpcs"):
+                # Laterality/bilateral modifiers and billing UNITS belong to
+                # procedure/supply codes only. An ICD-10 DIAGNOSIS encodes laterality
+                # IN the code (right vs left vs unspecified) and never takes an RT/LT
+                # modifier or a unit count — so this whole block is skipped for it.
                 # Data-driven per-line modifiers (laterality) + billing units
                 # (descriptor-driven, so a "2-4 lesions" code bills as one unit).
                 line.modifiers = modifier_engine.assign(

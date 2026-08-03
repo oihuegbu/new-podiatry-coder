@@ -989,6 +989,31 @@ class RecommendationsTest(unittest.TestCase):
         self.assertEqual(recs, [])
 
 
+class DiagnosisModifierTest(unittest.TestCase):
+    """An ICD-10 diagnosis encodes laterality IN the code and must never receive an
+    RT/LT procedure modifier — even when the fact documents a side and the chosen
+    code's descriptor is unspecified."""
+
+    def test_icd10_diagnosis_gets_no_laterality_modifier(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.modifiers import ModifierEngine
+        from claude_coder.pipeline import code_encounter
+        dx = CandidateCode("DX_UNSPEC", "icd10", "some condition, unspecified site",
+                           0.9, "retrieval")
+        src = MockSource(records={("DX_UNSPEC", "icd10"): {"active": True}},
+                         retrieval={("*", "icd10"): [dx]})
+        facts = ('{"facts":[{"kind":"diagnosis","description":"some condition",'
+                 '"attributes":{"laterality":"right"},"disposition":"performed_today",'
+                 '"negated":false,"evidence":["some condition, right side"],'
+                 '"confidence":0.98}]}')
+        r = code_encounter("e", "some condition, right side documented", "2026-03-14",
+                           source=src, extract_llm=lambda s, u: facts,
+                           arbitrate_llm=lambda s, u: '{"choice":0,"confidence":0}',
+                           modifier_engine=ModifierEngine(defs={"MR": {"description": "Right side of the body"}}))
+        dxln = next(ln for ln in r.billable_lines if ln.chosen.code == "DX_UNSPEC")
+        self.assertEqual(dxln.modifiers, [])           # never RT/LT on a diagnosis
+
+
 class AutonomyVerifiedTest(unittest.TestCase):
     """A cross-model-confirmed (VERIFIED) line clears the autonomy floor like a
     deterministic one — gated only by how well the underlying fact is documented."""
