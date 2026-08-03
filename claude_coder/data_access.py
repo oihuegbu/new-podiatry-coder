@@ -42,6 +42,8 @@ class CodeSource(Protocol):
 
     def index_codes(self, description: str, system: str) -> set[str]: ...
 
+    def snomed_codes(self, description: str, system: str) -> set[str]: ...
+
     def ncci_indicator(self, col1: str, col2: str, dos: str | None) -> str | None: ...
 
     def mue_limit(self, code: str, dos: str | None) -> int | None: ...
@@ -64,6 +66,29 @@ class AuthoritativeSource:
         self._store = None
         self._gp: dict | None = None
         self._idx = None
+        self._snomed = None
+
+    def snomed_codes(self, description: str, system: str) -> set[str]:
+        """Long-tail authoritative term->ICD-10-CM via the SNOMED CT -> ICD-10-CM
+        map (NLM/UMLS): the comprehensive clinical-synonym/eponym layer that
+        resolves phrasings the ICD Alphabetic Index does not carry (e.g. 'Morton's
+        neuroma'). Fail-safe: empty when the map file is absent — it needs a (free)
+        UMLS license to build; see tools/build_snomed_icd10_map.py."""
+        if system != "icd10":
+            return set()
+        if self._snomed is None:
+            try:
+                import json
+                from app.core.config import DATA_DIR
+                with open(DATA_DIR / "codes" / "snomed_icd10_map.json") as fh:
+                    self._snomed = json.load(fh).get("terms", {})
+            except Exception:
+                self._snomed = {}
+        if not self._snomed:
+            return set()
+        from .terminology import _norm
+        cands = self._snomed.get(_norm(description)) or []
+        return {c for c in cands if self.lookup(c, "icd10")}
 
     def index_codes(self, description: str, system: str) -> set[str]:
         """Authoritative ICD-10-CM codes for a clinician term, via the Alphabetic
@@ -76,7 +101,11 @@ class AuthoritativeSource:
                 self._idx = TerminologyIndex.load()
             except Exception:
                 self._idx = False
-        return self._idx.candidates(description) if self._idx else set()
+        if not self._idx:
+            return set()
+        # Validity filter: keep only codes that exist in the authoritative ICD-10-CM
+        # record — drops any noise/mis-parse in the Index (e.g. non-ICD entries).
+        return {c for c in self._idx.candidates(description) if self.lookup(c, "icd10")}
 
     def _pfs(self, code: str) -> dict:
         """The CMS PFS indicator record for a code ({'global':…, 'bilat':…})."""
@@ -224,7 +253,8 @@ class MockSource:
                  nonbillable: set[str] | None = None,
                  gp: dict[str, str] | None = None,
                  bilat: dict[str, str] | None = None,
-                 index: dict[str, set] | None = None) -> None:
+                 index: dict[str, set] | None = None,
+                 snomed: dict[str, set] | None = None) -> None:
         self._records = records or {}
         self._retrieval = retrieval or {}
         self._ncci = ncci or {}
@@ -233,6 +263,7 @@ class MockSource:
         self._gp = gp or {}
         self._bilat = bilat or {}
         self._index = index or {}
+        self._snomed_map = snomed or {}
 
     def global_period(self, code):
         return self._gp.get(code)
@@ -242,6 +273,9 @@ class MockSource:
 
     def index_codes(self, description, system):
         return set(self._index.get(description, set())) if system == "icd10" else set()
+
+    def snomed_codes(self, description, system):
+        return set(self._snomed_map.get(description, set())) if system == "icd10" else set()
 
     def retrieve(self, description, system, top_k=20):
         hits = (self._retrieval.get((description, system))

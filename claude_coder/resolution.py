@@ -95,9 +95,25 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -
     # reached when the Index has no entry for the phrasing.
     if fact.kind is FactKind.DIAGNOSIS:
         idx = source.index_codes(fact.description, fact.system)
-        if idx:
-            pool = [_candidate_from_code(c, source) for c in idx]
-            return _decide(fact, pool, authority="ICD-10-CM Alphabetic Index")
+        # Trust the Index only for an UNAMBIGUOUS single-code mapping (the clean
+        # authoritative wins, e.g. onychomycosis -> B35.1). A multi-code result is
+        # a laterality family OR Index noise; either way defer to the embedding +
+        # structured path, which disambiguates by documented evidence. This makes
+        # the deterministic Index path safe against parse noise.
+        if len(idx) == 1:
+            pool = [_candidate_from_code(next(iter(idx)), source)]
+            line = _decide(fact, pool, authority="ICD-10-CM Alphabetic Index")
+            if line.resolved:
+                return line
+        # SECOND authoritative layer: the SNOMED CT -> ICD-10-CM map (long-tail
+        # eponyms/synonyms the ICD Index lacks, e.g. "Morton's neuroma"). Same
+        # single-code trust rule; no-op until the map is ingested (needs UMLS).
+        snomed = source.snomed_codes(fact.description, fact.system)
+        if len(snomed) == 1:
+            pool = [_candidate_from_code(next(iter(snomed)), source)]
+            line = _decide(fact, pool, authority="SNOMED CT -> ICD-10-CM map")
+            if line.resolved:
+                return line
 
     # Multi-query RECALL: search the structured query AND the verbatim evidence
     # (which often carries the eponym / clinician term the descriptor lacks),

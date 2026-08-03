@@ -22,6 +22,17 @@ def _norm(s: str) -> str:
                   str(s).lower().replace("'", ""))).strip()
 
 
+def _sing(tok: str) -> str:
+    """Light singularization so plural note vocabulary matches Index terms
+    ('toenails'->'toenail', 'lesions'->'lesion'). Conservative: only trims a
+    trailing 's' on longer words."""
+    if len(tok) > 4 and tok.endswith("es") and tok[-3] in "sxzo":
+        return tok[:-2]
+    if len(tok) > 4 and tok.endswith("s") and not tok.endswith("ss"):
+        return tok[:-1]
+    return tok
+
+
 def _dot(code: str) -> str:
     """ICD-10-CM display form: 3-char category + '.' + remainder (undotted->dotted)."""
     c = str(code).upper().replace(".", "")
@@ -36,7 +47,8 @@ class TerminologyIndex:
 
     def __init__(self, terms_by_code: dict[str, list[str]]):
         self._exact: dict[str, set[str]] = {}
-        self._byset: dict[frozenset[str], set[str]] = {}
+        self._despaced: dict[str, set[str]] = {}   # 'hammer toe' <-> 'hammertoe'
+        self._byset: dict[frozenset[str], set[str]] = {}   # order + plural independent
         for code, terms in terms_by_code.items():
             dotted = _dot(code)
             for term in terms or []:
@@ -44,20 +56,25 @@ class TerminologyIndex:
                 if not n:
                     continue
                 self._exact.setdefault(n, set()).add(dotted)
-                toks = frozenset(t for t in n.split() if len(t) > 2)
+                self._despaced.setdefault(n.replace(" ", ""), set()).add(dotted)
+                toks = frozenset(_sing(t) for t in n.split() if len(t) > 2)
                 if toks:
                     self._byset.setdefault(toks, set()).add(dotted)
 
     def candidates(self, description: str) -> set[str]:
-        """Authoritative ICD-10-CM codes for a clinician term (dotted). Empty if
-        the Index does not carry the phrasing (→ caller falls back to retrieval)."""
+        """Authoritative ICD-10-CM codes for a clinician term (dotted). Matches in
+        order: exact normalized, compound-word (despaced), then order/plural-
+        independent token set. Empty if the Index does not carry the phrasing
+        (→ caller falls back to retrieval)."""
         n = _norm(description)
         if not n:
             return set()
-        exact = self._exact.get(n)
-        if exact:
-            return set(exact)
-        toks = frozenset(t for t in n.split() if len(t) > 2)
+        if n in self._exact:
+            return set(self._exact[n])
+        despaced = n.replace(" ", "")
+        if despaced in self._despaced:
+            return set(self._despaced[despaced])
+        toks = frozenset(_sing(t) for t in n.split() if len(t) > 2)
         return set(self._byset.get(toks, set())) if toks else set()
 
     @classmethod

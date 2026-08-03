@@ -369,6 +369,23 @@ class TerminologyIndexTest(unittest.TestCase):
         self.assertEqual(line.chosen.code, "B35.1")
         self.assertIn("Alphabetic Index", line.rationale)
 
+    def test_snomed_layer_resolves_when_index_misses(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        from claude_coder.resolution import resolve
+        # Index has no entry; the SNOMED map resolves the eponym authoritatively.
+        src = MockSource(records={("G57.60", "icd10"):
+                                  {"long_description": "Lesion of plantar nerve, "
+                                   "unspecified lower limb", "active": True}},
+                         index={}, snomed={"Morton's neuroma": {"G57.60"}})
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="Morton's neuroma",
+                            evidence=[EvidenceSpan("Morton's neuroma")], confidence=0.95)
+        line = resolve(fact, src)
+        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
+        self.assertEqual(line.chosen.code, "G57.60")
+        self.assertIn("SNOMED", line.rationale)
+
 
 if __name__ == "__main__":
     unittest.main()
