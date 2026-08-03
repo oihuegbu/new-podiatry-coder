@@ -40,6 +40,8 @@ class CodeSource(Protocol):
 
     def bilat_indicator(self, code: str) -> str | None: ...
 
+    def index_codes(self, description: str, system: str) -> set[str]: ...
+
     def ncci_indicator(self, col1: str, col2: str, dos: str | None) -> str | None: ...
 
     def mue_limit(self, code: str, dos: str | None) -> int | None: ...
@@ -61,6 +63,20 @@ class AuthoritativeSource:
         self._db = None
         self._store = None
         self._gp: dict | None = None
+        self._idx = None
+
+    def index_codes(self, description: str, system: str) -> set[str]:
+        """Authoritative ICD-10-CM codes for a clinician term, via the Alphabetic
+        Index. ICD-10-CM only; empty set otherwise or when the Index is absent."""
+        if system != "icd10":
+            return set()
+        if self._idx is None:
+            try:
+                from .terminology import TerminologyIndex
+                self._idx = TerminologyIndex.load()
+            except Exception:
+                self._idx = False
+        return self._idx.candidates(description) if self._idx else set()
 
     def _pfs(self, code: str) -> dict:
         """The CMS PFS indicator record for a code ({'global':…, 'bilat':…})."""
@@ -207,7 +223,8 @@ class MockSource:
                  mue: dict[str, int] | None = None,
                  nonbillable: set[str] | None = None,
                  gp: dict[str, str] | None = None,
-                 bilat: dict[str, str] | None = None) -> None:
+                 bilat: dict[str, str] | None = None,
+                 index: dict[str, set] | None = None) -> None:
         self._records = records or {}
         self._retrieval = retrieval or {}
         self._ncci = ncci or {}
@@ -215,12 +232,16 @@ class MockSource:
         self._nonbillable = nonbillable or set()
         self._gp = gp or {}
         self._bilat = bilat or {}
+        self._index = index or {}
 
     def global_period(self, code):
         return self._gp.get(code)
 
     def bilat_indicator(self, code):
         return self._bilat.get(code)
+
+    def index_codes(self, description, system):
+        return set(self._index.get(description, set())) if system == "icd10" else set()
 
     def retrieve(self, description, system, top_k=20):
         hits = (self._retrieval.get((description, system))

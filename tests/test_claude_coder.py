@@ -341,5 +341,34 @@ class EMSettingTest(unittest.TestCase):
         self.assertEqual(chosen.code, "EMOFF")   # office encounter -> office code, not ED
 
 
+class TerminologyIndexTest(unittest.TestCase):
+    """Deterministic ICD-10-CM resolution via the authoritative Alphabetic Index
+    — the permanent fix for the terse-descriptor / eponym gap."""
+
+    def test_index_term_to_code(self):
+        from claude_coder.terminology import TerminologyIndex
+        idx = TerminologyIndex({"B351": ["tinea unguium", "onychomycosis"],
+                                "G5760": ["neuroma mortons", "mortons metatarsalgia"]})
+        self.assertEqual(idx.candidates("Onychomycosis"), {"B35.1"})      # exact, dotted
+        self.assertEqual(idx.candidates("Morton's neuroma"), {"G57.60"})  # inverted, token-set
+        self.assertEqual(idx.candidates("no such term here"), set())      # -> caller falls back
+
+    def test_diagnosis_resolves_via_index_first(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        from claude_coder.resolution import resolve
+        # Index maps the clinician term; the record supplies the terse descriptor.
+        src = MockSource(records={("B35.1", "icd10"):
+                                  {"long_description": "Tinea unguium", "active": True}},
+                         index={"onychomycosis": {"B35.1"}})
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="onychomycosis",
+                            evidence=[EvidenceSpan("onychomycosis")], confidence=0.99)
+        line = resolve(fact, src)
+        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
+        self.assertEqual(line.chosen.code, "B35.1")
+        self.assertIn("Alphabetic Index", line.rationale)
+
+
 if __name__ == "__main__":
     unittest.main()

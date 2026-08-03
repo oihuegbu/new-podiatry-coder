@@ -27,7 +27,7 @@ import re
 from dataclasses import dataclass, field
 
 from .data_access import CodeSource
-from .models import CandidateCode, ClinicalFact, ResolutionMethod, ResolvedLine
+from .models import CandidateCode, ClinicalFact, FactKind, ResolutionMethod, ResolvedLine
 from .ontology import DescriptorFeatures, measurement_of, parse_descriptor
 
 _LATERALITY = {"left", "right", "bilateral"}
@@ -88,10 +88,21 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -
             fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
             rationale=f"not performed today (disposition={fact.disposition.value}) — not billed")
 
+    # AUTHORITATIVE FIRST: for a diagnosis, resolve through the ICD-10-CM
+    # Alphabetic Index (clinician term -> code) before any embedding. This is the
+    # permanent fix for the eponym / terse-descriptor gap — deterministic and
+    # provenance-clean wherever the Index carries the term. The embedding is only
+    # reached when the Index has no entry for the phrasing.
+    if fact.kind is FactKind.DIAGNOSIS:
+        idx = source.index_codes(fact.description, fact.system)
+        if idx:
+            pool = [_candidate_from_code(c, source) for c in idx]
+            return _decide(fact, pool, authority="ICD-10-CM Alphabetic Index")
+
     # Multi-query RECALL: search the structured query AND the verbatim evidence
     # (which often carries the eponym / clinician term the descriptor lacks),
-    # then union the pools keeping each code's best relevance. Agnostic recall
-    # boost; the eventual fix for eponyms is index enrichment at the data layer.
+    # then union the pools keeping each code's best relevance. Fallback for
+    # phrasings the authoritative Index does not carry.
     query = fact.description + " " + " ".join(
         str(v) for k, v in fact.attributes.items() if str(k).lower() != "count")
     queries = [query.strip()] + [s.text for s in fact.evidence[:1]]
@@ -107,20 +118,32 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -
         return ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
                             rationale="no candidate retrieved for the concept")
 
+    return _decide(fact, pool)
+
+
+def _candidate_from_code(code: str, source: CodeSource) -> CandidateCode:
+    """Wrap an authoritative-Index code as a top-relevance candidate, descriptor
+    from the authoritative record."""
+    rec = source.lookup(code, "icd10") or {}
+    desc = (rec.get("long_description") or rec.get("description")
+            or rec.get("short_description") or "")
+    return CandidateCode(code=code, system="icd10", descriptor=str(desc), score=1.0,
+                         source="icd10-index",
+                         authority={"source": "ICD-10-CM Alphabetic Index"})
+
+
+def _decide(fact: ClinicalFact, pool: list[CandidateCode],
+            authority: str | None = None) -> ResolvedLine:
+    """Structured decision over a candidate pool: eliminate contradictions,
+    rank by relevance (recall) then specificity, pick deterministically when the
+    leader is clear, else hand the shortlist to arbitration."""
     survivors = [m for m in (_evaluate(fact, c) for c in pool) if m is not None]
     if not survivors:
         return ResolvedLine(
             fact=fact, chosen=None, alternatives=pool[:5],
             method=ResolutionMethod.ABSTAINED,
-            rationale="every retrieved code contradicts a documented attribute")
+            rationale="every candidate contradicts a documented attribute")
 
-    # Rank by concept relevance (recall) FIRST; specificity only breaks near-ties
-    # among comparably-relevant codes — it must never promote a lower-recall code
-    # over a more-relevant one (doing so once picked a laterality-matching but
-    # semantically-wrong burn code for a neuroma). A deterministic pick also
-    # requires the leader to clear the relevance floor; anything softer goes to
-    # arbitration, which judges the descriptor against the fact and escalates on
-    # a concept mismatch.
     survivors.sort(key=lambda m: (m.recall, m.specificity), reverse=True)
     top = survivors[0]
     if top.recall < _RELEVANCE_FLOOR:
@@ -133,14 +156,14 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -
         deterministic = (top.recall - nxt.recall >= _SCORE_MARGIN
                          or (close and top.specificity > nxt.specificity))
 
+    tag = f" ({authority})" if authority else ""
     if deterministic:
         return ResolvedLine(
             fact=fact, chosen=top.candidate,
             alternatives=[m.candidate for m in survivors[1:4]],
             method=ResolutionMethod.DETERMINISTIC,
-            rationale="; ".join(top.rationale))
-
+            rationale=f"{'; '.join(top.rationale)}{tag}")
     return ResolvedLine(
         fact=fact, chosen=None, alternatives=[m.candidate for m in survivors[:5]],
         method=ResolutionMethod.ABSTAINED,
-        rationale=f"{len(survivors)} candidates comparable on structure & recall — arbitration")
+        rationale=f"{len(survivors)} candidates comparable — arbitration{tag}")
