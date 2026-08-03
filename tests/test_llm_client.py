@@ -1,7 +1,18 @@
 from types import SimpleNamespace
 from unittest import mock
 
-from app.core.llm_client import _openai_chat_completion
+from app.core.llm_client import (
+    _openai_chat_completion,
+    anthropic_batch_enabled,
+    anthropic_batch_mode,
+)
+
+
+def test_anthropic_batch_override_is_scoped_and_restored():
+    configured = anthropic_batch_enabled()
+    with anthropic_batch_mode(not configured):
+        assert anthropic_batch_enabled() is not configured
+    assert anthropic_batch_enabled() is configured
 
 
 def test_openai_uses_current_completion_budget_parameter():

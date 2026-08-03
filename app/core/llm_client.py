@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import contextvars
 import json
 import random
 import threading
 import time
 
 import uuid
+from contextlib import contextmanager
 
 from openai import OpenAI
 from app.core.config import (
@@ -37,6 +39,29 @@ logger = get_logger(__name__)
 # state entirely, so concurrency can never deadlock on it. Built once per
 # thread (ThreadPoolExecutor reuses a fixed worker set), not per call.
 _tls = threading.local()
+_anthropic_batch_override: contextvars.ContextVar[bool | None] = \
+    contextvars.ContextVar("anthropic_batch_override", default=None)
+
+
+@contextmanager
+def anthropic_batch_mode(enabled: bool):
+    """Override Anthropic transport for one logical operation.
+
+    Coding batches can trade latency for the provider's batch discount, while
+    single-note arbitration is latency-critical. A context-local override
+    avoids mutating process-global configuration when consistency workers or
+    audits run concurrently.
+    """
+    token = _anthropic_batch_override.set(bool(enabled))
+    try:
+        yield
+    finally:
+        _anthropic_batch_override.reset(token)
+
+
+def anthropic_batch_enabled() -> bool:
+    override = _anthropic_batch_override.get()
+    return ANTHROPIC_USE_BATCH if override is None else override
 
 
 # Hard per-request wall clock. The SDKs' own retry layer is disabled
@@ -374,7 +399,7 @@ def _claude_chat_completion(
         }],
     }
 
-    if ANTHROPIC_USE_BATCH:
+    if anthropic_batch_enabled():
         response = _claude_message_via_batch(client, body)
     else:
         # Streaming supports long-running interactive requests (>10 min)

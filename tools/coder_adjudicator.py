@@ -75,6 +75,12 @@ ALT_MODEL = os.getenv("CODER_ADJUDICATOR_ALT_MODEL", "").strip()
 # thousands of reasoning-model calls. Holdouts beyond the cap stay
 # deferred and route to human review exactly as before.
 ADJUDICATION_LIMIT = int(os.getenv("CODER_ADJUDICATION_LIMIT", "25"))
+# A disagreement on one completed claim is on the critical path. Provider
+# batch scheduling can legally take hours, so default to the synchronous
+# streaming transport here while retaining an explicit cost-optimization
+# switch for offline bulk adjudication.
+ADJUDICATION_USE_BATCH = os.getenv(
+    "CODER_ADJUDICATION_USE_BATCH", "0") == "1"
 
 _BILLING_ARRAYS = ("icd_codes", "cpt_codes", "hcpcs_codes")
 
@@ -323,7 +329,7 @@ def _quotable_sources() -> list[str]:
 def _adjudicate_once(case: dict, pass_idx: int = 0,
                      system_suffix: str = "") -> dict:
     from app.core import config
-    from app.core.llm_client import chat_completion
+    from app.core.llm_client import anthropic_batch_mode, chat_completion
     from app.core.model_profiles import active_profile
     system = _ADJUDICATOR_PROMPT + system_suffix
     user = (f"CASE FILE:\n{json.dumps(case, indent=1, default=str)}\n\n"
@@ -351,10 +357,11 @@ def _adjudicate_once(case: dict, pass_idx: int = 0,
     # records that pass as incomplete and keeps the claim at REVIEW; otherwise
     # persisted model-independence metadata would no longer describe who
     # actually influenced the decision.
-    text, usage = chat_completion(
-        system_prompt=system, user_prompt=user,
-        model=model, temperature=temperature, max_tokens=8192,
-        json_mode=True, effort="high")
+    with anthropic_batch_mode(ADJUDICATION_USE_BATCH):
+        text, usage = chat_completion(
+            system_prompt=system, user_prompt=user,
+            model=model, temperature=temperature, max_tokens=8192,
+            json_mode=True, effort="high")
     verdict = json.loads(text)
     actual_model = model or profile.model
     verdict["_model"] = actual_model

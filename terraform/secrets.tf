@@ -31,8 +31,10 @@ resource "aws_secretsmanager_secret_version" "app_env" {
     PDF_TEXT_LAYER_MIN_TOKENS     = tostring(var.pdf_text_layer_min_tokens)
     PDF_TEXT_LAYER_MIN_RECALL     = tostring(var.pdf_text_layer_min_recall)
     CODER_ADJUDICATOR_MODEL       = var.coder_adjudicator_model
+    CODER_ADJUDICATION_USE_BATCH  = "0"
     CLINICAL_AUDITOR_MODEL        = var.clinical_auditor_model
     CLINICAL_AUDIT_PASSES         = "2"
+    CLINICAL_AUDIT_USE_BATCH      = "0"
     CODER_ADJUDICATION_PASSES     = "2"
     LOG_LEVEL                     = var.log_level
     QDRANT_URL                    = "http://qdrant:6333"

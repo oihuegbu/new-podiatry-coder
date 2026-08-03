@@ -161,7 +161,10 @@ Every note starts with **two independent providers** in adaptive mode
       abstentions and split verdicts fall through to the human queue —
       the correct outcome, not a failure. `CODER_ADJUDICATION=0` turns
       the stage off; `CODER_ADJUDICATION_PASSES` and
-      `CODER_ADJUDICATOR_MODEL` tune it.
+      `CODER_ADJUDICATOR_MODEL` tune it. Adjudication defaults to synchronous
+      streaming (`CODER_ADJUDICATION_USE_BATCH=0`) so a single claim does not
+      wait in the provider's hours-long batch queue; offline bulk finalization
+      may explicitly opt back into batch pricing.
    6. *Finalization* — only notes still split after that automated shot
       (rules, templates, reconciliation, **and** adjudication) are
       routed to human review. The unanimity loop
@@ -722,14 +725,18 @@ notes): **~$41/note** (~$35 API across ~5 full-generation batch equivalents,
 
 Cost-reduction levers — two of three now implemented:
 
-- **Anthropic Batch API (implemented, default on)** — every Claude call is
+- **Anthropic Batch API (implemented, default on for coding)** — Claude coding calls are
   submitted as a single-request batch (`ANTHROPIC_USE_BATCH=1`), pricing all
   tokens at 50% of the interactive rate with the identical model and output
   distribution. The pipeline architecture is unchanged; each call blocks
   polling its batch until the result lands (typically minutes; a
   configurable `ANTHROPIC_BATCH_MAX_WAIT_S` ceiling, default 2 h, converts a
   stuck batch into a retryable timeout). Set `ANTHROPIC_USE_BATCH=0` for
-  latency-sensitive interactive runs.
+  latency-sensitive interactive runs. The single-claim adjudicator overrides
+  this to synchronous streaming by default; set
+  `CODER_ADJUDICATION_USE_BATCH=1` only for offline bulk arbitration.
+  The final clinical audit likewise defaults to synchronous streaming
+  (`CLINICAL_AUDIT_USE_BATCH=0`) because it is on the claim-release path.
 - **Prompt caching (implemented)** — cache breakpoints on both the system
   prompt (static per pass, shared across every note in a batch) and the user
   turn (note + RAG context, identical across the 3 consistency runs of one

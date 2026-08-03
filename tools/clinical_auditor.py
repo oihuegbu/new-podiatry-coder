@@ -88,6 +88,7 @@ DEFAULT_RESULTS = ROOT / "output" / "results"
 
 AUDITOR_MODEL = os.getenv("CLINICAL_AUDITOR_MODEL", "claude-fable-5")
 AUDIT_PASSES = max(1, int(os.getenv("CLINICAL_AUDIT_PASSES", "1")))
+AUDIT_USE_BATCH = os.getenv("CLINICAL_AUDIT_USE_BATCH", "0") == "1"
 
 _AUDITOR_PROMPT = """\
 You are an expert certified professional coder (CPC) performing the final
@@ -524,7 +525,7 @@ def _vocabulary_supplement() -> str:
 
 def _audit_once(case: dict, pass_idx: int = 0) -> dict:
     from app.core.config import LLM_PROVIDER
-    from app.core.llm_client import chat_completion
+    from app.core.llm_client import anthropic_batch_mode, chat_completion
     user = (f"CASE FILE:\n{json.dumps(case, indent=1, default=str)}\n\n"
             f"Audit every correction listed in corrections_under_audit, "
             f"then read full_record end to end against the doctor's note "
@@ -545,10 +546,11 @@ def _audit_once(case: dict, pass_idx: int = 0) -> dict:
     # Model identity is a release control. A failed audit opinion cannot be
     # silently replaced by the pipeline model (which may have authored the
     # claim); the caller treats the failed pass as incomplete and holds it.
-    text, usage = chat_completion(
-        system_prompt=system, user_prompt=user,
-        model=model, temperature=temperature, max_tokens=8192,
-        json_mode=True, effort="xhigh")
+    with anthropic_batch_mode(AUDIT_USE_BATCH):
+        text, usage = chat_completion(
+            system_prompt=system, user_prompt=user,
+            model=model, temperature=temperature, max_tokens=8192,
+            json_mode=True, effort="xhigh")
     verdict = json.loads(text)
     verdict["_model"] = model or "pipeline-default"
     from app.core.model_profiles import active_profile
@@ -601,17 +603,18 @@ def _exploratory_scan(case: dict) -> str:
     an enhancement to the scored review, not a gate; if it errors the audit
     proceeds without preliminary notes (the scored passes are unchanged)."""
     from app.core.config import LLM_PROVIDER
-    from app.core.llm_client import chat_completion
+    from app.core.llm_client import anthropic_batch_mode, chat_completion
     model = AUDITOR_MODEL if LLM_PROVIDER == "claude" else None
     user = (f"CASE FILE:\n{json.dumps(case, indent=1, default=str)}\n\n"
             f"Give this finished claim your open-ended first read. What looks "
             f"wrong, risky, or incomplete against the note and the "
             f"authoritative data?")
     try:
-        text, _ = chat_completion(
-            system_prompt=_EXPLORATORY_PROMPT, user_prompt=user,
-            model=model, temperature=0.5, max_tokens=4096,
-            json_mode=False, effort="xhigh")
+        with anthropic_batch_mode(AUDIT_USE_BATCH):
+            text, _ = chat_completion(
+                system_prompt=_EXPLORATORY_PROMPT, user_prompt=user,
+                model=model, temperature=0.5, max_tokens=4096,
+                json_mode=False, effort="xhigh")
         return (text or "").strip()
     except Exception as exc:  # fail-open: enhancement, not a gate
         logger.warning(f"  exploratory audit pass failed ({exc}) — "
