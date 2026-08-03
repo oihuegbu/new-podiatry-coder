@@ -63,7 +63,7 @@ def walk(node, path, out):
 
 
 def navigate(ref, main_terms):
-    """Follow a full 'see' reference path ('Deformity, toe, hammer toe') into the
+    """Follow a full 'see' reference path ('Entity, part, qualifier') into the
     subtree, matching each comma part to a nested term title. Returns the precise
     target node — NOT the whole main term — so an alias lands only on the referenced
     codes. Conservative: if any step can't be matched, returns None (no alias)."""
