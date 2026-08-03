@@ -101,19 +101,21 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -
         # structured path, which disambiguates by documented evidence. This makes
         # the deterministic Index path safe against parse noise.
         if len(idx) == 1:
-            pool = [_candidate_from_code(next(iter(idx)), source)]
-            line = _decide(fact, pool, authority="ICD-10-CM Alphabetic Index")
-            if line.resolved:
-                return line
+            pool = _authoritative_pool(next(iter(idx)), source)
+            if pool:
+                line = _decide(fact, pool, authority="ICD-10-CM Alphabetic Index")
+                if line.resolved:
+                    return line
         # SECOND authoritative layer: the SNOMED CT -> ICD-10-CM map (long-tail
         # eponyms/synonyms the ICD Index lacks, e.g. "Morton's neuroma"). Same
         # single-code trust rule; no-op until the map is ingested (needs UMLS).
         snomed = source.snomed_codes(fact.description, fact.system)
         if len(snomed) == 1:
-            pool = [_candidate_from_code(next(iter(snomed)), source)]
-            line = _decide(fact, pool, authority="SNOMED CT -> ICD-10-CM map")
-            if line.resolved:
-                return line
+            pool = _authoritative_pool(next(iter(snomed)), source)
+            if pool:
+                line = _decide(fact, pool, authority="SNOMED CT -> ICD-10-CM map")
+                if line.resolved:
+                    return line
 
     # Multi-query RECALL: search the structured query AND the verbatim evidence
     # (which often carries the eponym / clinician term the descriptor lacks),
@@ -146,6 +148,13 @@ def _candidate_from_code(code: str, source: CodeSource) -> CandidateCode:
     return CandidateCode(code=code, system="icd10", descriptor=str(desc), score=1.0,
                          source="icd10-index",
                          authority={"source": "ICD-10-CM Alphabetic Index"})
+
+
+def _authoritative_pool(code: str, source: CodeSource) -> list[CandidateCode]:
+    """Expand an authoritative code to its billable LEAVES — a leaf stays itself,
+    a category (e.g. M20.4-) becomes its children (M20.40/41/42) — so the
+    structured decision can pick the specific code by documented laterality."""
+    return [_candidate_from_code(c, source) for c in source.leaf_codes(code, "icd10")]
 
 
 def _decide(fact: ClinicalFact, pool: list[CandidateCode],

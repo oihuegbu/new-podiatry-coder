@@ -44,6 +44,8 @@ class CodeSource(Protocol):
 
     def snomed_codes(self, description: str, system: str) -> set[str]: ...
 
+    def leaf_codes(self, stem: str, system: str) -> set[str]: ...
+
     def ncci_indicator(self, col1: str, col2: str, dos: str | None) -> str | None: ...
 
     def mue_limit(self, code: str, dos: str | None) -> int | None: ...
@@ -103,9 +105,25 @@ class AuthoritativeSource:
                 self._idx = False
         if not self._idx:
             return set()
-        # Validity filter: keep only codes that exist in the authoritative ICD-10-CM
-        # record — drops any noise/mis-parse in the Index (e.g. non-ICD entries).
-        return {c for c in self._idx.candidates(description) if self.lookup(c, "icd10")}
+        # Keep candidates that resolve to real billable code(s) — a valid leaf OR a
+        # category with billable children (expanded downstream). Drops Index noise.
+        return {c for c in self._idx.candidates(description) if self.leaf_codes(c, "icd10")}
+
+    def leaf_codes(self, stem: str, system: str) -> set[str]:
+        """The billable code(s) at/under a code stem: the code itself if it is a
+        billable leaf, otherwise its more-specific billable children — so a
+        category the Index returns (e.g. M20.4-) becomes its leaves (M20.40/41/42),
+        which the resolver then disambiguates by documented laterality."""
+        table = getattr(self._reference(), system, {})
+        undot = str(stem).replace(".", "").upper()
+        under = {str(k).replace(".", "").upper() for k in table
+                 if str(k).replace(".", "").upper().startswith(undot)}
+        if not under:
+            return set()
+        from .terminology import _dot
+        if undot in under:                       # the stem is itself a billable leaf
+            return {_dot(undot)}
+        return {_dot(u) for u in under}          # category -> its billable children
 
     def _pfs(self, code: str) -> dict:
         """The CMS PFS indicator record for a code ({'global':…, 'bilat':…})."""
@@ -276,6 +294,15 @@ class MockSource:
 
     def snomed_codes(self, description, system):
         return set(self._snomed_map.get(description, set())) if system == "icd10" else set()
+
+    def leaf_codes(self, stem, system):
+        undot = str(stem).replace(".", "").upper()
+        under = {c for (c, s) in self._records
+                 if s == system and c.replace(".", "").upper().startswith(undot)}
+        if not under:
+            return set()
+        exact = {c for c in under if c.replace(".", "").upper() == undot}
+        return exact or under
 
     def retrieve(self, description, system, top_k=20):
         hits = (self._retrieval.get((description, system))

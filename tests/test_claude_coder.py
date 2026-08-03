@@ -386,6 +386,23 @@ class TerminologyIndexTest(unittest.TestCase):
         self.assertEqual(line.chosen.code, "G57.60")
         self.assertIn("SNOMED", line.rationale)
 
+    def test_category_expands_to_leaf_by_laterality(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        from claude_coder.resolution import resolve
+        # Index returns the category M20.4; documented laterality selects the leaf.
+        recs = {("M20.40", "icd10"): {"long_description": "Hammer toe, unspecified foot", "active": True},
+                ("M20.41", "icd10"): {"long_description": "Hammer toe, right foot", "active": True},
+                ("M20.42", "icd10"): {"long_description": "Hammer toe, left foot", "active": True}}
+        src = MockSource(records=recs, index={"hammertoe": {"M20.4"}})
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="hammertoe",
+                            attributes={"laterality": "right"},
+                            evidence=[EvidenceSpan("hammertoe")], confidence=0.99)
+        line = resolve(fact, src)
+        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
+        self.assertEqual(line.chosen.code, "M20.41")   # right-foot leaf, not the category
+
 
 if __name__ == "__main__":
     unittest.main()
