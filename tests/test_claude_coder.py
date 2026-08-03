@@ -787,23 +787,14 @@ class ProposeVerifyTest(unittest.TestCase):
         self.assertEqual([c.code for c in cands], ["CODEALPHA"])   # nonexistent code dropped
         self.assertEqual(cands[0].descriptor, self.ALPHA)          # descriptor from the record
 
-    def _corroborator(self, confirm):
+    def _corroborator(self, confirm, missing=False):
         import json
 
         def stub(system, user):
-            return json.dumps({"entailed": bool(confirm), "reason": "second opinion"})
+            return json.dumps({"entailed": bool(confirm),
+                               "missing_element": bool(missing),
+                               "reason": "second opinion"})
         return stub
-
-    def test_corroboration_rejection_escalates(self):
-        # primary model selects a code, the INDEPENDENT second model disagrees ->
-        # the line escalates (nothing bills on one model's say-so).
-        from claude_coder.models import ResolutionMethod
-        from claude_coder.resolution import resolve
-        line = resolve(self._fact(), self._src(), llm=self._llm(),
-                       corroborate=self._corroborator(confirm=False))
-        self.assertFalse(line.resolved)
-        self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
-        self.assertIn("second-model", line.rationale)
 
     def test_corroboration_agreement_accepts(self):
         from claude_coder.models import ResolutionMethod
@@ -813,6 +804,54 @@ class ProposeVerifyTest(unittest.TestCase):
         self.assertEqual(line.method, ResolutionMethod.VERIFIED)
         self.assertEqual(line.chosen.code, "CODEALPHA")
         self.assertIn("independently confirmed", line.rationale)
+
+    def test_missing_element_escalates_as_provider_query(self):
+        # second model says the code fits but the note omits a required element ->
+        # escalate as a provider query, do NOT down-code to something that omits it.
+        from claude_coder.models import ResolutionMethod
+        from claude_coder.resolution import resolve
+        line = resolve(self._fact(), self._src(), llm=self._llm(),
+                       corroborate=self._corroborator(confirm=False, missing=True))
+        self.assertFalse(line.resolved)
+        self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
+        self.assertIn("PROVIDER QUERY", line.rationale)
+
+    def test_wrong_code_reselects_to_confirmed_alternative(self):
+        # second model rejects the first pick as a WRONG code (not a doc gap) -> the
+        # loop re-selects among the remaining candidates and accepts the one both
+        # models agree on.
+        import json
+        import re
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        from claude_coder.resolution import resolve
+        d1, d2 = "act alpha primary form", "act alpha secondary form"
+        src = MockSource(
+            records={("A1", "cpt"): {"long_description": d1, "active": True},
+                     ("A2", "cpt"): {"long_description": d2, "active": True}},
+            retrieval={("*", "cpt"): [CandidateCode("A1", "cpt", d1, 0.9),
+                                      CandidateCode("A2", "cpt", d2, 0.8)]})
+
+        def sel(system, user):
+            if "propose" in system.lower():
+                return json.dumps({"codes": []})
+            block = user.split("CANDIDATE OFFICIAL DESCRIPTORS:", 1)[-1]
+            for num, desc in re.findall(r"(?m)^(\d+)\.\s+(.*)$", block):
+                if "alpha" in desc.lower():          # picks first alpha still on the list
+                    return json.dumps({"choice": int(num), "reason": "alpha"})
+            return json.dumps({"choice": 0})
+
+        def corr(system, user):
+            m = re.search(r"CANDIDATE OFFICIAL DESCRIPTOR: (.+)", user)
+            ok = "secondary" in (m.group(1).lower() if m else "")   # confirms only A2
+            return json.dumps({"entailed": ok, "missing_element": False, "reason": "x"})
+
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="act alpha",
+                            evidence=[EvidenceSpan("act alpha performed")], confidence=0.9)
+        line = resolve(fact, src, llm=sel, corroborate=corr)
+        self.assertEqual(line.method, ResolutionMethod.VERIFIED)
+        self.assertEqual(line.chosen.code, "A2")     # re-selected past the rejected A1
 
 
 class LearnedIndexTest(unittest.TestCase):

@@ -113,25 +113,31 @@ def propose_codes(fact: ClinicalFact, source: CodeSource, llm: LLMFn,
 
 _SELECT_SYSTEM = """You verify medical codes against clinical documentation. You are
 given a documented clinical fact and a NUMBERED list of candidate codes' OFFICIAL
-descriptors. Choose the ONE option whose descriptor is fully ENTAILED by the
-documentation, applying these principles GENERALLY (they hold for any specialty,
-procedure, diagnosis, or code set — reason from the words, not from examples):
-  - Every clinically distinguishing element the descriptor states must be supported
+descriptors. Choose the ONE option whose descriptor the documentation FULLY entails
+AND which most accurately represents the documented service — applying these
+principles GENERALLY (any specialty, procedure, diagnosis, or code set; reason from
+the words, not from examples):
+  - EVERY clinically distinguishing element the descriptor states must be supported
     by the documentation: the specific act/service performed, the
-    structure/site/organ, laterality, count or quantity, approach or technique, and
-    any qualifiers (with/without a feature, material or substance, stage, acuity,
-    encounter type).
+    structure/site/organ, laterality, count/quantity, approach/technique, and any
+    qualifiers or BUNDLED COMPONENTS (with/without a feature, material, stage,
+    acuity, encounter type).
+  - Do NOT choose a code that ASSERTS MORE than the documentation supports — e.g. a
+    descriptor that bundles additional components, steps, or findings the note does
+    not document. Over-assertion is not entailment.
+  - Do NOT choose a code that OMITS a documented, clinically significant part of the
+    service when a more complete, fully-supported option exists — that under-
+    represents the service.
   - Distinguish near-synonyms that denote clinically DIFFERENT acts or entities:
-    similar or overlapping wording is not a match unless the documentation supports
-    that exact meaning.
-  - Honor generality correctly. A documented specific value satisfies a descriptor
-    that is unspecified, or that is defined as "other than" a DIFFERENT specific
-    value. But a descriptor that names a specific value the documentation
-    contradicts — or that requires an element the documentation does not state — is
-    NOT entailed.
-If NO option's descriptor is entailed by the documentation, choose 0. Judge ONLY
-the descriptor text against the documentation; use no knowledge of what a code
-number 'usually' means. Return JSON only: {"choice": <int>, "reason": "<short>"}"""
+    overlapping wording is not a match unless the documentation supports that exact
+    meaning.
+  - A documented specific value satisfies a descriptor that is unspecified or
+    defined as "other than" a DIFFERENT value; a descriptor naming a value the
+    documentation contradicts, or requiring an element it does not state, is NOT
+    entailed.
+If NO option is BOTH fully supported AND an accurate representation, choose 0. Judge
+ONLY the descriptor text; use no knowledge of what a code number 'usually' means.
+Return JSON only: {"choice": <int>, "reason": "<short>"}"""
 
 
 def _best_descriptor(source: CodeSource, cand: CandidateCode) -> str:
@@ -169,29 +175,39 @@ def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
 _CORROBORATE_SYSTEM = """You INDEPENDENTLY check whether a candidate code is correct
 for documented care. You are given a documented clinical fact and ONE candidate
 code's OFFICIAL descriptor. Decide, skeptically and on the descriptor text alone,
-whether the documentation ENTAILS that exact descriptor, applying general
+whether the documentation FULLY ENTAILS that exact descriptor, applying general
 principles (any specialty / code set): every clinically distinguishing element the
 descriptor states — the specific act/service, the structure/site, laterality,
-count, approach, and any qualifiers — must be supported; a near-synonym that
-denotes a DIFFERENT act or entity does not qualify; a documented specific value
-satisfies an unspecified or "other than …" descriptor, but a descriptor naming a
-value the documentation contradicts or omits does not. If you are not confident the
-documentation entails it, answer false. Judge only the descriptor text; use no
-knowledge of what a code number 'usually' means. Return JSON only:
-{"entailed": true|false, "reason": "<short>"}"""
+count, approach, and any qualifiers or BUNDLED COMPONENTS — must be supported; a
+near-synonym that denotes a DIFFERENT act or entity does not qualify; a documented
+specific value satisfies an unspecified or "other than …" descriptor.
+If it is NOT entailed, also classify WHY:
+  - "missing_element": true when the code is the RIGHT KIND of service for what was
+    documented, but its descriptor REQUIRES a component/element/finding the
+    documentation does not state (a documentation gap — the note may simply be
+    incomplete);
+  - "missing_element": false when the descriptor denotes a DIFFERENT act, site, or
+    concept than what was documented (a genuinely wrong code).
+If you are not confident the documentation entails it, answer entailed=false. Judge
+only the descriptor text; use no knowledge of what a code number 'usually' means.
+Return JSON only:
+{"entailed": true|false, "missing_element": true|false, "reason": "<short>"}"""
 
 
 def corroborate(fact: ClinicalFact, candidate: CandidateCode,
-                source: CodeSource, llm: LLMFn) -> tuple[bool, str]:
+                source: CodeSource, llm: LLMFn) -> tuple[bool, str, bool]:
     """An INDEPENDENT second-model entailment check on the already-selected code.
-    True only when this model also finds the documentation entails the descriptor —
-    so a code bills only when TWO independent judgements agree; disagreement -> the
-    caller escalates (fail-closed)."""
+    Returns (entailed, reason, missing_element). `entailed` is True only when this
+    model also finds the documentation fully entails the descriptor — so a code
+    bills only when TWO independent judgements agree. On disagreement,
+    `missing_element` distinguishes a DOCUMENTATION GAP (right kind of code, an
+    element undocumented -> a provider query) from a WRONG CODE (re-select)."""
     ev = " | ".join(s.text for s in fact.evidence)
     user = (f"DOCUMENTED FACT: {fact.description}\n"
             f"ATTRIBUTES: {json.dumps(fact.attributes)}\n"
             f"EVIDENCE: {ev}\n\n"
             f"CANDIDATE OFFICIAL DESCRIPTOR: {_best_descriptor(source, candidate)}\n\n"
-            f"Is this descriptor entailed by the documentation?")
+            f"Is this descriptor fully entailed by the documentation?")
     ans = _json(llm(_CORROBORATE_SYSTEM, user))
-    return (ans.get("entailed") is True), str(ans.get("reason") or "").strip()
+    return (ans.get("entailed") is True, str(ans.get("reason") or "").strip(),
+            ans.get("missing_element") is True)

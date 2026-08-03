@@ -269,7 +269,8 @@ def _authoritative_pool(code: str, source: CodeSource) -> list[CandidateCode]:
     return [_candidate_from_code(c, source) for c in source.leaf_codes(code, "icd10")]
 
 
-VERIFY_K = 8           # shortlist size sent to the single entailment-selection call
+VERIFY_K = 8           # shortlist size sent to the entailment-selection call
+MAX_RESELECT = 2       # re-selection attempts after a WRONG-CODE (not documentation-gap) rejection
 
 
 def _ranked(fact: ClinicalFact, pool: list[CandidateCode],
@@ -300,22 +301,47 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
             seen.add(c.code)
             order.append(c)
     shortlist = order[:VERIFY_K]
-    chosen, why = _verify.select_entailed(fact, shortlist, source, llm)
-    if chosen is None:
-        return ResolvedLine(
-            fact=fact, chosen=None, alternatives=shortlist,
-            method=ResolutionMethod.ABSTAINED,
-            rationale="no candidate's authoritative descriptor was entailed by the "
-                      "documentation (verified) — escalate")
-    if corroborate is not None:
-        ok, why2 = _verify.corroborate(fact, chosen, source, corroborate)
-        if not ok:
+    tried: set[str] = set()
+    last_reason = ""
+    for _ in range(1 + MAX_RESELECT):
+        cands = [c for c in shortlist if c.code not in tried]
+        if not cands:
+            break
+        chosen, why = _verify.select_entailed(fact, cands, source, llm)
+        if chosen is None:
+            return ResolvedLine(
+                fact=fact, chosen=None, alternatives=shortlist,
+                method=ResolutionMethod.ABSTAINED,
+                rationale="no candidate's authoritative descriptor is fully entailed by "
+                          "the documentation (verified) — escalate")
+        if corroborate is None:                      # no second model configured
+            return _verified_line(fact, chosen, shortlist, why)
+        ok, why2, missing = _verify.corroborate(fact, chosen, source, corroborate)
+        if ok:
+            why = f"{why}; independently confirmed" if why else "independently confirmed"
+            return _verified_line(fact, chosen, shortlist, why)
+        last_reason = why2
+        if missing:
+            # The code is the right KIND of service but its descriptor requires an
+            # element the note does not state. Re-selecting a code that omits the
+            # element would UNDER-code, so escalate as a provider query instead.
             return ResolvedLine(
                 fact=fact, chosen=None, alternatives=[chosen] + shortlist[:4],
                 method=ResolutionMethod.ABSTAINED,
-                rationale=f"selected code not confirmed by independent second-model "
-                          f"verification ({why2}) — escalate")
-        why = f"{why}; independently confirmed" if why else "independently confirmed"
+                rationale=f"PROVIDER QUERY — the best-matching code ({chosen.code}) "
+                          f"requires an element the documentation does not state "
+                          f"({why2}); confirm it was performed / amend the note, "
+                          f"else a less-specific code applies")
+        tried.add(chosen.code)                       # wrong code -> try another candidate
+    return ResolvedLine(
+        fact=fact, chosen=None, alternatives=shortlist,
+        method=ResolutionMethod.ABSTAINED,
+        rationale=f"no candidate confirmed by independent second-model verification "
+                  f"after re-selection ({last_reason}) — escalate")
+
+
+def _verified_line(fact: ClinicalFact, chosen: CandidateCode,
+                   shortlist: list[CandidateCode], why: str) -> ResolvedLine:
     return ResolvedLine(
         fact=fact, chosen=chosen,
         alternatives=[c for c in shortlist if c.code != chosen.code][:4],
