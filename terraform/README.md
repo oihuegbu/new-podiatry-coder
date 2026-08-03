@@ -105,6 +105,22 @@ re-run Phase 1 (`docker compose run --rm app python run.py --setup-only
 --rebuild-index`) to rebuild the affected caches; otherwise just use
 `process-notes.sh` as normal — it'll pick up the new image.
 
+For an isolated release directory, use the checked-in transactional installer
+from the published artifact. It refuses to deploy over an active app batch,
+builds before swapping directories, preserves bind-mounted runtime state,
+keeps a timestamped rollback tree, refreshes secrets from Secrets Manager,
+and leaves the named volumes attached to the explicit Compose project:
+
+```bash
+sudo deploy/install_ec2_release.sh \
+  s3://<bucket>/<content-addressed-key> \
+  /opt/podiatry-autonomy-safety \
+  podiatry-autonomy-safety \
+  6335 \
+  <secret-arn> \
+  us-east-1
+```
+
 ## Rotating secrets (API keys, etc.)
 
 Same `user_data`-only-runs-once problem applies to `aws_secretsmanager_secret_version.app_env` — updating `terraform.tfvars` and running `terraform apply` writes a new secret version, but nothing pushes it onto an already-running instance. After `terraform apply`:
