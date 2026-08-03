@@ -74,11 +74,12 @@ def _json(text: str) -> dict:
         return {}
 
 
-_PROPOSE_SYSTEM = """You propose CANDIDATE procedure/supply code NUMBERS for a
-documented service. List the codes most likely to represent EXACTLY what was
-documented — these are only candidates that will be verified against the official
-descriptor, so include close alternatives. Do not explain, do not invent codes you
-are unsure of. Return JSON only: {"codes": ["<code>", "<code>", ...]} (max 6)."""
+_PROPOSE_SYSTEM = """You propose CANDIDATE code NUMBERS for a documented clinical
+fact — a procedure, service, supply, drug, or diagnosis. List the codes most likely
+to represent EXACTLY what was documented — these are only candidates that will be
+verified against the official descriptor, so include close alternatives. Do not
+explain, do not invent codes you are unsure of. Return JSON only:
+{"codes": ["<code>", "<code>", ...]} (max 6)."""
 
 
 def propose_codes(fact: ClinicalFact, source: CodeSource, llm: LLMFn,
@@ -88,7 +89,7 @@ def propose_codes(fact: ClinicalFact, source: CodeSource, llm: LLMFn,
     the pool; it never supplies truth."""
     ev = " | ".join(s.text for s in fact.evidence)
     user = (f"SYSTEM (code set): {fact.system.upper()}\n"
-            f"PROCEDURE: {fact.description}\n"
+            f"DOCUMENTED FACT ({fact.kind.value}): {fact.description}\n"
             f"ATTRIBUTES: {json.dumps(fact.attributes)}\n"
             f"EVIDENCE: {ev}\n\nList candidate {fact.system.upper()} codes.")
     ans = _json(llm(_PROPOSE_SYSTEM, user))
@@ -114,14 +115,14 @@ def propose_codes(fact: ClinicalFact, source: CodeSource, llm: LLMFn,
 _SELECT_SYSTEM = """You verify medical codes against clinical documentation. You are
 given a documented clinical fact and a NUMBERED list of candidate codes' OFFICIAL
 descriptors. Choose the ONE option whose descriptor the documentation FULLY entails
-AND which most accurately represents the documented service — applying these
-principles GENERALLY (any specialty, procedure, diagnosis, or code set; reason from
-the words, not from examples):
+AND which most accurately represents the documented fact — applying these
+principles GENERALLY (any specialty; a procedure, service, supply, or DIAGNOSIS;
+any code set; reason from the words, not from examples):
   - EVERY clinically distinguishing element the descriptor states must be supported
-    by the documentation: the specific act/service performed, the
-    structure/site/organ, laterality, count/quantity, approach/technique, and any
-    qualifiers or BUNDLED COMPONENTS (with/without a feature, material, stage,
-    acuity, encounter type).
+    by the documentation: the specific act, service, or CONDITION; the
+    structure/site/organ; laterality; count/quantity; approach/technique; acuity,
+    stage, or encounter type (e.g. acute vs chronic, initial vs subsequent); and any
+    qualifiers or BUNDLED COMPONENTS (with/without a feature, material, type/status).
   - Do NOT choose a code that ASSERTS MORE than the documentation supports — e.g. a
     descriptor that bundles additional components, steps, or findings the note does
     not document. Over-assertion is not entailment.
@@ -176,18 +177,20 @@ _CORROBORATE_SYSTEM = """You INDEPENDENTLY check whether a candidate code is cor
 for documented care. You are given a documented clinical fact and ONE candidate
 code's OFFICIAL descriptor. Decide, skeptically and on the descriptor text alone,
 whether the documentation FULLY ENTAILS that exact descriptor, applying general
-principles (any specialty / code set): every clinically distinguishing element the
-descriptor states — the specific act/service, the structure/site, laterality,
-count, approach, and any qualifiers or BUNDLED COMPONENTS — must be supported; a
-near-synonym that denotes a DIFFERENT act or entity does not qualify; a documented
+principles (any specialty; a procedure, service, supply, or DIAGNOSIS; any code
+set): every clinically distinguishing element the descriptor states — the specific
+act, service, or CONDITION; the structure/site; laterality; count; approach; acuity,
+stage, or encounter type (e.g. acute vs chronic, initial vs subsequent); and any
+qualifiers or BUNDLED COMPONENTS — must be supported; a near-synonym
+that denotes a DIFFERENT act, condition, or entity does not qualify; a documented
 specific value satisfies an unspecified or "other than …" descriptor.
 If it is NOT entailed, also classify WHY:
-  - "missing_element": true when the code is the RIGHT KIND of service for what was
-    documented, but its descriptor REQUIRES a component/element/finding the
-    documentation does not state (a documentation gap — the note may simply be
+  - "missing_element": true when the code is the RIGHT KIND of service/condition for
+    what was documented, but its descriptor REQUIRES an element/qualifier/finding
+    the documentation does not state (a documentation gap — the note may simply be
     incomplete);
-  - "missing_element": false when the descriptor denotes a DIFFERENT act, site, or
-    concept than what was documented (a genuinely wrong code).
+  - "missing_element": false when the descriptor denotes a DIFFERENT act, site,
+    condition, or concept than what was documented (a genuinely wrong code).
 If you are not confident the documentation entails it, answer entailed=false. Judge
 only the descriptor text; use no knowledge of what a code number 'usually' means.
 Return JSON only:

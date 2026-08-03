@@ -235,13 +235,16 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
                 best[c.code] = c
     pool = sorted(best.values(), key=lambda c: c.score, reverse=True)
 
-    # PROPOSE-THEN-VERIFY (procedures / imaging, when an LLM is available): widen the
-    # pool with authoritative-validated LLM proposals, then accept the first
-    # candidate whose OFFICIAL descriptor the documentation entails — the
-    # license-clean substitute for the CPT Index. Runs even on an empty recall pool,
-    # since a validated proposal can rescue a concept retrieval missed. Diagnoses/
-    # supplies keep the deterministic path (well served by the ICD index + rules).
-    if llm is not None and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING):
+    # PROPOSE-THEN-VERIFY (when an LLM is available): widen the pool with
+    # authoritative-validated LLM proposals, then accept the first candidate whose
+    # OFFICIAL descriptor the documentation entails; escalate otherwise. Applies to
+    # procedures/imaging AND to DIAGNOSES that reached the embedding fallback — an
+    # ICD Index / SNOMED hit already returned deterministically above, so this only
+    # verifies the UNGROUNDED embedding picks (the ones that were confidently wrong,
+    # e.g. an 'infective bursitis' code for a non-infective condition). Runs even on
+    # an empty recall pool, since a validated proposal can rescue a missed concept.
+    if llm is not None and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING,
+                                         FactKind.DIAGNOSIS):
         return _propose_then_verify(fact, source, pool, llm, corroborate)
 
     if not pool:

@@ -1116,5 +1116,47 @@ class AutonomyVerifiedTest(unittest.TestCase):
         self.assertEqual(r.verdict, Verdict.REVIEW_REQUIRED)
 
 
+class DiagnosisVerifyTest(unittest.TestCase):
+    """Diagnoses that reach the embedding fallback are now entailment-verified +
+    cross-model corroborated (same discipline as procedures), so a WRONG-concept
+    code the embedding ranked highest is rejected for the entailed one. Abstract."""
+
+    def test_entailment_overrides_wrong_embedding_top(self):
+        import json
+        import re
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        from claude_coder.resolution import resolve
+        d_wrong = "condition beta of the structure"      # near-neighbour, higher recall
+        d_right = "condition alpha of the structure"      # the entailed one, lower recall
+        src = MockSource(
+            records={("DXW", "icd10"): {"long_description": d_wrong, "active": True},
+                     ("DXR", "icd10"): {"long_description": d_right, "active": True}},
+            retrieval={("*", "icd10"): [CandidateCode("DXW", "icd10", d_wrong, 0.95),
+                                        CandidateCode("DXR", "icd10", d_right, 0.80)]})
+
+        def sel(system, user):
+            if "propose" in system.lower():
+                return json.dumps({"codes": []})
+            block = user.split("CANDIDATE OFFICIAL DESCRIPTORS:", 1)[-1]
+            for num, desc in re.findall(r"(?m)^(\d+)\.\s+(.*)$", block):
+                if "alpha" in desc.lower() and "beta" not in desc.lower():
+                    return json.dumps({"choice": int(num), "reason": "documented condition"})
+            return json.dumps({"choice": 0})
+
+        def corr(system, user):
+            m = re.search(r"CANDIDATE OFFICIAL DESCRIPTOR: (.+)", user)
+            ok = "alpha" in (m.group(1).lower() if m else "")
+            return json.dumps({"entailed": ok, "missing_element": False, "reason": "x"})
+
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="condition alpha",
+                            evidence=[EvidenceSpan("condition alpha documented")],
+                            confidence=0.95)
+        line = resolve(fact, src, llm=sel, corroborate=corr)
+        self.assertEqual(line.method, ResolutionMethod.VERIFIED)
+        self.assertEqual(line.chosen.code, "DXR")   # not the higher-recall wrong code
+
+
 if __name__ == "__main__":
     unittest.main()

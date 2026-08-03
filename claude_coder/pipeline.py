@@ -58,11 +58,13 @@ def code_encounter(
         else:
             line = resolution.resolve(fact, source, llm=verify_llm,
                                       corroborate=corroborate_llm)
-        # A procedure that went through propose-then-verify is already resolved-or-
+        # A fact that went through propose-then-verify is already resolved-or-
         # escalated on authoritative entailment; don't second-guess it with the
-        # weaker arbitration fallback. Other kinds still arbitrate residual ambiguity.
+        # weaker arbitration fallback. (Diagnoses verify too when they reach the
+        # embedding fallback.) Other kinds still arbitrate residual ambiguity.
         went_through_pv = (verify_llm is not None
-                           and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING))
+                           and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING,
+                                             FactKind.DIAGNOSIS))
         if (not line.resolved) and line.alternatives and fact.billable and not went_through_pv:
             line = arbitration.arbitrate(line, arbitrate_llm)
         # OBSERVE: feed a propose-then-verify success into the learned index so that,
