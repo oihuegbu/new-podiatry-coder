@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -7,6 +8,8 @@ SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / \
 
 
 def test_deployment_receipt_is_atomic_and_validated(tmp_path):
+    assert os.access(SCRIPT, os.X_OK), \
+        "deployment receipt writer must be executable in release artifacts"
     commit = "a" * 40
     artifact = "app-source-test.zip"
     timestamp = "2026-08-03T00:00:00Z"
