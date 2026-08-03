@@ -146,12 +146,12 @@ class OntologyResolutionTest(unittest.TestCase):
                                          ResolutionMethod)
         from claude_coder.resolution import resolve
 
-        left = CandidateCode("DX_LEFT", "icd10", "interdigital neuroma, left foot", 0.9)
-        right = CandidateCode("DX_RIGHT", "icd10", "interdigital neuroma, right foot", 0.9)
+        left = CandidateCode("DX_LEFT", "icd10", "some condition, left foot", 0.9)
+        right = CandidateCode("DX_RIGHT", "icd10", "some condition, right foot", 0.9)
         src = MockSource(retrieval={("*", "icd10"): [left, right]})
-        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="interdigital neuroma",
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="some condition",
                             attributes={"laterality": "right"},
-                            evidence=[EvidenceSpan("interdigital neuroma right")],
+                            evidence=[EvidenceSpan("some condition, right side")],
                             confidence=0.99)
         line = resolve(fact, src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
@@ -440,9 +440,10 @@ class SectionApplicabilityTest(unittest.TestCase):
         self.assertIsNone(anes.excluded_reason)
 
     def test_section_detection_is_descriptor_driven(self):
+        # section is read from the descriptor's leading grammar, not any code/term.
         from claude_coder.ontology import code_section
-        self.assertEqual(code_section("Anesthesia for procedures on the foot"), "anesthesia")
-        self.assertIsNone(code_section("Ostectomy, complete excision; metatarsal head"))
+        self.assertEqual(code_section("Anesthesia for procedures on the structure"), "anesthesia")
+        self.assertIsNone(code_section("Some surgical service on a structure"))
 
 
 class NcciBundlingTest(unittest.TestCase):
@@ -516,12 +517,12 @@ class ProcedureIndexTest(unittest.TestCase):
                                          ResolutionMethod)
         from claude_coder.resolution import resolve
         src = MockSource(records={("PROC_OST", "cpt"):
-                                  {"long_description": "Ostectomy fifth metatarsal head",
+                                  {"long_description": "some service on a named structure",
                                    "active": True}},
-                         proc_index={"ostectomy fifth metatarsal head": {"PROC_OST"}})
+                         proc_index={"some service on a named structure": {"PROC_OST"}})
         fact = ClinicalFact(kind=FactKind.PROCEDURE,
-                            description="ostectomy fifth metatarsal head",
-                            evidence=[EvidenceSpan("ostectomy fifth metatarsal head")],
+                            description="some service on a named structure",
+                            evidence=[EvidenceSpan("some service on a named structure")],
                             confidence=0.99)
         line = resolve(fact, src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
@@ -571,9 +572,9 @@ class SupportRankingTest(unittest.TestCase):
 
 
 class CptAlphabeticIndexTest(unittest.TestCase):
-    """The authoritative AMA CPT Alphabetic Index layer resolves a procedure term
-    deterministically BEFORE embedding — the case descriptor/embedding cannot get
-    ('fifth metatarsal' in the note vs 'other than first metatarsal' in the code)."""
+    """The authoritative term->code index layer (AMA CPT Alphabetic Index slot)
+    resolves a documented phrase deterministically BEFORE embedding — a plain
+    term->code lookup, agnostic to the term."""
 
     def test_cpt_index_resolves_authoritatively(self):
         from claude_coder.data_access import MockSource
@@ -581,17 +582,17 @@ class CptAlphabeticIndexTest(unittest.TestCase):
                                          ResolutionMethod)
         from claude_coder.resolution import resolve
         src = MockSource(
-            records={("PROC_OSTEO", "cpt"):
-                     {"long_description": "Osteotomy, metatarsal; other than first "
-                      "metatarsal, each", "active": True}},
-            cpt_index={"osteotomy of the fifth metatarsal": {"PROC_OSTEO"}})
+            records={("PROC_IDX", "cpt"):
+                     {"long_description": "some documented service, unspecified",
+                      "active": True}},
+            cpt_index={"a documented procedure phrase": {"PROC_IDX"}})
         fact = ClinicalFact(kind=FactKind.PROCEDURE,
-                            description="osteotomy of the fifth metatarsal",
-                            evidence=[EvidenceSpan("osteotomy of the fifth metatarsal")],
+                            description="a documented procedure phrase",
+                            evidence=[EvidenceSpan("a documented procedure phrase")],
                             confidence=0.95)
         line = resolve(fact, src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
-        self.assertEqual(line.chosen.code, "PROC_OSTEO")
+        self.assertEqual(line.chosen.code, "PROC_IDX")
         self.assertIn("CPT Alphabetic Index", line.rationale)
 
 
@@ -693,52 +694,56 @@ class DrugTableParserTest(unittest.TestCase):
 
 class ProposeVerifyTest(unittest.TestCase):
     """Propose-then-verify: recall is a candidate GENERATOR, the authoritative
-    descriptor + entailment is TRUTH. The model's proposals are validated against
-    the registry; a code is accepted only when its official descriptor is entailed
-    by the documentation (so an 'ostectomy' code is rejected for an 'osteotomy')."""
+    descriptor + entailment is TRUTH. Proposals are validated against the registry;
+    a code is accepted only when its official descriptor is entailed by the
+    documentation. Uses ABSTRACT near-synonym acts (ALPHA vs BETA) — the mechanism
+    is agnostic; it turns on descriptor↔documentation match, not any medical term."""
 
-    OSTEC = "Ostectomy, complete excision; fifth metatarsal head"
-    OSTEO = "Osteotomy, metatarsal; other than first metatarsal"
+    # Two descriptors differing only in the ACT primitive (a near-synonym pair).
+    ALPHA = "Act alpha of the structure, unspecified approach"
+    BETA = "Act beta of the structure, unspecified approach"
 
     def _src(self):
         from claude_coder.data_access import MockSource
         return MockSource(
-            records={("OSTEC", "cpt"): {"long_description": self.OSTEC, "active": True},
-                     ("OSTEO", "cpt"): {"long_description": self.OSTEO, "active": True}},
-            retrieval={("*", "cpt"): [CandidateCode("OSTEC", "cpt", self.OSTEC, 0.9),
-                                      CandidateCode("OSTEO", "cpt", self.OSTEO, 0.8)]})
+            records={("CODEALPHA", "cpt"): {"long_description": self.ALPHA, "active": True},
+                     ("CODEBETA", "cpt"): {"long_description": self.BETA, "active": True}},
+            # BETA has the HIGHER recall — verify must still reject it for ALPHA.
+            retrieval={("*", "cpt"): [CandidateCode("CODEBETA", "cpt", self.BETA, 0.9),
+                                      CandidateCode("CODEALPHA", "cpt", self.ALPHA, 0.8)]})
 
     def _fact(self):
         from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
         return ClinicalFact(kind=FactKind.PROCEDURE,
-                            description="osteotomy of the fifth metatarsal",
-                            evidence=[EvidenceSpan("distal osteotomy of the fifth metatarsal")],
+                            description="act alpha of the structure",
+                            evidence=[EvidenceSpan("act alpha performed on the structure")],
                             confidence=0.95)
 
-    def _llm(self, propose=(), entail_only_osteotomy=True):
+    def _llm(self, propose=(), entail=True):
         import json
         import re
 
         def stub(system, user):
             if "propose" in system.lower():
                 return json.dumps({"codes": list(propose)})
-            # select_entailed: pick the numbered option that is an 'osteotomy'
+            # select_entailed stub: pick the option whose descriptor names the
+            # DOCUMENTED act (alpha) and not the near-synonym (beta).
             block = user.split("CANDIDATE OFFICIAL DESCRIPTORS:", 1)[-1]
             opts = re.findall(r"(?m)^(\d+)\.\s+(.*)$", block)
-            if entail_only_osteotomy:
+            if entail:
                 for num, desc in opts:
                     d = desc.lower()
-                    if "osteotomy" in d and "ostectomy" not in d:
-                        return json.dumps({"choice": int(num), "reason": "osteotomy match"})
+                    if "alpha" in d and "beta" not in d:
+                        return json.dumps({"choice": int(num), "reason": "documented act matches"})
             return json.dumps({"choice": 0, "reason": "none entailed"})
         return stub
 
-    def test_rejects_homograph_accepts_entailed(self):
+    def test_rejects_near_synonym_accepts_entailed(self):
         from claude_coder.models import ResolutionMethod
         from claude_coder.resolution import resolve
         line = resolve(self._fact(), self._src(), llm=self._llm())
         self.assertEqual(line.method, ResolutionMethod.VERIFIED)
-        self.assertEqual(line.chosen.code, "OSTEO")     # not the higher-recall ostectomy
+        self.assertEqual(line.chosen.code, "CODEALPHA")   # not the higher-recall near-synonym
 
     def test_proposal_surfaces_missed_code(self):
         from claude_coder.data_access import MockSource
@@ -747,18 +752,17 @@ class ProposeVerifyTest(unittest.TestCase):
         # retrieval only surfaces the WRONG code; the model proposes the right one,
         # which is validated against the registry and then verified.
         src = MockSource(
-            records={("OSTEC", "cpt"): {"long_description": self.OSTEC, "active": True},
-                     ("OSTEO", "cpt"): {"long_description": self.OSTEO, "active": True}},
-            retrieval={("*", "cpt"): [CandidateCode("OSTEC", "cpt", self.OSTEC, 0.95)]})
-        line = resolve(self._fact(), src, llm=self._llm(propose=["OSTEO"]))
+            records={("CODEALPHA", "cpt"): {"long_description": self.ALPHA, "active": True},
+                     ("CODEBETA", "cpt"): {"long_description": self.BETA, "active": True}},
+            retrieval={("*", "cpt"): [CandidateCode("CODEBETA", "cpt", self.BETA, 0.95)]})
+        line = resolve(self._fact(), src, llm=self._llm(propose=["CODEALPHA"]))
         self.assertEqual(line.method, ResolutionMethod.VERIFIED)
-        self.assertEqual(line.chosen.code, "OSTEO")
+        self.assertEqual(line.chosen.code, "CODEALPHA")
 
     def test_escalates_when_nothing_entailed(self):
         from claude_coder.models import ResolutionMethod
         from claude_coder.resolution import resolve
-        line = resolve(self._fact(), self._src(),
-                       llm=self._llm(entail_only_osteotomy=False))
+        line = resolve(self._fact(), self._src(), llm=self._llm(entail=False))
         self.assertFalse(line.resolved)
         self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
         self.assertIn("verified", line.rationale)
@@ -766,9 +770,9 @@ class ProposeVerifyTest(unittest.TestCase):
     def test_fabricated_proposal_dropped(self):
         from claude_coder.verify import propose_codes
         cands = propose_codes(self._fact(), self._src(),
-                              self._llm(propose=["NOTREAL", "OSTEO"]))
-        self.assertEqual([c.code for c in cands], ["OSTEO"])   # nonexistent code dropped
-        self.assertEqual(cands[0].descriptor, self.OSTEO)      # descriptor from the record
+                              self._llm(propose=["NOTREAL", "CODEALPHA"]))
+        self.assertEqual([c.code for c in cands], ["CODEALPHA"])   # nonexistent code dropped
+        self.assertEqual(cands[0].descriptor, self.ALPHA)          # descriptor from the record
 
 
 class LearnedIndexTest(unittest.TestCase):
@@ -826,12 +830,15 @@ class LearnedIndexTest(unittest.TestCase):
             self.assertEqual(len(learned.load_observations(p)), 3)
 
     def test_entry_self_invalidates_on_descriptor_change(self):
+        # entry_current is pure normalized-string equality — no domain knowledge.
+        # Abstract inputs prove the generic property: same descriptor stays valid,
+        # ANY change invalidates, absent text is trusted.
         from claude_coder import learned
-        e = {"descriptor": "Osteotomy of the metatarsal"}
-        self.assertTrue(learned.entry_current(e, "Osteotomy of the metatarsal"))   # unchanged
-        self.assertFalse(learned.entry_current(e, "Ostectomy of the metatarsal"))  # revised
-        self.assertTrue(learned.entry_current(e, ""))                              # current unknown
-        self.assertTrue(learned.entry_current({"descriptor": ""}, "anything"))     # nothing stored
+        e = {"descriptor": "alpha beta gamma"}
+        self.assertTrue(learned.entry_current(e, "Alpha  Beta,  gamma"))   # same up to normalization
+        self.assertFalse(learned.entry_current(e, "alpha beta delta"))     # any change -> invalid
+        self.assertTrue(learned.entry_current(e, ""))                      # current unknown -> trust
+        self.assertTrue(learned.entry_current({"descriptor": ""}, "x"))    # nothing stored -> trust
 
     def test_resolution_uses_learned_index(self):
         from claude_coder.data_access import MockSource
@@ -839,17 +846,17 @@ class LearnedIndexTest(unittest.TestCase):
                                          ResolutionMethod)
         from claude_coder.resolution import resolve
         src = MockSource(
-            records={("PROC_OSTEO", "cpt"):
-                     {"long_description": "Osteotomy, metatarsal; other than first",
+            records={("PROC_X", "cpt"):
+                     {"long_description": "some documented service, unspecified",
                       "active": True}},
-            learned_index={"osteotomy of the fifth metatarsal": "PROC_OSTEO"})
+            learned_index={"a documented service phrase": "PROC_X"})
         fact = ClinicalFact(kind=FactKind.PROCEDURE,
-                            description="osteotomy of the fifth metatarsal",
-                            evidence=[EvidenceSpan("osteotomy of the fifth metatarsal")],
+                            description="a documented service phrase",
+                            evidence=[EvidenceSpan("a documented service phrase")],
                             confidence=0.95)
         line = resolve(fact, src)                    # no LLM -> deterministic hit
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
-        self.assertEqual(line.chosen.code, "PROC_OSTEO")
+        self.assertEqual(line.chosen.code, "PROC_X")
         self.assertIn("learned verified-resolution index", line.rationale)
 
 
