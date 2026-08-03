@@ -42,6 +42,28 @@ class AuthoritativeSource:
     def __init__(self) -> None:
         self._db = None
         self._store = None
+        self._syn: dict[str, dict] | None = None
+
+    def _synonyms_for(self, code: str, system: str) -> tuple[str, ...]:
+        """Clinician synonyms/index terms for a code, from the generated synonym
+        layers. These are the bridge between note vocabulary ('Morton's neuroma')
+        and a terse descriptor ('Lesion of plantar nerve') — used for concept
+        matching only, never as a coding authority."""
+        if self._syn is None:
+            import json
+            from app.core.config import DATA_DIR
+            self._syn = {}
+            for name, fname in (("cpt", "cpt_synonyms.json"),
+                                ("hcpcs", "hcpcs_synonyms.json"),
+                                ("icd10", "icd10_synonyms.json")):
+                try:
+                    self._syn[name] = json.load(
+                        open(DATA_DIR / "codes" / fname)).get("terms", {})
+                except Exception:
+                    self._syn[name] = {}
+        terms = self._syn.get(system, {})
+        got = terms.get(code) or terms.get(code.replace(".", "")) or ()
+        return tuple(got)
 
     # -- retrieval (concept -> candidate codes) --------------------------------
     def _vector_store(self):
@@ -59,12 +81,20 @@ class AuthoritativeSource:
             code = str(h.get("code") or "")
             if not code:
                 continue
+            # The DESCRIPTOR is authoritative — read it from the code record, not
+            # from the index payload (which may omit it). Retrieval only supplies
+            # the code identity (recall); the record supplies the truth.
+            rec = self.lookup(code, system) or {}
+            descriptor = (rec.get("long_description") or rec.get("description")
+                          or rec.get("short_description")
+                          or h.get("description") or h.get("descriptor") or "")
             out.append(CandidateCode(
                 code=code,
                 system=system,
-                descriptor=str(h.get("description") or h.get("descriptor") or ""),
+                descriptor=str(descriptor),
                 score=float(h.get("score") or h.get("rrf") or 0.0),
                 source="retrieval",
+                aliases=self._synonyms_for(code, system),
                 authority={"index": "rag-hybrid", "system": system},
             ))
         return out

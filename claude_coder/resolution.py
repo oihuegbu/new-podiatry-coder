@@ -82,9 +82,14 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode) -> _Match | None:
             return None
         reasons.append(f"measure {measure:g} in descriptor range")
 
-    # RULE — concept entailment floor.
+    # RULE — concept entailment floor. Match against the descriptor's core tokens
+    # PLUS the code's clinician synonyms (the note-vocabulary bridge), so
+    # "Morton's neuroma" can entail a "Lesion of plantar nerve" descriptor whose
+    # synonym set contains it. Laterality/measurement still come from the
+    # descriptor only — synonyms inform concept, never the discriminating axes.
     fc = _fact_concept(fact)
-    concept = (len(fc & feats.core_tokens) / len(fc)) if fc else 0.0
+    matchable = feats.core_tokens | {t for alias in cand.aliases for t in _tokens(alias)}
+    concept = (len(fc & matchable) / len(fc)) if fc else 0.0
     if concept < _MIN_CONCEPT:
         return None
     reasons.append(f"concept {concept:.2f}")

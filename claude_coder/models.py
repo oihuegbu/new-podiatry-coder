@@ -94,6 +94,7 @@ class CandidateCode:
     descriptor: str
     score: float = 0.0
     source: str = ""                  # "retrieval" | "descriptor-entailment"
+    aliases: tuple[str, ...] = ()     # clinician synonyms/index terms for THIS code
     authority: dict[str, Any] = field(default_factory=dict)   # data provenance
 
 

@@ -89,6 +89,31 @@ PYTHONPATH=. python3 tests/test_claude_coder.py -v
 python -m claude_coder.cli note.txt --dos 2026-03-14
 ```
 
+## Measured end-to-end (honest status)
+
+Run on the box against the **real** code data + RAG index and a real podiatry
+operative note, with **live** extraction (not mocked):
+
+- ✅ Reads the note and extracts evidence-linked facts with correct disposition —
+  a planned follow-up and a "consider hammertoe" discussion are both correctly
+  **not billed**.
+- ✅ Codes procedures from the authoritative data — e.g. CPT **28080** (Morton's
+  neuroma excision) *deterministically*, and a hyperkeratotic-lesion paring via
+  arbitration — with the descriptor pulled from the authoritative record and the
+  clinician-synonym layer bridging note vocabulary to terse descriptors.
+- ✅ **Fail-closes correctly**: with no diagnosis resolved, the medical-necessity
+  gate BLOCKS release rather than emitting an unsupported claim. It never
+  hallucinated a code — every code came from a retrieved candidate.
+- ⚠️ **Not yet production-solid**: ICD *diagnosis* resolution is the weak spot
+  (terse ICD descriptors + the known ICD recall gap), and it can over-generate
+  (e.g. coding surgeon-administered local anesthesia, which is bundled). The
+  system lacks bundling/global-package and E/M-leveling knowledge and assigns no
+  modifiers — each of which fails *closed* today (blocks/escalates, never a wrong
+  release).
+
+So: a working, safe, genuinely autonomous pipeline that codes what it can defend
+and blocks the rest — a sound spine, not a production-accuracy coder yet.
+
 ## Honest boundaries (scaffolded, not yet complete)
 
 - **Resolution** decides on laterality, measurement-interval containment,
