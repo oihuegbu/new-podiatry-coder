@@ -200,7 +200,7 @@ class ModifierTest(unittest.TestCase):
         eng = ModifierEngine(defs=defs)
         self.assertEqual(eng.assign(self._fact("right"), "Excision, neuroma, each"), ["MR"])
         self.assertEqual(eng.assign(self._fact("left"), "Excision, neuroma, each"), ["ML"])
-        self.assertEqual(eng.assign(self._fact("bilateral"), "Excision, neuroma"), ["MB"])
+        self.assertEqual(eng.assign(self._fact("bilateral"), "Excision, neuroma", bilat="1"), ["MB"])
         # descriptor already encodes the side -> no modifier (no double-coding)
         self.assertEqual(eng.assign(self._fact("right"), "Excision, neuroma, right foot"), [])
 
@@ -304,6 +304,41 @@ class GlobalPackageTest(unittest.TestCase):
         apply_global_package(r, MockSource(gp={"PROCG": "090"}))
         self.assertIsNone(em.excluded_reason)
         self.assertIn("EMV", {ln.chosen.code for ln in r.billable_lines})
+
+
+class BilateralEligibilityTest(unittest.TestCase):
+    """Modifier 50 / laterality is gated by the CMS bilateral indicator, so a
+    per-nail code (indicator 9) gets no laterality modifier."""
+
+    def _fact(self, lat):
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        return ClinicalFact(kind=FactKind.PROCEDURE, description="x",
+                            attributes={"laterality": lat}, evidence=[EvidenceSpan("x")])
+
+    def test_indicator_gates_modifier(self):
+        from claude_coder.modifiers import ModifierEngine
+        defs = {"MR": {"description": "Right side of the body"},
+                "ML": {"description": "Left side of the body"},
+                "MB": {"description": "Bilateral procedure"}}
+        eng = ModifierEngine(defs=defs)
+        # 9 = concept does not apply -> no modifier, even bilateral
+        self.assertEqual(eng.assign(self._fact("bilateral"), "Debridement of nails", bilat="9"), [])
+        self.assertEqual(eng.assign(self._fact("right"), "Debridement of nails", bilat="9"), [])
+        # 1 = bilateral eligible -> 50; 0 = not eligible -> none
+        self.assertEqual(eng.assign(self._fact("bilateral"), "Paired procedure", bilat="1"), ["MB"])
+        self.assertEqual(eng.assign(self._fact("bilateral"), "Some procedure", bilat="0"), [])
+
+
+class EMSettingTest(unittest.TestCase):
+    def test_setting_filter_rejects_wrong_setting(self):
+        from claude_coder.em import _select
+        ed = CandidateCode("EMED", "cpt",
+                           "Emergency department visit, moderate level medical decision making", 0.9)
+        office = CandidateCode("EMOFF", "cpt",
+                               "Office or other outpatient visit, established patient, "
+                               "moderate level medical decision making", 0.9)
+        chosen = _select("moderate", False, "office", [ed, office])  # ED ranked first
+        self.assertEqual(chosen.code, "EMOFF")   # office encounter -> office code, not ED
 
 
 if __name__ == "__main__":

@@ -38,11 +38,19 @@ For each fact return an object with:
         For an evaluation_management fact, also give the medical-decision-making
         elements when documented: "problems", "data", "risk" each as one of
         straightforward | low | moderate | high, plus "new_patient" (true/false),
+        "setting" (office | emergency | inpatient | observation | nursing | home —
+        from the place of service / note header, default office for a clinic),
         "total_time_minutes" if the note records visit time, and
         "separately_identifiable" (true only if the note documents E/M work
         significant and separate from any procedure done the same day).
   - "disposition": performed_today | ordered | planned | discussed |
-        historical | unclear  — ONLY performed_today / dispensed work is billable
+        historical | unclear  — ONLY performed_today / dispensed work is billable.
+        For a PROCEDURE/supply/drug this is whether it was actually done today.
+        For a DIAGNOSIS, use performed_today for a CURRENT/active condition
+        addressed at this encounter (this is the default for anything in the
+        assessment/impression); use historical ONLY when the note frames it as
+        past — "history of", "resolved", "status post", or listed under past
+        medical history.
   - "negated": true if the note denies/rules out this finding, else false
   - "evidence": a list of VERBATIM quotes copied exactly from the note that
         support this fact (never paraphrased)
@@ -50,7 +58,11 @@ For each fact return an object with:
 
 Rules: quote evidence verbatim; separate a planned/ordered service from a
 performed one; capture negation; do not merge distinct events; do not invent
-facts the note does not support. Return JSON only: {"facts": [ ... ]}."""
+facts the note does not support. For a DIAGNOSIS, the "description" must be the
+concise clinical name of ONE condition — when a note phrase lists several
+conditions together, emit a SEPARATE diagnosis fact for each, and keep severity
+prose, counts, and functional-limitation wording OUT of the description (put
+them in attributes or omit). Return JSON only: {"facts": [ ... ]}."""
 
 
 def _coerce_kind(value: str) -> FactKind | None:

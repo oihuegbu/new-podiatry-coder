@@ -55,7 +55,9 @@ def code_encounter(
             else:
                 # Data-driven per-line modifiers (laterality) + billing units
                 # (descriptor-driven, so a "2-4 lesions" code bills as one unit).
-                line.modifiers = modifier_engine.assign(line.fact, line.chosen.descriptor)
+                line.modifiers = modifier_engine.assign(
+                    line.fact, line.chosen.descriptor,
+                    bilat=source.bilat_indicator(line.chosen.code))
                 cnt = line.fact.attributes.get("count") or line.fact.attributes.get("quantity") or 1
                 try:
                     cnt = int(cnt)

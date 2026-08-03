@@ -74,31 +74,38 @@ def main() -> int:
     data = rows[hdr + 1:]
     gcol = _glob_column(data)
 
-    periods: dict[str, str] = {}
+    # BILAT SURG sits a fixed 5 columns after GLOB DAYS in the PPRRVU layout
+    # (GLOB, PRE OP, INTRA OP, POST OP, MULT PROC, BILAT SURG). Values 0/1/2/3/9.
+    bcol = gcol + 5
+    bilat_values = {"0", "1", "2", "3", "9"}
+
+    codes: dict[str, dict] = {}
     for r in data:
         if len(r) <= gcol:
             continue
         code = r[0].strip().upper()
         mod = r[1].strip()
-        val = r[gcol].strip().upper()
-        if not code or mod or val not in GLOBAL_VALUES:
+        gval = r[gcol].strip().upper()
+        if not code or mod or gval not in GLOBAL_VALUES:
             continue                              # base code rows only
-        periods[code] = val
+        bval = r[bcol].strip() if len(r) > bcol else ""
+        codes[code] = {"global": gval,
+                       "bilat": bval if bval in bilat_values else "9"}
 
     out = DATA_DIR / "codes" / "global_period.json"
     payload = {
-        "source": "CMS Medicare PFS Relative Value File (PPRRVU), GLOB DAYS column",
+        "source": "CMS Medicare PFS Relative Value File (PPRRVU): GLOB DAYS + BILAT SURG columns",
         "url": args.url,
         "file": name,
         "provenance": "authoritative CMS data, parsed verbatim from the RVU file",
         "generated": date.today().isoformat(),
-        "count": len(periods),
-        "global_period": dict(sorted(periods.items())),
+        "count": len(codes),
+        "codes": dict(sorted(codes.items())),
     }
     out.write_text(json.dumps(payload, indent=1))
-    dist = Counter(periods.values())
-    print(f"Wrote {len(periods)} codes -> {out}")
-    print(f"Distribution: {dict(sorted(dist.items()))}")
+    print(f"Wrote {len(codes)} codes -> {out}")
+    print(f"Global: {dict(sorted(Counter(v['global'] for v in codes.values()).items()))}")
+    print(f"Bilat:  {dict(sorted(Counter(v['bilat'] for v in codes.values()).items()))}")
     return 0
 
 

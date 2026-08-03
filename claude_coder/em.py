@@ -20,6 +20,38 @@ from .models import ClinicalFact, ResolutionMethod, ResolvedLine
 # Ordered MDM levels — the grid's own vocabulary, not codes.
 LEVELS = ("straightforward", "low", "moderate", "high")
 
+# Care-setting categories -> the descriptor phrases that name them. Setting
+# terminology from the E/M guidelines (not codes); used to keep an office
+# encounter from resolving to an ED / inpatient / other-setting code.
+_SETTINGS = {
+    "office": ("office or other outpatient", "outpatient"),
+    "emergency": ("emergency department",),
+    "inpatient": ("inpatient", "hospital observation or inpatient"),
+    "observation": ("observation",),
+    "nursing": ("nursing facility",),
+    "home": ("home or residence", "domiciliary", "rest home"),
+}
+
+
+def descriptor_setting(descriptor: str) -> str | None:
+    d = descriptor.lower()
+    for cat, phrases in _SETTINGS.items():
+        if any(p in d for p in phrases):
+            return cat
+    return None
+
+
+def _normalize_setting(value) -> str:
+    """The documented setting, defaulting to office/outpatient — the overwhelming
+    default for a clinic encounter and the safe choice when unspecified."""
+    v = str(value or "").lower()
+    for cat, phrases in _SETTINGS.items():
+        if cat in v or any(p in v for p in phrases):
+            return cat
+    if "er" in v.split() or "ed" in v.split():
+        return "emergency"
+    return "office"
+
 
 def mdm_level(problems: str, data: str, risk: str) -> str | None:
     """The MDM level met by 2 of the 3 elements (the grid's selection rule):
@@ -34,19 +66,24 @@ def mdm_level(problems: str, data: str, risk: str) -> str | None:
     return LEVELS[best] if best is not None else None
 
 
-def _select(level: str, new_patient: bool | None, candidates) -> "object | None":
+def _select(level: str, new_patient: bool | None, setting: str, candidates) -> "object | None":
     """Among retrieved E/M candidates, the one whose descriptor states this MDM
-    level and matches the new/established setting — read from the descriptor."""
+    level AND matches the care SETTING and new/established status — all read from
+    the descriptor. The setting match is what stops an office encounter resolving
+    to an emergency-department or inpatient code."""
     for c in candidates:
         d = c.descriptor.lower()
+        cand_setting = descriptor_setting(c.descriptor)
+        if cand_setting and setting and cand_setting != setting:
+            continue                          # wrong care setting (e.g. ED code, office visit)
         if level not in d:
             continue
-        if new_patient is None:
-            return c
-        is_new = "new patient" in d
-        is_est = "established patient" in d
-        if (new_patient and is_new) or (not new_patient and is_est) or not (is_new or is_est):
-            return c
+        if new_patient is not None:
+            is_new = "new patient" in d
+            is_est = "established patient" in d
+            if (is_new or is_est) and (new_patient != is_new):
+                continue                      # wrong new/established status
+        return c
     return None
 
 
@@ -63,17 +100,19 @@ def resolve_em(fact: ClinicalFact, source: CodeSource, top_k: int = 40) -> Resol
             fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
             rationale="MDM elements not fully documented — E/M level cannot be set")
 
-    pool = source.retrieve(f"evaluation and management office visit {level} "
+    setting = _normalize_setting(a.get("setting"))
+    pool = source.retrieve(f"evaluation and management {setting} visit {level} "
                            f"medical decision making", fact.system, top_k=top_k)
     new_patient = a.get("new_patient")
     if isinstance(new_patient, str):
         new_patient = new_patient.strip().lower() in ("true", "yes", "new")
-    chosen = _select(level, new_patient, pool)
+    chosen = _select(level, new_patient, setting, pool)
     if chosen is None:
         return ResolvedLine(
             fact=fact, chosen=None, alternatives=pool[:5],
             method=ResolutionMethod.ABSTAINED,
-            rationale=f"no retrieved E/M code matches MDM level '{level}' — review")
+            rationale=f"no retrieved E/M code matches level '{level}' in a {setting} "
+                      f"setting — review")
     return ResolvedLine(
         fact=fact, chosen=chosen, method=ResolutionMethod.DETERMINISTIC,
-        rationale=f"MDM level '{level}' by the 2-of-3 rule; descriptor states it")
+        rationale=f"MDM level '{level}', {setting} setting, by the 2-of-3 rule")

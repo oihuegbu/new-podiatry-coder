@@ -60,15 +60,21 @@ class ModifierEngine:
         self._distinct_59 = _discover(self._defs, "distinct procedural service")
         self._em_separate = _discover(self._defs, "separately identifiable evaluation")
 
-    def assign(self, fact: ClinicalFact, descriptor: str) -> list[str]:
-        """Per-line modifiers from documented facts (laterality/bilateral). Empty
-        when the descriptor already encodes the side (no double-coding)."""
+    def assign(self, fact: ClinicalFact, descriptor: str,
+               bilat: str | None = None) -> list[str]:
+        """Per-line modifiers from documented facts (laterality/bilateral), gated
+        by the code's CMS bilateral indicator: '9' means the laterality concept
+        does not apply to this code (e.g. a per-nail debridement) — no modifier;
+        modifier 50 is applied only when the indicator is '1' (bilateral eligible).
+        Empty, too, when the descriptor already encodes the side."""
         lat = str(fact.attributes.get("laterality", "")).lower().strip()
         desc = descriptor.lower()
+        if bilat == "9":                         # concept does not apply -> no modifier
+            return []
         if "bilateral" in desc:
             return []
-        if lat == "bilateral" and self._bilateral:
-            return [self._bilateral]
+        if lat == "bilateral":
+            return [self._bilateral] if (bilat == "1" and self._bilateral) else []
         if lat == "right" and "right" not in desc and self._right:
             return [self._right]
         if lat == "left" and "left" not in desc and self._left:
