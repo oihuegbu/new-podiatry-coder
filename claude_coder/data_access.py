@@ -32,6 +32,8 @@ class CodeSource(Protocol):
 
     def lookup(self, code: str, system: str) -> dict[str, Any] | None: ...
 
+    def descriptions(self, code: str, system: str) -> list[str]: ...
+
     def active_on(self, code: str, system: str, dos: str | None) -> Outcome: ...
 
     def separately_billable(self, code: str, system: str, dos: str | None) -> Outcome: ...
@@ -67,12 +69,62 @@ class AuthoritativeSource:
     """Adapter over the repo's existing authoritative components. Imports are
     lazy so the models/logic stay importable without the heavy RAG stack."""
 
+    # Authoritative description TIERS, richest first. The AMA CPT data package
+    # ships several parallel descriptors per code (full clinical, medium, and the
+    # plain-language 'consumer' descriptor); using them ALL gives the deterministic
+    # matcher more authoritative surface — e.g. the consumer wording distinguishes
+    # an "osteotomy" (cutting/reshaping bone) from an "ostectomy" (removing bone),
+    # which the terse clinical descriptor alone blurs. These are real authoritative
+    # fields (never the walled-off, llm-generated synonym retrieval aid).
+    _DESC_TIERS = ("long_description", "medium_description",
+                   "consumer_description", "short_description", "description")
+
     def __init__(self) -> None:
         self._db = None
         self._store = None
         self._gp: dict | None = None
         self._idx = None
         self._snomed = None
+        self._rich: dict | None = None
+
+    def _rich_records(self, system: str) -> dict:
+        """Raw {code: record} straight from data/codes/<system>_codes.json, which
+        carries the FULL set of authoritative description tiers (the in-memory
+        CodeReferenceDB keeps only long+short). Cached per system; {} if absent."""
+        if self._rich is None:
+            self._rich = {}
+        if system not in self._rich:
+            table: dict[str, dict] = {}
+            try:
+                import json
+                from app.core.config import DATA_DIR
+                with open(DATA_DIR / "codes" / f"{system}_codes.json") as fh:
+                    data = json.load(fh)
+                rows = (data if isinstance(data, list)
+                        else data.get("codes") or data.get(system)
+                        or next((v for v in data.values() if isinstance(v, list)), []))
+                for r in rows:
+                    if isinstance(r, dict) and r.get("code"):
+                        table[str(r["code"])] = r
+            except Exception:
+                table = {}
+            self._rich[system] = table
+        return self._rich[system]
+
+    def descriptions(self, code: str, system: str) -> list[str]:
+        """Every authoritative descriptor TIER for a code (long/medium/consumer/
+        short), de-duplicated, richest first. Falls back to the in-memory record
+        when the rich file is absent. Empty if the code is unknown."""
+        rec = self._rich_records(system).get(code) \
+            or self._rich_records(system).get(str(code).replace(".", "")) \
+            or self.lookup(code, system) or {}
+        out, seen = [], set()
+        for k in self._DESC_TIERS:
+            v = str(rec.get(k) or "").strip()
+            if v and v.lower() not in seen:
+                seen.add(v.lower())
+                out.append(v)
+        return out
 
     def snomed_codes(self, description: str, system: str) -> set[str]:
         """Long-tail authoritative term->ICD-10-CM via the SNOMED CT -> ICD-10-CM
@@ -121,16 +173,23 @@ class AuthoritativeSource:
         if system not in cache:
             try:
                 from .terminology import TerminologyIndex
-                table = getattr(self._reference(), system, {})
+                # Prefer the rich file (all description tiers); fall back to the
+                # in-memory registry (long+short) when it is not present.
+                rich = self._rich_records(system)
                 by_code: dict[str, list[str]] = {}
-                for code, rec in table.items():
-                    if not isinstance(rec, dict):
-                        continue
-                    descs = [str(rec.get("long_description") or ""),
-                             str(rec.get("short_description") or "")]
-                    terms = [d for d in descs if d]
-                    if terms:
-                        by_code[str(code)] = terms
+                if rich:
+                    for code, rec in rich.items():
+                        terms = self.descriptions(code, system)
+                        if terms:
+                            by_code[str(code)] = terms
+                else:
+                    for code, rec in getattr(self._reference(), system, {}).items():
+                        if not isinstance(rec, dict):
+                            continue
+                        terms = [d for d in (str(rec.get("long_description") or ""),
+                                             str(rec.get("short_description") or "")) if d]
+                        if terms:
+                            by_code[str(code)] = terms
                 cache[system] = TerminologyIndex(by_code) if by_code else False
             except Exception:
                 cache[system] = False
@@ -396,6 +455,12 @@ class MockSource:
 
     def lookup(self, code, system):
         return self._records.get((code, system))
+
+    def descriptions(self, code, system):
+        rec = self._records.get((code, system)) or {}
+        tiers = ("long_description", "medium_description", "consumer_description",
+                 "short_description", "description")
+        return [str(rec[k]) for k in tiers if rec.get(k)]
 
     def active_on(self, code, system, dos):
         rec = self._records.get((code, system))

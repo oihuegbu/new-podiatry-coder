@@ -58,7 +58,8 @@ def _fact_text(fact: ClinicalFact) -> str:
     return " ".join([fact.description] + [s.text for s in fact.evidence])
 
 
-def _evaluate(fact: ClinicalFact, cand: CandidateCode) -> _Match | None:
+def _evaluate(fact: ClinicalFact, cand: CandidateCode,
+              source: CodeSource | None = None) -> _Match | None:
     """Apply the agnostic elimination rules and score specificity. Return None if
     the candidate CONTRADICTS the documented facts, else a scored match. Concept
     relevance is not judged here — retrieval already guaranteed it."""
@@ -86,10 +87,21 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode) -> _Match | None:
         spec += 1
         reasons.append(f"measure {measure:g} in range")
 
-    # SUPPORT (mechanic 2) — how many of the descriptor's concept tokens the note
-    # actually names. A RANK signal ONLY (used to break near-ties in recall);
-    # never an elimination, so a correct-but-terse code is never dropped by it.
-    support = support_score(cand.descriptor, _fact_text(fact))
+    # SUPPORT (mechanic 2) — how many concept tokens the note shares with the
+    # code's AUTHORITATIVE descriptors. Scored over ALL description tiers (long /
+    # medium / plain-language consumer), so plain wording that distinguishes near-
+    # homographs (osteotomy vs ostectomy) participates. A RANK signal ONLY (breaks
+    # near-ties in recall); never an elimination, so a correct-but-terse code is
+    # never dropped by it.
+    desc_text = cand.descriptor
+    if source is not None:
+        try:
+            tiers = source.descriptions(cand.code, cand.system)
+            if tiers:
+                desc_text = " ".join([cand.descriptor, *tiers])
+        except Exception:
+            pass
+    support = support_score(desc_text, _fact_text(fact))
     reasons.append(f"recall {cand.score:.2f}")
 
     return _Match(cand, feats, cand.score, spec, support, reasons)
@@ -116,7 +128,7 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -
         if len(idx) == 1:
             pool = _authoritative_pool(next(iter(idx)), source)
             if pool:
-                line = _decide(fact, pool, authority="ICD-10-CM Alphabetic Index")
+                line = _decide(fact, pool, authority="ICD-10-CM Alphabetic Index", source=source)
                 if line.resolved:
                     return line
         # SECOND authoritative layer: the SNOMED CT -> ICD-10-CM map (long-tail
@@ -126,7 +138,7 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -
         if len(snomed) == 1:
             pool = _authoritative_pool(next(iter(snomed)), source)
             if pool:
-                line = _decide(fact, pool, authority="SNOMED CT -> ICD-10-CM map")
+                line = _decide(fact, pool, authority="SNOMED CT -> ICD-10-CM map", source=source)
                 if line.resolved:
                     return line
 
@@ -146,7 +158,7 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -
             cand = CandidateCode(code=code, system=fact.system, descriptor=str(desc),
                                  score=1.0, source="cpt-descriptor-index",
                                  authority={"source": "CPT/HCPCS descriptor index"})
-            line = _decide(fact, [cand], authority="CPT/HCPCS descriptor index")
+            line = _decide(fact, [cand], authority="CPT/HCPCS descriptor index", source=source)
             if line.resolved:
                 return line
 
@@ -169,7 +181,7 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -
         return ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
                             rationale="no candidate retrieved for the concept")
 
-    return _decide(fact, pool)
+    return _decide(fact, pool, source=source)
 
 
 def _candidate_from_code(code: str, source: CodeSource) -> CandidateCode:
@@ -191,11 +203,12 @@ def _authoritative_pool(code: str, source: CodeSource) -> list[CandidateCode]:
 
 
 def _decide(fact: ClinicalFact, pool: list[CandidateCode],
-            authority: str | None = None) -> ResolvedLine:
+            authority: str | None = None,
+            source: CodeSource | None = None) -> ResolvedLine:
     """Structured decision over a candidate pool: eliminate contradictions,
     rank by relevance (recall) then specificity, pick deterministically when the
     leader is clear, else hand the shortlist to arbitration."""
-    survivors = [m for m in (_evaluate(fact, c) for c in pool) if m is not None]
+    survivors = [m for m in (_evaluate(fact, c, source) for c in pool) if m is not None]
     if not survivors:
         return ResolvedLine(
             fact=fact, chosen=None, alternatives=pool[:5],
