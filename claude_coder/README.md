@@ -133,19 +133,28 @@ rest. A sound spine, not a production-accuracy coder yet.
 - **NCCI & MUE gates now functional**: the adapter was calling non-existent
   methods, so both silently did nothing; fixed to the real `check_ncci` and the
   `mue` table. Verified: NCCI evaluates real pairs; MUE enforces real limits.
+- **Units** (`ontology.billing_units`): billing units are *descriptor-driven*, not
+  the raw documented count — a "2–4 lesions" code bills once for 2 lesions; an
+  "each"/"per" code bills per item. The MUE gate uses these units.
+- **Claim modifiers** (`modifiers.assign_claim`): E/M-25 when the note documents
+  significant separately-identifiable work; distinct-service (X{S,U} preferred
+  over 59) on the column-2 code of an NCCI bypassable pair — which also clears
+  that NCCI edit in the gate. All values discovered from data.
+- **Global surgical package** (`build_global_period.py` + `apply_global_package`):
+  global-period days are ingested from the **authoritative CMS PFS RVU file**
+  (17,028 codes) with provenance; a same-day E/M related to a procedure with a
+  global period is bundled unless separately-identifiable work is documented.
+- **Multi-query recall**: resolution searches the structured query *and* the
+  verbatim evidence, unioning pools — an agnostic eponym-recall boost.
 
 ## Honest boundaries (still open)
 
-- **Units semantics**: MUE now runs, but units are taken from a documented count;
-  for a "2–4 lesions" code that count is not the billing unit. A units model
-  (per-code unit definition) is the next refinement — today it fails *closed*.
-- **Modifiers**: distinct-service (59 / X{EPSU}) and E/M-with-procedure (25) are
-  assigned the same data-driven way from NCCI/relationship signals — next, not
-  yet wired.
-- **Global surgical package** (post-op visits bundled) needs global-period data
-  and surgical history not cleanly exposed here — deliberately not faked.
-- **ICD diagnosis recall** for eponyms/terse descriptors is a retrieval/data-layer
-  concern (the synonym-enrichment work), not the coder logic.
+- **Full ICD eponym coverage** is index enrichment at the data layer (the synonym
+  work), beyond the coder's query-side boost.
+- **LCD/NCD medical-necessity linkage** (which diagnosis covers which procedure)
+  needs policy data; only the structural floor is enforced today.
+- **Frequency / longitudinal history** (60-day routine-foot-care limits, prior
+  surgery outside the note) needs claims/EHR history.
 - **Certificate** is an integrity hash; an HMAC with a private key adds
   non-repudiation.
 - **"Production-accurate"** is a VALIDATION milestone (adjudicated dual-coder gold
