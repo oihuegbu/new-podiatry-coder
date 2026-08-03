@@ -62,6 +62,17 @@ variable "openai_model" {
   default     = "gpt-5.6-sol"
 }
 
+variable "openai_reasoning_effort" {
+  description = "Reasoning effort for OpenAI coding and adjudication calls"
+  type        = string
+  default     = "high"
+
+  validation {
+    condition     = contains(["none", "low", "medium", "high", "xhigh", "max"], var.openai_reasoning_effort)
+    error_message = "openai_reasoning_effort must be none, low, medium, high, xhigh, or max."
+  }
+}
+
 variable "authorized_model_providers" {
   description = "Providers explicitly approved to receive clinical-note data"
   type        = set(string)

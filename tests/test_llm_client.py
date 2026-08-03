@@ -19,11 +19,13 @@ def test_openai_uses_current_completion_budget_parameter():
                     return_value=client):
         content, usage = _openai_chat_completion(
             system_prompt="system", user_prompt="user", model="model",
-            temperature=0.0, max_tokens=512, json_mode=True)
+            temperature=0.0, max_tokens=512, json_mode=True, effort="high")
 
     kwargs = client.chat.completions.create.call_args.kwargs
     assert kwargs["max_completion_tokens"] == 512
     assert "max_tokens" not in kwargs
+    assert "temperature" not in kwargs
+    assert kwargs["reasoning_effort"] == "high"
     assert kwargs["response_format"] == {"type": "json_object"}
     assert content == '{"ok":true}'
     assert usage["total_tokens"] == 12

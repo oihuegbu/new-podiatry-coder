@@ -1062,6 +1062,7 @@ CLAUDE_EFFORT=high
 # OpenAI — required when OpenAI is primary or an authorized corroborator
 OPENAI_API_KEY=sk-REPLACE_ME
 OPENAI_MODEL=gpt-5.6-sol
+OPENAI_REASONING_EFFORT=high
 
 # ── Vector store (Qdrant) ──────────────────────────────────────────────────────
 # Docker mode: http://qdrant:6333 is set automatically by docker compose
@@ -1100,6 +1101,7 @@ LOG_LEVEL=INFO
 | `CLAUDE_MODEL` | `claude-opus-4-8` | Primary Claude coding model; vision extraction always uses Claude |
 | `CLAUDE_EFFORT` | `high` | Works on every current model; use `xhigh` for Opus on critical batches |
 | `OPENAI_MODEL` | `gpt-5.6-sol` | Used for NER + coding passes when OpenAI is primary or an authorized corroborator |
+| `OPENAI_REASONING_EFFORT` | `high` | OpenAI reasoning budget; replaces unsupported temperature sampling on current reasoning models |
 | `CODING_TEMPERATURE` | `0.0` | All 4 coding passes run deterministically |
 | `CODING_MAX_TOKENS` | `4096` | Per coding pass |
 | `RAG_TOP_K` | `15` | Candidates retrieved per query |

@@ -18,6 +18,7 @@ resource "aws_secretsmanager_secret_version" "app_env" {
     STEDI_ELIGIBILITY_URL         = var.stedi_eligibility_url
     LLM_PROVIDER                  = var.llm_provider
     OPENAI_MODEL                  = var.openai_model
+    OPENAI_REASONING_EFFORT       = var.openai_reasoning_effort
     CLAUDE_MODEL                  = var.claude_model
     CLAUDE_EFFORT                 = var.claude_effort
     AUTHORIZED_MODEL_PROVIDERS    = join(",", sort(tolist(var.authorized_model_providers)))

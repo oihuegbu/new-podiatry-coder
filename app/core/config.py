@@ -16,6 +16,7 @@ LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "claude").lower()
 # --- OpenAI ---
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
+OPENAI_REASONING_EFFORT: str = os.getenv("OPENAI_REASONING_EFFORT", "high")
 
 # --- Anthropic / Claude ---
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")

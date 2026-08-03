@@ -12,6 +12,7 @@ from app.core.config import (
     LLM_PROVIDER,
     OPENAI_API_KEY,
     OPENAI_MODEL,
+    OPENAI_REASONING_EFFORT,
     ANTHROPIC_API_KEY,
     CLAUDE_MODEL,
     CLAUDE_EFFORT,
@@ -112,8 +113,8 @@ def chat_completion(
     """`json_schema`: a strict JSON Schema the response must conform to,
     enforced by the provider's structured-output API (Anthropic
     output_config.format / OpenAI json_schema response_format). `effort`:
-    per-call reasoning-effort override (Claude only; defaults to
-    CLAUDE_EFFORT)."""
+    per-call reasoning-effort override (defaults to the active provider's
+    configured effort)."""
     last_exc: Exception | None = None
     profile = active_profile()
     for attempt in range(1, _MAX_ATTEMPTS + 1):
@@ -135,6 +136,7 @@ def chat_completion(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 json_mode=json_mode,
+                effort=effort,
                 json_schema=json_schema,
             )
         except _TruncatedResponse as exc:
@@ -169,6 +171,7 @@ def _openai_chat_completion(
     temperature: float,
     max_tokens: int,
     json_mode: bool,
+    effort: str | None = None,
     json_schema: dict | None = None,
 ) -> tuple[str, dict]:
     client = get_openai_client()
@@ -178,7 +181,6 @@ def _openai_chat_completion(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": temperature,
         # max_tokens is the legacy Chat Completions field and is rejected by
         # current reasoning models. max_completion_tokens is the provider's
         # general output-budget field and includes visible plus reasoning
@@ -186,6 +188,13 @@ def _openai_chat_completion(
         # budget growth.
         "max_completion_tokens": max_tokens,
     }
+    # Current reasoning models expose reasoning_effort but accept only their
+    # default temperature. Sampling temperature remains a Claude control;
+    # OpenAI independence comes from a separate provider/model execution
+    # profile rather than an unsupported parameter or a silent retry.
+    reasoning_effort = str(effort or OPENAI_REASONING_EFFORT).strip()
+    if reasoning_effort:
+        kwargs["reasoning_effort"] = reasoning_effort
     if json_schema is not None:
         # strict=True is what makes OpenAI grammar-enforce the schema; without
         # it the schema is advisory only. Our schemas already satisfy strict
