@@ -92,9 +92,8 @@ class CandidateCode:
     code: str
     system: str
     descriptor: str
-    score: float = 0.0
-    source: str = ""                  # "retrieval" | "descriptor-entailment"
-    aliases: tuple[str, ...] = ()     # clinician synonyms/index terms for THIS code
+    score: float = 0.0                 # recall relevance (similarity), for ranking
+    source: str = ""
     authority: dict[str, Any] = field(default_factory=dict)   # data provenance
 
 
@@ -111,6 +110,9 @@ class ResolvedLine:
     alternatives: list[CandidateCode] = field(default_factory=list)
     method: ResolutionMethod = ResolutionMethod.ABSTAINED
     rationale: str = ""
+    # set when a resolved code is NOT a separately reportable line (bundled /
+    # non-covered per data): it is kept for the audit trail but not billed.
+    excluded_reason: str | None = None
 
     @property
     def resolved(self) -> bool:
@@ -158,7 +160,8 @@ class CodingResult:
 
     @property
     def billable_lines(self) -> list[ResolvedLine]:
-        return [ln for ln in self.lines if ln.resolved and ln.fact.billable]
+        return [ln for ln in self.lines
+                if ln.resolved and ln.fact.billable and not ln.excluded_reason]
 
     @property
     def procedure_lines(self) -> list[ResolvedLine]:

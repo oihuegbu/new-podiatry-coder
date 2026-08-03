@@ -98,21 +98,27 @@ operative note, with **live** extraction (not mocked):
   a planned follow-up and a "consider hammertoe" discussion are both correctly
   **not billed**.
 - ✅ Codes procedures from the authoritative data — e.g. CPT **28080** (Morton's
-  neuroma excision) *deterministically*, and a hyperkeratotic-lesion paring via
-  arbitration — with the descriptor pulled from the authoritative record and the
-  clinician-synonym layer bridging note vocabulary to terse descriptors.
-- ✅ **Fail-closes correctly**: with no diagnosis resolved, the medical-necessity
-  gate BLOCKS release rather than emitting an unsupported claim. It never
-  hallucinated a code — every code came from a retrieved candidate.
+  neuroma excision) *deterministically* — with the descriptor read from the
+  authoritative record and recall (semantic similarity) as the concept signal.
+- ✅ **Does not mis-bill on recall noise**: a wrong but laterality-matching code
+  (a "right ankle burn" for a neuroma) is *not* chosen — ranking is
+  relevance-first with a recall floor, so a mediocre-relevance code goes to
+  arbitration (which rejects the concept mismatch) instead of being billed.
+- ✅ **Drops non-separately-reportable lines agnostically**: a bundled/non-covered
+  item (e.g. a local-anesthesia code whose descriptor declares it non-covered) is
+  excluded from the claim by a data-driven filter — no named-code special case.
+- ✅ **Fail-closes**: when ICD recall genuinely can't resolve a diagnosis, the
+  medical-necessity gate BLOCKS rather than emitting an unsupported claim. It
+  never hallucinated a code — every code came from a retrieved candidate.
 - ⚠️ **Not yet production-solid**: ICD *diagnosis* resolution is the weak spot
-  (terse ICD descriptors + the known ICD recall gap), and it can over-generate
-  (e.g. coding surgeon-administered local anesthesia, which is bundled). The
-  system lacks bundling/global-package and E/M-leveling knowledge and assigns no
-  modifiers — each of which fails *closed* today (blocks/escalates, never a wrong
-  release).
+  (the known ICD recall gap for eponyms/terse descriptors); the system lacks
+  global-package/bundling-into-procedure logic beyond the coverage filter, E/M
+  leveling, and modifier assignment. Each fails *closed* today — it escalates or
+  blocks, never a wrong release.
 
-So: a working, safe, genuinely autonomous pipeline that codes what it can defend
-and blocks the rest — a sound spine, not a production-accuracy coder yet.
+So: a working, safe, genuinely autonomous pipeline whose decisions are agnostic
+mechanisms over authoritative data — it codes what it can defend and blocks the
+rest. A sound spine, not a production-accuracy coder yet.
 
 ## Honest boundaries (scaffolded, not yet complete)
 

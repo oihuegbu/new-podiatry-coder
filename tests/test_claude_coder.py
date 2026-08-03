@@ -158,5 +158,29 @@ class OntologyResolutionTest(unittest.TestCase):
         self.assertEqual(line.chosen.code, "DX_RIGHT", line.rationale)
 
 
+class BundlingExclusionTest(unittest.TestCase):
+    """A resolved code the source declares NOT separately reportable is dropped
+    from the claim (agnostic — driven by the source's separately_billable, not a
+    named code) while remaining in the audit trail."""
+
+    def test_non_separately_billable_code_excluded(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.pipeline import code_encounter
+
+        cand = CandidateCode("BUNDLED_X", "hcpcs", "bundled add-on service", 0.9)
+        src = MockSource(records={("BUNDLED_X", "hcpcs"): {"active": True}},
+                         retrieval={("*", "hcpcs"): [cand]},
+                         nonbillable={"BUNDLED_X"})
+        facts = ('{"facts":[{"kind":"supply","description":"bundled service",'
+                 '"attributes":{},"disposition":"performed_today","negated":false,'
+                 '"evidence":["bundled service provided"],"confidence":0.99}]}')
+        r = code_encounter("e", "bundled service provided during the visit",
+                           "2026-03-14", source=src,
+                           extract_llm=lambda s, u: facts,
+                           arbitrate_llm=lambda s, u: '{"choice":0,"confidence":0}')
+        self.assertNotIn("BUNDLED_X", {ln.chosen.code for ln in r.billable_lines})
+        self.assertTrue(any(ln.excluded_reason for ln in r.lines))
+
+
 if __name__ == "__main__":
     unittest.main()

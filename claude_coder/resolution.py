@@ -1,21 +1,25 @@
 """Stage 2 — Deterministic ontological resolution.
 
-The DECISION is made by structured rules over descriptor features, not by vector
-rank. Retrieval is demoted to what it is good at — RECALL: it narrows ~10^5 codes
-to a small candidate pool. The resolver then evaluates each candidate field by
-field against the documented fact and applies coding-guideline MECHANICS:
+Division of labour, each component doing what it is good at:
 
-  • laterality contradiction   → eliminate  (a "left" descriptor for a right foot)
-  • measurement out of range   → eliminate  (size 30 vs a "≤16 sq in" descriptor)
-  • concept entailment floor    → eliminate  (the core action/site must match)
-  • specificity preference      → rank       (a descriptor that positively matches
-                                              more documented attributes wins)
+  • RECALL (embedding retrieval) supplies the concept signal. Semantic
+    similarity over enriched, synonym-bearing text is exactly what handles terse
+    descriptors and clinician vocabulary ("Morton's neuroma" ≈ "Lesion of plantar
+    nerve"). The pool is already cosine-thresholded, so relevance is the RAG's
+    job — not a brittle token-overlap floor re-derived here (that floor wrongly
+    eliminated correct-but-terse codes; it is gone).
 
-The surviving code is chosen deterministically when it is the unique survivor or
-dominates on specificity; genuine ties go to bounded arbitration. Every decision
-carries a per-field rationale (the audit trail). None of the mechanics reference
-a code — they operate on features parsed from the authoritative descriptors, so
-the size-family selection the old pipeline HARDCODED is here derived from data.
+  • STRUCTURED RULES make the decision. They are agnostic MECHANICS over features
+    parsed from the authoritative descriptors — no code is named:
+      – laterality contradiction    → ELIMINATE  (a "left" descriptor, right foot)
+      – measurement out of range     → ELIMINATE  (size 30 vs a "≤16 sq in" code)
+      – specificity                  → RANK       (a code that positively matches
+                                                   more documented attributes wins,
+                                                   per ICD-10-CM specificity rules)
+
+A survivor is chosen deterministically when it is unique, dominates on
+specificity, or clearly leads on recall; otherwise the ambiguity goes to bounded
+arbitration. Every decision carries a per-field rationale (the audit trail).
 """
 from __future__ import annotations
 
@@ -27,18 +31,9 @@ from .models import CandidateCode, ClinicalFact, ResolutionMethod, ResolvedLine
 from .ontology import DescriptorFeatures, measurement_of, parse_descriptor
 
 _LATERALITY = {"left", "right", "bilateral"}
-_STOP = _LATERALITY | {
-    "of", "the", "and", "or", "with", "without", "to", "for", "a", "an", "in",
-    "on", "by", "per", "each", "single", "size", "sterile", "unspecified",
-}
-_MIN_CONCEPT = 0.34        # the core concept must overlap at least this much
-_DET_MARGIN = 0.15         # …and clearly beat the runner-up when specificity ties
+_SCORE_MARGIN = 0.05       # recall lead that settles a pick among relevant candidates
+_RELEVANCE_FLOOR = 0.6     # policy dial: min recall similarity for a deterministic pick
 _RECALL_POOL = 40
-
-
-def _tokens(s: str) -> set[str]:
-    return {t for t in re.findall(r"[a-z0-9]+", str(s).lower())
-            if len(t) > 2 and t not in _STOP}
 
 
 def _fact_laterality(fact: ClinicalFact) -> str:
@@ -46,64 +41,45 @@ def _fact_laterality(fact: ClinicalFact) -> str:
     return lat if lat in _LATERALITY else ""
 
 
-def _fact_concept(fact: ClinicalFact) -> set[str]:
-    toks = _tokens(fact.description)
-    for k, v in fact.attributes.items():
-        if str(k).lower() in ("laterality", "count", "quantity"):
-            continue
-        toks |= _tokens(str(v))
-    return toks
-
-
 @dataclass
 class _Match:
     candidate: CandidateCode
     features: DescriptorFeatures
-    concept: float
+    recall: float
     specificity: int
     rationale: list[str] = field(default_factory=list)
 
 
 def _evaluate(fact: ClinicalFact, cand: CandidateCode) -> _Match | None:
-    """Apply the guideline mechanics. Return None if the candidate is
-    eliminated, else a scored match with its per-field reasons."""
+    """Apply the agnostic elimination rules and score specificity. Return None if
+    the candidate CONTRADICTS the documented facts, else a scored match. Concept
+    relevance is not judged here — retrieval already guaranteed it."""
     feats = parse_descriptor(cand.descriptor)
     reasons: list[str] = []
 
-    # RULE — laterality contradiction eliminates.
+    # ELIMINATION — laterality contradiction.
     fl = _fact_laterality(fact)
     if fl and fl != "bilateral" and feats.laterality and fl not in feats.laterality:
         return None
 
-    # RULE — a documented measurement must fall in the descriptor's interval.
+    # ELIMINATION — a documented measurement must fall in the descriptor's range.
     measure = measurement_of(fact.attributes)
     if measure is not None and feats.interval and feats.interval.bounded():
         if not feats.interval.contains(measure):
             return None
-        reasons.append(f"measure {measure:g} in descriptor range")
 
-    # RULE — concept entailment floor. Match against the descriptor's core tokens
-    # PLUS the code's clinician synonyms (the note-vocabulary bridge), so
-    # "Morton's neuroma" can entail a "Lesion of plantar nerve" descriptor whose
-    # synonym set contains it. Laterality/measurement still come from the
-    # descriptor only — synonyms inform concept, never the discriminating axes.
-    fc = _fact_concept(fact)
-    matchable = feats.core_tokens | {t for alias in cand.aliases for t in _tokens(alias)}
-    concept = (len(fc & matchable) / len(fc)) if fc else 0.0
-    if concept < _MIN_CONCEPT:
-        return None
-    reasons.append(f"concept {concept:.2f}")
-
-    # specificity — count the constraining attributes the descriptor POSITIVELY
-    # accounts for (a more specific code wins per ICD-10-CM specificity guidance).
+    # SPECIFICITY — count the constraining attributes the descriptor POSITIVELY
+    # accounts for; a more specific code wins ties.
     spec = 0
     if fl and fl in feats.laterality:
         spec += 1
         reasons.append(f"laterality {fl}")
     if measure is not None and feats.interval and feats.interval.bounded():
         spec += 1
+        reasons.append(f"measure {measure:g} in range")
+    reasons.append(f"recall {cand.score:.2f}")
 
-    return _Match(cand, feats, concept, spec, reasons)
+    return _Match(cand, feats, cand.score, spec, reasons)
 
 
 def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -> ResolvedLine:
@@ -112,7 +88,6 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -
             fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
             rationale=f"not performed today (disposition={fact.disposition.value}) — not billed")
 
-    # Retrieval is RECALL ONLY — generate a candidate pool for the concept.
     query = fact.description + " " + " ".join(
         str(v) for k, v in fact.attributes.items() if str(k).lower() != "count")
     pool = source.retrieve(query.strip(), fact.system, top_k=top_k)
@@ -120,31 +95,40 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -
         return ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
                             rationale="no candidate retrieved for the concept")
 
-    # STRUCTURED decision over the pool.
-    matches = [m for m in (_evaluate(fact, c) for c in pool) if m is not None]
-    if not matches:
+    survivors = [m for m in (_evaluate(fact, c) for c in pool) if m is not None]
+    if not survivors:
         return ResolvedLine(
             fact=fact, chosen=None, alternatives=pool[:5],
             method=ResolutionMethod.ABSTAINED,
-            rationale="no retrieved code satisfies the documented attributes")
+            rationale="every retrieved code contradicts a documented attribute")
 
-    matches.sort(key=lambda m: (m.specificity, m.concept), reverse=True)
-    top = matches[0]
-    if len(matches) == 1:
+    # Rank by concept relevance (recall) FIRST; specificity only breaks near-ties
+    # among comparably-relevant codes — it must never promote a lower-recall code
+    # over a more-relevant one (doing so once picked a laterality-matching but
+    # semantically-wrong burn code for a neuroma). A deterministic pick also
+    # requires the leader to clear the relevance floor; anything softer goes to
+    # arbitration, which judges the descriptor against the fact and escalates on
+    # a concept mismatch.
+    survivors.sort(key=lambda m: (m.recall, m.specificity), reverse=True)
+    top = survivors[0]
+    if top.recall < _RELEVANCE_FLOOR:
+        deterministic = False
+    elif len(survivors) == 1:
         deterministic = True
     else:
-        nxt = matches[1]
-        deterministic = (top.specificity > nxt.specificity
-                         or top.concept - nxt.concept >= _DET_MARGIN)
+        nxt = survivors[1]
+        close = abs(top.recall - nxt.recall) < _SCORE_MARGIN
+        deterministic = (top.recall - nxt.recall >= _SCORE_MARGIN
+                         or (close and top.specificity > nxt.specificity))
 
     if deterministic:
         return ResolvedLine(
             fact=fact, chosen=top.candidate,
-            alternatives=[m.candidate for m in matches[1:4]],
+            alternatives=[m.candidate for m in survivors[1:4]],
             method=ResolutionMethod.DETERMINISTIC,
             rationale="; ".join(top.rationale))
 
     return ResolvedLine(
-        fact=fact, chosen=None, alternatives=[m.candidate for m in matches[:5]],
+        fact=fact, chosen=None, alternatives=[m.candidate for m in survivors[:5]],
         method=ResolutionMethod.ABSTAINED,
-        rationale=f"{len(matches)} candidates tie on structure — needs arbitration")
+        rationale=f"{len(survivors)} candidates comparable on structure & recall — arbitration")

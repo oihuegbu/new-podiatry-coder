@@ -37,6 +37,15 @@ def code_encounter(
         line = resolution.resolve(fact, source)
         if (not line.resolved) and line.alternatives and fact.billable:
             line = arbitration.arbitrate(line, arbitrate_llm)
+        # Data-driven bundling filter: a resolved code the source declares NOT
+        # separately reportable (bundled / non-covered / MUE 0) is kept for the
+        # audit trail but dropped from the claim. Agnostic — any such code, not
+        # a named one.
+        if line.resolved and line.fact.billable:
+            from .models import Outcome
+            if source.separately_billable(
+                    line.chosen.code, line.chosen.system, date_of_service) is Outcome.BLOCKED:
+                line.excluded_reason = "not separately reportable per authoritative data"
         lines.append(line)
 
     result = CodingResult(
@@ -58,7 +67,10 @@ def render(result: CodingResult) -> str:
     out.append("LINES:")
     for ln in result.lines:
         f = ln.fact
-        if ln.resolved:
+        if ln.resolved and ln.excluded_reason:
+            out.append(f"  ∅ excluded {ln.chosen.system.upper()} {ln.chosen.code}  "
+                       f"«{f.description}» — {ln.excluded_reason}")
+        elif ln.resolved:
             out.append(f"  ✓ {ln.chosen.system.upper()} {ln.chosen.code}  "
                        f"[{ln.method.value}]  «{f.description}»")
             out.append(f"      descriptor: {ln.chosen.descriptor[:70]}")
