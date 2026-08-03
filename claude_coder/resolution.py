@@ -328,6 +328,7 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
             return ResolvedLine(
                 fact=fact, chosen=None, alternatives=[chosen] + shortlist[:4],
                 method=ResolutionMethod.ABSTAINED,
+                documentation_gap=why2,
                 rationale=f"PROVIDER QUERY — the best-matching code ({chosen.code}) "
                           f"requires an element the documentation does not state "
                           f"({why2}); confirm it was performed / amend the note, "

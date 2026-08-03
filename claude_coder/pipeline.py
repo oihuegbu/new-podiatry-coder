@@ -129,6 +129,9 @@ def code_encounter(
     apply_global_package(result, source)
     result.gates = gates.run_gates(result, note_text, source)
     decide(result)
+    # Actionable documentation guidance for whatever could not be coded confidently.
+    from . import recommendations as _recs
+    result.recommendations = _recs.build_recommendations(result)
     result.certificate = certificate.build_certificate(
         result, note_text, source_identity={"source": type(source).__name__})
     return result
@@ -290,4 +293,9 @@ def render(result: CodingResult) -> str:
         out.append("DECISION:")
         for n in result.notes:
             out.append(f"  - {n}")
+    if result.recommendations:
+        out.append("")
+        out.append("DOCUMENTATION RECOMMENDATIONS:")
+        for r in result.recommendations:
+            out.append(f"  • [{r['issue']}] {r['recommendation']}")
     return "\n".join(out)

@@ -939,5 +939,55 @@ class LearnedIndexTest(unittest.TestCase):
         self.assertIn("learned verified-resolution index", line.rationale)
 
 
+class RecommendationsTest(unittest.TestCase):
+    """Documentation recommendations are derived agnostically from fact kinds,
+    resolution methods, and gate outcomes — no code/term/scenario. Abstract inputs."""
+
+    def _line(self, resolved, doc_gap=None, rationale="r"):
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod, ResolvedLine)
+        f = ClinicalFact(kind=FactKind.PROCEDURE, description="a documented service",
+                         evidence=[EvidenceSpan("a documented service performed")])
+        chosen = CandidateCode("PROC_X", "cpt", "d", 0.9) if resolved else None
+        return ResolvedLine(fact=f, chosen=chosen,
+                            method=(ResolutionMethod.VERIFIED if resolved
+                                    else ResolutionMethod.ABSTAINED),
+                            documentation_gap=doc_gap, rationale=rationale)
+
+    def test_documentation_gap_becomes_query(self):
+        from claude_coder.models import CodingResult
+        from claude_coder.recommendations import build_recommendations
+        ln = self._line(resolved=False, doc_gap="a required element was not stated")
+        recs = build_recommendations(
+            CodingResult(encounter_id="e", date_of_service="2026-03-14", lines=[ln]))
+        self.assertEqual([r["issue"] for r in recs], ["documentation_gap"])
+        self.assertIn("a required element was not stated", recs[0]["recommendation"])
+
+    def test_unresolved_service_recommendation(self):
+        from claude_coder.models import CodingResult
+        from claude_coder.recommendations import build_recommendations
+        ln = self._line(resolved=False)                  # abstained, no doc gap
+        recs = build_recommendations(
+            CodingResult(encounter_id="e", date_of_service="2026-03-14", lines=[ln]))
+        self.assertEqual([r["issue"] for r in recs], ["unresolved_service"])
+        self.assertIn("clarify", recs[0]["recommendation"].lower())
+
+    def test_gate_block_becomes_remediation(self):
+        from claude_coder.models import CodingResult, GateResult, Outcome
+        from claude_coder.recommendations import build_recommendations
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14",
+                         gates=[GateResult("verbatim_evidence", Outcome.BLOCKED, "x", "y")])
+        recs = build_recommendations(r)
+        self.assertEqual([x["issue"] for x in recs], ["gate_verbatim_evidence"])
+
+    def test_resolved_line_yields_no_recommendation(self):
+        from claude_coder.models import CodingResult
+        from claude_coder.recommendations import build_recommendations
+        recs = build_recommendations(
+            CodingResult(encounter_id="e", date_of_service="2026-03-14",
+                         lines=[self._line(resolved=True)]))
+        self.assertEqual(recs, [])
+
+
 if __name__ == "__main__":
     unittest.main()

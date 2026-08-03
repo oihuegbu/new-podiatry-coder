@@ -117,6 +117,9 @@ class ResolvedLine:
     # set when a resolved code is NOT a separately reportable line (bundled /
     # non-covered per data): it is kept for the audit trail but not billed.
     excluded_reason: str | None = None
+    # set when the line escalated because the best-matching code needs an element
+    # the documentation does not state — carries the specific gap for a provider query.
+    documentation_gap: str | None = None
 
     @property
     def resolved(self) -> bool:
@@ -162,6 +165,8 @@ class CodingResult:
     notes: list[str] = field(default_factory=list)
     certificate: dict[str, Any] | None = None   # tamper-evident evidence packet
     bypassed_ncci: list = field(default_factory=list)   # code pairs cleared by a modifier
+    # actionable documentation recommendations (what to document/clarify to code it)
+    recommendations: list[dict] = field(default_factory=list)
 
     @property
     def billable_lines(self) -> list[ResolvedLine]:
