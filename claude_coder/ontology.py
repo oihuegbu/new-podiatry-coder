@@ -157,6 +157,52 @@ def billing_units(documented_count: int, descriptor: str) -> int:
     return 1
 
 
+# ── CPT section applicability (mechanic 1) ────────────────────────────────────
+# A code's SECTION is not a field in the data, but the authoritative descriptor
+# names it: the CPT Anesthesia section's descriptors are formulaic ("Anesthesia
+# for procedures on …"). We read that grammar — exactly like reading a descriptor
+# for its measurement interval or laterality — never a code range. The table is
+# descriptor GRAMMAR, extensible as other sections gain a detectable signature;
+# there is no medical code in it.
+_SECTION_SIGNATURES: dict[str, tuple[str, ...]] = {
+    # section name : descriptor-leading phrases that identify it
+    "anesthesia": ("anesthesia for", "anesthesia,"),
+}
+
+
+def code_section(descriptor: str) -> str | None:
+    """The CPT section a code belongs to, inferred from its authoritative
+    descriptor grammar (not a code range). None when no signature matches."""
+    d = re.sub(r"\s+", " ", str(descriptor or "").lower()).strip()
+    for section, sigs in _SECTION_SIGNATURES.items():
+        if any(d.startswith(s) for s in sigs):
+            return section
+    return None
+
+
+def is_separate_procedure(descriptor: str) -> bool:
+    """CPT '(separate procedure)' designation: the service is bundled when
+    performed with a more extensive procedure of the same session. Read straight
+    from the descriptor — a real CPT convention, no code list."""
+    return "(separate procedure)" in str(descriptor or "").lower()
+
+
+# ── descriptor ↔ fact token support (mechanic 2, ranking only) ────────────────
+def support_score(descriptor: str, text: str) -> int:
+    """How many of the DESCRIPTOR's distinctive concept tokens the documented
+    text (fact description + evidence) also names — a safe RANK signal used only
+    to break near-ties in recall. It never eliminates a candidate (terse/generic
+    authoritative descriptors legitimately share few tokens with clinician
+    phrasing — the same reason the resolver has no token FLOOR), so a correct but
+    tersely-worded code can never be dropped by this; it only helps a
+    concept-matching code win when recall is otherwise a wash."""
+    from .terminology import _sing
+    dtok = {_sing(t) for t in _tokens(descriptor)
+            if t not in _QUALIFIER and not t.isdigit() and len(t) > 2}
+    ttok = {_sing(t) for t in _tokens(text) if len(t) > 2}
+    return len(dtok & ttok)
+
+
 def measurement_of(attributes: dict) -> float | None:
     """Pull a single numeric measurement out of a fact's attributes (area,
     size, depth, length…). Structural, unit-agnostic here; a production build

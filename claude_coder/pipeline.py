@@ -17,7 +17,7 @@ from . import arbitration, certificate, em, extraction, gates, ontology, resolut
 from .arbitration import LLMFn
 from .autonomy import decide
 from .data_access import AuthoritativeSource, CodeSource
-from .models import CodingResult, ResolutionMethod
+from .models import CodingResult, ResolutionMethod, ResolvedLine
 
 
 def code_encounter(
@@ -71,8 +71,18 @@ def code_encounter(
         date_of_service=date_of_service,
         lines=lines,
     )
-    # Claim-level modifiers (E/M-25, distinct-service 59/X) once all lines exist.
+    # Mechanic 4 — collapse duplicate resolved codes into one line before anything
+    # downstream reasons about the claim as a set.
+    dedup_lines(result)
+    # Mechanic 1 — code-type/section applicability (e.g. an anesthesia-section code
+    # is not separately reportable by the operating provider).
+    apply_section_applicability(result)
+    # Claim-level modifiers (E/M-25, distinct-service 59/X) once all lines exist —
+    # this records which PTP pairs a justified modifier bypasses.
     modifier_engine.assign_claim(result, source)
+    # Mechanic 3 — resolve NCCI PTP conflicts by DEMOTING the bundled component
+    # (not blocking the claim) whenever no distinct-service modifier is justified.
+    apply_ncci_bundling(result, source)
 
     apply_global_package(result, source)
     result.gates = gates.run_gates(result, note_text, source)
@@ -80,6 +90,105 @@ def code_encounter(
     result.certificate = certificate.build_certificate(
         result, note_text, source_identity={"source": type(source).__name__})
     return result
+
+
+def dedup_lines(result: CodingResult) -> None:
+    """Mechanic 4 — two documented phrases that resolve to the SAME code are one
+    billable line, not two. Keep the first occurrence (union its evidence) and
+    exclude the rest from the claim, keeping them in the audit trail. Agnostic: a
+    set-merge on the resolved (code, system), never a named code. Genuinely
+    repeated services are expressed through units/modifiers, not a second
+    identical line, so collapsing here prevents accidental double-billing while
+    the MUE gate still governs unit counts."""
+    seen: dict[tuple[str, str], ResolvedLine] = {}
+    for ln in result.lines:
+        if not (ln.resolved and ln.fact.billable and not ln.excluded_reason):
+            continue
+        key = (ln.chosen.code, ln.chosen.system)
+        keep = seen.get(key)
+        if keep is None:
+            seen[key] = ln
+            continue
+        # merge evidence for the audit trail, then drop the duplicate line
+        keep.fact.evidence = list(keep.fact.evidence) + list(ln.fact.evidence)
+        ln.excluded_reason = (f"duplicate of {ln.chosen.code} already on the claim "
+                              f"— merged into a single line")
+
+
+def apply_section_applicability(result: CodingResult) -> None:
+    """Mechanic 1 — a code whose authoritative descriptor identifies it as a
+    different CPT SECTION than the encounter supports is not separately reportable.
+    The concrete, agnostic rule: an ANESTHESIA-section service (detected from
+    descriptor grammar, not a code range) is billed by the anesthesia provider,
+    so on a claim that also carries an operative procedure it is bundled into the
+    surgeon's service unless the note documents a separate anesthesia provider.
+    Fail-closed: excluded by default, kept in the audit trail."""
+    from .ontology import code_section
+    from .models import FactKind
+    proc_lines = [ln for ln in result.billable_lines
+                  if ln.chosen.system in ("cpt", "hcpcs")
+                  and ln.fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING)]
+    has_operative = any(code_section(ln.chosen.descriptor) != "anesthesia"
+                        for ln in proc_lines)
+    if not has_operative:
+        return                          # e.g. an anesthesia provider's own claim
+    _SEP = ("anesthesia_provider", "separate_anesthesia_provider",
+            "anesthesia_by_separate_provider", "separate_anesthesia")
+    for ln in proc_lines:
+        if code_section(ln.chosen.descriptor) != "anesthesia":
+            continue
+        if any(ln.fact.attributes.get(k) for k in _SEP):
+            continue                    # a separate anesthesia provider is documented
+        ln.excluded_reason = ("anesthesia-section service — not separately "
+                              "reportable by the operating provider "
+                              "(no separate anesthesia provider documented)")
+
+
+def apply_ncci_bundling(result: CodingResult, source: CodeSource) -> None:
+    """Mechanic 3 — turn NCCI PTP edits into a resolution, not a hard block. For
+    each pair of billable procedure lines with a PTP edit, if no distinct-service
+    modifier is justified (the pair was not bypassed), DEMOTE the column-2
+    component code (the authoritative row tells us which side is the bundled
+    component) — the claim keeps the payable comprehensive code and drops the
+    component, exactly as a coder would, instead of blocking outright. Also honors
+    the CPT '(separate procedure)' designation, which bundles a service performed
+    alongside another procedure of the same session. All directionality comes from
+    the data; no code is named here."""
+    from .ontology import is_separate_procedure
+    proc = [ln for ln in result.billable_lines
+            if ln.chosen and ln.chosen.system in ("cpt", "hcpcs")]
+
+    # (a) '(separate procedure)' designation — bundled when billed with another
+    # distinct procedure line this session.
+    for ln in proc:
+        if ln.excluded_reason or not is_separate_procedure(ln.chosen.descriptor):
+            continue
+        if any(o is not ln and not o.excluded_reason
+               and o.chosen.code != ln.chosen.code for o in proc):
+            ln.excluded_reason = ("'(separate procedure)' designation — bundled "
+                                  "when performed with another procedure this session")
+
+    # (b) PTP edits — demote the component of any unbypassed pair.
+    by_code = {ln.chosen.code: ln for ln in proc}
+    for i in range(len(proc)):
+        for j in range(i + 1, len(proc)):
+            a, b = proc[i], proc[j]
+            if a.excluded_reason or b.excluded_reason:
+                continue
+            edit = source.ncci_edit(a.chosen.code, b.chosen.code, result.date_of_service)
+            if not edit:
+                continue
+            mod = edit.get("modifier")
+            if mod not in ("0", "1"):
+                continue                # deleted / non-applicable indicator -> no active edit
+            pair = frozenset((a.chosen.code, b.chosen.code))
+            if mod == "1" and pair in result.bypassed_ncci:
+                continue                # a justified distinct-service modifier keeps both
+            comp = by_code.get(edit.get("component"))
+            if comp is not None and not comp.excluded_reason:
+                comp.excluded_reason = (
+                    f"bundled into {edit.get('payable')} per NCCI PTP "
+                    f"(no distinct-service modifier justified)")
 
 
 def apply_global_package(result: CodingResult, source: CodeSource) -> None:

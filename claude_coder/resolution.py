@@ -28,7 +28,8 @@ from dataclasses import dataclass, field
 
 from .data_access import CodeSource
 from .models import CandidateCode, ClinicalFact, FactKind, ResolutionMethod, ResolvedLine
-from .ontology import DescriptorFeatures, measurement_of, parse_descriptor
+from .ontology import (DescriptorFeatures, measurement_of, parse_descriptor,
+                       support_score)
 
 _LATERALITY = {"left", "right", "bilateral"}
 _SCORE_MARGIN = 0.05       # recall lead that settles a pick among relevant candidates
@@ -47,7 +48,14 @@ class _Match:
     features: DescriptorFeatures
     recall: float
     specificity: int
+    support: int = 0
     rationale: list[str] = field(default_factory=list)
+
+
+def _fact_text(fact: ClinicalFact) -> str:
+    """The documented words for this fact: its description plus verbatim evidence
+    — the text a candidate descriptor's concept tokens are checked against."""
+    return " ".join([fact.description] + [s.text for s in fact.evidence])
 
 
 def _evaluate(fact: ClinicalFact, cand: CandidateCode) -> _Match | None:
@@ -77,9 +85,14 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode) -> _Match | None:
     if measure is not None and feats.interval and feats.interval.bounded():
         spec += 1
         reasons.append(f"measure {measure:g} in range")
+
+    # SUPPORT (mechanic 2) — how many of the descriptor's concept tokens the note
+    # actually names. A RANK signal ONLY (used to break near-ties in recall);
+    # never an elimination, so a correct-but-terse code is never dropped by it.
+    support = support_score(cand.descriptor, _fact_text(fact))
     reasons.append(f"recall {cand.score:.2f}")
 
-    return _Match(cand, feats, cand.score, spec, reasons)
+    return _Match(cand, feats, cand.score, spec, support, reasons)
 
 
 def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -> ResolvedLine:
@@ -116,6 +129,26 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -
                 line = _decide(fact, pool, authority="SNOMED CT -> ICD-10-CM map")
                 if line.resolved:
                     return line
+
+    # AUTHORITATIVE FIRST (procedure axis, mechanic 5): resolve a procedure/supply/
+    # imaging phrase through the CPT/HCPCS descriptor index before any embedding —
+    # the deterministic analog of the ICD Index. Same single-code trust rule: a
+    # unique descriptor match is taken deterministically; anything else defers to
+    # recall (which handles the many-competitor / terse cases).
+    elif fact.kind in (FactKind.PROCEDURE, FactKind.SUPPLY, FactKind.IMAGING,
+                       FactKind.DRUG):
+        pidx = source.procedure_index_codes(fact.description, fact.system)
+        if len(pidx) == 1:
+            code = next(iter(pidx))
+            rec = source.lookup(code, fact.system) or {}
+            desc = (rec.get("long_description") or rec.get("description")
+                    or rec.get("short_description") or "")
+            cand = CandidateCode(code=code, system=fact.system, descriptor=str(desc),
+                                 score=1.0, source="cpt-descriptor-index",
+                                 authority={"source": "CPT/HCPCS descriptor index"})
+            line = _decide(fact, [cand], authority="CPT/HCPCS descriptor index")
+            if line.resolved:
+                return line
 
     # Multi-query RECALL: search the structured query AND the verbatim evidence
     # (which often carries the eponym / clinician term the descriptor lacks),
@@ -169,7 +202,11 @@ def _decide(fact: ClinicalFact, pool: list[CandidateCode],
             method=ResolutionMethod.ABSTAINED,
             rationale="every candidate contradicts a documented attribute")
 
-    survivors.sort(key=lambda m: (m.recall, m.specificity), reverse=True)
+    # Rank by recall, then (specificity, support) — the latter two only separate
+    # candidates of comparable recall, so a concept-matching code wins a near-tie
+    # while recall still leads; neither can drop a correct code (that's elimination
+    # above, done only on hard contradictions).
+    survivors.sort(key=lambda m: (m.recall, m.specificity, m.support), reverse=True)
     top = survivors[0]
     if top.recall < _RELEVANCE_FLOOR:
         deterministic = False
@@ -179,7 +216,8 @@ def _decide(fact: ClinicalFact, pool: list[CandidateCode],
         nxt = survivors[1]
         close = abs(top.recall - nxt.recall) < _SCORE_MARGIN
         deterministic = (top.recall - nxt.recall >= _SCORE_MARGIN
-                         or (close and top.specificity > nxt.specificity))
+                         or (close and (top.specificity, top.support)
+                             > (nxt.specificity, nxt.support)))
 
     tag = f" ({authority})" if authority else ""
     if deterministic:

@@ -44,9 +44,13 @@ class CodeSource(Protocol):
 
     def snomed_codes(self, description: str, system: str) -> set[str]: ...
 
+    def procedure_index_codes(self, description: str, system: str) -> set[str]: ...
+
     def leaf_codes(self, stem: str, system: str) -> set[str]: ...
 
     def ncci_indicator(self, col1: str, col2: str, dos: str | None) -> str | None: ...
+
+    def ncci_edit(self, a: str, b: str, dos: str | None) -> dict | None: ...
 
     def mue_limit(self, code: str, dos: str | None) -> int | None: ...
 
@@ -99,6 +103,48 @@ class AuthoritativeSource:
             return set()
         return {c for c in self._snomed.candidates(description)
                 if self.leaf_codes(c, "icd10")}
+
+    def procedure_index_codes(self, description: str, system: str) -> set[str]:
+        """Deterministic CPT/HCPCS grounding, the procedure-axis analog of the ICD
+        Alphabetic Index (mechanic 5). Builds a TerminologyIndex over the OFFICIAL
+        descriptors already in the registry (long + short) and returns the codes a
+        documented procedure phrase matches by exact / compound / order-and-plural-
+        independent token set. Provenance-clean and deterministic wherever a phrase
+        cleanly matches a descriptor; the embedding recall remains the fallback for
+        everything else. No code authored here — the index is inverted from the
+        descriptor data at load time and self-updates with the code set."""
+        if system not in ("cpt", "hcpcs"):
+            return set()
+        cache = getattr(self, "_pidx", None)
+        if cache is None:
+            cache = self._pidx = {}
+        if system not in cache:
+            try:
+                from .terminology import TerminologyIndex
+                table = getattr(self._reference(), system, {})
+                by_code: dict[str, list[str]] = {}
+                for code, rec in table.items():
+                    if not isinstance(rec, dict):
+                        continue
+                    descs = [str(rec.get("long_description") or ""),
+                             str(rec.get("short_description") or "")]
+                    terms = [d for d in descs if d]
+                    if terms:
+                        by_code[str(code)] = terms
+                cache[system] = TerminologyIndex(by_code) if by_code else False
+            except Exception:
+                cache[system] = False
+        idx = cache[system]
+        if not idx:
+            return set()
+        # TerminologyIndex dots codes (ICD form); CPT/HCPCS have no dot, so strip
+        # it back off, and keep only codes that actually exist in this system.
+        out = set()
+        for c in idx.candidates(description):
+            code = str(c).replace(".", "")
+            if self.lookup(code, system):
+                out.add(code)
+        return out
 
     def index_codes(self, description: str, system: str) -> set[str]:
         """Authoritative ICD-10-CM codes for a clinician term, via the Alphabetic
@@ -254,6 +300,32 @@ class AuthoritativeSource:
             return "0"                            # an edit exists but no bypass field -> treat as hard
         return str(edit)
 
+    def ncci_edit(self, a: str, b: str, dos: str | None) -> dict | None:
+        """The DIRECTIONAL PTP edit for a code pair: which code is payable
+        (column 1 / comprehensive) vs the bundled component (column 2), plus the
+        modifier indicator. Returns {'payable', 'component', 'modifier'} or None.
+        The direction comes from the authoritative row (check_ncci echoes the
+        real col1/col2), so a caller can DEMOTE the component rather than block
+        the whole claim."""
+        db = self._reference()
+        try:
+            edit = db.check_ncci(a, b)           # type: ignore[attr-defined]
+        except Exception:
+            return None
+        if not isinstance(edit, dict):
+            return None
+        payable = edit.get("code1")
+        component = edit.get("code2")
+        if not payable or not component:
+            return None
+        mod = edit.get("modifier")
+        for k in ("modifier", "modifier_indicator", "indicator", "mi"):
+            if edit.get(k) is not None:
+                mod = edit.get(k)
+                break
+        return {"payable": str(payable), "component": str(component),
+                "modifier": ("0" if mod is None else str(mod))}
+
     def mue_limit(self, code: str, dos: str | None) -> int | None:
         """Max medically-unlikely units from the MUE table (a dict keyed by
         code -> {'mue_value': N})."""
@@ -280,7 +352,8 @@ class MockSource:
                  gp: dict[str, str] | None = None,
                  bilat: dict[str, str] | None = None,
                  index: dict[str, set] | None = None,
-                 snomed: dict[str, set] | None = None) -> None:
+                 snomed: dict[str, set] | None = None,
+                 proc_index: dict[str, set] | None = None) -> None:
         self._records = records or {}
         self._retrieval = retrieval or {}
         self._ncci = ncci or {}
@@ -290,6 +363,7 @@ class MockSource:
         self._bilat = bilat or {}
         self._index = index or {}
         self._snomed_map = snomed or {}
+        self._proc_index = proc_index or {}
 
     def global_period(self, code):
         return self._gp.get(code)
@@ -302,6 +376,9 @@ class MockSource:
 
     def snomed_codes(self, description, system):
         return set(self._snomed_map.get(description, set())) if system == "icd10" else set()
+
+    def procedure_index_codes(self, description, system):
+        return set(self._proc_index.get(description, set())) if system in ("cpt", "hcpcs") else set()
 
     def leaf_codes(self, stem, system):
         undot = str(stem).replace(".", "").upper()
@@ -333,6 +410,15 @@ class MockSource:
 
     def ncci_indicator(self, col1, col2, dos):
         return self._ncci.get((col1, col2))
+
+    def ncci_edit(self, a, b, dos):
+        # Mock stores directional edits under the payable/comprehensive key
+        # (a, b) -> modifier indicator, mirroring the real col1/col2 direction.
+        if (a, b) in self._ncci:
+            return {"payable": a, "component": b, "modifier": str(self._ncci[(a, b)])}
+        if (b, a) in self._ncci:
+            return {"payable": b, "component": a, "modifier": str(self._ncci[(b, a)])}
+        return None
 
     def mue_limit(self, code, dos):
         return self._mue.get(code)

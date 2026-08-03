@@ -83,8 +83,11 @@ class ModifierEngine:
 
     def _distinct_modifier(self, a, b) -> str | None:
         """Which distinct-service modifier a pair earns — X preferred over 59,
-        chosen by WHY the services are distinct (different structure/site → XS,
-        else unusual non-overlapping → XU). Values discovered from data."""
+        chosen by WHY the documentation makes the services distinct: a different
+        structure/site → XS, a separate encounter → XE. Returns None when the note
+        establishes NO basis for distinctness — a bypass modifier is never appended
+        just to clear an NCCI edit (that is unbundling); without a documented basis
+        the edit stands and the component is bundled downstream (mechanic 3)."""
         fa, fb = a.fact.attributes, b.fact.attributes
         diff_site = (fa.get("laterality") and fb.get("laterality")
                      and fa.get("laterality") != fb.get("laterality")) or \
@@ -92,7 +95,11 @@ class ModifierEngine:
                      and fa.get("anatomy") != fb.get("anatomy"))
         if diff_site and self._x_structure:
             return self._x_structure
-        return self._x_unusual or self._distinct_59
+        diff_enc = (fa.get("encounter") and fb.get("encounter")
+                    and fa.get("encounter") != fb.get("encounter"))
+        if diff_enc and self._x_encounter:
+            return self._x_encounter
+        return None
 
     def assign_claim(self, result, source) -> None:
         """Claim-level modifiers that depend on relationships between lines:
@@ -124,7 +131,9 @@ class ModifierEngine:
                                             procs[j].chosen.code, result.date_of_service)
                 if ind == "1":
                     mod = self._distinct_modifier(procs[i], procs[j])
-                    if mod and mod not in procs[j].modifiers:
+                    if not mod:
+                        continue        # no documented basis -> do NOT bypass the edit
+                    if mod not in procs[j].modifiers:
                         procs[j].modifiers.append(mod)
                     result.bypassed_ncci.append(
                         frozenset((procs[i].chosen.code, procs[j].chosen.code)))

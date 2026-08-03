@@ -404,5 +404,171 @@ class TerminologyIndexTest(unittest.TestCase):
         self.assertEqual(line.chosen.code, "M20.41")   # right-foot leaf, not the category
 
 
+def _line(code, kind, descriptor="d", attrs=None, system="cpt"):
+    from claude_coder.models import (ClinicalFact, EvidenceSpan, ResolutionMethod,
+                                     ResolvedLine)
+    f = ClinicalFact(kind=kind, description="x", attributes=(attrs or {}),
+                     evidence=[EvidenceSpan("x")])
+    return ResolvedLine(fact=f, chosen=CandidateCode(code, system, descriptor, 0.9),
+                        method=ResolutionMethod.DETERMINISTIC)
+
+
+class SectionApplicabilityTest(unittest.TestCase):
+    """Mechanic 1 — an anesthesia-section code (detected from descriptor grammar,
+    not a code range) is bundled into the operating provider's claim unless a
+    separate anesthesia provider is documented."""
+
+    def _result(self, anes_attrs=None):
+        from claude_coder.models import CodingResult, FactKind
+        surgery = _line("SURG_X", FactKind.PROCEDURE, "Ostectomy, complete excision")
+        anes = _line("ANES_X", FactKind.PROCEDURE,
+                     "Anesthesia for procedures on nerves of the leg", anes_attrs or {})
+        return CodingResult(encounter_id="e", date_of_service="2026-03-14",
+                            lines=[surgery, anes]), anes
+
+    def test_anesthesia_excluded_on_operative_claim(self):
+        from claude_coder.pipeline import apply_section_applicability
+        r, anes = self._result()
+        apply_section_applicability(r)
+        self.assertTrue(anes.excluded_reason)
+        self.assertNotIn("ANES_X", {ln.chosen.code for ln in r.billable_lines})
+
+    def test_anesthesia_kept_when_separate_provider_documented(self):
+        from claude_coder.pipeline import apply_section_applicability
+        r, anes = self._result(anes_attrs={"anesthesia_provider": True})
+        apply_section_applicability(r)
+        self.assertIsNone(anes.excluded_reason)
+
+    def test_section_detection_is_descriptor_driven(self):
+        from claude_coder.ontology import code_section
+        self.assertEqual(code_section("Anesthesia for procedures on the foot"), "anesthesia")
+        self.assertIsNone(code_section("Ostectomy, complete excision; metatarsal head"))
+
+
+class NcciBundlingTest(unittest.TestCase):
+    """Mechanic 3 — an unmodified PTP pair DEMOTES the component (keeps the
+    payable code) instead of blocking; '(separate procedure)' codes bundle."""
+
+    def test_component_demoted_not_blocked(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CodingResult, FactKind
+        from claude_coder.pipeline import apply_ncci_bundling
+        payable = _line("COMPREH", FactKind.PROCEDURE, "comprehensive procedure")
+        component = _line("COMPON", FactKind.PROCEDURE, "component procedure")
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14",
+                         lines=[payable, component])
+        # directional edit: COMPREH is column-1 payable, COMPON is column-2, no bypass
+        src = MockSource(ncci={("COMPREH", "COMPON"): "0"})
+        apply_ncci_bundling(r, src)
+        self.assertIsNone(payable.excluded_reason)
+        self.assertTrue(component.excluded_reason)
+        self.assertNotIn("COMPON", {ln.chosen.code for ln in r.billable_lines})
+
+    def test_separate_procedure_designation_bundled(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CodingResult, FactKind
+        from claude_coder.pipeline import apply_ncci_bundling
+        main = _line("MAINP", FactKind.PROCEDURE, "definitive surgical procedure")
+        sep = _line("SEPP", FactKind.IMAGING, "Fluoroscopy (separate procedure), 1 hour")
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14",
+                         lines=[main, sep])
+        apply_ncci_bundling(r, MockSource())
+        self.assertTrue(sep.excluded_reason)
+        self.assertIsNone(main.excluded_reason)
+
+    def test_bypassed_pair_keeps_both(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CodingResult, FactKind
+        from claude_coder.pipeline import apply_ncci_bundling
+        a = _line("PA", FactKind.PROCEDURE, "procedure A")
+        b = _line("PB", FactKind.PROCEDURE, "procedure B")
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14", lines=[a, b])
+        r.bypassed_ncci = [frozenset(("PA", "PB"))]     # a distinct-service modifier applied
+        src = MockSource(ncci={("PA", "PB"): "1"})       # bypassable edit
+        apply_ncci_bundling(r, src)
+        self.assertIsNone(a.excluded_reason)
+        self.assertIsNone(b.excluded_reason)
+
+
+class DedupTest(unittest.TestCase):
+    """Mechanic 4 — two facts resolving to the same code become one billable line."""
+
+    def test_duplicate_code_collapsed(self):
+        from claude_coder.models import CodingResult, FactKind
+        from claude_coder.pipeline import dedup_lines
+        a = _line("SAME", FactKind.PROCEDURE, "same procedure")
+        b = _line("SAME", FactKind.PROCEDURE, "same procedure")
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14", lines=[a, b])
+        dedup_lines(r)
+        billed = [ln for ln in r.billable_lines if ln.chosen.code == "SAME"]
+        self.assertEqual(len(billed), 1)
+        self.assertTrue(a.excluded_reason or b.excluded_reason)
+
+
+class ProcedureIndexTest(unittest.TestCase):
+    """Mechanic 5 — a procedure phrase resolves through the CPT/HCPCS descriptor
+    index (deterministic) before embedding, the procedure-axis analog of the ICD
+    Alphabetic Index."""
+
+    def test_procedure_resolves_via_descriptor_index(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        from claude_coder.resolution import resolve
+        src = MockSource(records={("PROC_OST", "cpt"):
+                                  {"long_description": "Ostectomy fifth metatarsal head",
+                                   "active": True}},
+                         proc_index={"ostectomy fifth metatarsal head": {"PROC_OST"}})
+        fact = ClinicalFact(kind=FactKind.PROCEDURE,
+                            description="ostectomy fifth metatarsal head",
+                            evidence=[EvidenceSpan("ostectomy fifth metatarsal head")],
+                            confidence=0.99)
+        line = resolve(fact, src)
+        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
+        self.assertEqual(line.chosen.code, "PROC_OST")
+        self.assertIn("descriptor index", line.rationale)
+
+
+class SupportRankingTest(unittest.TestCase):
+    """Mechanic 2 — descriptor↔fact token support breaks a near-tie in recall
+    toward the concept-matching code, and NEVER eliminates a candidate."""
+
+    def test_support_breaks_near_tie(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        from claude_coder.resolution import resolve
+        # equal recall; one descriptor names the documented concept, the other is a
+        # same-score neighbour. Support must pick the concept-matching one.
+        match = CandidateCode("P_MATCH", "cpt", "excision of bursa of the foot", 0.80)
+        neigh = CandidateCode("P_NEIGH", "cpt", "open treatment of fracture", 0.80)
+        src = MockSource(records={("P_MATCH", "cpt"): {"active": True},
+                                  ("P_NEIGH", "cpt"): {"active": True}},
+                         retrieval={("*", "cpt"): [neigh, match]})  # neighbour listed first
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="excision of bursa",
+                            evidence=[EvidenceSpan("the bursa was excised")], confidence=0.9)
+        line = resolve(fact, src)
+        self.assertEqual(line.chosen.code, "P_MATCH", line.rationale)
+
+    def test_support_never_eliminates_terse_code(self):
+        # a correct but terse/generic descriptor sharing no tokens with the phrasing
+        # must still resolve (support is ranking-only, not a floor).
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        from claude_coder.resolution import resolve
+        terse = CandidateCode("P_TERSE", "cpt",
+                              "Complete bilateral noninvasive physiologic studies", 0.82)
+        src = MockSource(records={("P_TERSE", "cpt"): {"active": True}},
+                         retrieval={("*", "cpt"): [terse]})
+        fact = ClinicalFact(kind=FactKind.PROCEDURE,
+                            description="ankle brachial index with doppler",
+                            evidence=[EvidenceSpan("ABI with Doppler waveforms")],
+                            confidence=0.9)
+        line = resolve(fact, src)
+        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
+        self.assertEqual(line.chosen.code, "P_TERSE")
+
+
 if __name__ == "__main__":
     unittest.main()
