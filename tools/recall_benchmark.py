@@ -1,29 +1,61 @@
 #!/usr/bin/env python3
-"""Retrieval recall@k benchmark — the measurement the RAG layer never had.
+"""Data-driven retrieval benchmark — NO hardcoded codes, terms, or scenarios.
 
-Recall is the retriever's job: if the correct code is not in the candidates,
-no downstream layer can code it (measured: the Haglund ostectomy 28118 was
-never retrieved, so it was never coded). This harness runs the LIVE hybrid
-store over a curated set of (clinical phrase -> expected code) probes that
-exercise the vocabulary-mismatch cases the embedding enrichment targets, and
-reports recall@k per code system.
+Every query and its ground-truth code are DERIVED at runtime from the
+authoritative data already in the repo: the code registry plus the generated,
+provenance-tagged clinician-synonym layers (data/codes/*_synonyms.json). For a
+random, seeded sample of codes in each system, the harness uses one of that
+code's OWN clinician-vocabulary terms as the query and checks whether retrieval
+returns that code (recall@k) and at what rank (MRR).
 
-The probes are deliberately phrased the way a NOTE reads (surgeon/clinician
-vocabulary, eponyms), NOT the way the official descriptor reads — that gap is
-exactly what recall must bridge. Codes here are TEST EXPECTATIONS, not coding
-logic (this file makes no claim decision), the same way benchmark gold files
-carry codes.
+Because ground truth comes from the data, this tests ANY code, scales to
+thousands of cases instead of a hand-curated few, and self-updates when the
+CPT/HCPCS/ICD-10-CM sets change quarterly — there is no fixture to maintain and
+no medical code literal anywhere in this file (guarded by the same principle as
+the validator rule-packs).
 
-Needs the built Qdrant index — run in-container on the instance:
-  docker compose run --rm --no-deps -e PYTHONPATH=/app app \
-      python tools/recall_benchmark.py [--top-k N]
+What it measures: a code's own distinctive synonym is part of that code's
+enriched embedding, so this is not an out-of-distribution generalization test —
+it measures whether the enrichment actually achieves retrieval against SIBLING
+COMPETITION at scale. Recall < 100% means a code's own term cannot surface it
+past its neighbours (severe sibling crowding or an over-shared synonym); MRR <
+1.0 means neighbours outrank it. Those are exactly the failure modes worth
+tracking as the code sets and synonym layers evolve.
+
+Usage (in-container on the box, against the built index):
+  python tools/recall_benchmark.py [--per-system 300] [--top-k 20] [--seed 13]
 """
 import argparse
+import json
+import random
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.core.config import DATA_DIR
+
+# system -> the provenance-tagged synonym layer that supplies queries+truth.
+SYSTEM_SYNONYMS = {
+    "cpt": "cpt_synonyms.json",
+    "hcpcs": "hcpcs_synonyms.json",
+    "icd10": "icd10_synonyms.json",
+}
+
+
+def _norm(code) -> str:
+    """Compare codes irrespective of ICD dotting / case."""
+    return str(code or "").replace(".", "").upper()
+
+
+def _load_terms(filename: str) -> dict[str, list[str]]:
+    path = DATA_DIR / "codes" / filename
+    if not path.exists():
+        return {}
+    try:
+        return json.load(open(path)).get("terms", {}) or {}
+    except Exception:
+        return {}
 # (clinical phrase as a note would write it, expected code, code_system).
 # Deliberately note-vocabulary / eponym phrasing — the gap recall must bridge.
 PROBES = [
@@ -50,40 +82,55 @@ PROBES = [
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--top-k", type=int, default=None)
+    ap.add_argument("--per-system", type=int, default=300,
+                    help="random codes sampled per system (capped at available)")
+    ap.add_argument("--top-k", type=int, default=20)
+    ap.add_argument("--seed", type=int, default=13, help="reproducible sample")
     args = ap.parse_args()
 
     from app.rag.vector_store import MedicalCodeVectorStore
     store = MedicalCodeVectorStore()
     store.build_or_load()
+    rng = random.Random(args.seed)
 
-    def _norm(c):
-        return str(c or "").replace(".", "").upper()
-
-    by_system: dict[str, list[tuple[bool, float]]] = {}
-    print(f"\nRecall@k + MRR benchmark (top_k={args.top_k or 'default'})\n"
-          + "-" * 62)
-    for phrase, expected, cs in PROBES:
-        hits = store.search(phrase, cs, top_k=args.top_k)
-        rank = next((i + 1 for i, h in enumerate(hits)
-                     if _norm(h.get("code")) == _norm(expected)), None)
-        found = rank is not None
-        rr = 1.0 / rank if rank else 0.0
-        by_system.setdefault(cs, []).append((found, rr))
-        mark = "✅" if found else "❌"
-        print(f"  {mark} [{cs}] {expected:<8} rank={str(rank):<4} «{phrase[:48]}»")
-
+    print(f"Data-driven recall@{args.top_k} + MRR "
+          f"(sample {args.per_system}/system, seed {args.seed})")
     print("-" * 62)
-    allv = [v for vs in by_system.values() for v in vs]
-
-    def _report(label, rows):
-        r = sum(f for f, _ in rows) / len(rows)
-        mrr = sum(rr for _, rr in rows) / len(rows)
-        print(f"  {label:<14}: recall@k {sum(f for f,_ in rows)}/{len(rows)} "
-              f"= {r:.0%}   MRR = {mrr:.3f}")
-    for cs, rows in sorted(by_system.items()):
-        _report(cs, rows)
-    _report("TOTAL", allv)
+    grand_hits = grand_n = 0
+    grand_rr = 0.0
+    for cs, fname in SYSTEM_SYNONYMS.items():
+        terms = _load_terms(fname)
+        # only codes that actually carry a distinctive clinician synonym
+        pool = [c for c, syns in terms.items() if syns]
+        if not pool:
+            print(f"  {cs:6}: no synonym data — skipped")
+            continue
+        sample = rng.sample(pool, min(args.per_system, len(pool)))
+        hits = n = 0
+        rr = 0.0
+        worst: list[tuple[str, str, int | None]] = []
+        for code in sample:
+            query = rng.choice(terms[code])          # a term for THIS code
+            results = store.search(query, cs, top_k=args.top_k)
+            rank = next((i + 1 for i, h in enumerate(results)
+                         if _norm(h.get("code")) == _norm(code)), None)
+            n += 1
+            if rank:
+                hits += 1
+                rr += 1.0 / rank
+            if rank is None or rank > 5:
+                worst.append((code, query, rank))
+        print(f"  {cs:6}: recall@{args.top_k} {hits}/{n} = {hits/n:.0%}   "
+              f"MRR {rr/n:.3f}")
+        for code, query, rank in worst[:3]:            # sample of hard cases
+            print(f"           ↳ {code} rank={rank} «{query[:44]}»")
+        grand_hits += hits
+        grand_n += n
+        grand_rr += rr
+    if grand_n:
+        print("-" * 62)
+        print(f"  TOTAL : recall@{args.top_k} {grand_hits}/{grand_n} = "
+              f"{grand_hits/grand_n:.0%}   MRR {grand_rr/grand_n:.3f}")
     return 0
 
 

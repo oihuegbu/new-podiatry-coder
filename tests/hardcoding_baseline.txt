@@ -1,0 +1,43 @@
+app/coding/code_assigner.py	prompt/f-string	73630,73650,76942,77002,E66,L3000,L3020,L3030,L4360,L4361,Z68,Z79,Z79.84
+app/coding/code_assigner.py	prompt/f-string	73630,73650,99024,99202,99205,99211,99215
+app/coding/code_assigner.py	prompt/string	11042,11043,11044,11055,11056,11057,11300,11313,11400,11446,11719,11720,11721,11730,11732,11740,11750,11765,20550,20551,20600,20605,20610,20900,20902,27610,27680,27685,27686,27698,28060,28119,28285,28296,28297,28298,28308,28312,28810,28820,29049,29515,29540,29550,29580,29581,29893,64450,64455,64632,64640,73620,73630,73650,73700,73701,73718,73720,76942,77002,93923,97597,97598,97602,97605,97606,99024,99202,99203,99204,99205,99211,99212,99213,99214,99215,E10,E11,E13,G0127,G57.61,G57.62
+app/coding/code_assigner.py	prompt/string	11055,11057,11719,11721,11750,20550,20551,20600,20605,20610,28060,28119,29540,29893,64450,64455,64632,64640,73630,73650,76942,77002,93923,97597,97598,99024,99202,99204,99205,99213,99214,99215,A5512,A5513,E10,E10.1,E10.8,E10.9,E11,E11.1,E11.8,E11.9,E13,E13.1,E13.8,E13.9,E66,G0127,I10,J0702,J1020,J1030,J3301,L3000,L3020,L3030,L3031,L4360,L4361,Z47.2,Z48.89,Z68,Z68.36,Z68.37,Z68.41,Z79,Z79.01,Z79.4,Z79.84
+app/coding/code_assigner.py	prompt/string	73630,73650,76942,77002,E66,L3000,L3020,L3030,L4360,L4361,Z68,Z79,Z79.84
+app/coding/code_assigner.py	prompt/string	A5500,A5501,A5507,A5508,A5512,A5513,A6020,A6021,A6022,A6196,A6212,A6213,A6248,A6531,A6532,A6545,E0747,E0748,E0760,G57.61,G57.62,J0702,J1020,J1030,J1040,J1094,J2920,J2930,J3301,J3490,L3000,L3010,L3020,L3030,L3031,L3040,L3090,L4360,L4361,L4386
+app/coding/code_assigner.py	prompt/string	E10.1,E10.40,E10.621,E10.8,E10.9,E11,E11.1,E11.40,E11.621,E11.8,E11.9,E13.1,E13.8,E13.9,E66,E78.5,L97,M20.11,M86.9,S93.321,S93.324,S93.401,Z47,Z47.2,Z48,Z48.89,Z68,Z68.1,Z68.20,Z68.29,Z68.30,Z68.36,Z68.37,Z68.39,Z68.41,Z68.45,Z79,Z79.01,Z79.4,Z79.84,Z88,Z88.0,Z88.1,Z88.2,Z88.3,Z88.5,Z88.8,Z88.9
+app/coding/code_assigner.py	prompt/string	M12.5,M12.571,M19.1,M19.171
+app/compliance/agents/mce.py	prompt/string	B95,B97,V00,Y99
+app/compliance/datastore/store.py	prompt/string	99211,99213,99214,99215
+app/compliance/datastore/store.py	prompt/string	B35.1,C25,E11,E75,H36.811,I70.2,I70.22,I70.221,I70.23,K86.81,L03.0,L03.03,L36199,M12.5,M19.1,Z79,Z79.84,Z99.2
+app/compliance/datastore/store.py	prompt/string	D57,E10,E11,E13,E75,H36
+app/compliance/datastore/store.py	prompt/string	E11,E11.62,E11.621,Z79.4,Z79.84,Z79.85,Z99.2
+app/compliance/datastore/store.py	prompt/string	E11,E11.621,L97.4,L97.5,Z79,Z79.4,Z79.84,Z79.85
+app/compliance/datastore/store.py	prompt/string	E11,E75,H36.811,I70.221,I70.23,M12.5,M19.1,Z79.84
+app/compliance/datastore/store.py	prompt/string	E11,Z79.4,Z79.84,Z79.85
+app/compliance/datastore/store.py	prompt/string	H36,H368,H3681,H36811
+app/compliance/datastore/store.py	prompt/string	I05,I11,I11.0,I12,I50,I70.221,I70.23,I70.235
+app/ingestion/pdf_parser.py	prompt/string	11721,28296,99213,A5513,B35.1,E11.42,E114,I10,J0702,J3301,L3020,L84,M20.11
+app/validation/validator.py	prompt/string	11042,11043,11044,97597
+app/validation/validator.py	prompt/string	11730,11740,29550,97597
+app/validation/validator.py	prompt/string	27654,28118,29515,A4570
+app/validation/validator.py	prompt/string	70010,73630,73660,76000,79999
+app/validation/validator.py	prompt/string	76942,77002,77012,77021
+app/validation/validator.py	prompt/string	B35.1,E11.40,E11.42,L03.03,L03.04,S90.122A
+app/validation/validator.py	prompt/string	D57,E10,E11,E11.621,E11.622,E13,E75,G63,H36,I70,I70.23,I70.24,I73,L97,M14,N08
+app/validation/validator.py	prompt/string	E10,E10.9,E11,E11.9,E13,E13.9
+app/validation/validator.py	prompt/string	E10,E11,E11.40,E11.621,E13,L97.511
+app/validation/validator.py	prompt/string	E11,N18.6,Z79.84,Z99.2
+app/validation/validator.py	prompt/string	I70.21,I70.242,I70.25,I70.26,I70.262
+app/validation/validator.py	prompt/string	I70.211,I70.221,I70.23,I70.235
+app/validation/validator.py	prompt/string	I70.245,I70.262,Q69.2,Q69.9,S90.112A,S90.122A
+app/validation/validator.py	prompt/string	L60.2,L97,M86.1,M86.172,M86.6,M86.672,M86.9,N18,Q84.5
+app/validation/validator.py	prompt/string	M12,M12.5,M12.571,M19,M19.1,M19.171
+tests/test_adjudicator.py	code collection	11720,99211,99213,99214
+tests/test_feedback_consistency.py	prompt/string	11055,99213,E11,E11.40,Z79.4
+tests/test_refresh.py	code collection	11719,11720,11721,G0127
+tests/test_refresh.py	prompt/string	11055,11056,A12345,E11.40,E11.42
+tests/test_refresh.py	prompt/string	11719,11720,11721,G0127
+tests/test_validator_checks.py	code collection	E11.40,G57.61,L84,M79.671,M79.672
+tests/test_validator_checks.py	code collection	E11.42,E11.610,M14.671,N18.6
+tests/test_validator_checks.py	code collection	E11.42,E11.610,M14.671,N18.6,Z79.4
+tools/parse_icd10cm_tabular.py	prompt/string	B12,E72.4,I50,I51.4,I51.7,Z99.2

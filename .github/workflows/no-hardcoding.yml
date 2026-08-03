@@ -1,0 +1,21 @@
+name: no-hardcoded-codes
+
+# Fails the build if a NEW hardcoded CPT/ICD-10-CM/HCPCS code table is added to
+# app/, tools/, or tests/ (see tests/check_no_hardcoding.py). Pre-existing
+# clusters are grandfathered via tests/hardcoding_baseline.txt; this gate only
+# blocks re-introducing the pattern. The guard is pure stdlib — no deps to install.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Hardcoded medical-code guard
+        run: python tests/check_no_hardcoding.py
