@@ -100,6 +100,8 @@ class CandidateCode:
 class ResolutionMethod(str, Enum):
     DETERMINISTIC = "deterministic"   # one candidate whose descriptor entails the fact
     ARBITRATED = "llm_arbitrated"     # model picked among retrieved candidates
+    VERIFIED = "verified_entailment"  # candidate whose authoritative descriptor the
+                                      # documentation entails (propose-then-verify)
     ABSTAINED = "abstained"           # genuine ambiguity / no candidate -> review
 
 

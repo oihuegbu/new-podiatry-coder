@@ -27,12 +27,21 @@ def code_encounter(
     source: CodeSource | None = None,
     extract_llm: LLMFn | None = None,
     arbitrate_llm: LLMFn | None = None,
+    verify_llm: LLMFn | None = None,
     modifier_engine: "ModifierEngine | None" = None,
 ) -> CodingResult:
     from .models import Outcome
     from .modifiers import ModifierEngine
     source = source or AuthoritativeSource()
     modifier_engine = modifier_engine or ModifierEngine()
+
+    # Propose-then-verify is enabled in real mode (no stubbed LLMs). It grounds every
+    # procedure code in an authoritative descriptor the documentation entails — the
+    # license-clean substitute for the CPT Index. Tests pass stub LLMs and leave
+    # verify_llm None, so they keep the deterministic path unchanged.
+    if verify_llm is None and arbitrate_llm is None:
+        from .verify import default_verify_llm
+        verify_llm = default_verify_llm
 
     from .models import FactKind
     facts = extraction.extract_facts(note_text, extract_llm)
@@ -42,8 +51,13 @@ def code_encounter(
         if fact.kind is FactKind.EM:
             line = em.resolve_em(fact, source)      # MDM-driven leveling
         else:
-            line = resolution.resolve(fact, source)
-        if (not line.resolved) and line.alternatives and fact.billable:
+            line = resolution.resolve(fact, source, llm=verify_llm)
+        # A procedure that went through propose-then-verify is already resolved-or-
+        # escalated on authoritative entailment; don't second-guess it with the
+        # weaker arbitration fallback. Other kinds still arbitrate residual ambiguity.
+        went_through_pv = (verify_llm is not None
+                           and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING))
+        if (not line.resolved) and line.alternatives and fact.billable and not went_through_pv:
             line = arbitration.arbitrate(line, arbitrate_llm)
         if line.resolved and line.fact.billable:
             # Data-driven bundling filter: a resolved code the source declares

@@ -107,12 +107,15 @@ def chat_completion(
     json_mode: bool = True,
     effort: str | None = None,
     json_schema: dict | None = None,
+    use_batch: bool | None = None,
 ) -> tuple[str, dict]:
     """`json_schema`: a strict JSON Schema the response must conform to,
     enforced by the provider's structured-output API (Anthropic
     output_config.format / OpenAI json_schema response_format). `effort`:
     per-call reasoning-effort override (Claude only; defaults to
-    CLAUDE_EFFORT)."""
+    CLAUDE_EFFORT). `use_batch`: per-call override of ANTHROPIC_USE_BATCH —
+    pass False for an interactive/low-latency call (the Batches API is ~50%
+    cheaper but adds minutes of latency, unsuitable for a sequential loop)."""
     last_exc: Exception | None = None
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
@@ -125,6 +128,7 @@ def chat_completion(
                     json_mode=json_mode,
                     effort=effort,
                     json_schema=json_schema,
+                    use_batch=use_batch,
                 )
             return _openai_chat_completion(
                 system_prompt=system_prompt,
@@ -308,6 +312,7 @@ def _claude_chat_completion(
     json_mode: bool,
     effort: str | None = None,
     json_schema: dict | None = None,
+    use_batch: bool | None = None,
 ) -> tuple[str, dict]:
     client = get_anthropic_client()
 
@@ -359,7 +364,7 @@ def _claude_chat_completion(
         }],
     }
 
-    if ANTHROPIC_USE_BATCH:
+    if (ANTHROPIC_USE_BATCH if use_batch is None else use_batch):
         response = _claude_message_via_batch(client, body)
     else:
         # Streaming supports long-running interactive requests (>10 min)

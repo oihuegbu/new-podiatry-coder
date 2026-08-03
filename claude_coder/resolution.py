@@ -107,7 +107,8 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
     return _Match(cand, feats, cand.score, spec, support, reasons)
 
 
-def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -> ResolvedLine:
+def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
+            llm=None) -> ResolvedLine:
     if not fact.billable:
         return ResolvedLine(
             fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
@@ -215,6 +216,16 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -
             if c.code not in best or c.score > best[c.code].score:
                 best[c.code] = c
     pool = sorted(best.values(), key=lambda c: c.score, reverse=True)
+
+    # PROPOSE-THEN-VERIFY (procedures / imaging, when an LLM is available): widen the
+    # pool with authoritative-validated LLM proposals, then accept the first
+    # candidate whose OFFICIAL descriptor the documentation entails — the
+    # license-clean substitute for the CPT Index. Runs even on an empty recall pool,
+    # since a validated proposal can rescue a concept retrieval missed. Diagnoses/
+    # supplies keep the deterministic path (well served by the ICD index + rules).
+    if llm is not None and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING):
+        return _propose_then_verify(fact, source, pool, llm)
+
     if not pool:
         return ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
                             rationale="no candidate retrieved for the concept")
@@ -240,24 +251,63 @@ def _authoritative_pool(code: str, source: CodeSource) -> list[CandidateCode]:
     return [_candidate_from_code(c, source) for c in source.leaf_codes(code, "icd10")]
 
 
+VERIFY_K = 8           # shortlist size sent to the single entailment-selection call
+
+
+def _ranked(fact: ClinicalFact, pool: list[CandidateCode],
+            source: CodeSource | None) -> list[_Match]:
+    """Survivors (candidates that contradict no documented attribute) ranked by
+    recall, then (specificity, support) — the latter two only separate candidates
+    of comparable recall. Shared by the deterministic path and propose-then-verify."""
+    survivors = [m for m in (_evaluate(fact, c, source) for c in pool) if m is not None]
+    survivors.sort(key=lambda m: (m.recall, m.specificity, m.support), reverse=True)
+    return survivors
+
+
+def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
+                         pool: list[CandidateCode], llm) -> ResolvedLine:
+    """Recall as candidate GENERATOR, authoritative descriptor + entailment as TRUTH.
+    Widen the pool with validated LLM proposals, then accept the first candidate
+    (proposals first, then retrieval by rank) whose OFFICIAL descriptor the
+    documentation entails; escalate if none do. Nothing bills on recall alone."""
+    from . import verify as _verify
+    proposals = [c for c in _verify.propose_codes(fact, source, llm)
+                 if _evaluate(fact, c, source) is not None]
+    order: list[CandidateCode] = []
+    seen: set[str] = set()
+    for c in proposals + [m.candidate for m in _ranked(fact, pool, source)]:
+        if c.code not in seen:
+            seen.add(c.code)
+            order.append(c)
+    shortlist = order[:VERIFY_K]
+    chosen, why = _verify.select_entailed(fact, shortlist, source, llm)
+    if chosen is not None:
+        return ResolvedLine(
+            fact=fact, chosen=chosen,
+            alternatives=[c for c in shortlist if c.code != chosen.code][:4],
+            method=ResolutionMethod.VERIFIED,
+            rationale=f"authoritative descriptor entailed by documentation: {why}"
+                      if why else "authoritative descriptor entailed by documentation")
+    return ResolvedLine(
+        fact=fact, chosen=None, alternatives=shortlist,
+        method=ResolutionMethod.ABSTAINED,
+        rationale="no candidate's authoritative descriptor was entailed by the "
+                  "documentation (verified) — escalate")
+
+
 def _decide(fact: ClinicalFact, pool: list[CandidateCode],
             authority: str | None = None,
             source: CodeSource | None = None) -> ResolvedLine:
     """Structured decision over a candidate pool: eliminate contradictions,
     rank by relevance (recall) then specificity, pick deterministically when the
     leader is clear, else hand the shortlist to arbitration."""
-    survivors = [m for m in (_evaluate(fact, c, source) for c in pool) if m is not None]
+    survivors = _ranked(fact, pool, source)
     if not survivors:
         return ResolvedLine(
             fact=fact, chosen=None, alternatives=pool[:5],
             method=ResolutionMethod.ABSTAINED,
             rationale="every candidate contradicts a documented attribute")
 
-    # Rank by recall, then (specificity, support) — the latter two only separate
-    # candidates of comparable recall, so a concept-matching code wins a near-tie
-    # while recall still leads; neither can drop a correct code (that's elimination
-    # above, done only on hard contradictions).
-    survivors.sort(key=lambda m: (m.recall, m.specificity, m.support), reverse=True)
     top = survivors[0]
     if top.recall < _RELEVANCE_FLOOR:
         deterministic = False

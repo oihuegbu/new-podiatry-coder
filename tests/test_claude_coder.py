@@ -691,5 +691,85 @@ class DrugTableParserTest(unittest.TestCase):
         self.assertIsNone(m._dose_of("Needle-free injection device, each"))
 
 
+class ProposeVerifyTest(unittest.TestCase):
+    """Propose-then-verify: recall is a candidate GENERATOR, the authoritative
+    descriptor + entailment is TRUTH. The model's proposals are validated against
+    the registry; a code is accepted only when its official descriptor is entailed
+    by the documentation (so an 'ostectomy' code is rejected for an 'osteotomy')."""
+
+    OSTEC = "Ostectomy, complete excision; fifth metatarsal head"
+    OSTEO = "Osteotomy, metatarsal; other than first metatarsal"
+
+    def _src(self):
+        from claude_coder.data_access import MockSource
+        return MockSource(
+            records={("OSTEC", "cpt"): {"long_description": self.OSTEC, "active": True},
+                     ("OSTEO", "cpt"): {"long_description": self.OSTEO, "active": True}},
+            retrieval={("*", "cpt"): [CandidateCode("OSTEC", "cpt", self.OSTEC, 0.9),
+                                      CandidateCode("OSTEO", "cpt", self.OSTEO, 0.8)]})
+
+    def _fact(self):
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        return ClinicalFact(kind=FactKind.PROCEDURE,
+                            description="osteotomy of the fifth metatarsal",
+                            evidence=[EvidenceSpan("distal osteotomy of the fifth metatarsal")],
+                            confidence=0.95)
+
+    def _llm(self, propose=(), entail_only_osteotomy=True):
+        import json
+        import re
+
+        def stub(system, user):
+            if "propose" in system.lower():
+                return json.dumps({"codes": list(propose)})
+            # select_entailed: pick the numbered option that is an 'osteotomy'
+            block = user.split("CANDIDATE OFFICIAL DESCRIPTORS:", 1)[-1]
+            opts = re.findall(r"(?m)^(\d+)\.\s+(.*)$", block)
+            if entail_only_osteotomy:
+                for num, desc in opts:
+                    d = desc.lower()
+                    if "osteotomy" in d and "ostectomy" not in d:
+                        return json.dumps({"choice": int(num), "reason": "osteotomy match"})
+            return json.dumps({"choice": 0, "reason": "none entailed"})
+        return stub
+
+    def test_rejects_homograph_accepts_entailed(self):
+        from claude_coder.models import ResolutionMethod
+        from claude_coder.resolution import resolve
+        line = resolve(self._fact(), self._src(), llm=self._llm())
+        self.assertEqual(line.method, ResolutionMethod.VERIFIED)
+        self.assertEqual(line.chosen.code, "OSTEO")     # not the higher-recall ostectomy
+
+    def test_proposal_surfaces_missed_code(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ResolutionMethod
+        from claude_coder.resolution import resolve
+        # retrieval only surfaces the WRONG code; the model proposes the right one,
+        # which is validated against the registry and then verified.
+        src = MockSource(
+            records={("OSTEC", "cpt"): {"long_description": self.OSTEC, "active": True},
+                     ("OSTEO", "cpt"): {"long_description": self.OSTEO, "active": True}},
+            retrieval={("*", "cpt"): [CandidateCode("OSTEC", "cpt", self.OSTEC, 0.95)]})
+        line = resolve(self._fact(), src, llm=self._llm(propose=["OSTEO"]))
+        self.assertEqual(line.method, ResolutionMethod.VERIFIED)
+        self.assertEqual(line.chosen.code, "OSTEO")
+
+    def test_escalates_when_nothing_entailed(self):
+        from claude_coder.models import ResolutionMethod
+        from claude_coder.resolution import resolve
+        line = resolve(self._fact(), self._src(),
+                       llm=self._llm(entail_only_osteotomy=False))
+        self.assertFalse(line.resolved)
+        self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
+        self.assertIn("verified", line.rationale)
+
+    def test_fabricated_proposal_dropped(self):
+        from claude_coder.verify import propose_codes
+        cands = propose_codes(self._fact(), self._src(),
+                              self._llm(propose=["NOTREAL", "OSTEO"]))
+        self.assertEqual([c.code for c in cands], ["OSTEO"])   # nonexistent code dropped
+        self.assertEqual(cands[0].descriptor, self.OSTEO)      # descriptor from the record
+
+
 if __name__ == "__main__":
     unittest.main()
