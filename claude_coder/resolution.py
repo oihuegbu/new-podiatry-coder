@@ -149,6 +149,25 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -
     # recall (which handles the many-competitor / terse cases).
     elif fact.kind in (FactKind.PROCEDURE, FactKind.SUPPLY, FactKind.IMAGING,
                        FactKind.DRUG):
+        # AUTHORITATIVE FIRST (drug axis): the CMS Table of Drugs & Biologicals
+        # (drug name -> HCPCS code). A dosed drug resolves by name deterministically
+        # here before any embedding; empty until the table is prepared, so it
+        # degrades to the descriptor index + recall below.
+        if fact.kind is FactKind.DRUG:
+            didx = source.drug_index_codes(fact.description, fact.system)
+            if len(didx) == 1:
+                code = next(iter(didx))
+                rec = source.lookup(code, fact.system) or {}
+                desc = (rec.get("long_description") or rec.get("description")
+                        or rec.get("short_description") or "")
+                cand = CandidateCode(code=code, system=fact.system, descriptor=str(desc),
+                                     score=1.0, source="cms-table-of-drugs",
+                                     authority={"source": "CMS Table of Drugs & Biologicals"})
+                line = _decide(fact, [cand],
+                               authority="CMS Table of Drugs & Biologicals", source=source)
+                if line.resolved:
+                    return line
+
         # AUTHORITATIVE FIRST: the AMA CPT Alphabetic Index (term -> code), the true
         # analog of the ICD Index. This is what resolves 'tailor's bunion osteotomy
         # -> 28308' where descriptor/embedding cannot ('fifth' vs 'other than first

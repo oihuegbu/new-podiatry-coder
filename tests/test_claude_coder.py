@@ -633,5 +633,63 @@ class CptIndexParserTest(unittest.TestCase):
         self.assertEqual(m._sniff("a,b,c"), ",")
 
 
+class DrugTableTest(unittest.TestCase):
+    """CMS Table of Drugs & Biologicals: a drug NAME resolves to its HCPCS code
+    authoritatively, and billing units come from documented dose / per-unit dose."""
+
+    def test_drug_resolves_by_name(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        from claude_coder.resolution import resolve
+        src = MockSource(
+            records={("DRUG_KETO", "hcpcs"):
+                     {"long_description": "Injection, ketorolac tromethamine, per 15 mg",
+                      "active": True}},
+            drug_index={"ketorolac tromethamine": {"DRUG_KETO"}})
+        fact = ClinicalFact(kind=FactKind.DRUG, description="ketorolac tromethamine",
+                            evidence=[EvidenceSpan("ketorolac tromethamine 30 mg IV")],
+                            confidence=0.95)
+        line = resolve(fact, src)
+        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
+        self.assertEqual(line.chosen.code, "DRUG_KETO")
+        self.assertIn("Table of Drugs", line.rationale)
+
+    def test_units_from_documented_dose(self):
+        from claude_coder.ontology import drug_billing_units
+        self.assertEqual(drug_billing_units("ketorolac 30 mg IV", {"amount": 15, "unit": "mg"}), 2)
+        self.assertEqual(drug_billing_units("1 g infused", {"amount": 100, "unit": "mg"}), 10)  # g->mg
+        self.assertIsNone(drug_billing_units("two tablets", {"amount": 15, "unit": "mg"}))       # no dose
+        self.assertIsNone(drug_billing_units("30 ml", {"amount": 15, "unit": "mg"}))             # unit clash
+
+
+class DrugTableParserTest(unittest.TestCase):
+    """tools/build_hcpcs_drug_table.py: a drug code is detected by descriptor
+    grammar (substance-amount billing unit), never a code prefix; name + per-unit
+    dose parsed out. No real code appears (synthetic descriptors only)."""
+
+    def _mod(self):
+        import importlib.util
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location(
+            "build_hcpcs_drug_table", root / "tools" / "build_hcpcs_drug_table.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    def test_dose_and_name(self):
+        m = self._mod()
+        self.assertEqual(m._dose_of("Injection, ketorolac tromethamine, per 15 mg"),
+                         (15.0, "mg"))
+        self.assertEqual(m._name_of("Injection, ketorolac tromethamine, per 15 mg"),
+                         "ketorolac tromethamine")
+
+    def test_supply_is_not_a_drug(self):
+        m = self._mod()
+        # 'each' is not a substance amount -> not a dosed drug
+        self.assertIsNone(m._dose_of("Needle-free injection device, each"))
+
+
 if __name__ == "__main__":
     unittest.main()

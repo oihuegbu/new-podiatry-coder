@@ -48,6 +48,10 @@ class CodeSource(Protocol):
 
     def cpt_index_codes(self, description: str, system: str) -> set[str]: ...
 
+    def drug_index_codes(self, description: str, system: str) -> set[str]: ...
+
+    def drug_unit(self, code: str) -> dict | None: ...
+
     def procedure_index_codes(self, description: str, system: str) -> set[str]: ...
 
     def leaf_codes(self, stem: str, system: str) -> set[str]: ...
@@ -88,6 +92,8 @@ class AuthoritativeSource:
         self._idx = None
         self._snomed = None
         self._cptidx = None
+        self._drug = None
+        self._drug_units: dict | None = None
         self._rich: dict | None = None
 
     def _rich_records(self, system: str) -> dict:
@@ -191,6 +197,49 @@ class AuthoritativeSource:
             if self.lookup(code, system):
                 out.add(code)
         return out
+
+    def _load_drug_table(self) -> None:
+        if self._drug is not None:
+            return
+        try:
+            import json
+            from app.core.config import DATA_DIR
+            from .terminology import TerminologyIndex
+            data = json.loads((DATA_DIR / "codes" / "hcpcs_drug_table.json").read_text())
+            terms = data.get("terms", {})       # {code: [drug names]}
+            self._drug = TerminologyIndex(terms) if terms else False
+            self._drug_units = data.get("units", {}) or {}
+        except Exception:
+            self._drug = False
+            self._drug_units = {}
+
+    def drug_index_codes(self, description: str, system: str) -> set[str]:
+        """AUTHORITATIVE drug NAME -> HCPCS code, via the CMS Table of Drugs &
+        Biologicals (public-domain; prepared by tools/build_hcpcs_drug_table.py).
+        The name->code map for J/A/Q drug codes — 'ketorolac tromethamine' -> its
+        code — the drug analog of the ICD/CPT alphabetic indexes. Fail-safe empty
+        until the table is prepared. HCPCS only."""
+        if system != "hcpcs":
+            return set()
+        self._load_drug_table()
+        if not self._drug:
+            return set()
+        out = set()
+        for c in self._drug.candidates(description):
+            code = str(c).replace(".", "")
+            if self.lookup(code, system):
+                out.add(code)
+        return out
+
+    def drug_unit(self, code: str) -> dict | None:
+        """The code's authoritative per-unit dose ({'amount': N, 'unit': 'mg'}) from
+        the drug table — used to convert a documented total dose into billing units.
+        None if the code is not a dosed drug or the table is absent."""
+        self._load_drug_table()
+        if not self._drug_units:
+            return None
+        rec = self._drug_units.get(code) or self._drug_units.get(code.replace(".", ""))
+        return rec if isinstance(rec, dict) else None
 
     def procedure_index_codes(self, description: str, system: str) -> set[str]:
         """Deterministic CPT/HCPCS grounding, the procedure-axis analog of the ICD
@@ -449,7 +498,9 @@ class MockSource:
                  index: dict[str, set] | None = None,
                  snomed: dict[str, set] | None = None,
                  proc_index: dict[str, set] | None = None,
-                 cpt_index: dict[str, set] | None = None) -> None:
+                 cpt_index: dict[str, set] | None = None,
+                 drug_index: dict[str, set] | None = None,
+                 drug_units: dict[str, dict] | None = None) -> None:
         self._records = records or {}
         self._retrieval = retrieval or {}
         self._ncci = ncci or {}
@@ -461,6 +512,8 @@ class MockSource:
         self._snomed_map = snomed or {}
         self._proc_index = proc_index or {}
         self._cpt_index = cpt_index or {}
+        self._drug_map = drug_index or {}
+        self._drug_units = drug_units or {}
 
     def global_period(self, code):
         return self._gp.get(code)
@@ -476,6 +529,12 @@ class MockSource:
 
     def cpt_index_codes(self, description, system):
         return set(self._cpt_index.get(description, set())) if system == "cpt" else set()
+
+    def drug_index_codes(self, description, system):
+        return set(self._drug_map.get(description, set())) if system == "hcpcs" else set()
+
+    def drug_unit(self, code):
+        return self._drug_units.get(code)
 
     def procedure_index_codes(self, description, system):
         return set(self._proc_index.get(description, set())) if system in ("cpt", "hcpcs") else set()

@@ -64,6 +64,18 @@ def code_encounter(
                 except (TypeError, ValueError):
                     cnt = 1
                 line.units = ontology.billing_units(cnt, line.chosen.descriptor)
+                # A dosed drug bills by dose, not count: documented total dose /
+                # the code's authoritative per-unit dose (e.g. 30 mg / 'per 15 mg'
+                # = 2 units). Falls back to the count-based units above when the
+                # dose or per-unit is unavailable.
+                if line.fact.kind is FactKind.DRUG:
+                    documented = " ".join(
+                        [str(v) for v in line.fact.attributes.values()]
+                        + [s.text for s in line.fact.evidence] + [line.fact.description])
+                    du = ontology.drug_billing_units(
+                        documented, source.drug_unit(line.chosen.code))
+                    if du is not None:
+                        line.units = du
         lines.append(line)
 
     result = CodingResult(

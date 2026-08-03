@@ -203,6 +203,49 @@ def support_score(descriptor: str, text: str) -> int:
     return len(dtok & ttok)
 
 
+# ── drug dose -> billing units ────────────────────────────────────────────────
+# Mass-unit conversion to a common base (mg). Volume/activity units ('ml', 'units',
+# 'iu') only convert to themselves. Generic dosing vocabulary, not codes.
+_MASS_TO_MG = {"mg": 1.0, "milligram": 1.0, "g": 1000.0, "gram": 1000.0,
+               "mcg": 0.001, "microgram": 0.001, "ug": 0.001, "µg": 0.001}
+_DOSE_RX = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(mg|milligram|mcg|microgram|ug|µg|g|gram|ml|milliliter|"
+    r"cc|units?|iu|meq|mmol)\b", re.I)
+
+
+def parse_dose(text: str) -> tuple[float, str] | None:
+    """(amount, unit) for the first dose in free text ('30 mg', '1 g'), else None."""
+    m = _DOSE_RX.search(str(text or ""))
+    if not m:
+        return None
+    return float(m.group(1)), m.group(2).lower()
+
+
+def _to_base(amount: float, unit: str) -> tuple[float, str]:
+    """Normalize a mass dose to mg; leave other units as-is (self-comparable)."""
+    u = unit.lower()
+    if u in _MASS_TO_MG:
+        return amount * _MASS_TO_MG[u], "mg"
+    return amount, u
+
+
+def drug_billing_units(documented: str, per_unit: dict | None) -> int | None:
+    """Billing units for a dosed drug = documented total dose / the code's per-unit
+    dose (e.g. 30 mg documented, 'per 15 mg' code -> 2 units). Unit-aware (mg/mcg/g
+    convert; ml/units compare in-kind). None when the dose isn't documented or the
+    units are incompatible — the caller then keeps the safe default of 1 unit."""
+    if not per_unit:
+        return None
+    doc = parse_dose(documented)
+    if not doc:
+        return None
+    d_amt, d_u = _to_base(doc[0], doc[1])
+    p_amt, p_u = _to_base(float(per_unit.get("amount") or 0), str(per_unit.get("unit") or ""))
+    if p_amt <= 0 or d_u != p_u:
+        return None
+    return max(1, round(d_amt / p_amt))
+
+
 def measurement_of(attributes: dict) -> float | None:
     """Pull a single numeric measurement out of a fact's attributes (area,
     size, depth, length…). Structural, unit-agnostic here; a production build

@@ -131,6 +131,17 @@ SOURCES: dict[str, dict] = {
         "prepare": lambda tmp, xml: [PY, "tools/parse_icd10cm_index.py", str(xml),
                                      str(CODES / "icd10cm_index_terms.json")],
     },
+    "drug_table": {
+        "output": "hcpcs_drug_table.json",
+        # Prepares the drug name->HCPCS + per-unit-dose table from the authoritative
+        # HCPCS Level II descriptors already ingested (public domain). Optionally
+        # enriches with brand names from an external CMS table when DRUG_TABLE_URL
+        # (or DRUG_TABLE_FILE) is set — auto-fetched by the prepare tool itself.
+        "prepare": lambda tmp, f: [PY, "tools/build_hcpcs_drug_table.py"]
+        + (["--table-url", os.environ["DRUG_TABLE_URL"]] if os.environ.get("DRUG_TABLE_URL")
+           else ["--table-file", os.environ["DRUG_TABLE_FILE"]] if os.environ.get("DRUG_TABLE_FILE")
+           else []),
+    },
     "cpt_index": {
         "output": "cpt_index_terms.json",
         "licensed": True,
