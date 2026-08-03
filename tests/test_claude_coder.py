@@ -477,6 +477,19 @@ class NcciBundlingTest(unittest.TestCase):
         self.assertTrue(sep.excluded_reason)
         self.assertIsNone(main.excluded_reason)
 
+    def test_separate_procedure_not_bundled_by_supply_only(self):
+        # a '(separate procedure)' code must NOT bundle just because a supply/device
+        # is also reported — only another actual PROCEDURE triggers the bundle.
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CodingResult, FactKind
+        from claude_coder.pipeline import apply_ncci_bundling
+        sep = _line("SEPP", FactKind.PROCEDURE, "some service (separate procedure)")
+        device = _line("DEVX", FactKind.SUPPLY, "implant device", system="hcpcs")
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14",
+                         lines=[sep, device])
+        apply_ncci_bundling(r, MockSource())
+        self.assertIsNone(sep.excluded_reason)      # a device is not "another procedure"
+
     def test_bypassed_pair_keeps_both(self):
         from claude_coder.data_access import MockSource
         from claude_coder.models import CodingResult, FactKind

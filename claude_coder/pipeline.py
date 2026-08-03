@@ -197,15 +197,22 @@ def apply_ncci_bundling(result: CodingResult, source: CodeSource) -> None:
     alongside another procedure of the same session. All directionality comes from
     the data; no code is named here."""
     from .ontology import is_separate_procedure
+    from .models import FactKind
     proc = [ln for ln in result.billable_lines
             if ln.chosen and ln.chosen.system in ("cpt", "hcpcs")]
 
-    # (a) '(separate procedure)' designation — bundled when billed with another
-    # distinct procedure line this session.
+    # (a) '(separate procedure)' designation — bundled ONLY when billed alongside
+    # another actual PROCEDURE this session (a more comprehensive surgical service).
+    # A supply/drug/device line (e.g. an implant HCPCS) is NOT a procedure and must
+    # not trigger the bundle — otherwise a legitimately separate procedure is dropped
+    # just because an implant was also reported.
+    def _is_procedure(o) -> bool:
+        return o.fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING)
+
     for ln in proc:
         if ln.excluded_reason or not is_separate_procedure(ln.chosen.descriptor):
             continue
-        if any(o is not ln and not o.excluded_reason
+        if any(o is not ln and not o.excluded_reason and _is_procedure(o)
                and o.chosen.code != ln.chosen.code for o in proc):
             ln.excluded_reason = ("'(separate procedure)' designation — bundled "
                                   "when performed with another procedure this session")
