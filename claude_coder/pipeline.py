@@ -75,6 +75,10 @@ def code_encounter(
             learned.observe(encounter_id, fact.description, line.chosen.code,
                             line.chosen.system, line.chosen.descriptor,
                             [s.text for s in fact.evidence])
+        # ICD-10-CM specificity: upgrade an unspecified-laterality diagnosis to the
+        # documented-side sibling when one exists (authoritative, descriptor-driven).
+        if line.resolved and fact.kind is FactKind.DIAGNOSIS:
+            line = resolution.upgrade_diagnosis_laterality(line, source)
         if line.resolved and line.fact.billable:
             # Data-driven bundling filter: a resolved code the source declares
             # NOT separately reportable (bundled / non-covered / MUE 0) is kept
@@ -129,6 +133,9 @@ def code_encounter(
     # Mechanic 3 — resolve NCCI PTP conflicts by DEMOTING the bundled component
     # (not blocking the claim) whenever no distinct-service modifier is justified.
     apply_ncci_bundling(result, source)
+    # An ancillary procedure that ESCALATED but is an NCCI 'always-bundled' component
+    # of a billed primary is INTEGRAL — decide it (bundle), don't send it to review.
+    apply_integral_bundling(result, source)
 
     apply_global_package(result, source)
     result.gates = gates.run_gates(result, note_text, source)
@@ -245,6 +252,47 @@ def apply_ncci_bundling(result: CodingResult, source: CodeSource) -> None:
                 comp.excluded_reason = (
                     f"bundled into {edit.get('payable')} per NCCI PTP "
                     f"(no distinct-service modifier justified)")
+
+
+def apply_integral_bundling(result: CodingResult, source: CodeSource) -> None:
+    """Decide the 'integral vs separately billable' gray area authoritatively, so an
+    ancillary procedure the resolver could not confidently code is not sent to a
+    human when NCCI already answers it. For each ESCALATED (unresolved) procedure
+    line, if one of its best candidates is an NCCI 'always-bundled' component
+    (modifier indicator 0 — never separately reportable) of a code that IS billed on
+    this claim, the ancillary is INTEGRAL to that primary: record it as bundled
+    (excluded), not a review item.
+
+    Safe by construction: it ONLY converts an escalation into a NON-billed exclusion
+    — it never bills an uncertain code. An indicator-1 (bypassable-with-modifier)
+    pair is a genuine judgement (bill-with-modifier vs bundle) and is left escalated.
+    Authoritative (NCCI) and agnostic — no code is named here."""
+    from .models import FactKind, ResolutionMethod
+    billed = {ln.chosen.code for ln in result.billable_lines
+              if ln.chosen and ln.chosen.system in ("cpt", "hcpcs")
+              and ln.fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING)}
+    if not billed:
+        return
+    for ln in result.lines:
+        if ln.resolved or ln.excluded_reason or not ln.fact.billable:
+            continue
+        if ln.fact.kind not in (FactKind.PROCEDURE, FactKind.IMAGING):
+            continue
+        done = False
+        for cand in ln.alternatives[:4]:
+            for primary in billed:
+                edit = source.ncci_edit(primary, cand.code, result.date_of_service)
+                if (edit and str(edit.get("component")) == cand.code
+                        and str(edit.get("payable")) in billed
+                        and str(edit.get("modifier")) == "0"):
+                    ln.chosen = cand
+                    ln.method = ResolutionMethod.DETERMINISTIC
+                    ln.excluded_reason = (f"integral to {edit.get('payable')} — always "
+                                          f"bundled per NCCI (not separately reportable)")
+                    done = True
+                    break
+            if done:
+                break
 
 
 def apply_global_package(result: CodingResult, source: CodeSource) -> None:

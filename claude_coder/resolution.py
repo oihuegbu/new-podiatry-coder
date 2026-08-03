@@ -251,6 +251,60 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
     return _decide(fact, pool, source=source)
 
 
+def _strip_laterality(text: str) -> str:
+    """A descriptor with the laterality word removed — so laterality variants of the
+    same concept compare equal ('… right foot' ~ '… unspecified foot')."""
+    return re.sub(r"\s+", " ",
+                  re.sub(r"\b(right|left|bilateral|unspecified)\b", " ",
+                         str(text).lower())).strip(" ,;")
+
+
+def upgrade_diagnosis_laterality(line: ResolvedLine, source: CodeSource) -> ResolvedLine:
+    """ICD-10-CM specificity: when a diagnosis resolved to an UNSPECIFIED-laterality
+    code but the note documents a side AND a laterality-specific SIBLING exists in
+    the authoritative data, upgrade to it. Agnostic — it uses descriptor grammar
+    ('unspecified' vs 'right'/'left') and the code's OWN sibling family (validated by
+    descriptor: a sibling must be the same concept with only laterality changed),
+    never a hardcoded code or family."""
+    fact = line.fact
+    if not (line.resolved and fact.kind is FactKind.DIAGNOSIS and line.chosen):
+        return line
+    lat = str(fact.attributes.get("laterality", "")).lower().strip()
+    if lat not in ("right", "left"):
+        return line
+    desc = line.chosen.descriptor.lower()
+    if lat in desc:                      # already specific to the documented side
+        return line
+    if "unspecified" not in desc:        # not an unspecified-laterality code — leave it
+        return line
+    from .terminology import _dot
+    undot = line.chosen.code.replace(".", "").upper()
+    stem = undot[:-1]                    # the presumed laterality position in the family
+    if not stem:
+        return line
+    family = _strip_laterality(desc)
+    target = None
+    for sib in source.leaf_codes(stem, "icd10"):
+        su = sib.replace(".", "").upper()
+        if su == undot:
+            continue
+        sdesc = (source.descriptions(su, "icd10") or [""])[0]
+        # a genuine laterality sibling: names the documented side AND is otherwise
+        # the identical concept (self-validates the structural guess above).
+        if sdesc and lat in sdesc.lower() and _strip_laterality(sdesc) == family:
+            if target is not None:
+                return line              # ambiguous family — keep the original
+            target = (su, sdesc)
+    if target is None:
+        return line
+    code, sdesc = target
+    line.chosen = CandidateCode(code=_dot(code), system="icd10", descriptor=sdesc,
+                                score=1.0, source="laterality-specificity",
+                                authority={"source": "ICD-10-CM laterality specificity"})
+    line.rationale = f"{line.rationale}; upgraded to documented laterality ({lat})"
+    return line
+
+
 def _candidate_from_code(code: str, source: CodeSource) -> CandidateCode:
     """Wrap an authoritative-Index code as a top-relevance candidate, descriptor
     from the authoritative record."""

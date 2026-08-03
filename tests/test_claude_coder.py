@@ -989,6 +989,79 @@ class RecommendationsTest(unittest.TestCase):
         self.assertEqual(recs, [])
 
 
+class IntegralBundlingTest(unittest.TestCase):
+    """An escalated ancillary that is an NCCI always-bundled (indicator 0) component
+    of a billed primary is decided as INTEGRAL (bundled), not escalated. A bypassable
+    (indicator 1) pair stays a genuine judgement → escalated. Synthetic codes."""
+
+    def _anc(self, cand_code):
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod, ResolvedLine)
+        f = ClinicalFact(kind=FactKind.PROCEDURE, description="ancillary",
+                         evidence=[EvidenceSpan("ancillary performed")])
+        return ResolvedLine(fact=f, chosen=None, method=ResolutionMethod.ABSTAINED,
+                            alternatives=[CandidateCode(cand_code, "cpt", "d", 0.7)])
+
+    def _result(self, indicator):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CodingResult, FactKind
+        primary = _line("PRIMARY", FactKind.PROCEDURE, "primary procedure")
+        anc = self._anc("COMPONENT")
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14",
+                         lines=[primary, anc])
+        return r, anc, MockSource(ncci={("PRIMARY", "COMPONENT"): indicator})
+
+    def test_integral_component_bundled(self):
+        from claude_coder.pipeline import apply_integral_bundling
+        r, anc, src = self._result("0")           # always-bundled
+        apply_integral_bundling(r, src)
+        self.assertEqual(anc.chosen.code, "COMPONENT")
+        self.assertIn("integral", anc.excluded_reason)
+
+    def test_bypassable_component_stays_escalated(self):
+        from claude_coder.pipeline import apply_integral_bundling
+        r, anc, src = self._result("1")           # separately billable with a modifier
+        apply_integral_bundling(r, src)
+        self.assertFalse(anc.resolved)
+        self.assertIsNone(anc.excluded_reason)
+
+
+class LateralityUpgradeTest(unittest.TestCase):
+    """An unspecified-laterality diagnosis is upgraded to the documented-side sibling
+    when the authoritative family has one (validated by descriptor, not a code)."""
+
+    def test_unspecified_upgraded_to_documented_side(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder.resolution import resolve, upgrade_diagnosis_laterality
+        recs = {("DX9", "icd10"): {"long_description": "some condition, unspecified site", "active": True},
+                ("DX1", "icd10"): {"long_description": "some condition, right site", "active": True},
+                ("DX2", "icd10"): {"long_description": "some condition, left site", "active": True}}
+        src = MockSource(records=recs, retrieval={("*", "icd10"):
+                         [CandidateCode("DX9", "icd10", "some condition, unspecified site", 1.0)]})
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="some condition",
+                            attributes={"laterality": "right"},
+                            evidence=[EvidenceSpan("some condition, right side")], confidence=0.98)
+        line = resolve(fact, src)
+        self.assertEqual(line.chosen.code, "DX9")           # retrieval gives unspecified
+        line = upgrade_diagnosis_laterality(line, src)
+        self.assertEqual(line.chosen.code, "DX1")           # upgraded to the right sibling
+
+    def test_no_upgrade_without_documented_side(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod, ResolvedLine)
+        from claude_coder.resolution import upgrade_diagnosis_laterality
+        recs = {("DX9", "icd10"): {"long_description": "some condition, unspecified site", "active": True},
+                ("DX1", "icd10"): {"long_description": "some condition, right site", "active": True}}
+        src = MockSource(records=recs)
+        f = ClinicalFact(kind=FactKind.DIAGNOSIS, description="some condition",
+                         evidence=[EvidenceSpan("x")])      # no laterality documented
+        ln = ResolvedLine(fact=f, chosen=CandidateCode("DX9", "icd10", "some condition, unspecified site", 1.0),
+                          method=ResolutionMethod.DETERMINISTIC)
+        self.assertEqual(upgrade_diagnosis_laterality(ln, src).chosen.code, "DX9")   # unchanged
+
+
 class DiagnosisModifierTest(unittest.TestCase):
     """An ICD-10 diagnosis encodes laterality IN the code and must never receive an
     RT/LT procedure modifier — even when the fact documents a side and the chosen
