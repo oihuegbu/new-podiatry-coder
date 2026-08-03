@@ -149,6 +149,25 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL) -
     # recall (which handles the many-competitor / terse cases).
     elif fact.kind in (FactKind.PROCEDURE, FactKind.SUPPLY, FactKind.IMAGING,
                        FactKind.DRUG):
+        # AUTHORITATIVE FIRST: the AMA CPT Alphabetic Index (term -> code), the true
+        # analog of the ICD Index. This is what resolves 'tailor's bunion osteotomy
+        # -> 28308' where descriptor/embedding cannot ('fifth' vs 'other than first
+        # metatarsal'). Empty until the licensed Index file is ingested (see
+        # data_access.cpt_index_codes / tools/parse_cpt_index.py), so it is a no-op
+        # that degrades gracefully to the descriptor index + embedding below.
+        cidx = source.cpt_index_codes(fact.description, fact.system)
+        if len(cidx) == 1:
+            code = next(iter(cidx))
+            rec = source.lookup(code, fact.system) or {}
+            desc = (rec.get("long_description") or rec.get("description")
+                    or rec.get("short_description") or "")
+            cand = CandidateCode(code=code, system=fact.system, descriptor=str(desc),
+                                 score=1.0, source="cpt-alphabetic-index",
+                                 authority={"source": "AMA CPT Alphabetic Index"})
+            line = _decide(fact, [cand], authority="AMA CPT Alphabetic Index", source=source)
+            if line.resolved:
+                return line
+
         pidx = source.procedure_index_codes(fact.description, fact.system)
         if len(pidx) == 1:
             code = next(iter(pidx))

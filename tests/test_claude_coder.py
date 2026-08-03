@@ -570,5 +570,68 @@ class SupportRankingTest(unittest.TestCase):
         self.assertEqual(line.chosen.code, "P_TERSE")
 
 
+class CptAlphabeticIndexTest(unittest.TestCase):
+    """The authoritative AMA CPT Alphabetic Index layer resolves a procedure term
+    deterministically BEFORE embedding — the case descriptor/embedding cannot get
+    ('fifth metatarsal' in the note vs 'other than first metatarsal' in the code)."""
+
+    def test_cpt_index_resolves_authoritatively(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        from claude_coder.resolution import resolve
+        src = MockSource(
+            records={("PROC_OSTEO", "cpt"):
+                     {"long_description": "Osteotomy, metatarsal; other than first "
+                      "metatarsal, each", "active": True}},
+            cpt_index={"osteotomy of the fifth metatarsal": {"PROC_OSTEO"}})
+        fact = ClinicalFact(kind=FactKind.PROCEDURE,
+                            description="osteotomy of the fifth metatarsal",
+                            evidence=[EvidenceSpan("osteotomy of the fifth metatarsal")],
+                            confidence=0.95)
+        line = resolve(fact, src)
+        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
+        self.assertEqual(line.chosen.code, "PROC_OSTEO")
+        self.assertIn("CPT Alphabetic Index", line.rationale)
+
+
+class CptIndexParserTest(unittest.TestCase):
+    """tools/parse_cpt_index.py: header-driven column detection + range expansion
+    to real codes only. Synthetic codes are generated at runtime (no literal code
+    cluster), so the parser is exercised without any real medical code."""
+
+    def _mod(self):
+        import importlib.util
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location(
+            "parse_cpt_index", root / "tools" / "parse_cpt_index.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    def test_column_detection(self):
+        m = self._mod()
+        main_i, mod_i, code_i = m._match_cols(["Main Term", "Modifier", "Code/Range"])
+        self.assertEqual((main_i, code_i), (0, 2))
+        self.assertEqual(mod_i, [1])
+
+    def test_range_expands_to_valid_only(self):
+        m = self._mod()
+        base = 90000
+        valid = {str(base + i) for i in range(5)}          # generated, not literal
+        self.assertEqual(m._expand(f"{base}-{base+3}", valid),
+                         [str(base + i) for i in range(4)])
+        self.assertEqual(m._expand(f"{base}, {base+2}", valid),
+                         [str(base), str(base + 2)])
+        self.assertEqual(m._expand("ZZ999", valid), [])    # not a real code -> dropped
+
+    def test_delimiter_sniff(self):
+        m = self._mod()
+        self.assertEqual(m._sniff("a\tb\tc"), "\t")
+        self.assertEqual(m._sniff("a|b|c"), "|")
+        self.assertEqual(m._sniff("a,b,c"), ",")
+
+
 if __name__ == "__main__":
     unittest.main()

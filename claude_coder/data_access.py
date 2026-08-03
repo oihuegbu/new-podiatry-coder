@@ -46,6 +46,8 @@ class CodeSource(Protocol):
 
     def snomed_codes(self, description: str, system: str) -> set[str]: ...
 
+    def cpt_index_codes(self, description: str, system: str) -> set[str]: ...
+
     def procedure_index_codes(self, description: str, system: str) -> set[str]: ...
 
     def leaf_codes(self, stem: str, system: str) -> set[str]: ...
@@ -85,6 +87,7 @@ class AuthoritativeSource:
         self._gp: dict | None = None
         self._idx = None
         self._snomed = None
+        self._cptidx = None
         self._rich: dict | None = None
 
     def _rich_records(self, system: str) -> dict:
@@ -155,6 +158,39 @@ class AuthoritativeSource:
             return set()
         return {c for c in self._snomed.candidates(description)
                 if self.leaf_codes(c, "icd10")}
+
+    def cpt_index_codes(self, description: str, system: str) -> set[str]:
+        """AUTHORITATIVE procedure term -> CPT code, via the AMA CPT Alphabetic
+        Index (the CPT-axis analog of the NCHS ICD Alphabetic Index). This is the
+        real term->code map — 'tailor's bunion / fifth metatarsal osteotomy' -> the
+        code — that no descriptor/embedding heuristic can reproduce (a note's
+        'fifth metatarsal' vs a descriptor's 'other than first metatarsal').
+
+        Source: data/codes/cpt_index_terms.json, prepared by tools/parse_cpt_index.py
+        from the LICENSED AMA CPT Link 'Index file'. Fail-safe: empty set until that
+        file is ingested (it is AMA-licensed and not publicly downloadable), so the
+        coder simply falls back to the descriptor index + embedding until then. CPT
+        only — the AMA Index does not cover HCPCS Level II."""
+        if system != "cpt":
+            return set()
+        if getattr(self, "_cptidx", None) is None:
+            try:
+                import json
+                from app.core.config import DATA_DIR
+                from .terminology import TerminologyIndex
+                with open(DATA_DIR / "codes" / "cpt_index_terms.json") as fh:
+                    terms = json.load(fh).get("terms", {})   # {code: [index phrases]}
+                self._cptidx = TerminologyIndex(terms) if terms else False
+            except Exception:
+                self._cptidx = False
+        if not self._cptidx:
+            return set()
+        out = set()
+        for c in self._cptidx.candidates(description):
+            code = str(c).replace(".", "")
+            if self.lookup(code, system):
+                out.add(code)
+        return out
 
     def procedure_index_codes(self, description: str, system: str) -> set[str]:
         """Deterministic CPT/HCPCS grounding, the procedure-axis analog of the ICD
@@ -412,7 +448,8 @@ class MockSource:
                  bilat: dict[str, str] | None = None,
                  index: dict[str, set] | None = None,
                  snomed: dict[str, set] | None = None,
-                 proc_index: dict[str, set] | None = None) -> None:
+                 proc_index: dict[str, set] | None = None,
+                 cpt_index: dict[str, set] | None = None) -> None:
         self._records = records or {}
         self._retrieval = retrieval or {}
         self._ncci = ncci or {}
@@ -423,6 +460,7 @@ class MockSource:
         self._index = index or {}
         self._snomed_map = snomed or {}
         self._proc_index = proc_index or {}
+        self._cpt_index = cpt_index or {}
 
     def global_period(self, code):
         return self._gp.get(code)
@@ -435,6 +473,9 @@ class MockSource:
 
     def snomed_codes(self, description, system):
         return set(self._snomed_map.get(description, set())) if system == "icd10" else set()
+
+    def cpt_index_codes(self, description, system):
+        return set(self._cpt_index.get(description, set())) if system == "cpt" else set()
 
     def procedure_index_codes(self, description, system):
         return set(self._proc_index.get(description, set())) if system in ("cpt", "hcpcs") else set()
