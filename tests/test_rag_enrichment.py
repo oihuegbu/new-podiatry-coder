@@ -11,7 +11,6 @@ they guard the enrichment without a live index.
 
 Run:  PYTHONPATH=. python tests/test_rag_enrichment.py
 """
-import json
 import sys
 from pathlib import Path
 
@@ -40,7 +39,7 @@ def _emb(records, code, key="code"):
 
 
 def main():
-    vs = MedicalCodeVectorStore.__new__(MedicalCodeVectorStore)
+    vs = MedicalCodeVectorStore()
     cpt = vs._load_cpt_records()
     icd = vs._load_icd10_records()
     hcpcs = vs._load_hcpcs_records()
@@ -57,8 +56,7 @@ def main():
           "heel bone')", low.count("removal of heel bone") <= 1)
 
     print("\n[ICD-10-CM — Index synonyms/eponyms folded in]")
-    idx = json.load(open(Path(__file__).resolve().parent.parent
-                         / "data/codes/icd10cm_index_terms.json"))["terms"]
+    idx = vs.lexicons.synonyms_for("icd10")
     # find an active record whose raw code has index synonyms not already in
     # its descriptor, and confirm the synonym reached the embedding text
     proved = False
@@ -75,30 +73,15 @@ def main():
     check("at least one ICD code carries an Index synonym absent from its "
           "descriptor", proved)
 
-    print("\n[CPT — LLM synonym index folded in when present]")
-    import json as _json
-    from app.rag.vector_store import CPT_SYNONYMS_FILE
-    existed = CPT_SYNONYMS_FILE.exists()
-    backup = CPT_SYNONYMS_FILE.read_text() if existed else None
-    try:
-        CPT_SYNONYMS_FILE.write_text(_json.dumps({"provenance": "test",
-            "terms": {"28118": ["Haglund resection",
-                                 "retrocalcaneal exostectomy"]}}))
-        cpt2 = vs._load_cpt_records()
-        e = (_emb(cpt2, "28118") or "").lower()
-        check("eponym synonym ('haglund') folded into 28118 embedding",
-              "haglund" in e and "exostectomy" in e)
-        check("official descriptor still retained alongside synonyms",
-              "ostectomy" in e and "calcaneus" in e)
-    finally:
-        if existed:
-            CPT_SYNONYMS_FILE.write_text(backup)
-        else:
-            CPT_SYNONYMS_FILE.unlink(missing_ok=True)
-    # absent-file path must not crash and must yield descriptor-only embeddings
-    cpt3 = vs._load_cpt_records()
-    check("absent synonyms file degrades gracefully (descriptor-only)",
-          bool(_emb(cpt3, "28118")))
+    print("\n[Generated retrieval packs — quarantine is non-influential]")
+    quarantined = vs.lexicon_report.get("quarantined_packs") or []
+    check("generated candidate packs are explicitly quarantined",
+          bool(quarantined) and all(
+              row.get("accepted_term_count") == 0 for row in quarantined))
+    check("uncorroborated generated CPT terms do not enter embeddings",
+          vs.lexicons.synonyms_for("cpt") == {})
+    check("official descriptors remain available without generated terms",
+          bool(_emb(cpt, "28118")))
 
     print("\n[HCPCS — short + long embedded]")
     e = _emb(hcpcs, hcpcs[0]["code"]) if hcpcs else None

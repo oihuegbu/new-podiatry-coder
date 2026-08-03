@@ -322,6 +322,8 @@ class MedicalCodingPipeline:
             em_level_reasoning=coding_result.get("em_level_reasoning", ""),
             rag_context={
                 "entities_extracted": len(entities),
+                "retrieval_lexicon": dict(
+                    self.vector_store.lexicon_report),
                 "candidates_per_system": {cs: len(cands) for cs, cands in merged.items()},
                 # The actual candidate CODES offered to the coder, in the
                 # rank order it saw them (deduped + similarity-sorted by

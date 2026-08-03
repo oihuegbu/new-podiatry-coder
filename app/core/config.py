@@ -93,6 +93,8 @@ TERMINOLOGY_PACK_DIR = DATA_DIR / "terminology" / "packs"
 TERMINOLOGY_SOURCE_CATALOG_FILE = (
     DATA_DIR / "terminology" / "source_catalog.json")
 SOURCE_REQUIREMENTS_FILE = DATA_DIR / "release" / "source_requirements.json"
+RETRIEVAL_LEXICON_CATALOG_FILE = (
+    DATA_DIR / "retrieval" / "lexicon_catalog.json")
 
 # --- RAG settings ---
 # top_k feeds the coder's candidate list; 20 gives recall headroom for a

@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "version": "2026.08.1",
+  "policy": {
+    "minimum_term_characters": 2,
+    "maximum_term_characters": 160,
+    "maximum_term_code_fanout": 24,
+    "minimum_generated_independence_domains": 2
+  },
+  "packs": [
+    {
+      "id": "official-icd-index-2026",
+      "status": "active",
+      "code_system": "icd10",
+      "authority_role": "retrieval_only",
+      "provenance_kind": "government_primary",
+      "pack_format": "legacy_primary",
+      "path": "data/codes/icd10cm_index_terms.json",
+      "pack_sha256": "sha256:d05174cc65bb863346743067e592da693d9c63869d821a0b223bd261c12a944c",
+      "code_source": "data/codes/icd10cm_codes.json",
+      "code_source_sha256": "sha256:8208bc66122f91552c3f4348dab33766604a663010eaadaf791884e5cd5fab13",
+      "unknown_code_policy": "reject_terms",
+      "maximum_term_code_fanout": 24,
+      "attestations": []
+    },
+    {
+      "id": "generated-cpt-candidate",
+      "status": "candidate",
+      "code_system": "cpt",
+      "authority_role": "retrieval_only",
+      "provenance_kind": "generated",
+      "pack_format": "legacy_generated",
+      "path": "data/codes/cpt_synonyms.json",
+      "pack_sha256": "sha256:a3ac7871b14a839eca5d8f10926341aee235d0237548b6c25a9e0cb4c7af6e51",
+      "code_source": "data/codes/cpt_codes.json",
+      "code_source_sha256": "sha256:8ec85a3eeb7d758364ff0b8a8be32592180c464aaea7db2cafea7c40441198d7",
+      "attestations": []
+    },
+    {
+      "id": "generated-hcpcs-candidate",
+      "status": "candidate",
+      "code_system": "hcpcs",
+      "authority_role": "retrieval_only",
+      "provenance_kind": "generated",
+      "pack_format": "legacy_generated",
+      "path": "data/codes/hcpcs_synonyms.json",
+      "pack_sha256": "sha256:17634ab12998244a1fbe70e8dcb2e79bb75f401c821dc09f9e1cc5e34745fc4b",
+      "code_source": "data/codes/hcpcs_codes.json",
+      "code_source_sha256": "sha256:ade87ad0357e9e5da444852fc30f99077c8818f7ee04941cf3ace8f16a65f316",
+      "attestations": []
+    },
+    {
+      "id": "generated-icd-candidate-2026-08",
+      "status": "candidate",
+      "code_system": "icd10",
+      "authority_role": "retrieval_only",
+      "provenance_kind": "generated",
+      "pack_format": "governed_v1",
+      "path": "data/retrieval/candidates/generated_icd_candidate.json",
+      "pack_sha256": "sha256:c754ce179046d38a1cd4a655e9a2d49cf7300f7f26956b01813b33480e74bcf6",
+      "code_source": "data/codes/icd10cm_codes.json",
+      "code_source_sha256": "sha256:8208bc66122f91552c3f4348dab33766604a663010eaadaf791884e5cd5fab13",
+      "attestations": []
+    }
+  ]
+}

@@ -142,6 +142,26 @@ class TestFailClosedRelease(unittest.TestCase):
         self.assertIn("procedures", {
             row["field"] for row in report["input_disagreements"]})
 
+    def test_identical_codes_do_not_mask_retrieval_lexicon_drift(self):
+        base = {
+            "icd_codes": [], "supporting_conditions": [], "cpt_codes": [],
+            "hcpcs_codes": [], "snomed_codes": [],
+            "final_disposition": "CLEAN", "auto_coding_tier": "AUTO",
+            "rag_context": {"retrieval_lexicon": {
+                "report_fingerprint": "sha256:first-report",
+                "catalog_sha256": "sha256:first-catalog",
+            }},
+        }
+        changed = {**base, "rag_context": {"retrieval_lexicon": {
+            "report_fingerprint": "sha256:second-report",
+            "catalog_sha256": "sha256:first-catalog",
+        }}}
+        report = compare_runs([base, changed])
+        self.assertFalse(report["unanimous"])
+        self.assertFalse(report["input_consistent"])
+        self.assertIn("retrieval_lexicon_fingerprint", {
+            row["field"] for row in report["input_disagreements"]})
+
     def test_unknown_and_execution_error_are_blocking(self):
         for status in (Status.UNKNOWN, Status.ERROR):
             with self.subTest(status=status):

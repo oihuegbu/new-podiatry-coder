@@ -27,6 +27,7 @@ _AUTHORITATIVE = {
     # interpretation source and must be bound into the same immutable manifest.
     "terminology_registry": config.TERMINOLOGY_REGISTRY_FILE,
     "terminology_source_catalog": config.TERMINOLOGY_SOURCE_CATALOG_FILE,
+    "retrieval_lexicon_catalog": config.RETRIEVAL_LEXICON_CATALOG_FILE,
     "source_requirements": config.SOURCE_REQUIREMENTS_FILE,
     "mcd_coverage_cache": config.MCD_COVERAGE_CACHE_FILE,
 }
@@ -64,6 +65,25 @@ def _authoritative_paths() -> dict[str, Path]:
         # a manifest error instead of escaping as an uncaught exception.
         paths["terminology_catalog_inputs_invalid"] = (
             config.BASE_DIR / ".invalid-terminology-source-catalog")
+    try:
+        catalog = json.loads(config.RETRIEVAL_LEXICON_CATALOG_FILE.read_text())
+        for pack in catalog.get("packs") or []:
+            pack_id = str(pack.get("id") or "unknown")
+            roles = ["path", "code_source"]
+            if pack.get("candidate_source"):
+                roles.append("candidate_source")
+            for role in roles:
+                relative = str(pack.get(role) or "")
+                path = (config.BASE_DIR / relative).resolve()
+                if not relative or not path.is_relative_to(
+                        config.BASE_DIR.resolve()):
+                    raise ValueError(
+                        f"retrieval lexicon path escapes repository: {relative}")
+                paths.setdefault(
+                    f"retrieval_lexicon/{pack_id}/{role}:{path.name}", path)
+    except Exception:
+        paths["retrieval_lexicon_catalog_inputs_invalid"] = (
+            config.BASE_DIR / ".invalid-retrieval-lexicon-catalog")
     runtime = {
         "compliance_database": config.DATA_DIR / "compliance.db",
         "validator_implementation": config.BASE_DIR / "app" / "validation" /
@@ -93,6 +113,18 @@ def _authoritative_paths() -> dict[str, Path]:
                                       "terminology" / "normalizer.py",
         "terminology_builder_implementation": config.BASE_DIR / "tools" /
                                               "build_terminology_pack.py",
+        "retrieval_lexicon_implementation": config.BASE_DIR / "app" / "rag" /
+                                            "retrieval_lexicon.py",
+        "retrieval_lexicon_importer": config.BASE_DIR / "tools" /
+                                      "import_retrieval_lexicon.py",
+        "retrieval_lexicon_corroborator": config.BASE_DIR / "tools" /
+                                          "corroborate_retrieval_lexicon.py",
+        "retrieval_index_implementation": config.BASE_DIR / "app" / "rag" /
+                                          "vector_store.py",
+        "candidate_retriever_implementation": config.BASE_DIR / "app" / "rag" /
+                                              "retriever.py",
+        "result_cache_implementation": config.BASE_DIR / "app" / "core" /
+                                       "cache.py",
         "source_preflight_implementation": config.BASE_DIR / "app" /
                                            "compliance" / "refresh" /
                                            "preflight.py",

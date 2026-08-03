@@ -94,6 +94,10 @@ _INPUT_PATHS: dict[str, tuple[str, ...]] = {
     "terminology_status": ("terminology_normalization", "status"),
     "clinical_facts_fingerprint": ("clinical_facts", "facts_fingerprint"),
     "clinical_facts_status": ("clinical_facts", "status"),
+    "retrieval_lexicon_fingerprint": (
+        "rag_context", "retrieval_lexicon", "report_fingerprint"),
+    "retrieval_lexicon_catalog_sha256": (
+        "rag_context", "retrieval_lexicon", "catalog_sha256"),
 }
 
 

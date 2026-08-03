@@ -29,39 +29,22 @@ from app.core.config import (
     RAG_SIMILARITY_THRESHOLD,
 )
 from app.core.logger import get_logger
+from app.rag.retrieval_lexicon import (
+    RetrievalLexiconRegistry, current_retrieval_lexicon_registry,
+)
 
 logger = get_logger(__name__)
 
-# The ICD-10-CM Index carries the clinical SYNONYMS and EPONYMS a note uses
-# ('Haglund', 'bunionette') that a terse Tabular descriptor omits — folded
-# into each diagnosis's embedding text so vocabulary-mismatched notes retrieve
-# the right code.
-ICD10_INDEX_TERMS_FILE = ICD10_FILE.parent / "icd10cm_index_terms.json"
-# LLM-generated, grounded, provenance-tagged clinical-synonym indexes
-# (tools/build_code_synonyms.py) — the eponym/clinician vocabulary the terse
-# descriptors omit. CPT/HCPCS ship no synonym source at all; ICD's authoritative
-# Index still misses eponyms, so its LLM file SUPPLEMENTS the Index. All
-# optional — an absent file degrades to descriptor(+Index)-only embeddings.
-CPT_SYNONYMS_FILE   = CPT_FILE.parent / "cpt_synonyms.json"
-HCPCS_SYNONYMS_FILE = HCPCS_FILE.parent / "hcpcs_synonyms.json"
-ICD10_SYNONYMS_FILE = ICD10_FILE.parent / "icd10_synonyms.json"
-# Cap synonyms folded per code so a code with a long index list does not
-# dominate/dilute its own embedding.
+# Governed retrieval lexicons carry clinician vocabulary that may be absent
+# from official descriptors. The registry accepts only source-bound active
+# packs; generated candidate packs remain quarantined until independently
+# corroborated. No lexicon term is coding authority.
 _INDEX_TERMS_PER_CODE = 12
 
-# Files whose content drives the index — any change triggers a rebuild
-_INDEXED_FILES = [ICD10_FILE, CPT_FILE, HCPCS_FILE, ICD10_INDEX_TERMS_FILE,
-                  CPT_SYNONYMS_FILE, HCPCS_SYNONYMS_FILE, ICD10_SYNONYMS_FILE]
-
-
-def _load_synonyms(path) -> dict:
-    """{code: [synonyms]} from an LLM-synonym file, or {} if absent/malformed."""
-    try:
-        d = _read_json(path)
-        t = d.get("terms", {}) if isinstance(d, dict) else {}
-        return {str(k): v for k, v in t.items() if isinstance(v, list)}
-    except Exception:
-        return {}
+# Base files whose content drives the index. Registry-bound pack/source paths
+# are added dynamically so catalog activation or quarantine changes rebuild
+# the collections automatically.
+_INDEXED_FILES = [ICD10_FILE, CPT_FILE, HCPCS_FILE]
 _CHECKSUM_FILE = QDRANT_DIR / "codes_checksum.txt"
 _CODE_SYSTEMS  = ["icd10", "cpt", "hcpcs"]
 
@@ -97,16 +80,20 @@ _RERANK_DEPTH   = int(os.getenv("RAG_RERANK_DEPTH", "40"))
 _RERANK_ENABLED = os.getenv("RAG_RERANK", "0") == "1"
 
 
-def _compute_checksum() -> str:
-    """SHA-256 of each indexed file's size + mtime — detects any change without reading GBs."""
+def _compute_checksum(registry: RetrievalLexiconRegistry | None = None) -> str:
+    """Hash exact indexed bytes so metadata-preserving edits cannot stay cached."""
     h = hashlib.sha256()
-    for p in _INDEXED_FILES:
+    paths = [*_INDEXED_FILES,
+             *(registry.bound_paths if registry is not None else ())]
+    for p in dict.fromkeys(paths):
         path = Path(p)
         if path.exists():
-            stat = path.stat()
-            h.update(f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}".encode())
+            h.update(str(path.resolve()).encode())
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    h.update(chunk)
         else:
-            h.update(f"{p}:missing".encode())
+            h.update(f"{path.resolve()}:missing".encode())
     return h.hexdigest()
 
 
@@ -131,6 +118,8 @@ class MedicalCodeVectorStore:
         self._sparse_model: SparseTextEmbedding | None = None
         self._reranker = None          # lazy cross-encoder
         self._reranker_failed = False  # don't retry a broken load every query
+        self.lexicons = current_retrieval_lexicon_registry()
+        self.lexicon_report = dict(self.lexicons.report)
         self._loaded = False
 
     # ------------------------------------------------------------------
@@ -143,7 +132,11 @@ class MedicalCodeVectorStore:
 
         self._open_client()
 
-        current_checksum  = _compute_checksum()
+        if self.lexicon_report.get("errors"):
+            raise RuntimeError(
+                "retrieval lexicon registry is invalid: "
+                + "; ".join(self.lexicon_report["errors"]))
+        current_checksum  = _compute_checksum(self.lexicons)
         stored_checksum   = _CHECKSUM_FILE.read_text().strip() if _CHECKSUM_FILE.exists() else ""
         collections_exist = self._all_collections_exist()
         files_unchanged   = (stored_checksum == current_checksum)
@@ -298,25 +291,18 @@ class MedicalCodeVectorStore:
         return self._reranker
 
     def _syn_map(self, code_system: str) -> dict:
-        """Lazy-cached {code: [synonyms]} for a system — the SAME LLM synonym
-        files the embedding folds in, read here so the reranker can score the
-        query against the ENRICHED text (descriptor + synonyms), not the bare
-        descriptor. This is what makes reranking synonym-AWARE: scoring the
-        bare descriptor demoted exactly the eponym matches the synonyms just
-        recovered ('onychomycosis' != descriptor 'dermatophytosis')."""
+        """Lazy-cache source-bound terms accepted by the governed registry."""
         if not hasattr(self, "_syn_cache"):
             self._syn_cache = {}
         if code_system not in self._syn_cache:
-            f = {"cpt": CPT_SYNONYMS_FILE, "hcpcs": HCPCS_SYNONYMS_FILE,
-                 "icd10": ICD10_SYNONYMS_FILE}.get(code_system)
-            self._syn_cache[code_system] = _load_synonyms(f) if f else {}
+            self._syn_cache[code_system] = self.lexicons.synonyms_for(
+                code_system)
         return self._syn_cache[code_system]
 
     def _rerank_text(self, entry: dict, code_system: str) -> str:
         """The enriched text the cross-encoder scores against the query:
-        descriptor variants PLUS the code's LLM synonyms — the same signal the
-        embedding uses. ICD synonym files key on the UNDOTTED code, so try
-        both the payload's dotted 'code' and undotted 'code_raw'."""
+        descriptor variants plus governed retrieval terms—the same signal the
+        embedding uses. Try both display and normalized code identities."""
         code = str(entry.get("code") or "")
         smap = self._syn_map(code_system)
         syns = (smap.get(code)
@@ -470,23 +456,7 @@ class MedicalCodeVectorStore:
 
     def _load_icd10_records(self) -> list[dict]:
         raw = _read_json(ICD10_FILE)
-        # Index synonyms/eponyms, keyed by undotted code: {'M2161': ['bunion
-        # of great toe', ...]}. Missing/malformed file degrades to
-        # descriptor-only embeddings (no crash).
-        index_terms: dict[str, list] = {}
-        try:
-            idx = _read_json(ICD10_INDEX_TERMS_FILE)
-            terms = idx.get("terms", idx) if isinstance(idx, dict) else {}
-            for k, v in terms.items():
-                if isinstance(v, list):
-                    index_terms[str(k).replace(".", "").upper()] = v
-        except Exception as exc:
-            logger.warning(f"ICD index terms unavailable ({exc}) — embedding "
-                           f"descriptors only")
-        # LLM synonym SUPPLEMENT: eponyms the authoritative Index misses
-        # (measured: 'Haglund's deformity' -> M77.31 was not retrieved because
-        # the Index lists only 'calcaneal spur').
-        icd_syns = _load_synonyms(ICD10_SYNONYMS_FILE)
+        lexicon_terms = self._syn_map("icd10")
         records = []
         for entry in _as_list(raw):
             code   = _get_field(entry, ["code"]).strip().replace(".", "").upper()
@@ -497,15 +467,13 @@ class MedicalCodeVectorStore:
             if status and status not in ("active", ""):
                 continue
             dotted = f"{code[:3]}.{code[3:]}" if len(code) > 3 else code
-            # Fold in the Index's clinical synonyms/eponyms (capped) PLUS the
-            # LLM supplement, so a note that names the condition the way a
-            # clinician does — not the way the Tabular descriptor does — still
-            # retrieves this code.
-            syns = [str(s) for s in index_terms.get(code, [])
-                    if str(s).strip()][:_INDEX_TERMS_PER_CODE]
-            llm = [str(s) for s in icd_syns.get(code, [])
-                   if str(s).strip()][:_INDEX_TERMS_PER_CODE]
-            variants = _dedup_texts([desc, *syns, *llm])
+            # Fold in capped, governed terms so note vocabulary can retrieve
+            # the authoritative descriptor without making the term itself a
+            # coding decision input.
+            synonyms = [str(value) for value in
+                        lexicon_terms.get(code, []) if str(value).strip()
+                        ][:_INDEX_TERMS_PER_CODE]
+            variants = _dedup_texts([desc, *synonyms])
             records.append({
                 "code":            dotted,
                 "code_raw":        code,
@@ -514,13 +482,14 @@ class MedicalCodeVectorStore:
                 "embedding_text":  f"ICD-10-CM {dotted}: " + " ".join(variants),
             })
         logger.info(f"  Loaded {len(records)} ICD-10-CM records from "
-                    f"{ICD10_FILE.name} ({len(index_terms)} with index terms)")
+                    f"{ICD10_FILE.name} ({len(lexicon_terms)} with governed "
+                    f"retrieval terms)")
         return records
 
     def _load_cpt_records(self) -> list[dict]:
         raw  = _read_json(CPT_FILE)
         data = _as_list(raw)
-        cpt_syns = _load_synonyms(CPT_SYNONYMS_FILE)
+        cpt_syns = self._syn_map("cpt")
         records = []
         for entry in data:
             code       = _get_field(entry, ["code"]).strip()
@@ -555,7 +524,7 @@ class MedicalCodeVectorStore:
 
     def _load_hcpcs_records(self) -> list[dict]:
         raw = _read_json(HCPCS_FILE)
-        hcpcs_syns = _load_synonyms(HCPCS_SYNONYMS_FILE)
+        hcpcs_syns = self._syn_map("hcpcs")
         records = []
         seen: set[str] = set()
         for entry in _as_list(raw):

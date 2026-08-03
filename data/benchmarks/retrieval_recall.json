@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "version": "2026.08.1",
+  "purpose": "retrieval_evaluation_only",
+  "authority_role": "non_production_benchmark",
+  "probes": [
+    {
+      "query": "retrocalcaneal exostectomy, Haglund resection of the calcaneus",
+      "expected_code": "28118",
+      "code_system": "cpt"
+    },
+    {
+      "query": "removal of prominent heel bone",
+      "expected_code": "28118",
+      "code_system": "cpt"
+    },
+    {
+      "query": "Haglund resection",
+      "expected_code": "28118",
+      "code_system": "cpt"
+    },
+    {
+      "query": "Achilles tendon debridement with reattachment using suture anchors",
+      "expected_code": "27654",
+      "code_system": "cpt"
+    },
+    {
+      "query": "bunionette correction, fifth metatarsal head resection",
+      "expected_code": "28110",
+      "code_system": "cpt"
+    },
+    {
+      "query": "hammertoe correction with proximal interphalangeal arthrodesis",
+      "expected_code": "28285",
+      "code_system": "cpt"
+    },
+    {
+      "query": "Morton's neuroma excision, intermetatarsal nerve",
+      "expected_code": "28080",
+      "code_system": "cpt"
+    },
+    {
+      "query": "hallux valgus, bunion of the great toe",
+      "expected_code": "M20.11",
+      "code_system": "icd10"
+    },
+    {
+      "query": "plantar fasciitis",
+      "expected_code": "M72.2",
+      "code_system": "icd10"
+    },
+    {
+      "query": "onychomycosis of the toenail",
+      "expected_code": "B35.1",
+      "code_system": "icd10"
+    },
+    {
+      "query": "diabetic foot ulcer of the heel",
+      "expected_code": "L97.409",
+      "code_system": "icd10"
+    },
+    {
+      "query": "total contact cast application, diabetic foot",
+      "expected_code": "29445",
+      "code_system": "cpt"
+    },
+    {
+      "query": "therapeutic diabetic shoe, custom molded",
+      "expected_code": "A5501",
+      "code_system": "hcpcs"
+    },
+    {
+      "query": "custom molded diabetic shoe insert, multiple density",
+      "expected_code": "A5513",
+      "code_system": "hcpcs"
+    }
+  ]
+}

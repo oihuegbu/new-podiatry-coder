@@ -150,6 +150,7 @@ def readiness_input_payload(result: dict) -> dict:
         "ner_entities": result.get("ner_entities") or [],
         "terminology_normalization": (
             result.get("terminology_normalization") or {}),
+        "retrieval_lexicon": rag.get("retrieval_lexicon") or {},
         "clinical_facts": result.get("clinical_facts") or {},
         "consistency": result.get("consistency") or {},
         "claim_scrub": result.get("claim_scrub") or {},
@@ -237,6 +238,7 @@ def _source_control(result: dict) -> ControlResult:
                  "mutation_ledger_implementation",
                  "submission_configuration", "terminology_registry",
                  "terminology_implementation", "terminology_source_catalog",
+                 "retrieval_lexicon_catalog",
                  "source_requirements",
                  "mcd_coverage_cache", "autonomous_scope_registry",
                  "scope_bootstrap_implementation",
@@ -244,6 +246,12 @@ def _source_control(result: dict) -> ControlResult:
                  "identifier_validation_implementation",
                  "model_execution_implementation",
                  "terminology_builder_implementation",
+                 "retrieval_lexicon_implementation",
+                 "retrieval_lexicon_importer",
+                 "retrieval_lexicon_corroborator",
+                 "retrieval_index_implementation",
+                 "candidate_retriever_implementation",
+                 "result_cache_implementation",
                  "source_preflight_implementation",
                  "clinical_facts_implementation",
                  "clinical_audit_implementation",
@@ -619,6 +627,70 @@ def _terminology_control(result: dict) -> ControlResult:
     return _control("terminology_normalization", ControlOutcome.PASS)
 
 
+def _retrieval_lexicon_control(result: dict) -> ControlResult:
+    """Bind the exact governed retrieval vocabulary used for the claim."""
+    report = ((result.get("rag_context") or {}).get("retrieval_lexicon"))
+    if not isinstance(report, dict) or not report:
+        return _control("retrieval_lexicon", ControlOutcome.NOT_CHECKED,
+                        "retrieval lexicon governance report is absent")
+    required = {"schema_version", "catalog_version", "catalog_sha256",
+                "authority_role", "active_packs", "quarantined_packs",
+                "errors", "report_fingerprint"}
+    if required - set(report) or report.get("schema_version") != 1:
+        return _control("retrieval_lexicon", ControlOutcome.ERROR,
+                        "retrieval lexicon report is incomplete or unsupported")
+    if report.get("authority_role") != "retrieval_only":
+        return _control("retrieval_lexicon", ControlOutcome.ERROR,
+                        "retrieval vocabulary attempted to act as coding authority")
+    if any(not isinstance(report.get(key), list) for key in
+           ("active_packs", "quarantined_packs", "errors")):
+        return _control("retrieval_lexicon", ControlOutcome.ERROR,
+                        "retrieval lexicon report collections are malformed")
+    body = {key: value for key, value in report.items()
+            if key != "report_fingerprint"}
+    if report.get("report_fingerprint") != _fingerprint(body):
+        return _control("retrieval_lexicon", ControlOutcome.ERROR,
+                        "retrieval lexicon report fingerprint is invalid")
+    try:
+        from app.rag.retrieval_lexicon import (
+            current_retrieval_lexicon_registry,
+        )
+        current = current_retrieval_lexicon_registry().report
+    except Exception as exc:
+        return _control("retrieval_lexicon", ControlOutcome.ERROR,
+                        f"retrieval lexicon could not be verified ({exc})")
+    if current.get("report_fingerprint") != report.get("report_fingerprint"):
+        return _control("retrieval_lexicon", ControlOutcome.BLOCKED,
+                        "retrieval vocabulary changed after candidate generation")
+    if report.get("errors"):
+        return _control("retrieval_lexicon", ControlOutcome.ERROR,
+                        "; ".join(str(value) for value in report["errors"]))
+    active = report.get("active_packs") or []
+    if not active:
+        return _control("retrieval_lexicon", ControlOutcome.NOT_CHECKED,
+                        "no governed retrieval vocabulary is active")
+    if any(not isinstance(row, dict) or row.get("status") != "active"
+           or row.get("authority_role") != "retrieval_only"
+           or not _SHA256_RE.fullmatch(str(row.get("pack_sha256") or ""))
+           or not _SHA256_RE.fullmatch(
+               str(row.get("code_source_sha256") or ""))
+           or (str(row.get("provenance_kind") or "").startswith("generated")
+               and not _SHA256_RE.fullmatch(
+                   str(row.get("candidate_source_sha256") or "")))
+           for row in active):
+        return _control("retrieval_lexicon", ControlOutcome.ERROR,
+                        "an active retrieval pack has invalid provenance")
+    quarantined = report.get("quarantined_packs") or []
+    if any(not isinstance(row, dict) or row.get("status") != "quarantined"
+           or int(row.get("accepted_term_count") or 0) != 0
+           or not row.get("quarantine_reasons") for row in quarantined):
+        return _control("retrieval_lexicon", ControlOutcome.ERROR,
+                        "a quarantined retrieval pack could influence candidates")
+    return _control(
+        "retrieval_lexicon", ControlOutcome.PASS,
+        evidence=[str(row.get("id")) for row in active])
+
+
 def _legacy_controls(result: dict) -> list[ControlResult]:
     controls = [_control(
         "pipeline_execution",
@@ -868,7 +940,8 @@ def build_readiness_certificate(
 ) -> ClaimReadinessCertificate:
     context = _context(result)
     controls = _legacy_controls(result)
-    controls += [_note_control(result), _source_control(result)]
+    controls += [_note_control(result), _source_control(result),
+                 _retrieval_lexicon_control(result)]
     controls.extend(_line_controls(result))
     controls.append(_mutation_control(result))
     signing_key = os.getenv(_CERTIFICATE_KEY_ENV, "")

@@ -267,6 +267,49 @@ MANIFEST: dict[str, dict[str, dict]] = {
         "required_sections":    {"consumer": "required_sections"},
         "allowed_laterality":   {"consumer": "allowed_laterality"},
     },
+    "retrieval/lexicon_catalog.json .": {
+        "schema_version": {"consumer": "RetrievalLexiconRegistry"},
+        "version":        {"consumer": "catalog_version"},
+        "policy":         {"consumer": "policy"},
+        "packs":          {"consumer": "_load_pack"},
+    },
+    "retrieval/lexicon_catalog.json policy": {
+        "minimum_term_characters": {"consumer": "minimum_term_characters"},
+        "maximum_term_characters": {"consumer": "maximum_term_characters"},
+        "maximum_term_code_fanout": {"consumer": "maximum_term_code_fanout"},
+        "minimum_generated_independence_domains": {
+            "consumer": "minimum_generated_independence_domains"},
+    },
+    "retrieval/lexicon_catalog.json packs[]": {
+        "id":                 {"consumer": "pack_id"},
+        "status":             {"consumer": "status"},
+        "code_system":        {"consumer": "code_system"},
+        "authority_role":     {"consumer": "authority_role"},
+        "provenance_kind":    {"consumer": "provenance_kind"},
+        "pack_format":        {"consumer": "pack_format"},
+        "path":               {"consumer": "pack_path"},
+        "pack_sha256":        {"consumer": "pack_sha256"},
+        "code_source":        {"consumer": "source_path"},
+        "code_source_sha256": {"consumer": "code_source_sha256"},
+        "unknown_code_policy": {"consumer": "unknown_code_policy"},
+        "maximum_term_code_fanout": {
+            "consumer": "maximum_term_code_fanout"},
+        "attestations":       {"consumer": "attestations"},
+    },
+    "retrieval/candidates/generated_icd_candidate.json .": {
+        "schema_version":          {"consumer": "governed pack schema"},
+        "pack_id":                 {"consumer": "governed pack metadata"},
+        "code_system":             {"consumer": "governed pack metadata"},
+        "authority_role":          {"consumer": "governed pack metadata"},
+        "provenance_kind":         {"consumer": "governed pack metadata"},
+        "source_candidate_sha256": {"waived": "provenance for the inert imported bytes"},
+        "code_source_sha256":      {"consumer": "governed pack metadata"},
+        "generated":               {"waived": "generator date provenance"},
+        "source_provenance":       {"waived": "human-readable source provenance"},
+        "count":                   {"consumer": "declared term-map count"},
+        "mapping_attestations":    {"consumer": "mapping_attestations"},
+        "terms":                   {"consumer": "terms mapping"},
+    },
 }
 
 

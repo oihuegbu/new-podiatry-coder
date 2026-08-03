@@ -141,6 +141,11 @@ class ClaimReadinessTest(unittest.TestCase):
             TerminologyNormalizer().normalize_entities(
                 [], {"full_text": self.note}))
         result["ner_entities"] = []
+        from app.rag.retrieval_lexicon import (
+            current_retrieval_lexicon_registry,
+        )
+        result["rag_context"]["retrieval_lexicon"] = dict(
+            current_retrieval_lexicon_registry().report)
         from app.clinical_facts import build_clinical_fact_report
         result["clinical_facts"] = build_clinical_fact_report(
             entities=[], sections={"full_text": self.note},
@@ -218,6 +223,16 @@ class ClaimReadinessTest(unittest.TestCase):
             "sha256:changed-without-rehash"
         cert = build_readiness_certificate(result)
         self.assertEqual(cert.disposition.value, "BLOCKED")
+
+    def test_tampered_retrieval_lexicon_report_blocks(self):
+        result = self.result()
+        result["rag_context"]["retrieval_lexicon"]["catalog_version"] = \
+            "tampered"
+        cert = build_readiness_certificate(result)
+        self.assertEqual(cert.disposition.value, "BLOCKED")
+        control = next(value for value in cert.controls
+                       if value.control_id == "retrieval_lexicon")
+        self.assertEqual(control.outcome.value, "ERROR")
 
     def test_missing_filter_execution_trail_blocks(self):
         result = self.result()
