@@ -36,6 +36,24 @@ def check(name, cond):
 
 def _run(icd=None, cpt=None, disposition="CLEAN", tier="AUTO"):
     return {
+        "evidence_packet": {
+            "evidence_fingerprint": "sha256:" + "a" * 64,
+            "source_document_sha256": "sha256:" + "b" * 64},
+        "note_integrity": {
+            "source_pdf_sha256": "sha256:" + "b" * 64,
+            "extracted_text_sha256": "sha256:" + "c" * 64,
+            "complete": True, "page_count": 1, "extracted_page_count": 1,
+            "page_coverage": [{"page_number": 1, "status": "extracted",
+                               "text_sha256": "sha256:" + "d" * 64}]},
+        "patient_metadata": {"date_of_service": "2026-05-01"},
+        "terminology_normalization": {
+            "entity_fingerprint": "sha256:" + "e" * 64,
+            "registry_sha256": "sha256:" + "f" * 64, "status": "PASS"},
+        "clinical_facts": {
+            "facts_fingerprint": "sha256:" + "1" * 64, "status": "PASS"},
+        "rag_context": {"retrieval_lexicon": {
+            "report_fingerprint": "sha256:" + "2" * 64,
+            "catalog_sha256": "sha256:" + "3" * 64}},
         "icd_codes": icd or [],
         "supporting_conditions": [],
         "cpt_codes": cpt or [],

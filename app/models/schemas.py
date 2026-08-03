@@ -231,6 +231,14 @@ class CodingResult(BaseModel):
     # registry marks its context as capable of changing a billed line.
     terminology_normalization: dict = Field(default_factory=dict)
     clinical_facts: dict = Field(default_factory=dict)
+    # Immutable input shared by all independent coding passes.  The full
+    # packet is stored once by the orchestrator; each result carries only its
+    # source/evidence fingerprints so consensus can prove equal inputs.
+    evidence_packet: dict = Field(default_factory=dict)
+    # Encounter-quarter authority acquisition report. This proves whether the
+    # NCCI/MUE/PFS snapshots governing the DOS were already present, fetched,
+    # or unavailable (which remains a fail-closed release condition).
+    dos_authority_preflight: dict = Field(default_factory=dict)
     # The operative note's documented procedures (vision extraction's
     # procedures_performed_today). Persisted on the record — not just used
     # transiently for the coding prompts — because the completeness

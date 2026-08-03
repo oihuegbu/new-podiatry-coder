@@ -27,6 +27,9 @@ resource "aws_secretsmanager_secret_version" "app_env" {
     CONSISTENCY_MODE              = var.consistency_mode
     CONSISTENCY_RUNS              = tostring(var.consistency_runs)
     CONSISTENCY_WORKERS           = tostring(var.consistency_workers)
+    OFFLINE_MAINTENANCE           = var.offline_maintenance ? "1" : "0"
+    PDF_TEXT_LAYER_MIN_TOKENS     = tostring(var.pdf_text_layer_min_tokens)
+    PDF_TEXT_LAYER_MIN_RECALL     = tostring(var.pdf_text_layer_min_recall)
     CODER_ADJUDICATOR_MODEL       = var.coder_adjudicator_model
     CLINICAL_AUDITOR_MODEL        = var.clinical_auditor_model
     CLINICAL_AUDIT_PASSES         = "2"

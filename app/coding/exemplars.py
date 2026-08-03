@@ -8,7 +8,7 @@ a worked example of a similar verified encounter BEFORE it drafts a claim,
 so judgment calls (E/M level, billability of borderline lines, modifier
 choices) arrive anchored instead of being re-derived from scratch each run.
 
-Modes (EXEMPLAR_MODE, default "auto"):
+Modes (EXEMPLAR_MODE, default "shadow"):
   off     disabled — no retrieval at all
   shadow  retrieve and RECORD what would have been injected
           (rag_context.exemplars in the result + a log line); prompts are
@@ -88,8 +88,8 @@ def _note_terms(note_category: str, note_sections: dict) -> set[str]:
 def resolve_mode(n_verified: int) -> str:
     mode = EXEMPLAR_MODE
     if mode not in ("auto", "off", "shadow", "live"):
-        logger.warning(f"Unknown EXEMPLAR_MODE '{mode}' — treating as auto")
-        mode = "auto"
+        logger.warning(f"Unknown EXEMPLAR_MODE '{mode}' — treating as shadow")
+        mode = "shadow"
     if mode == "auto":
         return "live" if n_verified > EXEMPLAR_LIVE_THRESHOLD else "shadow"
     return mode

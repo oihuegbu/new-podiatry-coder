@@ -14,6 +14,7 @@ Design:
 from __future__ import annotations
 
 import io
+import html as html_lib
 import json
 import os
 import re
@@ -22,6 +23,7 @@ import urllib.request
 import urllib.error
 import zipfile
 from datetime import date
+from html.parser import HTMLParser
 
 from app.compliance.datastore.store import ComplianceDataStore
 from app.compliance.refresh.sources import SOURCES_BY_ID, due_sources
@@ -74,7 +76,16 @@ def _quarter_start(year: int, q: int) -> str:
     return f"{year}-{(q - 1) * 3 + 1:02d}-01"
 
 
-def _resolve_ncci_ptp(url: str) -> tuple[list[str], str | None]:
+def _target_quarter(value: str | None) -> tuple[int, int] | None:
+    if not value:
+        return None
+    parsed = date.fromisoformat(value)
+    return parsed.year, ((parsed.month - 1) // 3) + 1
+
+
+def _resolve_ncci_ptp(
+        url: str, target_effective: str | None = None
+        ) -> tuple[list[str], str | None]:
     """Practitioner PTP edit files for the newest quarter on the page.
     CMS splits the full edit set across f1/f2/... members — ALL are needed,
     and they're served through an /license/ama? wrapper that still 200s the
@@ -84,7 +95,11 @@ def _resolve_ncci_ptp(url: str) -> tuple[list[str], str | None]:
         r'href="([^"]*?(\d{4})q([1-4])-practitioner-ptp-edits[^"]*?-f\d[^"]*?\.zip)"', html, re.I)
     if not hits:
         return [], None
-    year, q = max((int(y), int(qq)) for _, y, qq in hits)
+    available = {(int(y), int(qq)) for _, y, qq in hits}
+    target = _target_quarter(target_effective)
+    if target and target not in available:
+        return [], None
+    year, q = target or max(available)
     files = sorted({
         _abs(url, re.sub(r"^/license/ama\?file=", "", h))
         for h, y, qq in hits if (int(y), int(qq)) == (year, q)
@@ -92,26 +107,41 @@ def _resolve_ncci_ptp(url: str) -> tuple[list[str], str | None]:
     return files, _quarter_start(year, q)
 
 
-def _resolve_mue(url: str) -> tuple[list[str], str | None]:
+def _resolve_mue(
+        url: str, target_effective: str | None = None
+        ) -> tuple[list[str], str | None]:
     """Practitioner-services MUE table for the newest quarter on the page."""
     html = download(url).decode("utf-8", errors="replace")
     hits = re.findall(
         r'href="([^"]*?(\d{4})-?q([1-4])-practitioner-services-mue-table[^"]*?\.zip)"', html, re.I)
     if not hits:
-        return [], None
-    year, q = max((int(y), int(qq)) for _, y, qq in hits)
+        return (_resolve_mue_archive(target_effective)
+                if target_effective else ([], None))
+    available = {(int(y), int(qq)) for _, y, qq in hits}
+    target = _target_quarter(target_effective)
+    if target and target not in available:
+        return _resolve_mue_archive(target_effective)
+    year, q = target or max(available)
     files = [_abs(url, h) for h, y, qq in hits if (int(y), int(qq)) == (year, q)][:1]
     return files, _quarter_start(year, q)
 
 
-def _resolve_pfs(url: str) -> tuple[list[str], str | None]:
+def _resolve_pfs(
+        url: str, target_effective: str | None = None
+        ) -> tuple[list[str], str | None]:
     """Two-hop resolve: landing page → newest rvu<YY><a-d> page → its zip.
     The trailing letter is the quarterly revision (a=Jan ... d=Oct)."""
     html = download(url).decode("utf-8", errors="replace")
     hits = re.findall(r'href="([^"]*?/rvu(\d{2})([a-d])(?:-\d+)?)"', html, re.I)
     if not hits:
         return [], None
-    yy, letter = max((int(y), l.lower()) for _, y, l in hits)
+    target = _target_quarter(target_effective)
+    desired = ((target[0] % 100,
+                chr(ord("a") + target[1] - 1)) if target else None)
+    available = {(int(y), l.lower()) for _, y, l in hits}
+    if desired and desired not in available:
+        return [], None
+    yy, letter = desired or max(available)
     page = next(_abs(url, h) for h, y, l in hits
                 if int(y) == yy and l.lower() == letter)
     inner = download(page).decode("utf-8", errors="replace")
@@ -124,6 +154,88 @@ def _resolve_pfs(url: str) -> tuple[list[str], str | None]:
 _HCPCS_RELEASE_MONTHS = {
     "january": 1, "april": 4, "july": 7, "october": 10,
 }
+
+
+class _CMSArchiveParser(HTMLParser):
+    """Collect CMS download anchors with their nearest section heading."""
+
+    def __init__(self):
+        super().__init__()
+        self.heading = ""
+        self._heading_tag = ""
+        self._heading_parts: list[str] = []
+        self._anchor_href = ""
+        self._anchor_parts: list[str] = []
+        self._anchor_heading = ""
+        self.anchors: list[tuple[str, str, str]] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"h2", "h3", "h4"}:
+            self._heading_tag = tag
+            self._heading_parts = []
+        if tag == "a":
+            self._anchor_href = dict(attrs).get("href", "")
+            self._anchor_parts = []
+            self._anchor_heading = self.heading
+
+    def handle_data(self, data):
+        if self._heading_tag:
+            self._heading_parts.append(data)
+        if self._anchor_href:
+            self._anchor_parts.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == self._heading_tag:
+            self.heading = " ".join(self._heading_parts).strip()
+            self._heading_tag = ""
+        if tag == "a" and self._anchor_href:
+            self.anchors.append((
+                html_lib.unescape(self._anchor_href),
+                " ".join(self._anchor_parts).strip(),
+                self._anchor_heading,
+            ))
+            self._anchor_href = ""
+
+
+_MUE_ARCHIVE_URL = (
+    "https://www.cms.gov/medicare/coding-billing/"
+    "national-correct-coding-initiative-ncci-edits/"
+    "medicare-ncci-medically-unlikely-edit-mue-archive")
+
+
+def _effective_quarter_from_text(value: str) -> tuple[int, int] | None:
+    months = {name: index for index, name in enumerate(
+              ("january", "february", "march", "april", "may", "june",
+               "july", "august", "september", "october", "november",
+               "december"), 1)}
+    match = re.search(
+        r"effective\s+([A-Za-z]+)\s+\d{1,2},?\s+(\d{4})", value, re.I)
+    if not match or match.group(1).lower() not in months:
+        return None
+    month = months[match.group(1).lower()]
+    return int(match.group(2)), ((month - 1) // 3) + 1
+
+
+def _resolve_mue_archive(target_effective: str | None
+                         ) -> tuple[list[str], str | None]:
+    target = _target_quarter(target_effective)
+    if not target:
+        return [], None
+    markup = download(_MUE_ARCHIVE_URL).decode("utf-8", errors="replace")
+    parser = _CMSArchiveParser()
+    parser.feed(markup)
+    matches = []
+    for href, text, heading in parser.anchors:
+        context = " ".join((heading, text, href)).lower()
+        if (".zip" not in href.lower()
+                or "practitioner" not in context
+                or _effective_quarter_from_text(
+                    " ".join((heading, text))) != target):
+            continue
+        matches.append(_abs(_MUE_ARCHIVE_URL, href))
+    if not matches:
+        return [], None
+    return [matches[0]], _quarter_start(*target)
 
 
 def _resolve_hcpcs(url: str) -> tuple[list[str], str | None]:
@@ -314,7 +426,8 @@ def _write_coverage_cache(articles: list[dict], effective: str | None) -> None:
                 f"({len(articles)} articles) → {path.name}")
 
 
-def _resolve_urls(src) -> tuple[list[str], str | None]:
+def _resolve_urls(src, target_effective: str | None = None
+                  ) -> tuple[list[str], str | None]:
     """(concrete file URLs, effective date derived from the file's own
     quarter) — falls back to the registered URL when no resolver exists or
     resolution finds nothing (the 0-row guard downstream still catches a
@@ -323,11 +436,19 @@ def _resolve_urls(src) -> tuple[list[str], str | None]:
     if not resolver:
         return [src.url], None
     try:
-        urls, eff = resolver(src.url)
+        if src.id in {"ncci_ptp", "mue", "pfs_global"}:
+            urls, eff = resolver(src.url, target_effective)
+        else:
+            urls, eff = resolver(src.url)
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
         logger.warning(f"refresh[{src.id}]: landing-page resolve failed ({e})")
         return [src.url], None
     if not urls:
+        if target_effective:
+            logger.warning(
+                f"refresh[{src.id}]: no authoritative file covers "
+                f"requested quarter {target_effective}")
+            return [], None
         logger.warning(f"refresh[{src.id}]: no file links found on landing page — "
                        f"falling back to registered URL")
         return [src.url], None
@@ -336,7 +457,8 @@ def _resolve_urls(src) -> tuple[list[str], str | None]:
 
 def refresh_source(store: ComplianceDataStore, source_id: str, *,
                    effective_from: str | None = None, local_bytes: bytes | None = None,
-                   dry_run: bool = False) -> dict:
+                   dry_run: bool = False,
+                   target_effective: str | None = None) -> dict:
     """Refresh one source. Returns a summary dict."""
     src = SOURCES_BY_ID.get(source_id)
     if not src:
@@ -354,7 +476,7 @@ def refresh_source(store: ComplianceDataStore, source_id: str, *,
     if local_bytes is not None:
         payloads, resolved_eff = [(local_bytes, "local-file", "local-file")], None
     else:
-        urls, resolved_eff = _resolve_urls(src)
+        urls, resolved_eff = _resolve_urls(src, target_effective)
         payloads = []
         for u in urls:
             try:

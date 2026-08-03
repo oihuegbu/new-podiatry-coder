@@ -4,6 +4,11 @@ Run:  python -m tests.test_refresh
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 if __name__ != "__main__":
     import pytest
     pytest.skip("script harness; run with python tests/test_refresh.py",

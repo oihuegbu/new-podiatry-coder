@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "version": "2026.08.1",
+  "version": "2026.08.2",
   "governance": "Terminology normalization and retrieval aid only. It is not a medical-code authority. Every expansion is provenance-bearing; ambiguous or unknown affirmed terms with potential billing impact prevent autonomous release.",
   "sources": {
     "project_podiatry_note_conventions": {
       "name": "Governed podiatry documentation conventions",
-      "version": "2026.08.1",
+      "version": "2026.08.2",
       "review_status": "repository-reviewed",
       "authority_role": "retrieval_only",
       "provenance_kind": "practice_governed",
@@ -13,7 +13,7 @@
     },
     "project_general_clinical_conventions": {
       "name": "Governed general clinical documentation conventions",
-      "version": "2026.08.1",
+      "version": "2026.08.2",
       "review_status": "repository-reviewed",
       "authority_role": "retrieval_only",
       "provenance_kind": "practice_governed",
@@ -239,6 +239,13 @@
       "coding_impact": true,
       "candidates": [
         {
+          "expansion": "patient",
+          "confidence": 0.98,
+          "source_id": "project_general_clinical_conventions",
+          "required_context_any": ["reports", "presents", "states", "denies", "complains", "returns"],
+          "required_sections": ["HPI", "CC"]
+        },
+        {
           "expansion": "posterior tibial",
           "confidence": 0.84,
           "source_id": "project_podiatry_note_conventions",
@@ -283,7 +290,7 @@
           "expansion": "non-weight bearing",
           "confidence": 0.98,
           "source_id": "project_podiatry_note_conventions",
-          "required_context_any": ["foot", "leg", "boot", "cast", "crutch", "walker"]
+          "required_context_any": ["foot", "leg", "boot", "cast", "crutch", "walker", "weightbear", "ambulat"]
         }
       ]
     },
@@ -394,6 +401,46 @@
           "source_id": "project_general_clinical_conventions",
           "required_context_any": ["manufacturing", "fabrication", "digital model", "CAD"]
         }
+      ]
+    },
+    {
+      "id": "twice_daily",
+      "patterns": ["\\bBID\\b"],
+      "coding_impact": false,
+      "candidates": [
+        {"expansion": "twice daily", "confidence": 0.995, "source_id": "project_general_clinical_conventions"}
+      ]
+    },
+    {
+      "id": "three_times_daily",
+      "patterns": ["\\bTID\\b"],
+      "coding_impact": false,
+      "candidates": [
+        {"expansion": "three times daily", "confidence": 0.995, "source_id": "project_general_clinical_conventions"}
+      ]
+    },
+    {
+      "id": "as_needed",
+      "patterns": ["\\bPRN\\b"],
+      "coding_impact": false,
+      "candidates": [
+        {"expansion": "as needed", "confidence": 0.995, "source_id": "project_general_clinical_conventions"}
+      ]
+    },
+    {
+      "id": "venous_thromboembolism",
+      "patterns": ["\\bVTE\\b"],
+      "coding_impact": true,
+      "candidates": [
+        {"expansion": "venous thromboembolism", "confidence": 0.995, "source_id": "project_general_clinical_conventions"}
+      ]
+    },
+    {
+      "id": "no_known_drug_allergies",
+      "patterns": ["\\bNKDA\\b"],
+      "coding_impact": false,
+      "candidates": [
+        {"expansion": "no known drug allergies", "confidence": 0.995, "source_id": "project_general_clinical_conventions"}
       ]
     },
     {

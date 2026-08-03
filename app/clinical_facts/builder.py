@@ -42,9 +42,20 @@ def _evidence(anchor: str, note: str) -> str:
 
 def build_clinical_fact_report(*, entities: list[ClinicalEntity], sections: dict,
                                procedures: list, imaging: list,
-                               supplies: list, prior_surgery: dict) -> dict:
+                               supplies: list, prior_surgery: dict,
+                               event_evidence: list | None = None) -> dict:
     note = str(sections.get("full_text") or "")
     facts, unresolved = [], []
+    evidence_by_event = {}
+    for row in event_evidence or []:
+        if not isinstance(row, dict):
+            continue
+        key = (str(row.get("kind") or "").strip().lower(),
+               str(row.get("label") or "").strip().casefold())
+        quote = str(row.get("evidence_quote") or "").strip()
+        if (all(key) and row.get("source_span_verified")
+                and quote and quote in note):
+            evidence_by_event[key] = quote
     for entity in entities:
         span = entity.source_span or {}
         start, end = span.get("document_start"), span.get("document_end")
@@ -71,13 +82,15 @@ def build_clinical_fact_report(*, entities: list[ClinicalEntity], sections: dict
             unresolved.append({"kind": "entity", "label": entity.text,
                                "reason": "exact source span is unverified"})
 
-    for kind, values in (("performed_procedure", procedures),
-                         ("performed_imaging", imaging),
-                         ("dispensed_supply", supplies)):
+    for kind, evidence_kind, values in (
+            ("performed_procedure", "procedure", procedures),
+            ("performed_imaging", "imaging", imaging),
+            ("dispensed_supply", "supply", supplies)):
         for value in values or []:
             label = str(value.get("description") if isinstance(value, dict)
                         else value).strip()
-            evidence = _evidence(label, note)
+            evidence = evidence_by_event.get(
+                (evidence_kind, label.casefold())) or _evidence(label, note)
             fact = {"kind": kind, "label": label,
                     "status": "completed", "evidence_span": evidence,
                     "evidence_verified": bool(evidence)}

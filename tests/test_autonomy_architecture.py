@@ -40,6 +40,31 @@ def _profile(provider: str, model: str) -> dict:
             "model": model, "independence_domain": provider}
 
 
+def _complete_input_proof() -> dict:
+    return {
+        "evidence_packet": {
+            "evidence_fingerprint": "sha256:" + "a" * 64,
+            "source_document_sha256": "sha256:" + "b" * 64,
+        },
+        "note_integrity": {
+            "source_pdf_sha256": "sha256:" + "b" * 64,
+            "extracted_text_sha256": "sha256:" + "c" * 64,
+            "complete": True, "page_count": 1, "extracted_page_count": 1,
+            "page_coverage": [{"page_number": 1, "status": "extracted",
+                               "text_sha256": "sha256:" + "d" * 64}],
+        },
+        "patient_metadata": {"date_of_service": "2026-05-01"},
+        "terminology_normalization": {
+            "entity_fingerprint": "sha256:" + "e" * 64,
+            "registry_sha256": "sha256:" + "f" * 64, "status": "PASS"},
+        "clinical_facts": {
+            "facts_fingerprint": "sha256:" + "1" * 64, "status": "PASS"},
+        "rag_context": {"retrieval_lexicon": {
+            "report_fingerprint": "sha256:" + "2" * 64,
+            "catalog_sha256": "sha256:" + "3" * 64}},
+    }
+
+
 def test_credentials_alone_do_not_authorize_a_second_phi_processor():
     with patch.dict("os.environ", {
             "AUTHORIZED_MODEL_PROVIDERS": "claude,openai",
@@ -126,7 +151,8 @@ def test_consistency_requires_valid_profiles_from_multiple_domains():
 
 
 def test_adaptive_escalation_is_driven_by_disagreement_or_independence():
-    shared = {"icd_codes": [], "cpt_codes": [], "hcpcs_codes": [],
+    shared = {**_complete_input_proof(),
+              "icd_codes": [], "cpt_codes": [], "hcpcs_codes": [],
               "supporting_conditions": [], "snomed_codes": [],
               "final_disposition": "CLEAN", "auto_coding_tier": "AUTO"}
     agreeing = [dict(shared, model_execution=_profile("claude", "first")),
@@ -422,4 +448,110 @@ def test_pos_refresh_preserves_payment_designation_and_rejects_unknown_code():
                     ("12", "New CMS setting", None)])
     assert store.conn.execute(
         "SELECT COUNT(*) FROM pos").fetchone()[0] == 1
+    store.close()
+
+
+def test_pfs_dos_preflight_requires_quarter_provenance_not_open_ended_rows():
+    store = ComplianceDataStore()
+    store._conn = sqlite3.connect(":memory:")
+    store._conn.row_factory = sqlite3.Row
+    store.conn.execute(
+        "CREATE TABLE data_source_version (source_id TEXT, "
+        "effective_from TEXT, ingested_at TEXT, row_count INTEGER, "
+        "file_name TEXT)")
+    dos = date(2026, 5, 10)
+    assert refresh_preflight._versioned_quarter_available(
+        store, "pfs_global", dos) is False
+    store.conn.execute(
+        "INSERT INTO data_source_version VALUES (?,?,?,?,?)",
+        ("pfs_global", "2026-04-01", "now", 1, "quarter.zip"))
+    assert refresh_preflight._versioned_quarter_available(
+        store, "pfs_global", dos) is True
+    store.close()
+
+
+def test_dos_preflight_fetches_each_missing_authority_once_per_batch():
+    class Store:
+        def __init__(self):
+            self.ncci = False
+            self.mue = False
+            self._conn = sqlite3.connect(":memory:")
+            self._conn.execute(
+                "CREATE TABLE data_source_version (source_id TEXT, "
+                "effective_from TEXT, ingested_at TEXT, row_count INTEGER, "
+                "file_name TEXT)")
+
+        @property
+        def conn(self):
+            return self._conn
+
+        def ncci_data_available(self, _dos):
+            return self.ncci
+
+        def mue_data_available(self, _dos):
+            return self.mue
+
+    store = Store()
+    refresh_preflight._DOS_PREFLIGHT_CACHE.clear()
+    calls = []
+
+    def refresh(target, source_id, **kwargs):
+        assert target is store
+        assert kwargs["target_effective"] == "2026-04-01"
+        calls.append(source_id)
+        if source_id == "ncci_ptp":
+            store.ncci = True
+        elif source_id == "mue":
+            store.mue = True
+        else:
+            store.conn.execute(
+                "INSERT INTO data_source_version VALUES (?,?,?,?,?)",
+                (source_id, "2026-04-01", "now", 1, "quarter.zip"))
+        return {"source": source_id, "ok": True}
+
+    with patch.object(refresh_preflight, "refresh_source",
+                      side_effect=refresh) as mocked:
+        first = refresh_preflight.ensure_sources_cover_dos(
+            store, "2026-05-10")
+        second = refresh_preflight.ensure_sources_cover_dos(
+            store, "2026-05-10")
+    assert first["ok"] is True and second["ok"] is True
+    assert sorted(calls) == ["mue", "ncci_ptp", "pfs_global"]
+    assert mocked.call_count == 3
+    store.conn.close()
+    refresh_preflight._DOS_PREFLIGHT_CACHE.clear()
+
+
+def test_historical_mue_archive_date_may_live_in_section_heading():
+    current = (
+        '<a href="/files/zip/2026q3-practitioner-services-mue-table.zip">'
+        "current practitioner table</a>")
+    archive = (
+        "<h3>Files effective April 1, 2026</h3>"
+        '<a href="/files/zip/practitioner-mue.zip">'
+        "Practitioner Services MUE Table</a>")
+    with patch.object(refresh_runner, "download",
+                      side_effect=[current.encode(), archive.encode()]):
+        urls, effective = refresh_runner._resolve_mue(
+            "https://cms.invalid/current", "2026-04-01")
+    assert urls == ["https://www.cms.gov/files/zip/practitioner-mue.zip"]
+    assert effective == "2026-04-01"
+
+
+def test_ncci_availability_retains_every_provenance_quarter():
+    store = ComplianceDataStore()
+    store._conn = sqlite3.connect(":memory:")
+    store._conn.row_factory = sqlite3.Row
+    store.conn.execute("CREATE TABLE ncci_ptp (effective_from TEXT)")
+    store.conn.execute(
+        "CREATE TABLE data_source_version (source_id TEXT, "
+        "effective_from TEXT)")
+    store.conn.execute("INSERT INTO ncci_ptp VALUES (?)", ("2026-07-01",))
+    store.conn.executemany(
+        "INSERT INTO data_source_version VALUES (?,?)",
+        [("ncci_ptp", "2026-01-01"), ("ncci_ptp", "2026-04-01")])
+    assert store.ncci_data_available("2026-02-15") is True
+    assert store.ncci_data_available("2026-05-15") is True
+    assert store.ncci_data_available("2026-08-15") is True
+    assert store.ncci_data_available("2025-12-31") is False
     store.close()

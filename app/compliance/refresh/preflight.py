@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import calendar
+import copy
 import json
 import re
 import sqlite3
@@ -92,3 +94,83 @@ def refresh_stale_sources(*, require_current: bool = False) -> dict:
         return report
     finally:
         store.close()
+
+
+_DOS_PREFLIGHT_CACHE: dict[tuple[int, str, bool], dict] = {}
+
+
+def _versioned_quarter_available(store: ComplianceDataStore,
+                                 source_id: str, value: date) -> bool:
+    """Whether provenance proves the source's encounter quarter is loaded."""
+    start = _quarter_start(value)
+    end_month = start.month + 2
+    end = date(start.year, end_month,
+               calendar.monthrange(start.year, end_month)[1])
+    try:
+        return bool(store.conn.execute(
+            "SELECT 1 FROM data_source_version "
+            "WHERE source_id=? AND effective_from>=? AND effective_from<=? "
+            "LIMIT 1",
+            (source_id, start.isoformat(), end.isoformat()),
+        ).fetchone())
+    except sqlite3.Error:
+        return False
+
+
+def ensure_sources_cover_dos(store: ComplianceDataStore, dos: date | str | None,
+                             *, refresh_missing: bool = True) -> dict:
+    """Autonomously acquire the quarterly snapshots governing one DOS.
+
+    Refreshing only the newest release is insufficient for delayed claims and
+    corrected claims.  This preflight asks CMS for the encounter's own quarter,
+    retains it additively, and reports any source CMS does not make available.
+    Absence remains fail-closed in the release certificate.
+    """
+    try:
+        value = date.fromisoformat(dos) if isinstance(dos, str) else dos
+    except ValueError:
+        value = None
+    if not isinstance(value, date):
+        return {"ok": False, "quarter": "", "errors": ["date of service absent"]}
+    quarter = _quarter_start(value).isoformat()
+
+    cache_key = (id(store), quarter, refresh_missing)
+    if cache_key in _DOS_PREFLIGHT_CACHE:
+        return copy.deepcopy(_DOS_PREFLIGHT_CACHE[cache_key])
+
+    def pfs_available() -> bool:
+        # Open-ended row dates cannot prove which quarterly PFS file supplied
+        # them. Require an additive source-version record for the DOS quarter.
+        return _versioned_quarter_available(store, "pfs_global", value)
+
+    available = {
+        "ncci_ptp": store.ncci_data_available(value),
+        "mue": store.mue_data_available(value),
+        "pfs_global": pfs_available(),
+    }
+    attempted = []
+    if refresh_missing and not all(available.values()):
+        for source_id, covered in available.items():
+            if covered:
+                continue
+            attempted.append(refresh_source(
+                store, source_id, target_effective=quarter))
+        available = {
+            "ncci_ptp": store.ncci_data_available(value),
+            "mue": store.mue_data_available(value),
+            "pfs_global": pfs_available(),
+        }
+    missing = sorted(source for source, covered in available.items()
+                     if not covered)
+    report = {
+        "ok": not missing,
+        "quarter": quarter,
+        "available": available,
+        "attempted": attempted,
+        "errors": [f"no authoritative {source} snapshot for {quarter}"
+                   for source in missing],
+    }
+    # Avoid one CMS download attempt per note in a batch. A new process starts
+    # with an empty cache and therefore retries transient failures.
+    _DOS_PREFLIGHT_CACHE[cache_key] = report
+    return copy.deepcopy(report)

@@ -118,13 +118,13 @@ MIN_INDEPENDENT_MODEL_DOMAINS: int = int(
 
 # --- Verified-claim exemplars (few-shot from the finalized-claims registry) ---
 # Mode:
-#   auto    (default) shadow until the registry holds more than
+#   auto    shadow until the registry holds more than
 #           EXEMPLAR_LIVE_THRESHOLD verified claims, then live
 #   shadow  retrieve similar verified encounters and record what WOULD be
 #           injected (rag_context.exemplars) — prompts unchanged
 #   live    inject the rendered exemplar block into the coding prompts
 #   off     disabled entirely
-EXEMPLAR_MODE: str = os.getenv("EXEMPLAR_MODE", "auto").lower()
+EXEMPLAR_MODE: str = os.getenv("EXEMPLAR_MODE", "shadow").lower()
 # auto flips shadow → live above this many verified claims: enough registry
 # coverage that a same-scenario neighbor usually exists, so exemplars anchor
 # rather than mislead.

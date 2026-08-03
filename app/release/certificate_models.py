@@ -35,7 +35,7 @@ class ClaimReadinessCertificate(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    certificate_version: int = 2
+    certificate_version: int = 3
     document_id: str
     created_at: str
     disposition: ReadinessDisposition

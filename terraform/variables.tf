@@ -130,13 +130,41 @@ variable "consistency_mode" {
 }
 
 variable "consistency_runs" {
-  description = "Maximum independent coding runs per note"
+  description = "Independent coding profiles per note; production uses one run per authorized provider over a shared evidence packet"
   type        = number
-  default     = 3
+  default     = 2
 
   validation {
     condition     = var.consistency_runs >= 1 && floor(var.consistency_runs) == var.consistency_runs
     error_message = "consistency_runs must be a positive integer."
+  }
+}
+
+variable "offline_maintenance" {
+  description = "Enable rule synthesis, convergence, and pack consolidation only for a separately scheduled maintenance deployment"
+  type        = bool
+  default     = false
+}
+
+variable "pdf_text_layer_min_tokens" {
+  description = "Minimum embedded-text tokens on a PDF page before deterministic transcription corroboration applies"
+  type        = number
+  default     = 20
+
+  validation {
+    condition     = var.pdf_text_layer_min_tokens >= 1 && floor(var.pdf_text_layer_min_tokens) == var.pdf_text_layer_min_tokens
+    error_message = "pdf_text_layer_min_tokens must be a positive integer."
+  }
+}
+
+variable "pdf_text_layer_min_recall" {
+  description = "Minimum embedded-text token recall required from the vision transcript"
+  type        = number
+  default     = 0.85
+
+  validation {
+    condition     = var.pdf_text_layer_min_recall >= 0 && var.pdf_text_layer_min_recall <= 1
+    error_message = "pdf_text_layer_min_recall must be between 0 and 1."
   }
 }
 

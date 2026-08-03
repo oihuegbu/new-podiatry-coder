@@ -190,6 +190,7 @@ class ComplianceDataStore:
         self._conn: sqlite3.Connection | None = None
         self._ncci_release_window_loaded = False
         self._ncci_release_window: tuple[date, date] | None = None
+        self._ncci_release_windows: tuple[tuple[date, date], ...] = ()
         self._mue_release_window_loaded = False
         self._mue_release_window: tuple[date, date] | None = None
         self._mue_release_windows: tuple[tuple[date, date], ...] = ()
@@ -1287,6 +1288,7 @@ class ComplianceDataStore:
         # constructed store instances cannot retain the prior window.
         self._ncci_release_window_loaded = False
         self._ncci_release_window = None
+        self._ncci_release_windows = ()
         with open(NCCI_FILE) as f:
             data = json.load(f)
         rows, skipped = [], 0
@@ -2968,24 +2970,40 @@ class ComplianceDataStore:
         """
         if getattr(self, "_ncci_release_window_loaded", False):
             return getattr(self, "_ncci_release_window", None)
+        releases = []
         row = self.conn.execute(
             "SELECT MAX(effective_from) AS release_start FROM ncci_ptp",
         ).fetchone()
-        bounds = None
         if row and row["release_start"]:
             try:
-                release_date = date.fromisoformat(row["release_start"])
+                releases.append(date.fromisoformat(row["release_start"]))
             except (TypeError, ValueError):
                 pass
-            else:
-                quarter_index = (release_date.month - 1) // 3
-                start = date(release_date.year, quarter_index * 3 + 1, 1)
-                end_month = (quarter_index + 1) * 3
-                bounds = (
-                    start,
-                    date(start.year, end_month,
-                         calendar.monthrange(start.year, end_month)[1]),
-                )
+        try:
+            rows = self.conn.execute(
+                "SELECT DISTINCT effective_from FROM data_source_version "
+                "WHERE source_id='ncci_ptp' AND effective_from<>''",
+            ).fetchall()
+            for version in rows:
+                try:
+                    releases.append(date.fromisoformat(version[0]))
+                except (TypeError, ValueError):
+                    continue
+        except sqlite3.Error:
+            pass
+        windows = []
+        for release_date in releases:
+            quarter_index = (release_date.month - 1) // 3
+            start = date(release_date.year, quarter_index * 3 + 1, 1)
+            end_month = (quarter_index + 1) * 3
+            windows.append((
+                start,
+                date(start.year, end_month,
+                     calendar.monthrange(start.year, end_month)[1]),
+            ))
+        windows = sorted(set(windows))
+        bounds = windows[-1] if windows else None
+        self._ncci_release_windows = tuple(windows)
         self._ncci_release_window = bounds
         self._ncci_release_window_loaded = True
         return bounds
@@ -3004,11 +3022,9 @@ class ComplianceDataStore:
             d = date.fromisoformat(dos) if isinstance(dos, str) else dos
         except (TypeError, ValueError):
             return False
-        bounds = self._ncci_release_bounds()
-        if bounds is None:
-            return False
-        start, end = bounds
-        return start <= d <= end
+        self._ncci_release_bounds()
+        return any(start <= d <= end for start, end in
+                   getattr(self, "_ncci_release_windows", ()))
 
     def ncci_pair(self, c1: str, c2: str, dos=None) -> dict | None:
         """Return an NCCI edit only from the release covering the claim DOS."""
@@ -3399,6 +3415,7 @@ class ComplianceDataStore:
         elif table == "ncci_ptp":
             self._ncci_release_window_loaded = False
             self._ncci_release_window = None
+            self._ncci_release_windows = ()
         logger.info(f"  refresh[{source_id}]: +{len(rows)} rows (eff {effective_from})")
         return len(rows)
 

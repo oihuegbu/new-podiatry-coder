@@ -52,6 +52,9 @@ _ADVISORY_ARRAYS = {"snomed_codes", "supporting_conditions"}
 # PRESENCE flip on an optional supplementary code is therefore advisory:
 # recorded, but not a reason to pull the note from auto-submission.
 _INPUT_PATHS: dict[str, tuple[str, ...]] = {
+    "evidence_fingerprint": ("evidence_packet", "evidence_fingerprint"),
+    "evidence_source_document": (
+        "evidence_packet", "source_document_sha256"),
     "source_pdf_sha256": ("note_integrity", "source_pdf_sha256"),
     "extracted_text_sha256": ("note_integrity", "extracted_text_sha256"),
     "extraction_complete": ("note_integrity", "complete"),
@@ -100,6 +103,19 @@ _INPUT_PATHS: dict[str, tuple[str, ...]] = {
         "rag_context", "retrieval_lexicon", "catalog_sha256"),
 }
 
+# Equality is not completeness: two legacy/empty runs can agree that every
+# critical field is missing. These fields are the minimum proof that both
+# providers judged a real, integrity-checked evidence packet.
+_REQUIRED_INPUT_FIELDS = {
+    "evidence_fingerprint", "evidence_source_document",
+    "source_pdf_sha256", "extracted_text_sha256", "extraction_complete",
+    "page_count", "extracted_page_count", "page_coverage",
+    "date_of_service", "terminology_entity_fingerprint",
+    "terminology_registry_sha256", "terminology_status",
+    "clinical_facts_fingerprint", "clinical_facts_status",
+    "retrieval_lexicon_fingerprint", "retrieval_lexicon_catalog_sha256",
+}
+
 
 def _path_value(payload: dict, path: tuple[str, ...]):
     value: Any = payload
@@ -132,6 +148,18 @@ def _input_disagreements(runs: list[dict]) -> list[dict]:
         if any(value != values[0] for value in values[1:]):
             out.append({"field": field, "values": values, "runs": len(runs)})
     return out
+
+
+def _missing_required_inputs(runs: list[dict]) -> list[str]:
+    if not runs:
+        return sorted(_REQUIRED_INPUT_FIELDS)
+    missing = []
+    for field in sorted(_REQUIRED_INPUT_FIELDS):
+        path = _INPUT_PATHS[field]
+        values = [_path_value(run, path) for run in runs]
+        if any(value in (None, "", [], {}) for value in values):
+            missing.append(field)
+    return missing
 
 
 def _is_advisory(array: str, code: str, store=None) -> bool:
@@ -387,6 +415,7 @@ def compare_runs(runs: list[dict], store=None) -> dict:
     billing = [d for d in disagreements if not d["advisory"]]
     input_disagreements = _input_disagreements(runs)
     input_consistent = not input_disagreements
+    missing_inputs = _missing_required_inputs(runs)
     profiles = []
     invalid_profiles = []
     for index, run in enumerate(runs):
@@ -418,13 +447,18 @@ def compare_runs(runs: list[dict], store=None) -> dict:
         "satisfied": (not invalid_profiles and
                       len(domains) >= MIN_INDEPENDENT_MODEL_DOMAINS),
     }
+    outputs_unanimous = (
+        input_consistent and not billing and len(set(dispositions)) <= 1
+        and len(set(tiers)) <= 1)
     return {
         "runs": n,
         # unanimity (and therefore REVIEW routing) is judged on the arrays
         # that reach the claim form; advisory-array variance is reported only
-        "unanimous": input_consistent and not billing and len(set(dispositions)) <= 1
-                     and len(set(tiers)) <= 1,
+        "claim_outputs_unanimous": outputs_unanimous,
+        "unanimous": outputs_unanimous and not missing_inputs,
         "input_consistent": input_consistent,
+        "input_complete": not missing_inputs,
+        "missing_required_inputs": missing_inputs,
         "input_disagreements": input_disagreements,
         "disagreements": disagreements,
         "dispositions": dispositions,
@@ -441,8 +475,10 @@ def adaptive_escalation_reasons(report: dict) -> list[str]:
     contract is not proven by the persisted execution records.
     """
     reasons = []
-    if not report.get("unanimous"):
+    if not report.get("claim_outputs_unanimous", report.get("unanimous")):
         reasons.append("cross_provider_disagreement")
+    if not report.get("input_complete", False):
+        reasons.append("critical_input_evidence_incomplete")
     if not (report.get("model_independence") or {}).get("satisfied"):
         reasons.append("model_independence_not_proven")
     return reasons
@@ -454,7 +490,13 @@ def adaptive_escalation_indices(*, mode: str, initial_runs: int,
     """Zero-based scheduled-run indexes still needed after the first pass."""
     if mode == "fixed" or initial_runs >= maximum_runs:
         return []
-    if not adaptive_escalation_reasons(initial_report):
+    reasons = set(adaptive_escalation_reasons(initial_report))
+    # Re-running a coder cannot manufacture missing extraction/provenance.
+    # Only true output disagreement or invalid provider independence benefits
+    # from another opinion; missing inputs route fail-closed immediately.
+    if not reasons & {
+            "cross_provider_disagreement",
+            "model_independence_not_proven"}:
         return []
     return list(range(initial_runs, maximum_runs))
 
@@ -650,6 +692,10 @@ def annotate_result(result: dict, report: dict, route: bool = True) -> dict:
     if input_disagreements:
         summary_bits.append("critical inputs varied: " + ", ".join(
             item["field"] for item in input_disagreements[:10]))
+    missing_inputs = report.get("missing_required_inputs") or []
+    if missing_inputs:
+        summary_bits.append("critical inputs absent: " + ", ".join(
+            missing_inputs[:10]))
     reason = "Self-consistency check — " + "; ".join(summary_bits)
     reasons.append(reason)
     result["auto_coding_review_reasons"] = reasons

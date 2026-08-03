@@ -421,10 +421,19 @@ class TerminologyNormalizer:
     def _unknowns(self, text: str, covered: list[tuple[int, int]], *,
                   section: str, negation_from_text=True) -> list[dict]:
         unknowns = []
+        # Section labels and subheadings are formatting, not abbreviations.
+        # Exclude any all-caps phrase terminated by a colon as one structural
+        # span (e.g. arbitrary specialty-specific headings), rather than
+        # growing a brittle ignore list one heading at a time.
+        heading_spans = [match.span() for match in re.finditer(
+            r"(?m)(?:^|\n)\s*[A-Z][A-Z0-9 /&()\-]{1,100}:", text or "")]
         for found in self.unknown_pattern.finditer(text or ""):
             start, end = found.span()
             raw = found.group(0)
             if raw.casefold() in self.ignored_terms:
+                continue
+            if any(start < right and left < end
+                   for left, right in heading_spans):
                 continue
             if any(start < right and left < end for left, right in covered):
                 continue

@@ -1,4 +1,5 @@
 import time
+import os
 import copy
 from pathlib import Path
 from datetime import datetime
@@ -15,11 +16,13 @@ from app.coding.code_assigner import assign_codes
 from app.validation.validator import CodingValidator
 from app.compliance.datastore.store import ComplianceDataStore
 from app.compliance.engine import ClaimScrubber, _parse_dos
+from app.compliance.refresh.preflight import ensure_sources_cover_dos
 from app.compliance.agents import build_default_agents
 from app.models.schemas import CodingResult
 from app.terminology import TerminologyNormalizer
 from app.core.model_profiles import active_profile, execution_record
 from app.clinical_facts import build_clinical_fact_report
+from app.autonomous.evidence import EvidencePacket
 
 logger = get_logger(__name__)
 
@@ -62,7 +65,7 @@ def _sanitize_modifier_claims(raw) -> list[dict]:
 
 
 class MedicalCodingPipeline:
-    """Full Vision → NER → RAG → Multi-Pass LLM → Validation pipeline."""
+    """Evidence-first autonomous professional-claim coding pipeline."""
 
     def __init__(self):
         self.vector_store = MedicalCodeVectorStore()
@@ -79,8 +82,7 @@ class MedicalCodingPipeline:
         logger.info("INITIALIZING MEDICAL CODING PIPELINE")
         logger.info("=" * 70)
 
-        logger.info("Loading code reference database...")
-        self.ref_db.load_all()
+        self._initialize_coding_controls()
 
         logger.info("Loading governed clinical terminology registry...")
         self.terminology = TerminologyNormalizer()
@@ -90,7 +92,15 @@ class MedicalCodingPipeline:
 
         self.retriever = CandidateRetriever(self.vector_store)
 
-        logger.info("Building/loading compliance data store + 13-filter scrubber...")
+        self._initialized = True
+        logger.info("Pipeline initialized successfully")
+
+    def _initialize_coding_controls(self) -> None:
+        """Load only state required to code an already-prepared packet."""
+        logger.info("Loading code reference database...")
+        self.ref_db.load_all()
+
+        logger.info("Building/loading compliance data store + claim scrubber...")
         self.compliance_store = ComplianceDataStore()
         self.compliance_store.build_or_load()
         self.scrubber = ClaimScrubber(
@@ -102,10 +112,117 @@ class MedicalCodingPipeline:
         # modifier -25 purposes) — built after compliance_store so it can be passed in.
         self.validator = CodingValidator(self.ref_db, self.compliance_store)
 
+    def initialize_for_prepared_evidence(self) -> None:
+        """Lean worker initialization with no duplicate NER/RAG index state."""
+        logger.info("Initializing prepared-evidence coding worker")
+        self._initialize_coding_controls()
         self._initialized = True
-        logger.info("Pipeline initialized successfully")
+        logger.info("Prepared-evidence coding worker initialized")
 
-    def process_note(self, pdf_path: str | Path, use_cache: bool = True) -> CodingResult:
+    def prepare_note(self, pdf_path: str | Path) -> EvidencePacket:
+        """Compile the one immutable evidence packet every coder must use.
+
+        This boundary deliberately contains every operation that interprets
+        the source document before code selection: PDF extraction, NER,
+        terminology normalization, clinical-fact compilation, retrieval, and
+        exemplar selection.  It is executed once per encounter, never once
+        per model opinion.
+        """
+        if not self._initialized:
+            raise RuntimeError("Pipeline not initialized. Call initialize() first.")
+        pdf_path = Path(pdf_path)
+        logger.info("[evidence 1/3] Extracting one source-of-truth note record")
+        extraction = extract_from_pdf(pdf_path)
+        metadata = extraction["metadata"]
+        sections = extraction["sections"]
+        note_category = extraction["note_category"]
+        procedures_today = extraction["procedures_performed_today"]
+        imaging_today = extraction["imaging_performed_today"]
+        supplies_today = extraction["supplies_dispensed_today"]
+        event_evidence = extraction.get("performed_event_evidence", []) or []
+        prior_surgery_info = extraction.get("prior_surgery_info", {}) or {}
+        physician_documented_codes = (
+            extraction.get("physician_documented_codes", []) or [])
+        note_integrity = extraction.get("note_integrity") or {}
+
+        # A delayed or corrected claim must use the quarterly authorities in
+        # force on its own date of service.  Missing releases are recorded in
+        # the immutable evidence packet and remain a fail-closed readiness
+        # condition; no current-quarter rule is silently substituted.
+        authority_preflight = ensure_sources_cover_dos(
+            self.compliance_store, _parse_dos(metadata),
+            refresh_missing=os.getenv("AUTO_REFRESH_AUTHORITIES", "1") != "0")
+
+        logger.info("[evidence 2/3] Compiling terminology and clinical facts")
+        entities = extract_entities(sections)
+        entities, terminology_report = self.terminology.normalize_entities(
+            entities, sections)
+        clinical_facts = build_clinical_fact_report(
+            entities=entities, sections=sections, procedures=procedures_today,
+            imaging=imaging_today, supplies=supplies_today,
+            prior_surgery=prior_surgery_info,
+            event_evidence=event_evidence)
+
+        logger.info("[evidence 3/3] Retrieving authoritative candidates once")
+        entity_candidates = self.retriever.retrieve_for_entities(entities)
+        note_candidates = self.retriever.retrieve_for_full_note(sections)
+        fact_candidates = self.retriever.retrieve_for_clinical_facts(
+            clinical_facts)
+        note_candidates = {
+            system: self.retriever._round_robin(
+                [rows for rows in (note_candidates.get(system) or [],
+                                   fact_candidates.get(system) or []) if rows],
+                RAG_TOP_K)
+            for system in ("icd10", "cpt", "hcpcs")
+        }
+        merged = self._merge_candidates(entity_candidates, note_candidates)
+        merged = self._drop_inactive_candidates(
+            merged, _parse_dos(metadata))
+
+        from app.coding import exemplars as _exemplars
+        exemplar_block, exemplar_info = _exemplars.for_note(
+            document_id=pdf_path.stem,
+            note_category=note_category,
+            note_sections=sections,
+        )
+        payload = {
+            "metadata": metadata,
+            "sections": sections,
+            "note_category": note_category,
+            "procedures_performed_today": procedures_today,
+            "imaging_performed_today": imaging_today,
+            "supplies_dispensed_today": supplies_today,
+            "performed_event_evidence": event_evidence,
+            "prior_surgery_info": prior_surgery_info,
+            "physician_documented_codes": physician_documented_codes,
+            "note_integrity": note_integrity,
+            "dos_authority_preflight": authority_preflight,
+            "entities": [entity.model_dump(mode="json") for entity in entities],
+            "terminology_normalization": terminology_report,
+            "clinical_facts": clinical_facts,
+            "rag_candidates": merged,
+            "retrieval_lexicon": dict(self.vector_store.lexicon_report),
+            "exemplar_block": exemplar_block,
+            "exemplar_info": exemplar_info,
+        }
+        source_sha = str(note_integrity.get("source_pdf_sha256") or "")
+        if not source_sha.startswith("sha256:"):
+            import hashlib
+            source_sha = "sha256:" + hashlib.sha256(
+                pdf_path.read_bytes()).hexdigest()
+        packet = EvidencePacket.create(
+            document_id=pdf_path.stem,
+            source_document_sha256=source_sha,
+            payload=payload,
+        )
+        logger.info(
+            f"Evidence packet {packet.evidence_fingerprint} compiled for "
+            f"{pdf_path.stem}; all coding profiles will share it")
+        return packet
+
+    def process_note(self, pdf_path: str | Path, use_cache: bool = True,
+                     evidence_packet: EvidencePacket | None = None
+                     ) -> CodingResult:
         if not self._initialized:
             raise RuntimeError("Pipeline not initialized. Call initialize() first.")
 
@@ -113,12 +230,26 @@ class MedicalCodingPipeline:
         start = time.time()
 
         logger.info(f"\n{'='*70}")
-        logger.info(f"PROCESSING: {pdf_path.name}  [provider={LLM_PROVIDER.upper()}]")
+        profile = active_profile()
+        logger.info(
+            f"PROCESSING: {pdf_path.name}  "
+            f"[provider={profile.provider.upper()} model={profile.model}]")
         logger.info(f"{'='*70}")
 
         # Fix 4 — Response cache: same PDF + same pipeline version always returns same result
         if use_cache:
             cached = result_cache.get_cached(pdf_path)
+            if cached is not None:
+                if evidence_packet is not None:
+                    cached_evidence = cached.get("evidence_packet") or {}
+                    if (cached_evidence.get("evidence_fingerprint")
+                            != evidence_packet.evidence_fingerprint
+                            or cached_evidence.get("source_document_sha256")
+                            != evidence_packet.source_document_sha256):
+                        logger.info(
+                            "  Cache evidence differs from the freshly "
+                            "compiled packet — reprocessing")
+                        cached = None
             if cached is not None:
                 try:
                     # note_text rides alongside the CodingResult in the cache
@@ -139,72 +270,37 @@ class MedicalCodingPipeline:
                     self._print_summary(r)
                     logger.info(f"  [cache] VERDICT: {r.final_disposition} — {r.final_summary}")
                     return r
-                except Exception:
-                    pass  # corrupt cache entry — reprocess
+                except Exception as exc:
+                    logger.warning(
+                        f"  Cache entry could not be safely reused ({exc}) — "
+                        "reprocessing")
 
-        # Step 1: Vision-based PDF extraction
-        logger.info("[1/5] Extracting from PDF via GPT-4o Vision...")
-        extraction = extract_from_pdf(pdf_path)
-        metadata = extraction["metadata"]
-        sections = extraction["sections"]
-        note_category = extraction["note_category"]
-        procedures_today = extraction["procedures_performed_today"]
-        imaging_today = extraction["imaging_performed_today"]
-        supplies_today = extraction["supplies_dispensed_today"]
-
-        prior_surgery_info = extraction.get("prior_surgery_info", {}) or {}
-        physician_documented_codes = extraction.get("physician_documented_codes", []) or []
-        note_integrity = extraction.get("note_integrity") or {}
-
-        logger.info(f"  Patient: {metadata.get('patient_name')} | DOS: {metadata.get('date_of_service')}")
-        logger.info(f"  Category: {note_category}")
-        logger.info(f"  Procedures today: {procedures_today}")
-        logger.info(f"  Imaging today: {imaging_today}")
-        logger.info(f"  Supplies today: {supplies_today}")
-        if prior_surgery_info.get("is_post_op_visit"):
-            logger.info(
-                f"  Post-op visit: day {prior_surgery_info.get('days_post_op')} "
-                f"after {prior_surgery_info.get('prior_surgery_description')} "
-                f"(CPT {prior_surgery_info.get('prior_surgery_cpt')})"
-            )
-
-        # Step 2: NER — extract clinical entities
-        logger.info("[2/5] Extracting clinical entities (NER)...")
-        entities = extract_entities(sections)
-        entities, terminology_report = self.terminology.normalize_entities(
-            entities, sections)
-        clinical_facts = build_clinical_fact_report(
-            entities=entities, sections=sections, procedures=procedures_today,
-            imaging=imaging_today, supplies=supplies_today,
-            prior_surgery=prior_surgery_info)
-        logger.info(f"  Found {len(entities)} entities")
-        for e in entities:
-            logger.info(f"    [{e.category:>14}] {e.clinical_term} {'['+e.laterality+']' if e.laterality else ''}")
-
-        # Step 3: RAG — retrieve candidate codes
-        logger.info("[3/5] Retrieving candidate codes (RAG/Qdrant hybrid)...")
-        entity_candidates = self.retriever.retrieve_for_entities(entities)
-        note_candidates = self.retriever.retrieve_for_full_note(sections)
-        fact_candidates = self.retriever.retrieve_for_clinical_facts(
-            clinical_facts)
-        note_candidates = {
-            system: self.retriever._round_robin(
-                [rows for rows in (note_candidates.get(system) or [],
-                                   fact_candidates.get(system) or []) if rows],
-                RAG_TOP_K)
-            for system in ("icd10", "cpt", "hcpcs")
-        }
-
-        merged = self._merge_candidates(entity_candidates, note_candidates)
-        # Deleted/not-yet-effective codes must never be OFFERED to the coding
-        # model in the first place — the vector index carries the full code
-        # history, and a discontinued code that reaches the prompt can come
-        # back as an assignment (observed live: G0456, deleted 2015, assigned
-        # to a 2026 NPWT encounter and only caught post-hoc by validation).
-        dos_for_filter = _parse_dos(metadata)
-        merged = self._drop_inactive_candidates(merged, dos_for_filter)
-        for cs, cands in merged.items():
-            logger.info(f"  {cs.upper()}: {len(cands)} candidates retrieved")
+        if evidence_packet is None:
+            evidence_packet = self.prepare_note(pdf_path)
+        elif evidence_packet.document_id != pdf_path.stem:
+            raise ValueError(
+                "evidence packet document does not match requested note")
+        prepared = evidence_packet.payload()
+        metadata = prepared["metadata"]
+        sections = prepared["sections"]
+        note_category = prepared["note_category"]
+        procedures_today = prepared["procedures_performed_today"]
+        imaging_today = prepared["imaging_performed_today"]
+        supplies_today = prepared["supplies_dispensed_today"]
+        prior_surgery_info = prepared["prior_surgery_info"]
+        physician_documented_codes = prepared["physician_documented_codes"]
+        note_integrity = prepared["note_integrity"]
+        from app.models.schemas import ClinicalEntity
+        entities = [ClinicalEntity(**row) for row in prepared["entities"]]
+        terminology_report = prepared["terminology_normalization"]
+        clinical_facts = prepared["clinical_facts"]
+        authority_preflight = prepared["dos_authority_preflight"]
+        merged = prepared["rag_candidates"]
+        exemplar_block = prepared["exemplar_block"]
+        exemplar_info = prepared["exemplar_info"]
+        logger.info(
+            f"Using immutable evidence {evidence_packet.evidence_fingerprint} "
+            f"with {len(entities)} entities")
 
         # Step 4: Multi-pass LLM code assignment
         logger.info("[4/5] Assigning codes (4-pass: ICD → CPT → HCPCS → Verify)...")
@@ -216,18 +312,6 @@ class MedicalCodingPipeline:
             "imaging_performed_today": imaging_today,
             "supplies_dispensed_today": supplies_today,
         }
-
-        # Verified-claim exemplars from the finalized-claims registry:
-        # shadow mode records what would be injected (calibration), live
-        # mode (auto above the registry-size threshold) injects worked
-        # examples into the coding prompts. Deterministic per registry
-        # state, so it adds no run-to-run variance to the consistency gate.
-        from app.coding import exemplars as _exemplars
-        exemplar_block, exemplar_info = _exemplars.for_note(
-            document_id=pdf_path.stem,
-            note_category=note_category,
-            note_sections=sections,
-        )
 
         coding_result, usage = assign_codes(
             note_text=sections.get("full_text", ""),
@@ -322,8 +406,7 @@ class MedicalCodingPipeline:
             em_level_reasoning=coding_result.get("em_level_reasoning", ""),
             rag_context={
                 "entities_extracted": len(entities),
-                "retrieval_lexicon": dict(
-                    self.vector_store.lexicon_report),
+                "retrieval_lexicon": prepared["retrieval_lexicon"],
                 "candidates_per_system": {cs: len(cands) for cs, cands in merged.items()},
                 # The actual candidate CODES offered to the coder, in the
                 # rank order it saw them (deduped + similarity-sorted by
@@ -360,6 +443,8 @@ class MedicalCodingPipeline:
             ner_entities=entity_dicts,
             terminology_normalization=terminology_report,
             clinical_facts=clinical_facts,
+            evidence_packet=evidence_packet.manifest(),
+            dos_authority_preflight=authority_preflight,
             # Persist the documented procedures so the completeness invariant
             # can re-run when this claim is re-validated on replay/reconcile
             # (the replayer reads it back from the stored payload).

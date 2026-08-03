@@ -37,6 +37,8 @@ _LOGIC_SOURCES = [
     _APP_DIR / "ner" / "entity_extractor.py",
     _APP_DIR / "ner" / "biomed_ner.py",
     _APP_DIR / "terminology" / "normalizer.py",
+    _APP_DIR / "clinical_facts" / "builder.py",
+    _APP_DIR / "autonomous" / "evidence.py",
     BASE_DIR / "data" / "terminology" / "clinical_abbreviations.json",
     BASE_DIR / "data" / "terminology" / "source_catalog.json",
     *sorted((BASE_DIR / "data" / "terminology" / "packs").glob("*.json")),
@@ -49,6 +51,7 @@ _LOGIC_SOURCES = [
     _APP_DIR / "coding" / "code_assigner.py",
     _APP_DIR / "validation" / "validator.py",
     _APP_DIR / "compliance" / "datastore" / "store.py",
+    _APP_DIR / "compliance" / "refresh" / "preflight.py",
 ]
 _DATA_DIRS = [BASE_DIR / "data" / "codes", BASE_DIR / "data"]
 

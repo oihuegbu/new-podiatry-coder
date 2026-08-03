@@ -14,6 +14,7 @@ import json
 import os
 import re
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 from app.release.certificate_models import (
     ClaimReadinessCertificate, ControlOutcome, ControlResult,
@@ -152,6 +153,9 @@ def readiness_input_payload(result: dict) -> dict:
             result.get("terminology_normalization") or {}),
         "retrieval_lexicon": rag.get("retrieval_lexicon") or {},
         "clinical_facts": result.get("clinical_facts") or {},
+        "evidence_packet": result.get("evidence_packet") or {},
+        "dos_authority_preflight": (
+            result.get("dos_authority_preflight") or {}),
         "consistency": result.get("consistency") or {},
         "claim_scrub": result.get("claim_scrub") or {},
         "clinical_audit": result.get("clinical_audit") or {},
@@ -179,6 +183,18 @@ def _note_control(result: dict) -> ControlResult:
         return _control("note_integrity", ControlOutcome.NOT_CHECKED,
                         "complete-document extraction proof is absent")
     expected = "sha256:" + hashlib.sha256(note.encode()).hexdigest()
+    text_check = integrity.get("embedded_text_crosscheck") or {}
+    if text_check.get("status") == "ERROR":
+        return _control(
+            "note_integrity", ControlOutcome.ERROR,
+            "independent PDF text-layer verification failed")
+    if text_check.get("status") == "FAILED":
+        pages = ", ".join(str(value) for value in
+                          text_check.get("failed_pages") or [])
+        return _control(
+            "note_integrity", ControlOutcome.BLOCKED,
+            "vision transcription contradicts the PDF text layer"
+            + (f" on page(s) {pages}" if pages else ""))
     if not integrity.get("complete"):
         return _control("note_integrity", ControlOutcome.BLOCKED,
                         "document extraction is incomplete")
@@ -202,6 +218,29 @@ def _note_control(result: dict) -> ControlResult:
         return _control("note_integrity", ControlOutcome.BLOCKED,
                         "not every source page was extracted")
     return _control("note_integrity", ControlOutcome.PASS)
+
+
+def _evidence_packet_control(result: dict) -> ControlResult:
+    packet = result.get("evidence_packet") or {}
+    integrity = result.get("note_integrity") or {}
+    artifact = str(packet.get("artifact_name") or "")
+    if not packet:
+        return _control("evidence_packet", ControlOutcome.NOT_CHECKED,
+                        "immutable evidence manifest is absent")
+    if (packet.get("schema_version") != 1
+            or str(packet.get("document_id") or "")
+            != str(result.get("document_id") or "")
+            or not _SHA256_RE.fullmatch(
+                str(packet.get("evidence_fingerprint") or ""))
+            or not _SHA256_RE.fullmatch(
+                str(packet.get("source_document_sha256") or ""))
+            or packet.get("source_document_sha256")
+            != integrity.get("source_pdf_sha256")
+            or not artifact or Path(artifact).name != artifact):
+        return _control("evidence_packet", ControlOutcome.ERROR,
+                        "immutable evidence manifest is malformed or unbound")
+    return _control("evidence_packet", ControlOutcome.PASS,
+                    evidence=[packet["evidence_fingerprint"]])
 
 
 def _source_control(result: dict) -> ControlResult:
@@ -699,12 +738,13 @@ def _legacy_controls(result: dict) -> list[ControlResult]:
     cons = result.get("consistency") or {}
     repeatable = ((cons.get("runs") or 0) >= 2
                   and bool(cons.get("unanimous"))
-                  and cons.get("input_consistent") is True)
+                  and cons.get("input_consistent") is True
+                  and cons.get("input_complete") is True)
     controls.append(_control(
         "repeatability", ControlOutcome.PASS if repeatable else
         ControlOutcome.REVIEW_REQUIRED,
         "" if repeatable else
-        "claim outputs and critical extracted inputs are not independently unanimous"))
+        "claim outputs and complete critical inputs are not independently unanimous"))
     independence = cons.get("model_independence") or {}
     domains = independence.get("observed_domains") or []
     profiles = independence.get("observed_profiles") or []
@@ -940,7 +980,8 @@ def build_readiness_certificate(
 ) -> ClaimReadinessCertificate:
     context = _context(result)
     controls = _legacy_controls(result)
-    controls += [_note_control(result), _source_control(result),
+    controls += [_note_control(result), _evidence_packet_control(result),
+                 _source_control(result),
                  _retrieval_lexicon_control(result)]
     controls.extend(_line_controls(result))
     controls.append(_mutation_control(result))
@@ -970,7 +1011,7 @@ def build_readiness_certificate(
     rules = next((r for r in manifest.get("records") or []
                   if r.get("source_id") == "validator_rules"), {})
     payload = {
-        "certificate_version": 2,
+        "certificate_version": 3,
         "document_id": str(result.get("document_id") or ""),
         "created_at": created_at or datetime.now(timezone.utc).isoformat(
             timespec="seconds"),
@@ -989,7 +1030,7 @@ def build_readiness_certificate(
         "rule_pack_fingerprint": str(rules.get("sha256") or ""),
         "autonomous_scope_id": str((scope or {}).get("id") or ""),
         "autonomous_scope_fingerprint": scope_fingerprint(scope) if scope else "",
-        "system_versions": {"release_gate": "2"},
+        "system_versions": {"release_gate": "3"},
         "claim_payload": claim,
         "controls": [c.model_dump(mode="json") for c in controls],
         "assumptions": [],

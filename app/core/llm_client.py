@@ -350,9 +350,8 @@ def _claude_chat_completion(
 
     # Prompt-caching breakpoints: one on the system prompt (static per pass —
     # shared by every note in a batch) and one on the user turn (note + RAG
-    # context — identical across the 3 consistency runs of the same note, so
-    # runs that start after the first write re-read the whole prefix at 10%
-    # of the input price). Cache hits inside the Batches API are best-effort
+    # context, reusable by explicitly configured repeated Claude evaluations).
+    # Cache hits inside the Batches API are best-effort
     # but the breakpoints cost nothing when they miss beyond the 25% write
     # premium on the first run.
     body: dict = {

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Podiatry Medical Coding System
-NER → RAG (Qdrant hybrid) → LLM (Claude Opus 5.0) → Validation Pipeline
+Evidence-first autonomous professional-claim coding system
+PDF → immutable evidence → provider-independent coding → deterministic
+validation → independent clinical audit → readiness certification
 
 Usage:
     python run.py                     # Process all notes
@@ -34,7 +35,7 @@ logger = get_logger("main")
 # ---------------------------------------------------------------- parallel
 # consistency workers. Process-based (spawn), NOT threads: the pipeline's
 # SQLite connections and mutable validator state are not thread-safe, and a
-# spawned process builds its own full pipeline instance so nothing is shared.
+# spawned process builds its own coding-control state so nothing is shared.
 # The N runs of one note are fully independent by design (use_cache=False),
 # so running them concurrently changes wall time only — per-run behavior,
 # inputs and outputs are byte-identical to the sequential path.
@@ -45,19 +46,20 @@ def _consistency_worker_init():
     global _WORKER_PIPELINE
     from app.pipeline import MedicalCodingPipeline
     _WORKER_PIPELINE = MedicalCodingPipeline()
-    _WORKER_PIPELINE.initialize()
+    _WORKER_PIPELINE.initialize_for_prepared_evidence()
     logger.info(f"  [CONSISTENCY] worker pid {os.getpid()} ready")
 
 
-def _consistency_worker_run(pdf_path_str: str, run_idx: int, total: int,
-                            profile: dict) -> dict:
+def _consistency_worker_run(pdf_path_str: str, evidence_packet, run_idx: int,
+                            total: int, profile: dict) -> dict:
     logger.info(f"  [CONSISTENCY] {Path(pdf_path_str).stem}: run {run_idx}/{total} "
                 f"(worker pid {os.getpid()})")
     try:
         from app.core.model_profiles import use_execution_profile
         with use_execution_profile(profile):
             result = _WORKER_PIPELINE.process_note(
-                Path(pdf_path_str), use_cache=False)
+                Path(pdf_path_str), use_cache=False,
+                evidence_packet=evidence_packet)
         return result.model_dump()
     except Exception as exc:
         # Log the full traceback HERE, in the worker — it is the only place
@@ -78,13 +80,14 @@ def _consistency_worker_run(pdf_path_str: str, run_idx: int, total: int,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Podiatry Medical Coding System")
+    parser = argparse.ArgumentParser(
+        description="Evidence-first autonomous medical coding system")
     parser.add_argument("--note", type=str, help="Process a single PDF note (filename or path)")
     parser.add_argument("--rebuild-index", action="store_true", help="Force rebuild Qdrant vector collections")
     parser.add_argument("--no-cache", action="store_true", help="Skip cache lookup and force fresh processing")
     parser.add_argument("--setup-only", action="store_true", help="Load/build all dependencies and exit — process no notes")
     parser.add_argument("--consistency", type=int,
-                        default=int(os.getenv("CONSISTENCY_RUNS", "3")),
+                        default=int(os.getenv("CONSISTENCY_RUNS", "2")),
                         help="Maximum independent runs per note. Adaptive mode "
                              "starts with one run per provider and consumes the "
                              "remaining capacity only on disagreement.")
@@ -96,9 +99,16 @@ def main():
                         default=int(os.getenv("CONSISTENCY_WORKERS", "1")),
                         help="Run a note's N consistency runs concurrently in this "
                              "many worker processes (1 = sequential). Each worker "
-                             "builds its own pipeline instance — the runs are "
+                             "builds its own lean coding-control instance — "
+                             "the evidence and RAG work remain shared and the runs are "
                              "independent, so this only changes wall time. Mind "
                              "the LLM provider's rate limits before raising it.")
+    parser.add_argument(
+        "--offline-maintenance", action="store_true",
+        default=os.getenv("OFFLINE_MAINTENANCE", "0") == "1",
+        help=("After claim processing, run rule synthesis, audit convergence, "
+              "and rule-pack consolidation. Disabled by default: production "
+              "claims never mutate global decision logic."))
     parser.add_argument("--start-at", type=str, default="",
                         help="Skip notes sorting before this stem/filename prefix — "
                              "resume a batch without redoing completed notes")
@@ -209,21 +219,22 @@ def main():
     logger.info(f"\nProcessing {len(note_files)} clinical note(s)\n")
 
     # Worker pool for parallel consistency runs — created once for the whole
-    # batch (each worker's pipeline init costs ~1 min; per-note pools would
-    # pay it 54 times). 'spawn' start method: forked children would inherit
-    # the parent's live SQLite connections and Qdrant client, which must not
-    # be shared across processes; spawned children import fresh and build
-    # their own in _consistency_worker_init.
+    # batch. 'spawn' start method: forked children would inherit the parent's
+    # live SQLite connections, which must not be shared across processes;
+    # spawned children build only the lean coding controls they actually use.
     pool = None
     if args.consistency > 1 and args.consistency_workers > 1:
         import multiprocessing as mp
         # cap at the batch's total run count — extra workers would only idle
+        # Adaptive execution initially needs only the provider-diverse set.
+        # Do not initialize another worker merely because a bounded
+        # disagreement fallback is available later.
         n_workers = min(args.consistency_workers,
-                        args.consistency * len(note_files))
+                        initial_run_count * len(note_files))
         pool = mp.get_context("spawn").Pool(
             processes=n_workers, initializer=_consistency_worker_init)
         logger.info(f"[CONSISTENCY] {n_workers} parallel run workers starting "
-                    f"(pipeline init in each)")
+                    f"(lean coding-control init in each)")
 
     # Process notes
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -239,21 +250,42 @@ def main():
     # The runs stay fully independent (own worker pipeline, use_cache=False),
     # so per-run behavior is byte-identical to the sequential path.
     jobs: dict = {}
+    evidence_packets: dict = {}
+    evidence_failures: dict = {}
     if pool is not None and args.consistency > 1:
         for pdf_path in note_files:
-            jobs[pdf_path] = [
-                pool.apply_async(
-                    _consistency_worker_run,
-                    (str(pdf_path), i + 1, args.consistency,
-                     execution_profiles[i].model_dump()))
-                for i in range(initial_run_count)
-            ]
+            try:
+                packet = pipeline.prepare_note(pdf_path)
+                packet.persist(OUTPUT_DIR)
+                evidence_packets[pdf_path] = packet
+                jobs[pdf_path] = [
+                    pool.apply_async(
+                        _consistency_worker_run,
+                        (str(pdf_path), packet, i + 1, args.consistency,
+                         execution_profiles[i].model_dump()))
+                    for i in range(initial_run_count)
+                ]
+            except Exception as exc:
+                # One malformed/unreadable note must fail closed without
+                # aborting every unrelated encounter in the batch.
+                evidence_failures[pdf_path] = exc
+                logger.error(
+                    f"Evidence compilation failed for {pdf_path.name}: {exc}")
 
     for pdf_path in note_files:
         new_run_files: list[str] = []
         main_committed = False
         try:
+            if pdf_path in evidence_failures:
+                raise RuntimeError(
+                    "evidence compilation failed before coding") from \
+                    evidence_failures[pdf_path]
             if args.consistency > 1:
+                evidence_packet = evidence_packets.get(pdf_path)
+                if evidence_packet is None:
+                    evidence_packet = pipeline.prepare_note(pdf_path)
+                    evidence_packet.persist(OUTPUT_DIR)
+                    evidence_packets[pdf_path] = evidence_packet
                 # Cross-provider consistency: N independent uncached runs.
                 # A billing split is held while deterministic actuation/replay
                 # attempts to converge it, then the same explicitly authorized
@@ -271,18 +303,28 @@ def main():
                         logger.info(f"  [CONSISTENCY] run {i + 1}/{args.consistency}")
                         from app.core.model_profiles import use_execution_profile
                         with use_execution_profile(execution_profiles[i]):
-                            r = pipeline.process_note(pdf_path, use_cache=False)
+                            r = pipeline.process_note(
+                                pdf_path, use_cache=False,
+                                evidence_packet=evidence_packet)
                         dumps.append(r.model_dump())
                 initial_report = compare_runs(
                     dumps, store=pipeline.compliance_store)
                 escalation_reasons = (
                     adaptive_escalation_reasons(initial_report)
                     if args.consistency_mode == "adaptive" else [])
-                additional_indices = adaptive_escalation_indices(
-                    mode=args.consistency_mode,
-                    initial_runs=initial_run_count,
-                    maximum_runs=args.consistency,
-                    initial_report=initial_report)
+                # Online arbitration never re-runs the entire extraction and
+                # coding stack as an expensive third vote.  The two coders
+                # already share one immutable evidence packet; unresolved
+                # lines go to the bounded, evidence-specific adjudicator
+                # below.  Extra full runs remain an explicit offline
+                # evaluation option.
+                additional_indices = (
+                    adaptive_escalation_indices(
+                        mode=args.consistency_mode,
+                        initial_runs=initial_run_count,
+                        maximum_runs=args.consistency,
+                        initial_report=initial_report)
+                    if args.offline_maintenance else [])
                 escalation_failures = []
                 for i in additional_indices:
                     logger.warning(
@@ -292,13 +334,15 @@ def main():
                         if pool is not None:
                             extra = pool.apply_async(
                                 _consistency_worker_run,
-                                (str(pdf_path), i + 1, args.consistency,
+                                (str(pdf_path), evidence_packet, i + 1,
+                                 args.consistency,
                                  execution_profiles[i].model_dump())).get()
                         else:
                             from app.core.model_profiles import use_execution_profile
                             with use_execution_profile(execution_profiles[i]):
                                 result = pipeline.process_note(
-                                    pdf_path, use_cache=False)
+                                    pdf_path, use_cache=False,
+                                    evidence_packet=evidence_packet)
                             extra = result.model_dump()
                         dumps.append(extra)
                     except Exception as exc:
@@ -320,6 +364,9 @@ def main():
                     executed_runs=len(dumps),
                     escalation_reasons=escalation_reasons,
                     escalation_failures=escalation_failures)
+                report["execution_strategy"][
+                    "online_full_run_escalation_suppressed"] = bool(
+                        escalation_reasons and not args.offline_maintenance)
                 idx = select_canonical(dumps)
                 # A disagreement at save time is not yet a human's problem:
                 # the post-batch actuation may mint a rule and the replay
@@ -336,6 +383,11 @@ def main():
                     OUTPUT_DIR, pdf_path.stem, dumps)
                 report["run_files"] = new_run_files
                 payload["consistency"] = report
+                # The per-model certificates predate cross-provider
+                # comparison. Re-certify the selected claim only after the
+                # shared-input and model-independence verdict is attached.
+                from app.release.claim_readiness import refresh_release_artifacts
+                refresh_release_artifacts(payload)
                 if not report["unanimous"]:
                     deferred_docs.append(pdf_path.stem)
                 n_billing = sum(1 for d in report["disagreements"]
@@ -346,14 +398,18 @@ def main():
                         f"  [CONSISTENCY] {pdf_path.stem}: {n_billing} billing "
                         f"disagreement(s) ({n_advisory} advisory) across "
                         f"{report['runs']} runs — review deferred pending "
-                        f"actuation + replay reconciliation")
+                        f"bounded evidence-specific adjudication")
                 else:
                     logger.info(
                         f"  [CONSISTENCY] {pdf_path.stem}: billing arrays "
                         f"unanimous across {report['runs']} runs"
                         + (f" ({n_advisory} advisory-only variance)" if n_advisory else ""))
             else:
-                result = pipeline.process_note(pdf_path, use_cache=not args.no_cache)
+                evidence_packet = pipeline.prepare_note(pdf_path)
+                evidence_packet.persist(OUTPUT_DIR)
+                result = pipeline.process_note(
+                    pdf_path, use_cache=not args.no_cache,
+                    evidence_packet=evidence_packet)
                 payload = result.model_dump()
             results.append(payload)
 
@@ -453,41 +509,35 @@ def main():
     #      claim, including ones reconciliation just converged
     if args.consistency > 1:
         actuated_rules = 0
-        try:
-            from tools import flip_triage
-            tstats = flip_triage.scan(OUTPUT_DIR)
-            logger.info(
-                f"Flip queue: {tstats['total_classes']} class(es), "
-                f"{tstats['open']} open")
-            # total_classes, not open: actuate() also reopens escalations
-            # whose "no template fits" verdict predates the current template
-            # vocabulary — a queue with zero open classes can still yield.
-            if tstats["total_classes"] and os.getenv("AUTO_ACTUATE", "1") == "1":
-                from tools.auto_actuate import actuate
-                limit = int(os.getenv("AUTO_ACTUATE_LIMIT", "5"))
-                # Scope to THIS batch's documents: evidence, convergence,
-                # and the inertness control set all stay inside the corpus
-                # just processed — stale results from older corpora in the
-                # same directory can neither trigger nor veto a rule.
-                # AUTO_ACTUATE_SCOPE (comma-separated stems/prefixes)
-                # overrides for callers that process a SUBSET but need the
-                # gates verified against the whole corpus — the unanimity
-                # loop reruns only holdouts, but a rule must still be inert
-                # on the notes that are already unanimous.
-                scope_env = os.getenv("AUTO_ACTUATE_SCOPE", "")
-                batch_scope = (
-                    tuple(s.strip() for s in scope_env.split(",")
-                          if s.strip())
-                    if scope_env else tuple(p.stem for p in note_files))
-                astats = actuate(OUTPUT_DIR, limit=limit, dry_run=False,
-                                 scope=batch_scope)
-                actuated_rules = astats["actuated"]
+        if args.offline_maintenance:
+            try:
+                from tools import flip_triage
+                tstats = flip_triage.scan(OUTPUT_DIR)
                 logger.info(
-                    f"Auto-actuation: {astats['actuated']} rule(s) accepted, "
-                    f"{astats['escalated']} class(es) escalated to human "
-                    f"review (of {astats['considered']} considered)")
-        except Exception as e:
-            logger.warning(f"Flip actuation skipped: {e}")
+                    f"Flip queue: {tstats['total_classes']} class(es), "
+                    f"{tstats['open']} open")
+                if (tstats["total_classes"]
+                        and os.getenv("AUTO_ACTUATE", "1") == "1"):
+                    from tools.auto_actuate import actuate
+                    limit = int(os.getenv("AUTO_ACTUATE_LIMIT", "5"))
+                    scope_env = os.getenv("AUTO_ACTUATE_SCOPE", "")
+                    batch_scope = (
+                        tuple(s.strip() for s in scope_env.split(",")
+                              if s.strip())
+                        if scope_env else tuple(p.stem for p in note_files))
+                    astats = actuate(
+                        OUTPUT_DIR, limit=limit, dry_run=False,
+                        scope=batch_scope)
+                    actuated_rules = astats["actuated"]
+                    logger.info(
+                        f"Auto-actuation: {astats['actuated']} rule(s) "
+                        f"accepted, {astats['escalated']} escalated")
+            except Exception as e:
+                logger.warning(f"Offline flip actuation skipped: {e}")
+        else:
+            logger.info(
+                "Online coding mode: rule synthesis and global pack mutation "
+                "are disabled")
 
         # Unconditional when anything is split: rules accepted THIS pass are
         # the obvious trigger, but actuation also proves classes "resolved
@@ -495,7 +545,7 @@ def main():
         # measured live: 6 such classes with zero acceptances), and the pack
         # can have moved through any parallel driver. Replay is cheap and
         # deterministic; a skipped reconcile strands convergeable notes.
-        if deferred_docs:
+        if deferred_docs and args.offline_maintenance:
             try:
                 from tools.replay_reconcile import reconcile
                 rstats = reconcile(OUTPUT_DIR, docs=deferred_docs)
@@ -595,7 +645,8 @@ def main():
                 # deterministic rule/template/gate, and the note replays
                 # and is re-reviewed until upheld. Only a STALLED loop
                 # leaves disputes with a human.
-                if os.getenv("AUDIT_CONVERGENCE", "1") == "1":
+                if (args.offline_maintenance
+                        and os.getenv("AUDIT_CONVERGENCE", "1") == "1"):
                     from tools.audit_convergence_loop import (
                         _disputed_docs, _scope_docs, converge)
                     # judge from the saved files, not this pass's counters:
@@ -632,7 +683,8 @@ def main():
         # replay. When the unanimity loop is driving
         # (DEFER_REVIEW_ROUTING=1) it consolidates at ITS finalization
         # instead — mid-loop the pack is still growing.
-        if os.getenv("DEFER_REVIEW_ROUTING", "0") != "1" \
+        if args.offline_maintenance \
+                and os.getenv("DEFER_REVIEW_ROUTING", "0") != "1" \
                 and os.getenv("PACK_CONSOLIDATION", "1") == "1":
             try:
                 from tools.pack_consolidation import consolidate
@@ -687,7 +739,8 @@ def main():
 
         # Template graduation proposal — maturity is evaluated, but runtime
         # code never writes executable application modules.
-        if os.getenv("AUTO_GRADUATE", "0") == "1":
+        if (args.offline_maintenance
+                and os.getenv("AUTO_GRADUATE", "0") == "1"):
             try:
                 from tools.graduate_templates import graduate
                 gstats = graduate(OUTPUT_DIR)

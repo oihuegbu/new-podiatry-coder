@@ -102,10 +102,11 @@ judge the mutation itself). Judge whether each change is clinically
 CORRECT — not whether the rule executed as designed.
 
 JOB 2 — REVIEW THE WHOLE RECORD AS A PAYER WOULD. The case file's
-full_record field is the COMPLETE saved output for this note — every
-field the system wrote, including the consistency run votes, the
-adjudication block's decisions, the correction ledger, the scrubber's
-findings, and the disposition history. Read it end to end against the
+full_record field is a deterministic, claim-specific defensibility view:
+all clinical facts and spans, final and candidate claim lines, consistency
+votes, adjudication decisions, correction ledger, scrubber findings,
+source-version controls, and disposition history, without duplicated
+prompt material or non-coding identifiers. Read it end to end against the
 doctor's note (note_text) and the authoritative reference data. Examine
 the final claim: code selection and specificity, primary/secondary
 designation, missing documented diagnoses or services, modifiers, units,
@@ -222,8 +223,7 @@ def material_corrections_of(result: dict) -> list[dict]:
 
 # Review-protocol version, salted into the fingerprint: a stored verdict
 # identifies not just WHAT claim state it judged but what the reviewer was
-# SHOWN when judging it. v2 = the full-record case file (the reviewer sees
-# the complete saved output, not a curated excerpt). v3 = disputed system
+# SHOWN when judging it. v2 = the full-record case file. v3 = disputed system
 # advisories are first-class: the reviewer is instructed to report a wrong
 # scrubber advisory as kind "advisory_defect" (not to shoehorn it into a
 # billing kind), and such findings now DISPUTE the verdict regardless of
@@ -231,13 +231,14 @@ def material_corrections_of(result: dict) -> list[dict]:
 # targets. Bumping this makes every verdict rendered under the older
 # protocol stale — those claims fail closed back into the pending hold and
 # get one fresh review under the current standards.
-_AUDIT_PROTOCOL_VERSION = 3
+_AUDIT_PROTOCOL_VERSION = 4
 
 
 def corrections_fingerprint(result: dict) -> str:
     mats = material_corrections_of(result)
     sig = {
         "protocol": _AUDIT_PROTOCOL_VERSION,
+        "evidence_packet": result.get("evidence_packet") or {},
         # The measurement vocabulary is part of what the reviewer was
         # SHOWN (synthesized observables add finding kinds to the prompt)
         # — when an observable installs, every verdict rendered without
@@ -264,22 +265,119 @@ def corrections_fingerprint(result: dict) -> str:
         json.dumps(sig, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
-def _full_record_view(result: dict) -> dict:
-    """The complete saved record, as the reviewer's primary exhibit — the
-    same artifact a human reviewer reads when handed the output JSON.
-    Only two redactions, both non-informational: the PRIOR clinical_audit
-    block (a stale verdict must not anchor the fresh one) and the full
-    note text duplicated inside rag_context (provided once, un-truncated,
-    as the case's note_text)."""
-    view = json.loads(json.dumps(result, default=str))
-    view.pop("clinical_audit", None)
-    rag = view.get("rag_context")
-    if isinstance(rag, dict) and rag.get("note_full_text"):
-        rag["note_full_text"] = "(provided separately as note_text)"
-    return view
+def _evidence_audit_view(payload: dict | None) -> dict:
+    """Bounded retrieval exhibit from the retained immutable packet."""
+    if not isinstance(payload, dict):
+        return {}
+    candidate_keys = (
+        "code", "description", "long_description", "score", "system",
+        "effective_from", "effective_to", "source")
+    candidates = {}
+    for system, rows in (payload.get("rag_candidates") or {}).items():
+        candidates[str(system)] = [
+            {key: row.get(key) for key in candidate_keys if key in row}
+            for row in rows or [] if isinstance(row, dict)]
+    return {
+        "note_category": payload.get("note_category"),
+        "retrieved_candidates": candidates,
+        "performed_event_evidence": (
+            payload.get("performed_event_evidence") or []),
+        "physician_documented_codes": (
+            payload.get("physician_documented_codes") or []),
+    }
 
 
-def assemble_case(doc: str, result: dict, note: str, rep) -> dict:
+def _full_record_view(result: dict,
+                      evidence_payload: dict | None = None) -> dict:
+    """Build the complete *coding* record without duplicated bulk.
+
+    The prior implementation serialized the entire output back into the
+    prompt, including the same note, entities, warnings, and candidate data
+    several times.  Real cases exceeded two successive model budgets.  This
+    projection is allowlisted and deterministic: it keeps everything that can
+    affect a billed line or its defense while excluding patient identity,
+    presentation-only summaries, API usage, and duplicated note text.
+    """
+    copied = json.loads(json.dumps(result, default=str))
+    metadata = copied.get("patient_metadata") or {}
+    context_keys = (
+        "date_of_service", "date_of_birth", "gender", "insurance",
+        "insurance_plan", "provider_npi", "billing_npi", "place_of_service",
+        "care_setting", "state", "service_facility", "authorization_number",
+    )
+    terminology = copied.get("terminology_normalization") or {}
+    terminology_view = {
+        key: terminology.get(key) for key in (
+            "schema_version", "registry_version", "registry_sha256",
+            "authority_role", "status", "entity_fingerprint",
+            "unresolved_billing_relevant")
+        if terminology.get(key) not in (None, "", [])
+    }
+    facts = copied.get("clinical_facts") or {}
+    facts_view = {
+        key: facts.get(key) for key in (
+            "schema_version", "facts", "unresolved_material_facts",
+            "note_sha256", "facts_fingerprint", "status")
+        if facts.get(key) not in (None, "", [])
+    }
+    consistency = copied.get("consistency") or {}
+    consistency_view = {
+        key: consistency.get(key) for key in (
+            "runs", "unanimous", "claim_outputs_unanimous",
+            "input_consistent", "input_disagreements",
+            "input_complete", "missing_required_inputs",
+            "disagreements", "dispositions", "tiers", "model_independence",
+            "execution_strategy")
+        if consistency.get(key) not in (None, "", [])
+    }
+    manifest = copied.get("authoritative_source_manifest") or {}
+    source_ids = {
+        "icd10_codes", "cpt_codes", "hcpcs_codes", "ncci_edits",
+        "mue_limits", "pfs_indicators", "validator_rules", "modifiers",
+        "coverage_policy", "mcd_coverage_cache", "source_requirements",
+        "place_of_service", "payers", "submission_configuration",
+    }
+    source_view = {
+        "fingerprint": manifest.get("fingerprint"),
+        "errors": manifest.get("errors") or [],
+        "records": [row for row in (manifest.get("records") or [])
+                    if isinstance(row, dict)
+                    and str(row.get("source_id") or "") in source_ids],
+    }
+    readiness = copied.get("claim_readiness_certificate") or {}
+    return {
+        "document_id": copied.get("document_id"),
+        "encounter_context": {key: metadata.get(key) for key in context_keys
+                              if metadata.get(key) not in (None, "", {})},
+        "evidence_packet": copied.get("evidence_packet") or {},
+        "retained_evidence": _evidence_audit_view(evidence_payload),
+        "dos_authority_preflight": (
+            copied.get("dos_authority_preflight") or {}),
+        "note_integrity": copied.get("note_integrity") or {},
+        "clinical_facts": facts_view,
+        "terminology_normalization": terminology_view,
+        "procedures_performed_today": (
+            copied.get("procedures_performed_today") or []),
+        "candidate_claim": copied.get("candidate_claim") or {},
+        "final_claim": {array: copied.get(array) or [] for array in
+                        ("icd_codes", "cpt_codes", "hcpcs_codes")},
+        "supporting_conditions": copied.get("supporting_conditions") or [],
+        "consistency": consistency_view,
+        "adjudication": copied.get("adjudication") or {},
+        "material_corrections": copied.get("material_corrections") or [],
+        "validation_issues": copied.get("validation_issues") or [],
+        "claim_scrub": copied.get("claim_scrub") or {},
+        "documentation_audit": copied.get("documentation_audit") or {},
+        "encounter_integrity": copied.get("encounter_integrity") or {},
+        "authoritative_source_manifest": source_view,
+        "readiness_controls": readiness.get("controls") or [],
+        "final_disposition": copied.get("final_disposition"),
+        "final_summary": copied.get("final_summary"),
+    }
+
+
+def assemble_case(doc: str, result: dict, note: str, rep,
+                  evidence_payload: dict | None = None) -> dict:
     from tools.auto_actuate import _authoritative_evidence
 
     mats = material_corrections_of(result)
@@ -326,12 +424,18 @@ def assemble_case(doc: str, result: dict, note: str, rep) -> dict:
                 if arr not in ("icd_codes", "cpt_codes", "hcpcs_codes"):
                     arr = _array_of(c)
                 codes_by_array.setdefault(arr, set()).add(c)
-    evidence = {}
+    evidence, evidence_errors = {}, []
     for arr, codes in codes_by_array.items():
         try:
             evidence[arr] = _authoritative_evidence(rep, arr, sorted(codes))
-        except Exception:
+        except Exception as exc:
             evidence[arr] = []
+            evidence_errors.append(f"{arr}: {type(exc).__name__}")
+    if evidence_errors and (result.get("evidence_packet") or {}).get(
+            "evidence_fingerprint"):
+        raise RuntimeError(
+            "clinical audit could not assemble authoritative evidence: "
+            + "; ".join(evidence_errors))
 
     # The system's own advisory conclusions, offered for the contradiction
     # check: a HIGH-risk recommendation that is authoritatively wrong for
@@ -364,15 +468,15 @@ def assemble_case(doc: str, result: dict, note: str, rep) -> dict:
 
     return {
         "document_id": doc,
-        "note_text": note[:12000],
+        # Never silently truncate clinical evidence.  The defensibility view
+        # removes duplicated bulk instead; the complete source note remains
+        # available to every audit pass.
+        "note_text": note,
         "payer": str((result.get("patient_metadata") or {})
                      .get("insurance") or ""),
-        # The COMPLETE saved record — consistency votes, adjudication
-        # decisions, correction ledger, scrubber findings, disposition
-        # history. The curated fields below remain as the review's index
-        # into the record (correction indices, per-code reference data),
-        # but the record itself is what the reviewer reads end to end.
-        "full_record": _full_record_view(result),
+        # Deterministic claim-specific view: complete coding evidence without
+        # duplicated presentation and API fields.
+        "full_record": _full_record_view(result, evidence_payload),
         "final_claim": {arr: [
             {k: e.get(k) for k in ("code", "description", "modifiers",
                                    "units", "type", "linked_diagnoses")
@@ -684,7 +788,8 @@ def _corroborate_findings(all_findings: list[list[dict]]) -> list[dict]:
 
 
 def audit_result(doc: str, result: dict, note: str, rep,
-                 passes: int = AUDIT_PASSES) -> dict:
+                 passes: int = AUDIT_PASSES,
+                 evidence_payload: dict | None = None) -> dict:
     """Audit one result in place: verify every interpretive correction AND
     review the whole final claim (the browser-expert review, run through
     the deterministic gates). ALWAYS runs — a claim with no interpretive
@@ -696,14 +801,14 @@ def audit_result(doc: str, result: dict, note: str, rep,
     interp_idx = {i for i, m in enumerate(mats) if m.get("interpretive")}
     fingerprint = corrections_fingerprint(result)
 
-    case = assemble_case(doc, result, note, rep)
-    # Open-ended "what's wrong with this claim?" pass FIRST, so unconstrained
-    # expert reasoning happens before the verdict schema narrows attention.
-    # Its prose rides along in the case as LEADS the scored passes must still
-    # independently ground; it never bypasses the authority+quote gate.
-    prelim = _exploratory_scan(case)
-    if prelim:
-        case["preliminary_reviewer_notes"] = prelim
+    case = assemble_case(doc, result, note, rep, evidence_payload)
+    # The two scored passes already perform an open-ended whole-claim review.
+    # A legacy third exploratory call is available for offline investigations,
+    # but it is not part of the bounded online claim path.
+    if os.getenv("CLINICAL_AUDIT_EXPLORATORY", "0") == "1":
+        prelim = _exploratory_scan(case)
+        if prelim:
+            case["preliminary_reviewer_notes"] = prelim
     maps, verdicts, findings_per_pass = [], [], []
     for i in range(passes):
         try:
@@ -917,7 +1022,8 @@ def audit_batch(results_dir: Path, docs: list[str] | None = None,
             continue
         try:
             result = json.loads(f.read_text())
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"Clinical audit skipped unreadable result {f}: {exc}")
             continue
         if not isinstance(result, dict) or not result.get("success"):
             continue
@@ -961,7 +1067,39 @@ def audit_batch(results_dir: Path, docs: list[str] | None = None,
             stats["skipped"] += 1
             stats["docs"][doc] = "no note text available — not audited"
             continue
-        block = audit_result(doc, result, note, rep)
+        evidence_payload = None
+        evidence_manifest = result.get("evidence_packet") or {}
+        artifact_name = str(evidence_manifest.get("artifact_name") or "")
+        if artifact_name:
+            try:
+                from app.autonomous.evidence import EvidencePacket
+                if Path(artifact_name).name != artifact_name:
+                    raise ValueError("invalid evidence artifact name")
+                packet = EvidencePacket.load(results_dir / artifact_name)
+                if (packet.evidence_fingerprint
+                        != evidence_manifest.get("evidence_fingerprint")):
+                    raise ValueError("result and artifact fingerprints differ")
+                evidence_payload = packet.payload()
+            except Exception as exc:
+                reason = ("[clinical_audit/evidence_artifact] retained "
+                          f"evidence unavailable: {type(exc).__name__}")
+                reasons = list(result.get("auto_coding_review_reasons") or [])
+                if reason not in reasons:
+                    reasons.append(reason)
+                result["auto_coding_review_reasons"] = reasons
+                result["final_disposition"] = "REVIEW"
+                result["auto_coding_tier"] = "REVIEW"
+                result["auto_coding_confidence"] = min(
+                    float(result.get("auto_coding_confidence") or 0.0), 0.84)
+                from app.release.claim_readiness import refresh_release_artifacts
+                refresh_release_artifacts(result)
+                from app.validation.run_store import atomic_write_json
+                atomic_write_json(f, result)
+                stats["skipped"] += 1
+                stats["docs"][doc] = reason
+                continue
+        block = audit_result(
+            doc, result, note, rep, evidence_payload=evidence_payload)
         from app.validation.run_store import atomic_write_json
         atomic_write_json(f, result)
         stats["audited"] += 1

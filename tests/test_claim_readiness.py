@@ -73,7 +73,7 @@ class ClaimReadinessTest(unittest.TestCase):
                             "vision_context": {
                                 "note_category": "established_visit"}},
             "consistency": {"runs": 3, "unanimous": True,
-                            "input_consistent": True,
+                            "input_consistent": True, "input_complete": True,
                             "input_disagreements": [],
                             "model_independence": {
                                 "required_domains": 2,
@@ -135,6 +135,14 @@ class ClaimReadinessTest(unittest.TestCase):
                     for n in range(1, 4)
                 ],
             },
+        }
+        result["evidence_packet"] = {
+            "schema_version": 1,
+            "document_id": result["document_id"],
+            "source_document_sha256": result["note_integrity"][
+                "source_pdf_sha256"],
+            "evidence_fingerprint": "sha256:" + "b" * 64,
+            "artifact_name": "claim-a_evidence.json",
         }
         from app.terminology import TerminologyNormalizer
         _, result["terminology_normalization"] = (

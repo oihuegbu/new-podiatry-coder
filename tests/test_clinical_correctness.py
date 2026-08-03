@@ -568,11 +568,13 @@ class FullRecordCaseTest(unittest.TestCase):
         # a stale verdict must not anchor the fresh review
         self.assertNotIn("clinical_audit", self._case()["full_record"])
 
-    def test_duplicated_note_text_replaced_not_dropped(self):
+    def test_defensibility_view_keeps_note_once_without_bulk_duplication(self):
         rec = self._case()["full_record"]
-        self.assertNotEqual(rec["rag_context"]["note_full_text"],
-                            "the full note text")
-        self.assertEqual(rec["rag_context"]["corrections_made"], ["kept"])
+        self.assertNotIn("rag_context", rec)
+        self.assertEqual(self._case()["note_text"],
+                         "Assessment: calcaneal spur.")
+        self.assertIn("final_claim", rec)
+        self.assertEqual(rec["material_corrections"], _INTERP)
 
     def test_source_result_not_mutated(self):
         from tools.clinical_auditor import assemble_case

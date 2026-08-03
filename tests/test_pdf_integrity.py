@@ -13,6 +13,25 @@ from app.ingestion import pdf_parser
 
 
 class PdfIntegrityTest(unittest.TestCase):
+    def test_embedded_text_layer_corroborates_layout_independent_transcript(self):
+        words = [f"token{index}" for index in range(30)]
+        report = pdf_parser._text_layer_crosscheck(
+            [" ".join(words)], ["\n".join(reversed(words))])
+        self.assertEqual(report["status"], "PASS")
+        self.assertEqual(report["pages"][0]["token_recall"], 1.0)
+        self.assertNotIn(" ".join(words), json.dumps(report))
+
+    def test_embedded_text_layer_material_mismatch_fails(self):
+        expected = " ".join(f"expected{index}" for index in range(30))
+        observed = " ".join(f"different{index}" for index in range(30))
+        report = pdf_parser._text_layer_crosscheck([expected], [observed])
+        self.assertEqual(report["status"], "FAILED")
+        self.assertEqual(report["failed_pages"], [1])
+
+    def test_image_only_pdf_has_explicit_not_applicable_status(self):
+        report = pdf_parser._text_layer_crosscheck([""], ["vision text"])
+        self.assertEqual(report["status"], "NOT_APPLICABLE")
+
     def test_all_pages_are_sent_and_bound_to_result(self):
         parsed = {
             "patient_metadata": {"date_of_service": "2026-01-05"},
@@ -42,7 +61,9 @@ class PdfIntegrityTest(unittest.TestCase):
                     mock.patch("app.core.llm_client.get_anthropic_client",
                                return_value=object()), \
                     mock.patch("app.core.llm_client._claude_message_via_batch",
-                               return_value=response):
+                               return_value=response), \
+                    mock.patch.object(pdf_parser, "_embedded_text_crosscheck",
+                                      return_value={"status": "NOT_APPLICABLE"}):
                 result = pdf_parser.extract_from_pdf(pdf)
         kwargs = convert.call_args.kwargs
         self.assertEqual(kwargs, {"dpi": 300})
@@ -79,7 +100,9 @@ class PdfIntegrityTest(unittest.TestCase):
                     mock.patch("app.core.llm_client.get_anthropic_client",
                                return_value=object()), \
                     mock.patch("app.core.llm_client._claude_message_via_batch",
-                               return_value=response):
+                               return_value=response), \
+                    mock.patch.object(pdf_parser, "_embedded_text_crosscheck",
+                                      return_value={"status": "NOT_APPLICABLE"}):
                 with self.assertRaisesRegex(RuntimeError, "coverage"):
                     pdf_parser.extract_from_pdf(pdf)
 

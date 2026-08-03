@@ -1,6 +1,8 @@
 import base64
+from collections import Counter
 import hashlib
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -11,6 +13,76 @@ from app.core.logger import get_logger
 from app.core.config import CLAUDE_MODEL, CLAUDE_EFFORT
 
 logger = get_logger(__name__)
+
+_TEXT_LAYER_MIN_TOKENS = max(
+    1, int(os.getenv("PDF_TEXT_LAYER_MIN_TOKENS", "20")))
+_TEXT_LAYER_MIN_RECALL = min(
+    1.0, max(0.0, float(os.getenv("PDF_TEXT_LAYER_MIN_RECALL", "0.85"))))
+
+
+def _tokens(value: str) -> list[str]:
+    """Layout-insensitive tokens that preserve clinically meaningful glyphs."""
+    return re.findall(r"[a-z0-9]+", str(value or "").casefold())
+
+
+def _text_layer_crosscheck(embedded_pages: list[str],
+                           vision_pages: list[str]) -> dict:
+    """Compare Vision transcription with a PDF's independent text layer.
+
+    Multiset recall makes repeated measurements and words count while harmless
+    layout/order differences do not. The record stores hashes and counts, not
+    a second copy of protected health information.
+    """
+    if len(embedded_pages) != len(vision_pages):
+        return {"status": "FAILED", "checked_pages": 0,
+                "reason": "PDF text-layer page count differs from rendered pages",
+                "pages": []}
+    rows, failures = [], []
+    for index, (embedded, vision) in enumerate(
+            zip(embedded_pages, vision_pages), 1):
+        expected = Counter(_tokens(embedded))
+        observed = Counter(_tokens(vision))
+        expected_count = sum(expected.values())
+        if expected_count < _TEXT_LAYER_MIN_TOKENS:
+            continue
+        matched = sum((expected & observed).values())
+        recall = matched / expected_count
+        row = {
+            "page_number": index,
+            "embedded_text_sha256": "sha256:" + hashlib.sha256(
+                embedded.encode()).hexdigest(),
+            "embedded_token_count": expected_count,
+            "matched_token_count": matched,
+            "token_recall": round(recall, 4),
+            "passed": recall >= _TEXT_LAYER_MIN_RECALL,
+        }
+        rows.append(row)
+        if not row["passed"]:
+            failures.append(index)
+    if not rows:
+        return {"status": "NOT_APPLICABLE", "checked_pages": 0,
+                "reason": "PDF has no usable embedded text layer", "pages": []}
+    return {
+        "status": "FAILED" if failures else "PASS",
+        "checked_pages": len(rows),
+        "minimum_token_recall": _TEXT_LAYER_MIN_RECALL,
+        "failed_pages": failures,
+        "pages": rows,
+    }
+
+
+def _embedded_text_crosscheck(pdf_path: Path, page_texts: list[dict]) -> dict:
+    try:
+        import pdfplumber
+        with pdfplumber.open(pdf_path) as document:
+            embedded = [page.extract_text() or "" for page in document.pages]
+    except Exception as exc:
+        logger.warning(
+            f"  Embedded PDF text-layer cross-check unavailable: {exc}")
+        return {"status": "ERROR", "checked_pages": 0,
+                "reason": type(exc).__name__, "pages": []}
+    vision = [str(page.get("text") or "") for page in page_texts]
+    return _text_layer_crosscheck(embedded, vision)
 
 
 EXTRACTION_SYSTEM_PROMPT = """You are an expert medical document parser specializing in podiatry clinical notes.
@@ -97,6 +169,13 @@ This extracted data feeds a medical billing pipeline where a single misread char
   "procedures_performed_today": ["list of procedures actually done on this date, not planned for future"],
   "imaging_performed_today": ["list of imaging studies done on this date"],
   "supplies_dispensed_today": ["list of DME/supplies/orthotics given to patient today"],
+  "performed_event_evidence": [
+    {
+      "kind": "procedure|imaging|supply",
+      "label": "exactly one entry from the corresponding list above",
+      "evidence_quote": "shortest complete verbatim source sentence proving it occurred today"
+    }
+  ],
   "prior_surgery_info": {
     "is_post_op_visit": true,
     "days_post_op": 14,
@@ -139,9 +218,9 @@ CRITICAL: Return ONLY valid JSON with no markdown code fences. Every character i
 
 
 def extract_from_pdf(pdf_path: str | Path) -> dict:
-    """Use Claude Opus 4.7 Vision to intelligently extract structured data from a clinical note PDF."""
+    """Extract and integrity-check one complete clinical-note PDF."""
     pdf_path = Path(pdf_path)
-    logger.info(f"Converting {pdf_path.name} to image for Claude Opus 4.7 Vision...")
+    logger.info(f"Converting {pdf_path.name} to images for clinical extraction...")
 
     # Convert the complete document.  The previous first_page/last_page cap
     # silently discarded page 3 onward while still returning a successful
@@ -195,12 +274,11 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
                 "messages": [{
                     "role": "user",
                     "content": [
-                        # Images first — improves OCR accuracy on Opus 4.7
+                        # Images first — improves visual transcription accuracy.
                         *image_blocks,
                         # cache_control on the final block caches the whole
-                        # prefix including the images — the 3 consistency
-                        # runs of one note send identical pages, so runs 2/3
-                        # read the OCR-heavy prefix at 10% of input price.
+                        # prefix including the images, including retries of
+                        # this one evidence-compilation operation.
                         {"type": "text",
                          "text": "Extract all information from this clinical note into the required JSON structure. Take your time to read every character carefully, especially medical codes and laterality.",
                          "cache_control": {"type": "ephemeral"}},
@@ -304,6 +382,7 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
     sections["full_text"] = "\n\n".join(
         str(p.get("text") or "") for p in page_texts)
     text_digest = hashlib.sha256(sections["full_text"].encode()).hexdigest()
+    text_layer_crosscheck = _embedded_text_crosscheck(pdf_path, page_texts)
 
     logger.info(
         f"  Vision extraction complete: "
@@ -324,6 +403,22 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
     if physician_codes:
         logger.info(f"  Physician-documented codes found: {[p.get('code') for p in physician_codes]}")
 
+    # Event labels may be normalized summaries, but their evidence never is.
+    # Keep only exact quotes found in the complete transcription; a missing or
+    # invented quote remains visible as unverified and blocks release later.
+    performed_event_evidence = []
+    for row in result.get("performed_event_evidence", []) or []:
+        if not isinstance(row, dict):
+            continue
+        quote = str(row.get("evidence_quote") or "").strip()
+        performed_event_evidence.append({
+            "kind": str(row.get("kind") or "").strip().lower(),
+            "label": str(row.get("label") or "").strip(),
+            "evidence_quote": quote,
+            "source_span_verified": bool(
+                quote and quote in sections["full_text"]),
+        })
+
     return {
         "metadata": metadata,
         "sections": sections,
@@ -331,11 +426,13 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
         "procedures_performed_today": result.get("procedures_performed_today", []),
         "imaging_performed_today": result.get("imaging_performed_today", []),
         "supplies_dispensed_today": result.get("supplies_dispensed_today", []),
+        "performed_event_evidence": performed_event_evidence,
         "prior_surgery_info": prior_surgery_info,
         "physician_documented_codes": physician_codes,
         "extraction_usage": usage,
         "note_integrity": {
-            "complete": True,
+            "complete": text_layer_crosscheck.get("status") in {
+                "PASS", "NOT_APPLICABLE"},
             "page_count": len(images),
             "extracted_page_count": len(page_texts),
             "source_pdf_sha256": f"sha256:{source_digest}",
@@ -350,5 +447,6 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
                 }
                 for p in page_texts
             ],
+            "embedded_text_crosscheck": text_layer_crosscheck,
         },
     }
