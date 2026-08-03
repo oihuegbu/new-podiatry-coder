@@ -94,7 +94,7 @@ def code_encounter(
                 # IN the code (right vs left vs unspecified) and never takes an RT/LT
                 # modifier or a unit count — so this whole block is skipped for it.
                 # Data-driven per-line modifiers (laterality) + billing units
-                # (descriptor-driven, so a "2-4 lesions" code bills as one unit).
+                # (descriptor-driven, so a "2-4 items" code bills as one unit).
                 line.modifiers = modifier_engine.assign(
                     line.fact, line.chosen.descriptor,
                     bilat=source.bilat_indicator(line.chosen.code))

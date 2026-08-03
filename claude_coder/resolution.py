@@ -4,8 +4,8 @@ Division of labour, each component doing what it is good at:
 
   • RECALL (embedding retrieval) supplies the concept signal. Semantic
     similarity over enriched, synonym-bearing text is exactly what handles terse
-    descriptors and clinician vocabulary ("Morton's neuroma" ≈ "Lesion of plantar
-    nerve"). The pool is already cosine-thresholded, so relevance is the RAG's
+    descriptors and clinician vocabulary (a clinician eponym ≈ a terse anatomic
+    descriptor). The pool is already cosine-thresholded, so relevance is the RAG's
     job — not a brittle token-overlap floor re-derived here (that floor wrongly
     eliminated correct-but-terse codes; it is gone).
 
@@ -90,7 +90,7 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
     # SUPPORT (mechanic 2) — how many concept tokens the note shares with the
     # code's AUTHORITATIVE descriptors. Scored over ALL description tiers (long /
     # medium / plain-language consumer), so plain wording that distinguishes near-
-    # homographs (osteotomy vs ostectomy) participates. A RANK signal ONLY (breaks
+    # homographs (similar wording, different act) participates. A RANK signal ONLY (breaks
     # near-ties in recall); never an elimination, so a correct-but-terse code is
     # never dropped by it.
     desc_text = cand.descriptor
@@ -122,7 +122,7 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
     if fact.kind is FactKind.DIAGNOSIS:
         idx = source.index_codes(fact.description, fact.system)
         # Trust the Index only for an UNAMBIGUOUS single-code mapping (the clean
-        # authoritative wins, e.g. onychomycosis -> B35.1). A multi-code result is
+        # authoritative wins, an unambiguous single code). A multi-code result is
         # a laterality family OR Index noise; either way defer to the embedding +
         # structured path, which disambiguates by documented evidence. This makes
         # the deterministic Index path safe against parse noise.
@@ -133,7 +133,7 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
                 if line.resolved:
                     return line
         # SECOND authoritative layer: the SNOMED CT -> ICD-10-CM map (long-tail
-        # eponyms/synonyms the ICD Index lacks, e.g. "Morton's neuroma"). Same
+        # eponyms/synonyms the ICD Index lacks). Same
         # single-code trust rule; no-op until the map is ingested (needs UMLS).
         snomed = source.snomed_codes(fact.description, fact.system)
         if len(snomed) == 1:
@@ -170,9 +170,10 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
                     return line
 
         # AUTHORITATIVE FIRST: the AMA CPT Alphabetic Index (term -> code), the true
-        # analog of the ICD Index. This is what resolves 'tailor's bunion osteotomy
-        # -> 28308' where descriptor/embedding cannot ('fifth' vs 'other than first
-        # metatarsal'). Empty until the licensed Index file is ingested (see
+        # analog of the ICD Index. This is what resolves a documented procedure
+        # phrase where descriptor/embedding cannot (a note's specific value vs a
+        # descriptor's 'other than <a different value>'). Empty until the licensed
+        # Index file is ingested (see
         # data_access.cpt_index_codes / tools/parse_cpt_index.py), so it is a no-op
         # that degrades gracefully to the descriptor index + embedding below.
         cidx = source.cpt_index_codes(fact.description, fact.system)
@@ -241,7 +242,7 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
     # procedures/imaging AND to DIAGNOSES that reached the embedding fallback — an
     # ICD Index / SNOMED hit already returned deterministically above, so this only
     # verifies the UNGROUNDED embedding picks (the ones that were confidently wrong,
-    # e.g. an 'infective bursitis' code for a non-infective condition). Runs even on
+    # e.g. a code asserting a qualifier the documentation does not support). Runs even on
     # an empty recall pool, since a validated proposal can rescue a missed concept.
     if llm is not None and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING,
                                          FactKind.DIAGNOSIS):
@@ -321,7 +322,7 @@ def _candidate_from_code(code: str, source: CodeSource) -> CandidateCode:
 
 def _authoritative_pool(code: str, source: CodeSource) -> list[CandidateCode]:
     """Expand an authoritative code to its billable LEAVES — a leaf stays itself,
-    a category (e.g. M20.4-) becomes its children (M20.40/41/42) — so the
+    a category becomes its more-specific billable children — so the
     structured decision can pick the specific code by documented laterality."""
     return [_candidate_from_code(c, source) for c in source.leaf_codes(code, "icd10")]
 

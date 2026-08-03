@@ -3,8 +3,8 @@
 This is the permanent fix for the terse-descriptor / eponym recall gap. The
 ICD-10-CM Alphabetic Index (published by NCHS/CMS, parsed into
 data/codes/icd10cm_index_terms.json by tools/parse_icd10cm_index.py) is the
-AUTHORITATIVE map from clinician vocabulary — "onychomycosis", "Morton's
-neuroma", eponyms, lay terms — to codes. It is exactly the knowledge an
+AUTHORITATIVE map from clinician vocabulary — eponyms, lay terms, abbreviations,
+synonyms — to codes. It is exactly the knowledge an
 embedding only approximates. We look a diagnosis up here FIRST, deterministically
 and with provenance; the embedding index is only the fallback for phrasings the
 Index does not carry.
@@ -24,7 +24,7 @@ def _norm(s: str) -> str:
 
 def _sing(tok: str) -> str:
     """Light singularization so plural note vocabulary matches Index terms
-    ('toenails'->'toenail', 'lesions'->'lesion'). Conservative: only trims a
+    ('words'->'word', 'boxes'->'box'). Conservative: only trims a
     trailing 's' on longer words."""
     if len(tok) > 4 and tok.endswith("es") and tok[-3] in "sxzo":
         return tok[:-2]
@@ -42,12 +42,12 @@ def _dot(code: str) -> str:
 class TerminologyIndex:
     """Inverts the authoritative {code: [index terms]} into term→codes lookups:
     an exact normalized-term map, and an order-independent token-set map that
-    handles the Index's inverted phrasing ('Neuroma, Morton's') against a note's
-    natural phrasing ('Morton's neuroma')."""
+    handles the Index's inverted phrasing ('Entity, qualifying-term') against a
+    note's natural phrasing ('qualifying-term entity')."""
 
     def __init__(self, terms_by_code: dict[str, list[str]]):
         self._exact: dict[str, set[str]] = {}
-        self._despaced: dict[str, set[str]] = {}   # 'hammer toe' <-> 'hammertoe'
+        self._despaced: dict[str, set[str]] = {}   # 'two words' <-> 'twowords'
         self._byset: dict[frozenset[str], set[str]] = {}   # order + plural independent
         for code, terms in terms_by_code.items():
             dotted = _dot(code)

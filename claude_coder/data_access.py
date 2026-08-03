@@ -81,7 +81,7 @@ class AuthoritativeSource:
     # ships several parallel descriptors per code (full clinical, medium, and the
     # plain-language 'consumer' descriptor); using them ALL gives the deterministic
     # matcher more authoritative surface — e.g. the consumer wording distinguishes
-    # an "osteotomy" (cutting/reshaping bone) from an "ostectomy" (removing bone),
+    # one act from a similarly-worded but clinically different act,
     # which the terse clinical descriptor alone blurs. These are real authoritative
     # fields (never the walled-off, llm-generated synonym retrieval aid).
     _DESC_TIERS = ("long_description", "medium_description",
@@ -141,8 +141,8 @@ class AuthoritativeSource:
     def snomed_codes(self, description: str, system: str) -> set[str]:
         """Long-tail authoritative term->ICD-10-CM via the SNOMED CT -> ICD-10-CM
         map (NLM/UMLS): the comprehensive clinical-synonym/eponym layer that
-        resolves phrasings the ICD Alphabetic Index does not carry (e.g. 'Morton's
-        neuroma'). Fail-safe: empty when the map file is absent — it needs a (free)
+        resolves long-tail eponym/synonym phrasings the ICD Alphabetic Index does
+        not carry. Fail-safe: empty when the map file is absent — it needs a (free)
         UMLS license to build; see tools/build_snomed_icd10_map.py."""
         if system != "icd10":
             return set()
@@ -155,7 +155,7 @@ class AuthoritativeSource:
                     term_to_codes = json.load(fh).get("terms", {})
                 # Invert term->codes into code->terms and reuse the SAME robust
                 # matcher as the ICD Index (exact / compound / token-set + plural)
-                # so variant phrasings ('Morton neuroma' vs 'Morton's neuroma') hit.
+                # so variant phrasings (possessive / plural / word order) hit.
                 inv: dict[str, list[str]] = {}
                 for term, codes in term_to_codes.items():
                     for c in codes:
@@ -171,9 +171,9 @@ class AuthoritativeSource:
     def cpt_index_codes(self, description: str, system: str) -> set[str]:
         """AUTHORITATIVE procedure term -> CPT code, via the AMA CPT Alphabetic
         Index (the CPT-axis analog of the NCHS ICD Alphabetic Index). This is the
-        real term->code map — 'tailor's bunion / fifth metatarsal osteotomy' -> the
+        real term->code map — a documented procedure phrase -> the
         code — that no descriptor/embedding heuristic can reproduce (a note's
-        'fifth metatarsal' vs a descriptor's 'other than first metatarsal').
+        specific value vs a descriptor phrased as 'other than <a different value>').
 
         Source: data/codes/cpt_index_terms.json, prepared by tools/parse_cpt_index.py
         from the LICENSED AMA CPT Link 'Index file'. Fail-safe: empty set until that
@@ -250,7 +250,7 @@ class AuthoritativeSource:
     def drug_index_codes(self, description: str, system: str) -> set[str]:
         """AUTHORITATIVE drug NAME -> HCPCS code, via the CMS Table of Drugs &
         Biologicals (public-domain; prepared by tools/build_hcpcs_drug_table.py).
-        The name->code map for J/A/Q drug codes — 'ketorolac tromethamine' -> its
+        The name->code map for J/A/Q drug codes — a documented drug name -> its
         code — the drug analog of the ICD/CPT alphabetic indexes. Fail-safe empty
         until the table is prepared. HCPCS only."""
         if system != "hcpcs":
@@ -344,7 +344,8 @@ class AuthoritativeSource:
     def leaf_codes(self, stem: str, system: str) -> set[str]:
         """The billable code(s) at/under a code stem: the code itself if it is a
         billable leaf, otherwise its more-specific billable children — so a
-        category the Index returns (e.g. M20.4-) becomes its leaves (M20.40/41/42),
+        category the Index returns (e.g. a 4-char category) becomes its leaves (its
+        5+-char billable children),
         which the resolver then disambiguates by documented laterality."""
         table = getattr(self._reference(), system, {})
         undot = str(stem).replace(".", "").upper()

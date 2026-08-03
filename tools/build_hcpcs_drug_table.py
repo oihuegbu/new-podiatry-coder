@@ -2,7 +2,7 @@
 """Prepare the HCPCS drug/biological index -> data/codes/hcpcs_drug_table.json.
 
 The authoritative CMS "Table of Drugs and Biologicals" maps a drug NAME to its
-HCPCS code and per-unit DOSAGE (e.g. 'ketorolac tromethamine, per 15 mg' -> the
+HCPCS code and per-unit DOSAGE (e.g. a drug name with a 'per N mg' dose -> the
 code, unit=15 mg). CMS HCPCS Level II is PUBLIC-DOMAIN / free (unlike AMA CPT), so
 this is fully automatable.
 

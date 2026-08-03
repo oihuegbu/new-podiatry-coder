@@ -24,7 +24,7 @@ Link column order:
   - MODIFIER/SUBTERM cols  : header contains 'modif' | 'subterm' | 'sub' | 'level'
   - CODE column           : header contains 'code' | 'range' | 'cpt'
 Each row's phrase = main term + its modifiers; the code cell may be a single
-code, a range ('28306-28309'), or a list ('28306, 28308') — all handled.
+code, a range ('NNNNN-NNNNN'), or a list ('NNNNN, NNNNN') — all handled.
 
 NOTE: validate the detected columns against your actual CPT Link Index file
 (print-summary at the end reports the mapping and counts); adjust the header

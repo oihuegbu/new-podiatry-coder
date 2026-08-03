@@ -1,89 +1,103 @@
 #!/usr/bin/env python3
-"""Retrieval recall@k benchmark — the measurement the RAG layer never had.
+"""Retrieval recall@k + MRR benchmark — DATA-DERIVED, no hardcoded codes/terms/scenarios.
 
-Recall is the retriever's job: if the correct code is not in the candidates,
-no downstream layer can code it (measured: the Haglund ostectomy 28118 was
-never retrieved, so it was never coded). This harness runs the LIVE hybrid
-store over a curated set of (clinical phrase -> expected code) probes that
-exercise the vocabulary-mismatch cases the embedding enrichment targets, and
-reports recall@k per code system.
+Recall is the retriever's job: if the correct code is not in the candidates, no
+downstream layer can code it. This harness measures recall WITHOUT a hand-written
+probe list — every probe (query + expected code) is DERIVED at runtime from the
+authoritative, provenance-tagged clinician-synonym layers already in the repo
+(data/codes/*_synonyms.json). For a seeded random sample of codes that carry a
+distinctive synonym, one of that code's OWN synonym terms becomes the query and we
+check whether retrieval returns that code (recall@k) and at what rank (MRR).
 
-The probes are deliberately phrased the way a NOTE reads (surgeon/clinician
-vocabulary, eponyms), NOT the way the official descriptor reads — that gap is
-exactly what recall must bridge. Codes here are TEST EXPECTATIONS, not coding
-logic (this file makes no claim decision), the same way benchmark gold files
-carry codes.
+Because the ground truth comes from the data, this tests ANY code, scales to
+thousands of cases, self-updates when the code/synonym sets change, and contains no
+medical code literal, condition, or eponym anywhere in the file.
 
 Needs the built Qdrant index — run in-container on the instance:
   docker compose run --rm --no-deps -e PYTHONPATH=/app app \
-      python tools/recall_benchmark.py [--top-k N]
+      python tools/recall_benchmark.py [--per-system 300] [--top-k 20] [--seed 13]
 """
 import argparse
+import json
+import random
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# (clinical phrase as a note would write it, expected code, code_system).
-# Deliberately note-vocabulary / eponym phrasing — the gap recall must bridge.
-PROBES = [
-    ("retrocalcaneal exostectomy, Haglund resection of the calcaneus",
-     "28118", "cpt"),
-    ("removal of prominent heel bone", "28118", "cpt"),
-    ("Haglund resection", "28118", "cpt"),                 # pure eponym
-    ("Achilles tendon debridement with reattachment using suture anchors",
-     "27654", "cpt"),
-    ("bunionette correction, fifth metatarsal head resection", "28110", "cpt"),
-    ("hammertoe correction with proximal interphalangeal arthrodesis",
-     "28285", "cpt"),
-    ("Morton's neuroma excision, intermetatarsal nerve", "28080", "cpt"),
-    ("Haglund's deformity of the right heel", "M77.31", "icd10"),
-    ("pump bump of the heel", "M77.31", "icd10"),          # eponym/lay term
-    ("hallux valgus, bunion of the great toe", "M20.11", "icd10"),
-    ("plantar fasciitis", "M72.2", "icd10"),
-    ("onychomycosis of the toenail", "B35.1", "icd10"),
-    ("diabetic foot ulcer of the heel", "L97.4", "icd10"),
-    ("compression burn garment, bodysuit", "A6501", "hcpcs"),
-    ("therapeutic diabetic shoe, custom molded", "A5501", "hcpcs"),
-]
+from app.core.config import DATA_DIR
+
+# system -> the provenance-tagged synonym layer that supplies queries + ground truth.
+SYSTEM_SYNONYMS = {
+    "cpt": "cpt_synonyms.json",
+    "hcpcs": "hcpcs_synonyms.json",
+    "icd10": "icd10_synonyms.json",
+}
+
+
+def _norm(code) -> str:
+    return str(code or "").replace(".", "").upper()
+
+
+def _load_terms(filename: str) -> dict:
+    path = DATA_DIR / "codes" / filename
+    if not path.exists():
+        return {}
+    try:
+        return json.load(open(path)).get("terms", {}) or {}
+    except Exception:
+        return {}
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--top-k", type=int, default=None)
+    ap.add_argument("--per-system", type=int, default=300,
+                    help="random codes sampled per system (capped at available)")
+    ap.add_argument("--top-k", type=int, default=20)
+    ap.add_argument("--seed", type=int, default=13, help="reproducible sample")
     args = ap.parse_args()
 
     from app.rag.vector_store import MedicalCodeVectorStore
     store = MedicalCodeVectorStore()
     store.build_or_load()
+    rng = random.Random(args.seed)
 
-    def _norm(c):
-        return str(c or "").replace(".", "").upper()
-
-    by_system: dict[str, list[tuple[bool, float]]] = {}
-    print(f"\nRecall@k + MRR benchmark (top_k={args.top_k or 'default'})\n"
-          + "-" * 62)
-    for phrase, expected, cs in PROBES:
-        hits = store.search(phrase, cs, top_k=args.top_k)
-        rank = next((i + 1 for i, h in enumerate(hits)
-                     if _norm(h.get("code")) == _norm(expected)), None)
-        found = rank is not None
-        rr = 1.0 / rank if rank else 0.0
-        by_system.setdefault(cs, []).append((found, rr))
-        mark = "✅" if found else "❌"
-        print(f"  {mark} [{cs}] {expected:<8} rank={str(rank):<4} «{phrase[:48]}»")
-
-    print("-" * 62)
-    allv = [v for vs in by_system.values() for v in vs]
-
-    def _report(label, rows):
-        r = sum(f for f, _ in rows) / len(rows)
-        mrr = sum(rr for _, rr in rows) / len(rows)
-        print(f"  {label:<14}: recall@k {sum(f for f,_ in rows)}/{len(rows)} "
-              f"= {r:.0%}   MRR = {mrr:.3f}")
-    for cs, rows in sorted(by_system.items()):
-        _report(cs, rows)
-    _report("TOTAL", allv)
+    print(f"\nData-derived recall@{args.top_k} + MRR "
+          f"(sample {args.per_system}/system, seed {args.seed})\n" + "-" * 62)
+    grand_hits = grand_n = 0
+    grand_rr = 0.0
+    for cs, fname in SYSTEM_SYNONYMS.items():
+        terms = _load_terms(fname)
+        pool = [c for c, syns in terms.items() if syns]   # codes with a distinctive synonym
+        if not pool:
+            print(f"  {cs:6}: no synonym data — skipped")
+            continue
+        sample = rng.sample(pool, min(args.per_system, len(pool)))
+        hits = n = 0
+        rr = 0.0
+        worst = []
+        for code in sample:
+            query = rng.choice(terms[code])               # a synonym for THIS code
+            results = store.search(query, cs, top_k=args.top_k)
+            rank = next((i + 1 for i, h in enumerate(results)
+                         if _norm(h.get("code")) == _norm(code)), None)
+            n += 1
+            if rank:
+                hits += 1
+                rr += 1.0 / rank
+            elif len(worst) < 3:
+                worst.append((code, query, rank))
+        print(f"  {cs:6}: recall@{args.top_k} {hits}/{n} = {hits/n:.0%}   "
+              f"MRR {rr/n:.3f}")
+        for code, query, rank in worst:
+            print(f"           ↳ rank={rank} «{query[:44]}»")
+        grand_hits += hits
+        grand_n += n
+        grand_rr += rr
+    if grand_n:
+        print("-" * 62)
+        print(f"  {'TOTAL':6}: recall@{args.top_k} {grand_hits}/{grand_n} = "
+              f"{grand_hits/grand_n:.0%}   MRR {grand_rr/grand_n:.3f}")
     return 0
 
 

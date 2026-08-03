@@ -121,9 +121,9 @@ _COUNT_RANGE = [
 
 
 def count_range(descriptor: str) -> tuple[int, int | None] | None:
-    """A quantity RANGE the descriptor covers as one unit, e.g. '2 to 4 lesions'
+    """A quantity RANGE the descriptor covers as one unit, e.g. '2 to 4 items'
     -> (2, 4), 'up to 4' -> (1, 4), 'N or more' -> (N, None). Parsed from the
-    descriptor — this is how 'one unit for 2-4 lesions' is known without a code
+    descriptor — this is how 'one unit for 2-4 items' is known without a code
     list."""
     d = re.sub(r"\s+", " ", descriptor.lower())
     for rx in _COUNT_RANGE:
@@ -141,8 +141,8 @@ def count_range(descriptor: str) -> tuple[int, int | None] | None:
 
 def billing_units(documented_count: int, descriptor: str) -> int:
     """Billing UNITS for a line — not the raw documented count. A descriptor
-    whose quantity RANGE covers the count is a single unit (e.g. a '2-4 lesions'
-    code billed once for 2 lesions); an 'each'/'per' descriptor bills per item;
+    whose quantity RANGE covers the count is a single unit (e.g. a '2-4 items'
+    code billed once for 2 items); an 'each'/'per' descriptor bills per item;
     otherwise a single unit. Purely descriptor-driven, so it self-updates."""
     n = max(1, int(documented_count or 1))
     rng = count_range(descriptor)
