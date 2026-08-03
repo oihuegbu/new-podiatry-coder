@@ -54,19 +54,23 @@ the failure is repeatability itself (the unanimity loop reprocesses
 holdouts end to end) — never to re-ask the same question hoping for a
 luckier answer.
 
-Every note runs **3 independent times** (`CONSISTENCY_RUNS=3`, the default):
+Every note starts with **two independent providers** in adaptive mode
+(`CONSISTENCY_MODE=adaptive`, `CONSISTENCY_RUNS=3` maximum):
 
 1. **Unanimous on all billing arrays** (ICD/CPT/HCPCS codes, primary/secondary
    types, modifiers, units) → eligible for auto-submission. The deterministic
    layers validated the claim; repeatability confirms no decision was a
-   knife-edge draw. SNOMED variance is recorded but never gates routing (it
+   knife-edge draw. A third opinion is not spent when both providers agree.
+   SNOMED variance is recorded but never gates routing (it
    doesn't appear on a CMS-1500).
 2. **Any billing disagreement** → review is **deferred, never immediate**.
    The saved result embeds the full per-code disagreement report (present in
-   1/3 runs, modifiers flipped across runs, units differ, ...) but stays off
+   1/2 or 1/3 runs, modifiers flipped across runs, units differ, ...) but stays off
    the human queue while automation still has moves to make: the post-batch
    growth loop (below) gets its shot first, and only what survives it is
-   routed to REVIEW. The human is the tiebreaker — never the vote: the saved
+   routed to REVIEW. A disagreement first triggers the remaining third run,
+   then deterministic replay and authority-grounded adjudication. The human
+   is the final unresolved-residue handler — never the vote: the saved
    result is one coherent run (the majority-agreeing one), not a synthetic
    claim assembled from per-code frequencies.
 3. **Self-deploying deterministic layers** — the growth loop that runs

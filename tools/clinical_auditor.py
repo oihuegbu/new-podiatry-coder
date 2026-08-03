@@ -950,7 +950,8 @@ def audit_batch(results_dir: Path, docs: list[str] | None = None,
             from app.release.claim_readiness import refresh_release_artifacts
             refresh_release_artifacts(result)
             if json.dumps(result, sort_keys=True, default=str) != before:
-                f.write_text(json.dumps(result, indent=2, default=str))
+                from app.validation.run_store import atomic_write_json
+                atomic_write_json(f, result)
             stats["skipped"] += 1
             stats["docs"][doc] = f"unchanged since last audit ({prior.get('verdict')})"
             continue
@@ -961,7 +962,8 @@ def audit_batch(results_dir: Path, docs: list[str] | None = None,
             stats["docs"][doc] = "no note text available — not audited"
             continue
         block = audit_result(doc, result, note, rep)
-        f.write_text(json.dumps(result, indent=2, default=str))
+        from app.validation.run_store import atomic_write_json
+        atomic_write_json(f, result)
         stats["audited"] += 1
         stats[block["verdict"]] += 1
         n_interp = len([m for m in material_corrections_of(result)

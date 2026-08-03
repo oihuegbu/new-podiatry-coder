@@ -727,7 +727,10 @@ def adjudicate(results_dir: Path, docs: list[str] | None = None,
                 arrays, report = rep.replay_arrays(a, note)
                 rebuilt.append(_rebuild_run(a, arrays, report,
                                             scrubber, note))
-            new_report = compare_runs(rebuilt, store=rep.store)
+            from app.validation.run_store import inherit_run_metadata
+            new_report = inherit_run_metadata(
+                compare_runs(rebuilt, store=rep.store),
+                main.get("consistency"))
         except Exception as exc:
             stats["failed_replay"] += 1
             stats["docs"][doc] = f"replay failed: {exc}"
@@ -814,7 +817,8 @@ def adjudicate(results_dir: Path, docs: list[str] | None = None,
                 f"overridden by replay layers — held at REVIEW, "
                 f"not recorded")
 
-        f.write_text(json.dumps(payload, indent=2, default=str))
+        from app.validation.run_store import atomic_write_json
+        atomic_write_json(f, payload)
         stats["adjudicated"] += 1
         disp = payload.get("final_disposition", "")
         stats["docs"][doc] = f"adjudicated (disposition {disp})"
@@ -1012,7 +1016,8 @@ def recheck_survival(results_dir: Path, docs: list[str] | None = None,
                               f"observed {c['observed']}"
                               for c in conflicts]
         _apply_override_hold(main, conflicts)
-        f.write_text(json.dumps(main, indent=2, default=str))
+        from app.validation.run_store import atomic_write_json
+        atomic_write_json(f, main)
         conflicted_docs.append(doc)
         logger.warning(f"Survival recheck {doc}: {len(conflicts)} "
                        f"overridden decision(s) — held at REVIEW")
@@ -1932,7 +1937,10 @@ def adjudicate_audit(results_dir: Path, docs: list[str] | None = None,
                 rebuilt.append(_rebuild_run(a, arrays, report,
                                             scrubber, note))
             if len(rebuilt) >= 2:
-                new_report = compare_runs(rebuilt, store=rep.store)
+                from app.validation.run_store import inherit_run_metadata
+                new_report = inherit_run_metadata(
+                    compare_runs(rebuilt, store=rep.store),
+                    main.get("consistency"))
             else:
                 new_report = main.get("consistency") or {}
         except Exception as exc:
@@ -2035,7 +2043,8 @@ def adjudicate_audit(results_dir: Path, docs: list[str] | None = None,
                 list(payload.get("auto_coding_review_reasons") or [])
                 + [f"[audit_adjudication/residual] {r}" for r in residual])
 
-        f.write_text(json.dumps(payload, indent=2, default=str))
+        from app.validation.run_store import atomic_write_json
+        atomic_write_json(f, payload)
         # Observable-emission verdicts record in EVERY outcome: they
         # cannot be realized mechanically (the measured surface recomputes
         # its findings, so a 'suppress' verdict only materializes once

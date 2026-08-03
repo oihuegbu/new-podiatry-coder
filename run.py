@@ -84,9 +84,14 @@ def main():
     parser.add_argument("--no-cache", action="store_true", help="Skip cache lookup and force fresh processing")
     parser.add_argument("--setup-only", action="store_true", help="Load/build all dependencies and exit — process no notes")
     parser.add_argument("--consistency", type=int,
-                        default=int(os.getenv("CONSISTENCY_RUNS", "1")),
-                        help="Run each note N times and flag non-unanimous codes "
-                             "for review (self-consistency; forces --no-cache)")
+                        default=int(os.getenv("CONSISTENCY_RUNS", "3")),
+                        help="Maximum independent runs per note. Adaptive mode "
+                             "starts with one run per provider and consumes the "
+                             "remaining capacity only on disagreement.")
+    parser.add_argument("--consistency-mode", choices=("adaptive", "fixed"),
+                        default=os.getenv("CONSISTENCY_MODE", "adaptive").lower(),
+                        help="adaptive = two-provider first pass with conditional "
+                             "escalation; fixed = always execute all configured runs")
     parser.add_argument("--consistency-workers", type=int,
                         default=int(os.getenv("CONSISTENCY_WORKERS", "1")),
                         help="Run a note's N consistency runs concurrently in this "
@@ -123,14 +128,18 @@ def main():
     logger.info(f"Autonomy scope: {scope_status}")
 
     from app.core.model_profiles import (
-        autonomous_execution_errors, profiles_for_runs,
+        autonomous_execution_errors, consistency_execution_plan,
     )
-    execution_profiles = profiles_for_runs(args.consistency)
-    logger.info("Coding execution profiles: " + ", ".join(
+    execution_profiles, initial_run_count = consistency_execution_plan(
+        args.consistency, args.consistency_mode)
+    logger.info("Coding execution profiles (initial first): " + ", ".join(
         f"{profile.provider}:{profile.model}" for profile in execution_profiles))
+    logger.info(
+        f"Consistency strategy: {args.consistency_mode}; "
+        f"initial={initial_run_count}; maximum={args.consistency}")
     if scope_status.get("enabled"):
         execution_errors = autonomous_execution_errors(
-            execution_profiles, args.consistency)
+            execution_profiles, initial_run_count)
         if execution_errors:
             raise RuntimeError(
                 "autonomous execution preflight failed: "
@@ -221,7 +230,7 @@ def main():
     results = []
     deferred_docs: list[str] = []  # non-unanimous, awaiting finalization
 
-    # Cross-note parallelism: every note's N runs are submitted to the pool
+    # Cross-note parallelism: every note's initial runs are submitted to the pool
     # up front, so the workers drain one batch-wide queue instead of
     # parallelizing only within a single note (which capped useful workers
     # at N and left the batch note-sequential). With W workers, ~W/N notes
@@ -237,10 +246,12 @@ def main():
                     _consistency_worker_run,
                     (str(pdf_path), i + 1, args.consistency,
                      execution_profiles[i].model_dump()))
-                for i in range(args.consistency)
+                for i in range(initial_run_count)
             ]
 
     for pdf_path in note_files:
+        new_run_files: list[str] = []
+        main_committed = False
         try:
             if args.consistency > 1:
                 # Cross-provider consistency: N independent uncached runs.
@@ -249,26 +260,66 @@ def main():
                 # provider schedule adjudicates the evidence-bound residue.
                 # Only an unresolved/abstained split reaches human review.
                 from app.validation.consistency import (
-                    compare_runs, select_canonical, annotate_result)
+                    adaptive_escalation_indices, adaptive_escalation_reasons,
+                    annotate_result, compare_runs, execution_strategy_report,
+                    select_canonical)
                 if pool is not None:
                     dumps = [p.get() for p in jobs[pdf_path]]
                 else:
                     dumps = []
-                    for i in range(args.consistency):
+                    for i in range(initial_run_count):
                         logger.info(f"  [CONSISTENCY] run {i + 1}/{args.consistency}")
                         from app.core.model_profiles import use_execution_profile
                         with use_execution_profile(execution_profiles[i]):
                             r = pipeline.process_note(pdf_path, use_cache=False)
                         dumps.append(r.model_dump())
-                # Persist every independent run — flip forensics need the
-                # losing runs' validation traces, and only the canonical
-                # payload survives otherwise.
-                runs_dir = OUTPUT_DIR / "consistency_runs"
-                runs_dir.mkdir(parents=True, exist_ok=True)
-                for i, dump in enumerate(dumps, 1):
-                    with open(runs_dir / f"{pdf_path.stem}_run{i}.json", "w") as rf:
-                        json.dump(dump, rf, indent=2, default=str)
+                initial_report = compare_runs(
+                    dumps, store=pipeline.compliance_store)
+                escalation_reasons = (
+                    adaptive_escalation_reasons(initial_report)
+                    if args.consistency_mode == "adaptive" else [])
+                additional_indices = adaptive_escalation_indices(
+                    mode=args.consistency_mode,
+                    initial_runs=initial_run_count,
+                    maximum_runs=args.consistency,
+                    initial_report=initial_report)
+                escalation_failures = []
+                for i in additional_indices:
+                    logger.warning(
+                        f"  [CONSISTENCY] {pdf_path.stem}: escalating to run "
+                        f"{i + 1}/{args.consistency} ({', '.join(escalation_reasons)})")
+                    try:
+                        if pool is not None:
+                            extra = pool.apply_async(
+                                _consistency_worker_run,
+                                (str(pdf_path), i + 1, args.consistency,
+                                 execution_profiles[i].model_dump())).get()
+                        else:
+                            from app.core.model_profiles import use_execution_profile
+                            with use_execution_profile(execution_profiles[i]):
+                                result = pipeline.process_note(
+                                    pdf_path, use_cache=False)
+                            extra = result.model_dump()
+                        dumps.append(extra)
+                    except Exception as exc:
+                        # The two-provider split remains valid evidence and is
+                        # safer to retain for deterministic reconciliation than
+                        # to erase because an optional tie-breaking opinion was
+                        # temporarily unavailable. Release remains fail-closed.
+                        failure = f"run {i + 1}: {type(exc).__name__}: {exc}"
+                        escalation_failures.append(failure)
+                        logger.error(
+                            f"  [CONSISTENCY] escalation failed for "
+                            f"{pdf_path.stem}: {failure}")
+
                 report = compare_runs(dumps, store=pipeline.compliance_store)
+                report["execution_strategy"] = execution_strategy_report(
+                    mode=args.consistency_mode,
+                    initial_runs=initial_run_count,
+                    maximum_runs=args.consistency,
+                    executed_runs=len(dumps),
+                    escalation_reasons=escalation_reasons,
+                    escalation_failures=escalation_failures)
                 idx = select_canonical(dumps)
                 # A disagreement at save time is not yet a human's problem:
                 # the post-batch actuation may mint a rule and the replay
@@ -277,6 +328,14 @@ def main():
                 # actuation+reconcile pass (below) — or by the unanimity
                 # loop's own end-of-loop finalization when it is driving.
                 payload = annotate_result(dumps[idx], report, route=False)
+                # Persist every independent run before the main result. The
+                # main result atomically commits the unique generation as its
+                # manifest; stale files can no longer join a later run set.
+                from app.validation.run_store import persist_runs
+                new_run_files = persist_runs(
+                    OUTPUT_DIR, pdf_path.stem, dumps)
+                report["run_files"] = new_run_files
+                payload["consistency"] = report
                 if not report["unanimous"]:
                     deferred_docs.append(pdf_path.stem)
                 n_billing = sum(1 for d in report["disagreements"]
@@ -299,11 +358,26 @@ def main():
             results.append(payload)
 
             output_file = OUTPUT_DIR / f"{pdf_path.stem}_results.json"
-            with open(output_file, "w") as f:
-                json.dump(payload, f, indent=2, default=str)
+            from app.validation.run_store import atomic_write_json
+            atomic_write_json(output_file, payload)
+            main_committed = True
+            if new_run_files:
+                from app.validation.run_store import prune_obsolete_runs
+                try:
+                    prune_obsolete_runs(
+                        OUTPUT_DIR, pdf_path.stem, new_run_files)
+                except Exception as exc:
+                    # The manifest makes old generations inert. Cleanup is
+                    # deliberately non-transactional after the durable commit.
+                    logger.warning(
+                        f"  [CONSISTENCY] could not prune old run files for "
+                        f"{pdf_path.stem}: {exc}")
             logger.info(f"  Saved → {output_file.name}")
 
         except Exception as e:
+            if new_run_files and not main_committed:
+                from app.validation.run_store import discard_run_files
+                discard_run_files(OUTPUT_DIR, new_run_files)
             logger.error(f"FAILED: {pdf_path.name} — {e}")
             import traceback
             traceback.print_exc()
@@ -326,8 +400,8 @@ def main():
                 combined_payloads.append(json.loads(f_path.read_text()))
             except Exception as exc:
                 logger.warning(f"  all_results: skipped unreadable {f_path.name} ({exc})")
-        with open(OUTPUT_DIR / "all_results.json", "w") as f:
-            json.dump(combined_payloads, f, indent=2, default=str)
+        from app.validation.run_store import atomic_write_json
+        atomic_write_json(OUTPUT_DIR / "all_results.json", combined_payloads)
 
     if results:
         _rebuild_all_results()

@@ -240,14 +240,8 @@ def _note_text_for(doc: str, results_dir: Path, runs: list[dict],
 
 
 def _load_runs(doc: str, results_dir: Path) -> list[dict]:
-    runs_dir = results_dir / "consistency_runs"
-    out = []
-    for i in range(1, 10):
-        f = runs_dir / f"{doc}_run{i}.json"
-        if not f.exists():
-            break
-        out.append(json.loads(f.read_text()))
-    return out
+    from app.validation.run_store import load_runs
+    return load_runs(doc, results_dir)
 
 
 def _load_main(doc: str, results_dir: Path) -> dict | None:

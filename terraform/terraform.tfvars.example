@@ -10,6 +10,9 @@ stedi_api_key     = ""
 # claude_model  = "claude-opus-4-8"
 # openai_model  = "gpt-5.6-sol"
 # openai_reasoning_effort = "high"
+# consistency_mode        = "adaptive"
+# consistency_runs        = 3
+# consistency_workers     = 4
 #
 # Adding an API key alone does not authorize PHI routing. Explicitly list each
 # approved provider and its execution profile after the applicable privacy,

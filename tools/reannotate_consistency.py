@@ -107,7 +107,8 @@ def main() -> None:
             action = "unchanged"  # already annotated under current rules
         counts[action] = counts.get(action, 0) + 1
         if action in ("downgraded", "rebuilt"):
-            f.write_text(json.dumps(updated, indent=2, default=str))
+            from app.validation.run_store import atomic_write_json
+            atomic_write_json(f, updated)
             tier = updated.get("auto_coding_tier")
             n_billing = len([d for d in updated["consistency"]["disagreements"]
                              if not d.get("advisory")])

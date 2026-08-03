@@ -232,7 +232,8 @@ def sweep(results_dir: Path, docs: list[str] | None = None,
             continue
         was_clean = _is_clean(result)
         enforce_coherence(result)
-        f.write_text(json.dumps(result, indent=2, default=str))
+        from app.validation.run_store import atomic_write_json
+        atomic_write_json(f, result)
         if was_clean:
             stats["held"] += 1
         logger.warning(f"Coherence {doc}: {len(violations)} "

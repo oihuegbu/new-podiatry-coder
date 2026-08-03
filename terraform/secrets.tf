@@ -24,6 +24,9 @@ resource "aws_secretsmanager_secret_version" "app_env" {
     AUTHORIZED_MODEL_PROVIDERS    = join(",", sort(tolist(var.authorized_model_providers)))
     CODING_EXECUTION_PROFILES     = length(var.coding_execution_profiles) > 0 ? jsonencode(var.coding_execution_profiles) : ""
     MIN_INDEPENDENT_MODEL_DOMAINS = tostring(var.min_independent_model_domains)
+    CONSISTENCY_MODE              = var.consistency_mode
+    CONSISTENCY_RUNS              = tostring(var.consistency_runs)
+    CONSISTENCY_WORKERS           = tostring(var.consistency_workers)
     CODER_ADJUDICATOR_MODEL       = var.coder_adjudicator_model
     CLINICAL_AUDITOR_MODEL        = var.clinical_auditor_model
     CLINICAL_AUDIT_PASSES         = "2"

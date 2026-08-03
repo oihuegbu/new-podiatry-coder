@@ -433,6 +433,53 @@ def compare_runs(runs: list[dict], store=None) -> dict:
     }
 
 
+def adaptive_escalation_reasons(report: dict) -> list[str]:
+    """Why an initial cross-provider comparison requires extra opinions.
+
+    No confidence threshold or majority vote is used. A third run is useful
+    only when the claim-facing outputs disagree or the independent-provider
+    contract is not proven by the persisted execution records.
+    """
+    reasons = []
+    if not report.get("unanimous"):
+        reasons.append("cross_provider_disagreement")
+    if not (report.get("model_independence") or {}).get("satisfied"):
+        reasons.append("model_independence_not_proven")
+    return reasons
+
+
+def adaptive_escalation_indices(*, mode: str, initial_runs: int,
+                                maximum_runs: int,
+                                initial_report: dict) -> list[int]:
+    """Zero-based scheduled-run indexes still needed after the first pass."""
+    if mode == "fixed" or initial_runs >= maximum_runs:
+        return []
+    if not adaptive_escalation_reasons(initial_report):
+        return []
+    return list(range(initial_runs, maximum_runs))
+
+
+def execution_strategy_report(*, mode: str, initial_runs: int,
+                              maximum_runs: int, executed_runs: int,
+                              escalation_reasons: list[str],
+                              escalation_failures: list[str] | None = None) -> dict:
+    additional = max(0, executed_runs - initial_runs)
+    failures = list(escalation_failures or [])
+    return {
+        "mode": mode,
+        "initial_runs": initial_runs,
+        "maximum_runs": maximum_runs,
+        "executed_runs": executed_runs,
+        "additional_runs": additional,
+        "escalation_required": bool(escalation_reasons),
+        "escalated": additional > 0,
+        "escalation_reasons": list(escalation_reasons),
+        "escalation_failures": failures,
+        "escalation_complete": (not escalation_reasons) or (
+            not failures and executed_runs == maximum_runs),
+    }
+
+
 def select_canonical(runs: list[dict]) -> int:
     """Index of the run that best agrees with the majority: for each BILLING
     (array, code) present in >= half the runs, a run scores +1 for carrying

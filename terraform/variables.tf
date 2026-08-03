@@ -118,6 +118,39 @@ variable "min_independent_model_domains" {
   }
 }
 
+variable "consistency_mode" {
+  description = "Consistency execution strategy: adaptive starts provider-diverse and escalates only on disagreement; fixed always consumes the maximum"
+  type        = string
+  default     = "adaptive"
+
+  validation {
+    condition     = contains(["adaptive", "fixed"], var.consistency_mode)
+    error_message = "consistency_mode must be adaptive or fixed."
+  }
+}
+
+variable "consistency_runs" {
+  description = "Maximum independent coding runs per note"
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.consistency_runs >= 1 && floor(var.consistency_runs) == var.consistency_runs
+    error_message = "consistency_runs must be a positive integer."
+  }
+}
+
+variable "consistency_workers" {
+  description = "Maximum worker processes used for independent coding runs"
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.consistency_workers >= 1 && floor(var.consistency_workers) == var.consistency_workers
+    error_message = "consistency_workers must be a positive integer."
+  }
+}
+
 variable "coder_adjudicator_model" {
   description = "Primary-provider model used for deterministic-dispute adjudication"
   type        = string

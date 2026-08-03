@@ -22,13 +22,16 @@ from app.compliance.refresh import runner as refresh_runner
 from app.core import config
 from app.core.model_profiles import (
     CodingExecutionProfile, autonomous_execution_errors, configured_profiles,
-    profiles_for_runs,
+    consistency_execution_plan, profiles_for_runs,
 )
 from app.models.schemas import ClinicalEntity
 from app.rag.retriever import CandidateRetriever
 from app.release.claim_readiness import _source_contract_errors
 from app.release.scope_bootstrap import ScopeBootstrapError, _scope_payload
-from app.validation.consistency import compare_runs
+from app.validation.consistency import (
+    adaptive_escalation_indices, adaptive_escalation_reasons, compare_runs,
+    execution_strategy_report,
+)
 from tools.build_terminology_pack import _pairs, materialize_pack
 
 
@@ -59,6 +62,33 @@ def test_explicit_authorized_profiles_are_scheduled_across_domains():
         scheduled = profiles_for_runs(3)
     assert [profile.provider for profile in scheduled] == [
         "claude", "openai", "claude"]
+
+
+def test_adaptive_plan_starts_cross_provider_and_reserves_primary_tiebreaker():
+    raw = [_profile("claude", "first-model"),
+           _profile("openai", "second-model")]
+    with patch.dict("os.environ", {
+            "AUTHORIZED_MODEL_PROVIDERS": "claude,openai",
+            "CODING_EXECUTION_PROFILES": json.dumps(raw)}), patch.object(
+                config, "LLM_PROVIDER", "claude"), patch.object(
+                config, "ANTHROPIC_API_KEY", "live-secret"), patch.object(
+                config, "OPENAI_API_KEY", "another-live-secret"):
+        scheduled, initial = consistency_execution_plan(3, "adaptive")
+    assert initial == 2
+    assert [profile.provider for profile in scheduled] == [
+        "claude", "openai", "claude"]
+
+
+def test_adaptive_plan_preserves_fixed_self_consistency_without_diversity():
+    raw = [_profile("claude", "first-model")]
+    with patch.dict("os.environ", {
+            "AUTHORIZED_MODEL_PROVIDERS": "claude",
+            "CODING_EXECUTION_PROFILES": json.dumps(raw)}), patch.object(
+                config, "ANTHROPIC_API_KEY", "live-secret"), patch.object(
+                config, "OPENAI_API_KEY", ""):
+        scheduled, initial = consistency_execution_plan(3, "adaptive")
+    assert initial == 3
+    assert [profile.provider for profile in scheduled] == ["claude"] * 3
 
 
 def test_enabled_autonomy_preflights_diversity_and_auditor_separation():
@@ -93,6 +123,46 @@ def test_consistency_requires_valid_profiles_from_multiple_domains():
     same_domain = [dict(shared, model_execution=_profile("claude", "first")),
                    dict(shared, model_execution=_profile("claude", "second"))]
     assert compare_runs(same_domain)["model_independence"]["satisfied"] is False
+
+
+def test_adaptive_escalation_is_driven_by_disagreement_or_independence():
+    shared = {"icd_codes": [], "cpt_codes": [], "hcpcs_codes": [],
+              "supporting_conditions": [], "snomed_codes": [],
+              "final_disposition": "CLEAN", "auto_coding_tier": "AUTO"}
+    agreeing = [dict(shared, model_execution=_profile("claude", "first")),
+                dict(shared, model_execution=_profile("openai", "second"))]
+    report = compare_runs(agreeing)
+    assert adaptive_escalation_reasons(report) == []
+    assert adaptive_escalation_indices(
+        mode="adaptive", initial_runs=2, maximum_runs=3,
+        initial_report=report) == []
+
+    split = [agreeing[0], dict(agreeing[1], cpt_codes=[{"code": "candidate"}])]
+    report = compare_runs(split)
+    assert adaptive_escalation_reasons(report) == [
+        "cross_provider_disagreement"]
+    assert adaptive_escalation_indices(
+        mode="adaptive", initial_runs=2, maximum_runs=3,
+        initial_report=report) == [2]
+
+    invalid = [agreeing[0], dict(shared, model_execution={})]
+    assert "model_independence_not_proven" in adaptive_escalation_reasons(
+        compare_runs(invalid))
+
+
+def test_execution_strategy_records_failed_optional_escalation():
+    strategy = execution_strategy_report(
+        mode="adaptive", initial_runs=2, maximum_runs=3, executed_runs=2,
+        escalation_reasons=["cross_provider_disagreement"],
+        escalation_failures=["run 3: unavailable"])
+    assert strategy["escalation_required"] is True
+    assert strategy["escalation_complete"] is False
+    assert strategy["executed_runs"] == 2
+    agreement = execution_strategy_report(
+        mode="adaptive", initial_runs=2, maximum_runs=3, executed_runs=2,
+        escalation_reasons=[])
+    assert agreement["escalation_complete"] is True
+    assert agreement["escalated"] is False
 
 
 def test_clinical_facts_bind_exact_evidence_and_retrieval_uses_only_verified():

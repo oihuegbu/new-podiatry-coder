@@ -185,7 +185,9 @@ def reconcile(results_dir: Path, docs: list[str] | None = None,
                 arrays, report = rep.replay_arrays(run, note)
                 rebuilt.append(_rebuild_run(run, arrays, report,
                                             scrubber, note))
-            new_report = compare_runs(rebuilt, store=rep.store)
+            from app.validation.run_store import inherit_run_metadata
+            new_report = inherit_run_metadata(
+                compare_runs(rebuilt, store=rep.store), cons)
         except Exception as exc:
             logger.warning(f"Reconcile {doc}: replay failed ({exc}) — "
                            f"left as-is")
@@ -202,7 +204,8 @@ def reconcile(results_dir: Path, docs: list[str] | None = None,
             "reason": "stored runs replayed through the updated rule pack "
                       "now produce identical claims",
         }
-        f.write_text(json.dumps(payload, indent=2, default=str))
+        from app.validation.run_store import atomic_write_json
+        atomic_write_json(f, payload)
         stats["reconciled"] += 1
         stats["docs"][doc] = "reconciled — unanimous under current pack"
         logger.info(f"Reconciled {doc}: replay under the current pack is "
@@ -225,7 +228,8 @@ def finalize_review_routing(results_dir: Path, docs: list[str]) -> int:
             if not report or report.get("unanimous"):
                 continue
             annotate_result(result, report, route=True)
-            f.write_text(json.dumps(result, indent=2, default=str))
+            from app.validation.run_store import atomic_write_json
+            atomic_write_json(f, result)
             routed += 1
             logger.info(f"Routed to REVIEW: {doc}")
         except Exception as exc:

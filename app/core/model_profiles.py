@@ -132,6 +132,55 @@ def profiles_for_runs(run_count: int) -> list[CodingExecutionProfile]:
     return [profiles[i % len(profiles)] for i in range(run_count)]
 
 
+def consistency_execution_plan(
+        maximum_runs: int, mode: str = "adaptive"
+        ) -> tuple[list[CodingExecutionProfile], int]:
+    """Return ``(profile_schedule, initial_run_count)`` for consistency.
+
+    Adaptive execution starts with the smallest provider-diverse set that can
+    satisfy the autonomous independence gate. Remaining capacity is ordered
+    primary-provider first and is consumed only after a disagreement. If the
+    configured credentials cannot span the required domains, retain the fixed
+    N-run behavior so manual/non-autonomous operation does not silently lose
+    its same-provider instability checks; the autonomy preflight still blocks.
+    """
+    if maximum_runs < 1:
+        raise ValueError("maximum_runs must be positive")
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode not in {"adaptive", "fixed"}:
+        raise ValueError("consistency mode must be adaptive or fixed")
+    if normalized_mode == "fixed" or maximum_runs == 1:
+        schedule = profiles_for_runs(maximum_runs)
+        return schedule, len(schedule)
+
+    profiles = configured_profiles()
+    required = config.MIN_INDEPENDENT_MODEL_DOMAINS
+    initial: list[CodingExecutionProfile] = []
+    seen_domains: set[str] = set()
+    for profile in profiles:
+        if profile.independence_domain in seen_domains:
+            continue
+        initial.append(profile)
+        seen_domains.add(profile.independence_domain)
+        if len(seen_domains) >= required:
+            break
+
+    if len(seen_domains) < required or len(initial) > maximum_runs:
+        schedule = profiles_for_runs(maximum_runs)
+        return schedule, len(schedule)
+
+    primary_first = sorted(
+        profiles,
+        key=lambda profile: profile.provider != config.LLM_PROVIDER,
+    )
+    schedule = list(initial)
+    index = 0
+    while len(schedule) < maximum_runs:
+        schedule.append(primary_first[index % len(primary_first)])
+        index += 1
+    return schedule, len(initial)
+
+
 def default_profile() -> CodingExecutionProfile:
     configured = configured_profiles()
     for profile in configured:
@@ -162,7 +211,9 @@ def autonomous_execution_errors(
     if run_count < config.MIN_INDEPENDENT_MODEL_DOMAINS:
         errors.append(
             "consistency run count is below the independent-domain requirement")
-    domains = {profile.independence_domain for profile in scheduled}
+    domains = {
+        profile.independence_domain for profile in scheduled[:run_count]
+    }
     if len(domains) < config.MIN_INDEPENDENT_MODEL_DOMAINS:
         errors.append(
             "configured coding profiles do not span enough authorized providers")

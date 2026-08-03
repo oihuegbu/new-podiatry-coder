@@ -139,7 +139,6 @@ def _verified_advisory_targets() -> dict[str, dict[tuple, bool]]:
 
 
 def scan(results_dir: Path, queue_path: Path = QUEUE_PATH) -> dict:
-    runs_dir = results_dir / "consistency_runs"
     classes: dict[str, dict] = {}
     if queue_path.exists():
         for line in queue_path.read_text().splitlines():
@@ -162,11 +161,8 @@ def scan(results_dir: Path, queue_path: Path = QUEUE_PATH) -> dict:
         if not billing:
             continue
         stats["docs_scanned"] += 1
-        runs = []
-        for i in range(1, (cons.get("runs") or 0) + 1):
-            rf = runs_dir / f"{doc}_run{i}.json"
-            if rf.exists():
-                runs.append(json.loads(rf.read_text()))
+        from app.validation.run_store import load_runs
+        runs = load_runs(doc, results_dir, result)
         note_text = _note_text_of(result) or next(
             (t for r in runs if (t := _note_text_of(r))), "")
 

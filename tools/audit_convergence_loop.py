@@ -144,6 +144,10 @@ def replay_scope(results_dir: Path, docs: list[str], rep) -> int:
                                             scrubber, note))
             new_report = (compare_runs(rebuilt, store=rep.store)
                           if len(rebuilt) >= 2 else None)
+            if new_report:
+                from app.validation.run_store import inherit_run_metadata
+                new_report = inherit_run_metadata(
+                    new_report, main.get("consistency"))
         except Exception as exc:
             logger.warning(f"Replay {doc} failed ({exc}) — left as-is")
             continue
@@ -180,7 +184,8 @@ def replay_scope(results_dir: Path, docs: list[str], rep) -> int:
                        "claim changed under a rule pack grown from "
                        "verified clinical-review findings"),
         }
-        f.write_text(json.dumps(payload, indent=2, default=str))
+        from app.validation.run_store import atomic_write_json
+        atomic_write_json(f, payload)
         changed += 1
         logger.info(f"Replayed {doc}: "
                     + ("observable emission" if advisory_only else "claim")
