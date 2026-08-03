@@ -422,7 +422,7 @@ class SectionApplicabilityTest(unittest.TestCase):
         from claude_coder.models import CodingResult, FactKind
         surgery = _line("SURG_X", FactKind.PROCEDURE, "Ostectomy, complete excision")
         anes = _line("ANES_X", FactKind.PROCEDURE,
-                     "Anesthesia for procedures on nerves of the leg", anes_attrs or {})
+                     "Anesthesia for procedures on nerves of a structure", anes_attrs or {})
         return CodingResult(encounter_id="e", date_of_service="2026-03-14",
                             lines=[surgery, anes]), anes
 
@@ -450,7 +450,7 @@ class SectionApplicabilityTest(unittest.TestCase):
                           evidence=[EvidenceSpan("regional block for anesthesia")])
         anes = ResolvedLine(fact=af, chosen=None, method=ResolutionMethod.ABSTAINED,
                             alternatives=[CandidateCode("ANESX", "cpt",
-                                          "Anesthesia for procedures on the leg", 0.8)])
+                                          "Anesthesia for procedures on a structure", 0.8)])
         r = CodingResult(encounter_id="e", date_of_service="2026-03-14",
                          lines=[surgery, anes])
         apply_section_applicability(r)
@@ -468,7 +468,7 @@ class SectionApplicabilityTest(unittest.TestCase):
                           evidence=[EvidenceSpan("tendon debridement")])
         esc = ResolvedLine(fact=sf, chosen=None, method=ResolutionMethod.ABSTAINED,
                            alternatives=[CandidateCode("SURGC", "cpt", "Tenolysis of a tendon", 0.8),
-                                         CandidateCode("ANESX", "cpt", "Anesthesia for procedures on the foot", 0.5)])
+                                         CandidateCode("ANESX", "cpt", "Anesthesia for procedures on a structure", 0.5)])
         r = CodingResult(encounter_id="e", date_of_service="2026-03-14",
                          lines=[surgery, esc])
         apply_section_applicability(r)

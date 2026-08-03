@@ -206,9 +206,9 @@ def apply_section_applicability(result: CodingResult) -> None:
     # which specific code the LLM happened to resolve. Signal: the BEST-ranked
     # candidate is the anesthesia section AND that section DOMINATES the candidate
     # set. The 'best + dominant' test matters because an anesthesia-section
-    # descriptor ('Anesthesia for procedures on the foot') is a semantic neighbour
-    # of ANY foot procedure and will appear incidentally among a surgical line's
-    # candidates — so mere presence is not enough; it must be the leading match.
+    # descriptor ('Anesthesia for procedures on <region>') is a semantic neighbour
+    # of any procedure in that region and will appear incidentally among a surgical
+    # line's candidates — so mere presence is not enough; it must be the leading match.
     for ln in result.lines:
         if ln.resolved or ln.excluded_reason or not ln.fact.billable:
             continue
