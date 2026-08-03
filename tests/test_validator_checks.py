@@ -853,6 +853,21 @@ def main():
                        {"code": "29515", "modifiers": ["RT", "LT"], "units": 1}])
         check("plain laterality does not rescue the splint",
               "29515" in s)
+        # The performed-service list may include the postoperative splint even
+        # when no separate application line was proposed. Record the service
+        # as integral so the later completeness invariant does not demand a
+        # bundled line.
+        documented_splint = "Posterior splint application after closure"
+        v.issues = []
+        major_only = [{"code": "28118", "modifiers": ["RT"], "units": 1}]
+        v._check_integral_immobilization(
+            major_only, [], [documented_splint])
+        v._check_procedure_completeness(
+            major_only, [], [documented_splint])
+        check("documented integral splint is accounted without a billed line",
+              any(i.category == "surgical_package" for i in v.issues)
+              and not any(i.category == "documented_work_unaccounted"
+                          for i in v.issues))
     else:
         check("SKIP: 28118/29515 not in dataset for integral-immobilization", True)
     v._non_billable_codes_to_suppress = set()
@@ -3268,19 +3283,18 @@ def main():
     check("Achilles (billed, evidence-span match) does NOT flag",
           not any("Achilles" in m for m in flags))
 
-    # VOCABULARY BRIDGE: the ostectomy CPT descriptor ('Ostectomy,
-    # calcaneus') shares no distinctive token with the surgeon's wording
-    # ('exostectomy', 'Haglund'). Billed WITHOUT its note-quote, the
-    # descriptor alone cannot account for it -> it flags (this is the gap a
-    # descriptor-only check leaves). Billed WITH the note-quote as evidence,
-    # the surgeon's own words account for it -> silent. No synonym table.
+    # VOCABULARY BRIDGE: generic compound morphology connects the official
+    # descriptor ('Ostectomy, calcaneus') with surgeon wording
+    # ('retrocalcaneal exostectomy') without a term-specific synonym table.
+    # Two distinctive morphological matches account for the service even
+    # when the coder did not persist a matching quote.
     ost_desc_only = {"code": "28118", "evidence_spans": []}
     v.issues = []
     v._check_procedure_completeness([ost_desc_only, ach_code], [], procs)
-    check("ostectomy billed but descriptor-only still flags (vocab gap)",
-          any("exostectomy" in i.message or "Haglund" in i.message
-              for i in v.issues
-              if i.category == "documented_work_unaccounted"))
+    check("ostectomy descriptor morphology accounts for documented work",
+          not any("exostectomy" in i.message or "Haglund" in i.message
+                  for i in v.issues
+                  if i.category == "documented_work_unaccounted"))
     ost_with_span = {"code": "28118", "evidence_spans": [
         "Retrocalcaneal exostectomy performed, Haglund deformity resected"]}
     v.issues = []

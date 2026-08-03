@@ -426,7 +426,12 @@ class TerminologyNormalizer:
         # span (e.g. arbitrary specialty-specific headings), rather than
         # growing a brittle ignore list one heading at a time.
         heading_spans = [match.span() for match in re.finditer(
-            r"(?m)(?:^|\n)\s*[A-Z][A-Z0-9 /&()\-]{1,100}:", text or "")]
+            # Extracted section text often joins source subheadings onto one
+            # line ("... . FOLLOW-UP: ..."). A heading remains structural at
+            # a sentence boundary; requiring a newline alone mislabeled every
+            # word in those headings as an unknown abbreviation.
+            r"(?m)(?:^|[\n.!?]\s+)[A-Z][A-Z0-9 /&()\-]{1,100}:",
+            text or "")]
         for found in self.unknown_pattern.finditer(text or ""):
             start, end = found.span()
             raw = found.group(0)

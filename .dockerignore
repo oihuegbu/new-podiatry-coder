@@ -5,6 +5,8 @@ __pycache__/
 *.pyo
 .DS_Store
 data/qdrant_store/
+data/compliance.db
+data/compliance.db-*
 output/
 logs/
 *.log

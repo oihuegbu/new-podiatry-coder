@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "managed_roots": [
+    "codes",
+    "retrieval",
+    "terminology"
+  ],
+  "managed_files": [
+    "global_periods.json",
+    "release/source_requirements.json",
+    "snomed_root_concepts.json"
+  ],
+  "runtime_owned_files": [
+    "codes/hcpcs_codes.json",
+    "codes/mcd_coverage_cache.json"
+  ]
+}

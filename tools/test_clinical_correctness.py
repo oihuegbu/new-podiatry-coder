@@ -20,6 +20,7 @@ network, no hardcoded rule outcomes beyond the fixture's own descriptors.
 Run:  PYTHONPATH=. .venv/bin/python -m pytest tests/test_clinical_correctness.py -q
 """
 
+import os
 import unittest
 from unittest import mock
 
@@ -359,7 +360,8 @@ class ClinicalAuditorTest(unittest.TestCase):
                                "authority": "CPT", "note_evidence": "x"}],
                     "claim_level_concerns": "", "overall_rationale": ""}
 
-        with mock.patch.object(ca, "_exploratory_scan",
+        with mock.patch.dict(os.environ, {"CLINICAL_AUDIT_EXPLORATORY": "1"}), \
+                mock.patch.object(ca, "_exploratory_scan",
                                return_value="LEAD: check laterality"), \
                 mock.patch.object(ca, "_audit_once", side_effect=capture_once):
             ca.audit_result("note_x", result, "note", rep=object(), passes=1)

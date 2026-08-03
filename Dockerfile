@@ -29,6 +29,10 @@ print('Models cached')"
 
 # Copy application code and bundled data (code JSON files, global tables)
 COPY . .
+# Keep a release-owned copy outside /app/data. The named app_data volume hides
+# /app/data after its first initialization, so startup reconciles this seed
+# into that volume whenever a newer image changes the managed reference set.
+COPY data /opt/podiatry-reference-seed
 
 # Output and log dirs will typically be bind-mounted from the host
 RUN mkdir -p output/results logs data/result_cache

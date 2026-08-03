@@ -538,6 +538,32 @@ def test_historical_mue_archive_date_may_live_in_section_heading():
     assert effective == "2026-04-01"
 
 
+def test_historical_mue_archive_accepts_abbreviated_month_punctuation():
+    archive = (
+        "<h3>Practitioner Services</h3>"
+        '<a href="/files/zip/practitioner-mue.zip">'
+        "Effective Jan. 1, 2026 (ZIP)</a>")
+    with patch.object(refresh_runner, "download", return_value=archive.encode()):
+        urls, effective = refresh_runner._resolve_mue_archive("2026-01-01")
+    assert urls == ["https://www.cms.gov/files/zip/practitioner-mue.zip"]
+    assert effective == "2026-01-01"
+
+
+def test_historical_ncci_uses_newest_complete_effective_dated_file():
+    current = (
+        '<a href="/files/zip/2026q3-practitioner-ptp-edits-v1-f1.zip">Q3</a>'
+        '<a href="/files/zip/2026q3-practitioner-ptp-edits-v1-f2.zip">Q3</a>'
+        '<a href="/files/zip/2026q2-practitioner-ptp-edits-v1-f1.zip">Q2</a>')
+    with patch.object(refresh_runner, "download", return_value=current.encode()):
+        urls, effective = refresh_runner._resolve_ncci_ptp(
+            "https://cms.invalid/current", "2026-01-01")
+    assert urls == [
+        "https://www.cms.gov/files/zip/2026q3-practitioner-ptp-edits-v1-f1.zip",
+        "https://www.cms.gov/files/zip/2026q3-practitioner-ptp-edits-v1-f2.zip",
+    ]
+    assert effective == "2026-01-01"
+
+
 def test_ncci_availability_retains_every_provenance_quarter():
     store = ComplianceDataStore()
     store._conn = sqlite3.connect(":memory:")

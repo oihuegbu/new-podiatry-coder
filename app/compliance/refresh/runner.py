@@ -98,13 +98,24 @@ def _resolve_ncci_ptp(
     available = {(int(y), int(qq)) for _, y, qq in hits}
     target = _target_quarter(target_effective)
     if target and target not in available:
-        return [], None
-    year, q = target or max(available)
+        newest = max(available)
+        if target > newest:
+            return [], None
+        # CMS states that the current Medicare PTP files retain each edit's
+        # effective and deletion dates and are the public source for looking
+        # up prior-period edits. Use the newest complete file for an older
+        # requested quarter; parse_ncci persists the row-level dates, while
+        # the requested quarter remains the provenance coverage identity.
+        year, q = newest
+        coverage_effective = _quarter_start(*target)
+    else:
+        year, q = target or max(available)
+        coverage_effective = _quarter_start(year, q)
     files = sorted({
         _abs(url, re.sub(r"^/license/ama\?file=", "", h))
         for h, y, qq in hits if (int(y), int(qq)) == (year, q)
     })
-    return files, _quarter_start(year, q)
+    return files, coverage_effective
 
 
 def _resolve_mue(
@@ -209,10 +220,15 @@ def _effective_quarter_from_text(value: str) -> tuple[int, int] | None:
                "july", "august", "september", "october", "november",
                "december"), 1)}
     match = re.search(
-        r"effective\s+([A-Za-z]+)\s+\d{1,2},?\s+(\d{4})", value, re.I)
-    if not match or match.group(1).lower() not in months:
+        r"effective\s+([A-Za-z]+)\.?\s+\d{1,2},?\s+(\d{4})", value, re.I)
+    if not match:
         return None
-    month = months[match.group(1).lower()]
+    token = match.group(1).lower()
+    matching_months = [index for name, index in months.items()
+                       if len(token) >= 3 and name.startswith(token)]
+    if len(matching_months) != 1:
+        return None
+    month = matching_months[0]
     return int(match.group(2)), ((month - 1) // 3) + 1
 
 

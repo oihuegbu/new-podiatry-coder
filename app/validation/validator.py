@@ -478,7 +478,8 @@ class CodingValidator:
         # run_auto_rules (which strips an unsupported distinct-service
         # modifier) so a stripped-59 line reads as non-distinct, and before
         # the suppression blocks realize the removal.
-        self._check_integral_immobilization(cpt, hcpcs)
+        self._check_integral_immobilization(
+            cpt, hcpcs, procedures_performed)
 
         # Conservation gate BEFORE the suppression blocks realize removals:
         # a documentation-mismatch removal must either substitute the family
@@ -7519,7 +7520,17 @@ class CodingValidator:
                     or (self.db.validate_hcpcs(code) or {}).get(
                         "long_description") or "")
             billed_parts.append(desc)
-        billed_stems = {self._stem(t)
+        def _procedure_stem(token: str) -> str:
+            # Generic compound/morphology bridge for surgeon language versus
+            # terse descriptors: "ex-<operation>" and site adjectives often
+            # wrap the descriptor noun. Strip a classical noun ending before
+            # the existing linguistic stemmer, then allow only long affix
+            # containment. No clinical term or code family is encoded here.
+            value = token[:-2] if token.endswith("us") and len(token) >= 8 \
+                else token
+            return self._stem(value)
+
+        billed_stems = {_procedure_stem(t)
                         for t in self._tokens(" ".join(billed_parts).lower())}
         # Accounting evidence #2 — LEGITIMATE exclusion dispositions: only
         # the validator's OWN issues in exclusion categories (integral,
@@ -7535,8 +7546,16 @@ class CodingValidator:
         # dropped primary procedure to avoid flagging an integral one.
         excl_parts = [(i.message or "") for i in self.issues
                       if self._EXCLUSION_CAT_RE.search(i.category or "")]
-        excl_stems = {self._stem(t)
+        excl_stems = {_procedure_stem(t)
                       for t in self._tokens(" ".join(excl_parts).lower())}
+        def _is_accounted(token: str, references: set[str]) -> bool:
+            stem = _procedure_stem(token)
+            if stem in references:
+                return True
+            return any(min(len(stem), len(reference)) >= 6
+                       and (stem.endswith(reference)
+                            or reference.endswith(stem))
+                       for reference in references)
         _GEN = self._DESC_STOPWORDS | {
             "performed", "procedure", "right", "left", "today", "with",
             "without", "using", "under", "bilateral"}
@@ -7546,8 +7565,9 @@ class CodingValidator:
             if not toks:
                 continue
             billed_hits = sum(1 for t in toks
-                              if self._stem(t) in billed_stems)
-            excl_hits = sum(1 for t in toks if self._stem(t) in excl_stems)
+                              if _is_accounted(t, billed_stems))
+            excl_hits = sum(1 for t in toks
+                            if _is_accounted(t, excl_stems))
             # accounted: a strong overlap with a billed code OR a legitimate
             # exclusion. Threshold of 2 distinctive tokens (or 1 when the
             # procedure phrase itself is short) avoids incidental matches.
@@ -7570,7 +7590,8 @@ class CodingValidator:
                 clause="procedure_completeness",
             )
 
-    def _check_integral_immobilization(self, cpt, hcpcs):
+    def _check_integral_immobilization(self, cpt, hcpcs,
+                                       procedures_performed=None):
         """CMS Global Surgery (IOM 100-04 Ch.12 §40.1) / NCCI Policy Manual
         Ch.1: the INITIAL cast/splint/strap application furnished by the
         operating surgeon at the same session as a 010/090-global surgical
@@ -7610,6 +7631,13 @@ class CodingValidator:
             return
         gov = (major[0].get("code") or "").strip()
         distinct_modifiers = self._modifiers("ncci_procedure_separation")
+        application_line_present = False
+
+        def _is_application(value: str) -> bool:
+            low = str(value or "").lower()
+            return "appl" in low and any(
+                word in low for word in ("cast", "splint", "strap"))
+
         for entry in cpt + hcpcs:
             code = (entry.get("code") or "").strip()
             if not code or code in self._non_billable_codes_to_suppress:
@@ -7620,9 +7648,9 @@ class CodingValidator:
             desc = (info.get("long_description")
                     or info.get("description") or "").lower()
             # Own-descriptor grammar: an APPLICATION of a cast/splint/strap.
-            if "appl" not in desc or not any(
-                    w in desc for w in ("cast", "splint", "strap")):
+            if not _is_application(desc):
                 continue
+            application_line_present = True
             mods = {m.strip().upper() for m in (entry.get("modifiers") or [])}
             if mods & distinct_modifiers:
                 continue  # supported distinct modifier — separately reportable
@@ -7641,6 +7669,30 @@ class CodingValidator:
                 denial_risk="LOW",
                 clause="integral_immobilization",
             )
+
+        # The extractor may correctly leave an integral postoperative
+        # application off the candidate claim. Record that documented work as
+        # accounted for even when there is no line to suppress; otherwise the
+        # later completeness invariant contradicts the global-package rule
+        # and demands a separately billed service. The phrase comes only from
+        # the performed-service list, never a future plan.
+        if not application_line_present:
+            for procedure in procedures_performed or []:
+                if not _is_application(str(procedure)):
+                    continue
+                self._add(
+                    "INFO", "", "surgical_package",
+                    f"ACCOUNTED AS INTEGRAL: '{str(procedure)[:120]}' is the "
+                    f"initial postoperative immobilization furnished at the "
+                    f"same session as a global-"
+                    f"{self.store.global_period(gov)} procedure ({gov}); CMS "
+                    f"IOM 100-04 Ch.12 §40.1 includes it in the surgical "
+                    f"package.",
+                    "Do not add a separate application line unless a distinct "
+                    "site or later encounter is documented",
+                    denial_risk="LOW",
+                    clause="integral_immobilization",
+                )
 
     def _check_removal_conservation(self, cpt, note_full_text: str):
         if not note_full_text or not self._non_billable_codes_to_suppress:

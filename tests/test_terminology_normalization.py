@@ -137,6 +137,25 @@ def test_ambiguous_or_unknown_affirmed_term_requires_review_but_negated_does_not
     assert occurrence["negated"] is True
 
 
+def test_inline_uppercase_subheadings_are_not_unknown_abbreviations():
+    normalizer = TerminologyNormalizer()
+    plan = ("Repair completed. PLAN / TREATMENT: protected activity. "
+            "FOLLOW-UP: return after recovery. PATIENT EDUCATION: discussed.")
+    pmh = ("Stable history. CURRENT MEDICATIONS: none. "
+           "ALLERGIES: none documented.")
+    _, report = normalizer.normalize_entities([], {
+        "plan": plan,
+        "pmh_medications_allergies": pmh,
+        "full_text": plan + "\n" + pmh,
+    })
+    unresolved = {row["raw_text"] for row in report["note_occurrences"]
+                  if row["status"] == "unresolved"}
+    assert not unresolved & {
+        "PLAN", "TREATMENT", "FOLLOW", "UP", "PATIENT", "EDUCATION",
+        "CURRENT", "MEDICATIONS", "ALLERGIES",
+    }
+
+
 class _SearchStore:
     def __init__(self):
         self.queries = []
