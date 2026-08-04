@@ -165,7 +165,7 @@ def decide(result: CodingResult,
     result.routing = routing
     # Only MATERIAL (blocking) items gate release. Non-material clarifications go out
     # as provider queries in parallel while the defensible claim releases.
-    blocking = [r for r in routing if r.get("blocking", True)]
+    blocking = [r for r in routing if r["blocking"]]
     if not blocking:
         result.destination = Destination.AUTO_READY
         result.verdict = Verdict.AUTO_READY
@@ -185,6 +185,6 @@ def decide(result: CodingResult,
     counts = Counter(r["destination"] for r in routing)
     result.notes.append("routing → " + ", ".join(f"{k}×{v}" for k, v in sorted(counts.items())))
     for r in routing:
-        tag = "" if r.get("blocking", True) else " (non-blocking)"
+        tag = "" if r["blocking"] else " (non-blocking)"
         result.notes.append(f"  [{r['destination']}]{tag} {r['subject']}: {r['reason']}")
     return result.verdict

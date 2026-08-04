@@ -145,3 +145,63 @@ def test_provider_query_is_self_contained():
     assert "recommendation" in pq[0]
     assert "confirm and document" in pq[0]["recommendation"]
     assert "laterality not documented" in pq[0]["recommendation"]
+
+
+# ---- failure-path tests the mutation gate found were missing (kill the survivors) --
+from claude_coder.models import GateResult, Verdict
+from claude_coder.autonomy import decide, _line_confidence, _ARBITRATED_DISCOUNT, AUTONOMY_CONFIDENCE
+_GATES_OK = [GateResult(n, Outcome.PASS, "", "") for n in
+             ("date_of_service", "verbatim_evidence", "code_active_on_dos",
+              "medical_necessity", "ncci_ptp", "mue", "icd_excludes1")]
+
+def _dx(code, conf=0.99):
+    return ResolvedLine(fact=ClinicalFact(FactKind.DIAGNOSIS, code or "unresolved dx",
+                        evidence=[EvidenceSpan("dx")], disposition=Disposition.PERFORMED, confidence=conf),
+                        chosen=(CandidateCode(code, "icd10", "d", 1.0) if code else None),
+                        method=(ResolutionMethod.VERIFIED if code else ResolutionMethod.ABSTAINED))
+
+def _proc(code, conf=0.99):
+    return ResolvedLine(fact=ClinicalFact(FactKind.PROCEDURE, "p", evidence=[EvidenceSpan("p")],
+                        disposition=Disposition.PERFORMED, confidence=conf),
+                        chosen=CandidateCode(code, "cpt", "d", 1.0), method=ResolutionMethod.VERIFIED)
+
+
+def test_materiality_no_procedure_blocks():
+    """Fail-closed: with NO billed procedure, necessity cannot be confirmed, so an
+    unresolved diagnosis BLOCKS (kills the no-procs return-True mutant)."""
+    r = CodingResult("e", "2026-01-05", lines=[_dx("D001"), _dx(None)], gates=list(_GATES_OK))
+    decide(r, source=MockSource(coverage={"GG01": {"D001"}}))
+    assert r.verdict is Verdict.REVIEW_REQUIRED
+
+
+def test_materiality_coverage_error_blocks():
+    """Fail-closed: if the coverage lookup RAISES, an unresolved dx BLOCKS (kills the
+    except-return-True mutant)."""
+    class Boom(MockSource):
+        def qualifying_dx_for(self, code, system="cpt"):
+            raise RuntimeError("coverage lookup failed")
+    r = CodingResult("e", "2026-01-05", lines=[_proc("GG01"), _dx("D001"), _dx(None)], gates=list(_GATES_OK))
+    decide(r, source=Boom(coverage={"GG01": {"D001"}}))
+    assert r.verdict is Verdict.REVIEW_REQUIRED
+
+
+def test_arbitrated_confidence_is_discounted():
+    """An ARBITRATED (single-model) line's confidence is discounted; a VERIFIED line's
+    is not (kills the ARBITRATED is/is-not mutant)."""
+    def conf(method):
+        return _line_confidence(ResolvedLine(
+            fact=ClinicalFact(FactKind.PROCEDURE, "p", evidence=[EvidenceSpan("p")],
+                              disposition=Disposition.PERFORMED, confidence=0.9),
+            chosen=CandidateCode("AAA1", "cpt", "d", 1.0), method=method))
+    assert abs(conf(ResolutionMethod.ARBITRATED) - 0.9 * _ARBITRATED_DISCOUNT) < 1e-9
+    assert conf(ResolutionMethod.VERIFIED) == 0.9
+
+
+def test_confidence_floor_is_strict():
+    """A line EXACTLY at the autonomy floor is NOT below it -> releases; the <=-mutant
+    would wrongly block it (kills the floor Lt->LtE mutant)."""
+    r = CodingResult("e", "2026-01-05",
+                     lines=[_proc("AAA1", AUTONOMY_CONFIDENCE), _dx("D001", AUTONOMY_CONFIDENCE)],
+                     gates=list(_GATES_OK))
+    decide(r)
+    assert r.verdict is Verdict.AUTO_READY
