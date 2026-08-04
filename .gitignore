@@ -31,3 +31,8 @@ repo.zip
 data/codes/snomed_icd10_map.json
 data/codes/learned_observations.jsonl
 data/codes/learned_cpt_index.json
+# NCCI PTP edits — a ~300MB build product rebuilt from the current CMS quarter by
+# tools/build_ncci_ptp.py (via tools/refresh_authoritative_data.py ncci_ptp). Not
+# committed: it used to be a git-LFS blob that silently degraded to a 134B pointer
+# on any checkout without git-lfs, breaking every PTP check. Deploy/refresh builds it.
+data/codes/ncci_data.json

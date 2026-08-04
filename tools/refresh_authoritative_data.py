@@ -126,6 +126,15 @@ SOURCES: dict[str, dict] = {
         "output": "global_period.json",
         "prepare": lambda tmp, args: [PY, "tools/build_global_period.py"],
     },
+    "ncci_ptp": {
+        # NCCI Procedure-to-Procedure edits — quarterly (Jan/Apr/Jul/Oct). Build
+        # product (gitignored like snomed_icd10_map): the builder fetches the newest
+        # CMS quarter and writes the snapshot the compliance store reads, so it is
+        # reproduced from source on refresh/deploy instead of shipped as a fragile
+        # ~497MB git-LFS blob that silently vanishes without git-lfs installed.
+        "output": "ncci_data.json",
+        "prepare": lambda tmp, args: [PY, "tools/build_ncci_ptp.py"],
+    },
     "snomed_icd10": {
         "output": "snomed_icd10_map.json",
         "prepare": lambda tmp, args: [PY, "tools/build_snomed_icd10_map.py"],
@@ -168,12 +177,16 @@ def _verify(output: str) -> dict:
     if not path.exists():
         raise RuntimeError(f"expected output missing: {path}")
     data = json.loads(path.read_text())
-    terms = data.get("terms") or data.get("codes") or {}
-    n = len(terms)
+    # Outputs are either a keyed map ({"terms"/"codes": {...}, "provenance": ...}) or a
+    # bare list of records (e.g. ncci_data.json's PTP edit rows).
+    if isinstance(data, list):
+        n, prov = len(data), ""
+    else:
+        n = len(data.get("terms") or data.get("codes") or {})
+        prov = data.get("provenance") or data.get("source") or ""
     if n == 0:
         raise RuntimeError(f"{output} prepared but empty")
-    return {"codes": n,
-            "provenance": data.get("provenance") or data.get("source") or "",
+    return {"codes": n, "provenance": prov,
             "sha256": _sha256(path), "bytes": path.stat().st_size}
 
 
