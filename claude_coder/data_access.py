@@ -75,6 +75,8 @@ class CodeSource(Protocol):
 
     def data_fingerprint(self) -> dict[str, Any]: ...
 
+    def qualifying_dx_for(self, code: str, system: str = "cpt") -> set[str] | None: ...
+
 
 # Data-driven signals that a code is NOT a separately reportable line. These are
 # generic terms found in coverage/status fields or the descriptor itself (e.g.
@@ -587,6 +589,40 @@ class AuthoritativeSource:
         self._excl1 = cache
         return cache
 
+    def _coverage_map(self) -> dict[str, set[str]]:
+        """{governed CPT/HCPCS code -> set of qualifying ICD-10 codes} from the CMS
+        LCD/Article coverage data (podiatry_lcd.json: governed_cpts x qualifying_dx) —
+        the authoritative dx->procedure MEDICAL-NECESSITY linkage. Cached; {} if the
+        file is absent (necessity then falls back to the structural check)."""
+        cache = getattr(self, "_cov", None)
+        if cache is not None:
+            return cache
+        cache = {}
+        try:
+            import json
+            from app.core.config import DATA_DIR
+            d = json.load(open(DATA_DIR / "codes" / "podiatry_lcd.json"))
+            for row in (d.get("lcd") or []) + (d.get("article") or []):
+                qd = {str(x).replace(".", "").upper()
+                      for x in (row.get("qualifying_dx") or [])}
+                if not qd:
+                    continue
+                for c in (row.get("governed_cpts") or []):
+                    cache.setdefault(str(c).replace(".", "").upper(), set()).update(qd)
+        except Exception:
+            cache = {}
+        self._cov = cache
+        return cache
+
+    def qualifying_dx_for(self, code: str, system: str = "cpt") -> set[str] | None:
+        """Authoritative qualifying (medically-necessary) ICD-10 codes for a procedure
+        per CMS LCD/Article coverage — the dx->procedure necessity linkage, undotted.
+        None when the procedure is governed by NO coverage policy (its necessity
+        cannot be confirmed from this source -> callers fail closed); a set when it is
+        governed."""
+        cov = self._coverage_map()
+        return cov.get(str(code).replace(".", "").upper()) if cov else None
+
     def excludes1_refs(self, code: str, system: str) -> set[str]:
         """The Excludes1 target code-prefixes that apply to a diagnosis — gathered
         from the code AND its ancestor categories (an Excludes1 at a 3-character
@@ -624,7 +660,8 @@ class MockSource:
                  drug_index: dict[str, set] | None = None,
                  drug_units: dict[str, dict] | None = None,
                  learned_index: dict[str, set] | None = None,
-                 excludes1: dict[str, set] | None = None) -> None:
+                 excludes1: dict[str, set] | None = None,
+                 coverage: dict[str, set] | None = None) -> None:
         self._records = records or {}
         self._retrieval = retrieval or {}
         self._ncci = ncci or {}
@@ -642,6 +679,9 @@ class MockSource:
         self._excl1_data = {str(k).replace(".", "").upper():
                             {str(r).replace(".", "").upper() for r in v}
                             for k, v in (excludes1 or {}).items()}
+        self._coverage = {str(k).replace(".", "").upper():
+                          {str(x).replace(".", "").upper() for x in v}
+                          for k, v in (coverage or {}).items()}
 
     def global_period(self, code):
         return self._gp.get(code)
@@ -725,6 +765,10 @@ class MockSource:
 
     def data_fingerprint(self):
         return {"source": "mock"}
+
+    def qualifying_dx_for(self, code, system="cpt"):
+        c = str(code).replace(".", "").upper()
+        return set(self._coverage[c]) if c in self._coverage else None
 
     def excludes1_refs(self, code, system):
         if system != "icd10" or not self._excl1_data:

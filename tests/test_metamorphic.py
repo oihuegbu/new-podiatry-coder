@@ -88,30 +88,40 @@ def test_failure_class_routing():
     assert Destination.PROVIDER_QUERY.value in dests  # doc gap -> provider
 
 
-def test_materiality_secondary_dx_non_blocking():
-    """An unresolved SECONDARY diagnosis (necessity met by a resolved dx) is
-    non-material: it routes to PROVIDER_QUERY, non-blocking, and the defensible
-    claim still releases AUTO_READY — instead of the whole encounter blocking."""
-    from claude_coder.models import GateResult, Verdict, Destination
+def test_materiality_from_authoritative_coverage():
+    """Materiality of an unresolved diagnosis is decided by the AUTHORITATIVE
+    dx->procedure coverage linkage (LCD qualifying_dx), not a proxy:
+      (a) a procedure governed by NO policy (necessity unconfirmable) -> the
+          unresolved dx BLOCKS — this is the exostectomy/Haglund case (28118 is
+          ungoverned), where an unresolved principal indication must never release;
+      (b) a governed procedure whose necessity is met by a RESOLVED qualifying dx ->
+          an unresolved EXTRA dx is genuinely non-material -> AUTO_READY;
+      (c) a governed procedure with NO resolved qualifying dx -> BLOCKS."""
+    from claude_coder.models import GateResult, Verdict
     from claude_coder.autonomy import decide
-    def line(kind, code, conf=0.99):
-        return ResolvedLine(
-            fact=ClinicalFact(kind, f"{kind.value} thing", evidence=[EvidenceSpan("ev")],
-                              disposition=Disposition.PERFORMED, confidence=conf),
-            chosen=(CandidateCode(code, "cpt" if kind is FactKind.PROCEDURE else "icd10", "d", 1.0)
-                    if code else None),
-            method=(ResolutionMethod.VERIFIED if code else ResolutionMethod.ABSTAINED))
-    proc = line(FactKind.PROCEDURE, "AAA1")
-    dx_ok = line(FactKind.DIAGNOSIS, "D001")
-    dx_open = line(FactKind.DIAGNOSIS, None)
+    def proc(code):
+        return ResolvedLine(fact=ClinicalFact(FactKind.PROCEDURE, "p", evidence=[EvidenceSpan("p")],
+                            disposition=Disposition.PERFORMED, confidence=0.99),
+                            chosen=CandidateCode(code, "cpt", "d", 1.0), method=ResolutionMethod.VERIFIED)
+    def dx(code):
+        return ResolvedLine(fact=ClinicalFact(FactKind.DIAGNOSIS, code or "unresolved dx",
+                            evidence=[EvidenceSpan("dx")], disposition=Disposition.PERFORMED, confidence=0.99),
+                            chosen=(CandidateCode(code, "icd10", "d", 1.0) if code else None),
+                            method=(ResolutionMethod.VERIFIED if code else ResolutionMethod.ABSTAINED))
     gates_ok = [GateResult(n, Outcome.PASS, "", "") for n in
                 ("date_of_service", "verbatim_evidence", "code_active_on_dos",
                  "medical_necessity", "ncci_ptp", "mue", "icd_excludes1")]
-    r = CodingResult("e", "2026-01-05", lines=[proc, dx_ok, dx_open], gates=gates_ok)
+    src = MockSource(coverage={"GG01": {"DQ01"}})   # governed procedure GG01, qualifying dx DQ01
+    def run(lines):
+        r = CodingResult("e", "2026-01-05", lines=lines, gates=list(gates_ok))
+        decide(r, source=src); return r.verdict
+    assert run([proc("UU01"), dx("DQ01"), dx(None)]) is Verdict.REVIEW_REQUIRED   # (a) ungoverned -> block
+    assert run([proc("GG01"), dx("DQ01"), dx(None)]) is Verdict.AUTO_READY        # (b) governed+met -> release
+    assert run([proc("GG01"), dx("ZZ99"), dx(None)]) is Verdict.REVIEW_REQUIRED   # (c) governed, unmet -> block
+    # (d) no source at all -> fail-closed
+    r = CodingResult("e", "2026-01-05", lines=[proc("GG01"), dx("DQ01"), dx(None)], gates=list(gates_ok))
     decide(r)
-    assert r.verdict is Verdict.AUTO_READY   # released despite the unresolved secondary dx
-    assert any(x["destination"] == Destination.PROVIDER_QUERY.value and not x["blocking"]
-               for x in r.routing)
+    assert r.verdict is Verdict.REVIEW_REQUIRED
 
 
 def test_provider_query_is_self_contained():

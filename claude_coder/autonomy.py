@@ -17,11 +17,41 @@ from __future__ import annotations
 from .models import (
     CodingResult,
     Destination,
+    FactKind,
     Outcome,
     ResolutionMethod,
     ResolvedLine,
     Verdict,
 )
+
+
+def _necessity_authoritatively_met(result: CodingResult, source) -> bool:
+    """Is the claim's medical necessity CONFIRMED by resolved diagnoses per
+    authoritative coverage — so an unresolved diagnosis adds nothing the necessity
+    requires (non-material)? True ONLY when every billed procedure/service is
+    governed by a CMS LCD/Article AND a RESOLVED diagnosis on the claim is one of its
+    qualifying (covered) indications. If the source is absent, there is no billed
+    procedure, a billed procedure is governed by NO policy (necessity unconfirmable),
+    or a governed procedure has no resolved qualifying diagnosis, this is False and an
+    unresolved diagnosis BLOCKS (fail-closed). This replaces the earlier
+    'another dx resolved -> secondary' PROXY with a data-driven necessity-linkage
+    query — it cannot mistake a procedure's principal indication for a redundant one."""
+    if source is None:
+        return False
+    procs = [ln for ln in result.billable_lines
+             if ln.chosen and ln.chosen.system in ("cpt", "hcpcs")
+             and ln.fact.kind is not FactKind.EM]
+    if not procs:
+        return False
+    dx = {str(ln.chosen.code).replace(".", "").upper() for ln in result.diagnosis_lines}
+    for p in procs:
+        try:
+            qd = source.qualifying_dx_for(p.chosen.code, p.chosen.system)
+        except Exception:
+            return False
+        if not qd or not (dx & qd):      # ungoverned, or no resolved covered indication
+            return False
+    return True
 
 # Which destination wins when several apply: a hard stop first, then an operational
 # retry, then genuine coding judgement, then a provider question, then a do-not-bill
@@ -53,7 +83,8 @@ def _line_confidence(line: ResolvedLine) -> float:
 
 
 def decide(result: CodingResult,
-           floor: float = AUTONOMY_CONFIDENCE) -> Verdict:
+           floor: float = AUTONOMY_CONFIDENCE,
+           source=None) -> Verdict:
     """Set the release verdict AND route every open item to its real destination —
     an operational failure to SYSTEM_HOLD (retry), a documentation gap to
     PROVIDER_QUERY, a genuine coding judgement to REVIEW — instead of collapsing all
@@ -93,20 +124,24 @@ def decide(result: CodingResult,
                 route(Destination.REVIEW, g.name,
                       f"unverifiable, needs coding/clinical judgement ({g.detail})")
 
-    # 3. Every performed fact must be accounted for — but MATERIALLY. An unresolved
-    #    SECONDARY diagnosis (necessity already met by another resolved diagnosis)
-    #    does not change the billed claim's payment or necessity: clarify it via a
-    #    provider query, but do NOT block the release of the defensible claim. A
-    #    procedure/supply/etc. would ADD a billable line (material -> blocks); a code
-    #    that FITS but needs an undocumented element is a material PROVIDER_QUERY.
-    from .models import FactKind
-    necessity_met = bool(result.diagnosis_lines)   # a resolved diagnosis already supports the claim
+    # 3. Every performed fact must be accounted for. MATERIALITY is decided from
+    #    authoritative coverage, not a proxy: an unresolved DIAGNOSIS is non-material
+    #    (non-blocking, clarify via provider query) ONLY when every billed procedure's
+    #    medical necessity is already confirmed by a RESOLVED qualifying diagnosis per
+    #    LCD/Article coverage — so the unresolved one adds nothing necessity requires.
+    #    Otherwise (any ungoverned procedure, or necessity not yet met, or no coverage
+    #    data) it BLOCKS — this is what keeps a procedure's PRINCIPAL indication (an
+    #    unresolved principal diagnosis on an ungoverned procedure) from being
+    #    released. A code that FITS but needs an undocumented element is a material
+    #    PROVIDER_QUERY; anything else needs a coder.
+    dx_non_material = _necessity_authoritatively_met(result, source)
     for ln in result.lines:
         if ln.fact.billable and not ln.resolved:
-            if ln.fact.kind is FactKind.DIAGNOSIS and necessity_met:
+            if ln.fact.kind is FactKind.DIAGNOSIS and dx_non_material:
                 route(Destination.PROVIDER_QUERY, ln.fact.description,
-                      "secondary diagnosis could not be coded — non-material to the billed "
-                      "claim (necessity met by another diagnosis); clarify to add specificity",
+                      "diagnosis could not be coded — non-material: every billed procedure's "
+                      "necessity is already met by a resolved qualifying diagnosis per "
+                      "authoritative coverage; clarify to add specificity",
                       blocking=False, fact_id=ln.fact.fact_id)
             elif ln.documentation_gap:
                 route(Destination.PROVIDER_QUERY, ln.fact.description, ln.documentation_gap,

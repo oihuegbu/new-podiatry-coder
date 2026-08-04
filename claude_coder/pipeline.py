@@ -146,7 +146,7 @@ def code_encounter(
 
     apply_global_package(result, source)
     result.gates = gates.run_gates(result, note_text, source)
-    decide(result)
+    decide(result, source=source)
     # Actionable documentation guidance for whatever could not be coded confidently.
     from . import recommendations as _recs
     result.recommendations = _recs.build_recommendations(result)
