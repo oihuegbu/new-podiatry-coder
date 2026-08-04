@@ -148,6 +148,10 @@ class GateResult:
     outcome: Outcome
     detail: str = ""
     authority: str = ""               # what source/rule decided this
+    # True when this gate could not clear because an AUTHORITY was UNAVAILABLE (data
+    # not loaded / a lookup error) — an OPERATIONAL problem a retry can fix, NOT a
+    # coding decision. The router sends these to SYSTEM_HOLD, never to a coder.
+    retryable: bool = False
 
     @property
     def clears(self) -> bool:
@@ -158,6 +162,18 @@ class Verdict(str, Enum):
     AUTO_READY = "AUTO_READY"
     REVIEW_REQUIRED = "REVIEW_REQUIRED"
     BLOCKED = "BLOCKED"
+
+
+class Destination(str, Enum):
+    """Where a non-auto-released encounter should ACTUALLY go — so operational
+    failures, documentation gaps, and genuine coding judgement don't collapse into
+    one human queue. A coder only ever sees REVIEW."""
+    AUTO_READY = "AUTO_READY"          # release to billing, no human
+    SYSTEM_HOLD = "SYSTEM_HOLD"        # operational/data failure -> retry + ops alert (not a coder)
+    PROVIDER_QUERY = "PROVIDER_QUERY"  # documentation gap -> one structured question to the provider
+    REVIEW = "REVIEW"                  # genuine coding/clinical judgement -> coder
+    HOLD = "HOLD"                      # documentation cannot support a claim -> do not bill
+    BLOCKED = "BLOCKED"                # a hard release gate failed
 
 
 @dataclass
@@ -172,6 +188,11 @@ class CodingResult:
     bypassed_ncci: list = field(default_factory=list)   # code pairs cleared by a modifier
     # actionable documentation recommendations (what to document/clarify to code it)
     recommendations: list[dict] = field(default_factory=list)
+    # the actionable next-step destination (set by autonomy.decide) and the per-item
+    # routing breakdown, so an encounter that isn't AUTO_READY is dispatched to the
+    # RIGHT place (retry / provider / coder / hold) instead of one review queue.
+    destination: "Destination | None" = None
+    routing: list[dict] = field(default_factory=list)
 
     @property
     def billable_lines(self) -> list[ResolvedLine]:

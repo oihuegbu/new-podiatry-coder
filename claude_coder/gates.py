@@ -77,7 +77,7 @@ def code_active_gate(result: CodingResult, source: CodeSource) -> GateResult:
 def ncci_gate(result: CodingResult, source: CodeSource) -> GateResult:
     lines = [ln for ln in result.billable_lines
              if ln.chosen and ln.chosen.system in ("cpt", "hcpcs")]
-    outcomes, detail = [], []
+    outcomes, detail, retryable = [], [], False
     for i in range(len(lines)):
         for j in range(len(lines)):
             if i == j:
@@ -86,6 +86,7 @@ def ncci_gate(result: CodingResult, source: CodeSource) -> GateResult:
                                         result.date_of_service)
             if ind == AUTHORITY_UNAVAILABLE:   # the check could not run -> not clean
                 outcomes.append(Outcome.UNKNOWN)
+                retryable = True               # operational failure -> SYSTEM_HOLD, not review
                 detail.append(f"{lines[i].chosen.code}/{lines[j].chosen.code} "
                               f"NCCI check unavailable")
                 continue
@@ -106,7 +107,7 @@ def ncci_gate(result: CodingResult, source: CodeSource) -> GateResult:
                           "NCCI PTP (data)")
     return GateResult("ncci_ptp", _worst(outcomes) if outcomes else Outcome.PASS,
                       "no unresolved PTP conflicts" if not detail else "; ".join(detail),
-                      "NCCI PTP (data)")
+                      "NCCI PTP (data)", retryable=retryable)
 
 
 def mue_gate(result: CodingResult, source: CodeSource) -> GateResult:
@@ -124,7 +125,7 @@ def mue_gate(result: CodingResult, source: CodeSource) -> GateResult:
     if result.billable_lines and not source.mue_available():
         return GateResult("mue", Outcome.UNKNOWN,
                           "MUE table unavailable — unit limits cannot be asserted",
-                          "MUE (data)")
+                          "MUE (data)", retryable=True)
     if not outcomes:
         return GateResult("mue", Outcome.NOT_APPLICABLE, "no MUE-constrained lines",
                           "MUE (data)")

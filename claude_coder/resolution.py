@@ -37,6 +37,34 @@ _RELEVANCE_FLOOR = 0.6     # policy dial: min recall similarity for a determinis
 _RECALL_POOL = 40
 
 
+# Generic coding-grammar qualifiers (like left/right/unspecified) that denote a
+# DISTINCT billable variant — a descriptor carrying one must have it supported by the
+# documentation, so a hit whose descriptor asserts one is verified rather than closed
+# deterministically. Not medical codes or conditions; generic status vocabulary.
+_STATUS_QUALIFIERS = ("secondary", "revision", "delayed", "reconstruction", "sequela")
+
+
+def _needs_verification(fact: ClinicalFact, cand: CandidateCode) -> bool:
+    """Does this authoritative hit carry a distinguishing qualifier the documentation
+    may not support — so it must be entailment-CONFIRMED rather than closed
+    deterministically? True when the descriptor states a bundled-component clause
+    ('with'/'without …'), a status qualifier (secondary/revision/…), a measurement it
+    needs but the note lacks, or a count it needs but the note lacks. A plain concept
+    match with none of these closes deterministically (recovers autonomy + cost)."""
+    d = cand.descriptor.lower()
+    if re.search(r"\bwith(?:out)?\b", d):
+        return True
+    if any(q in d for q in _STATUS_QUALIFIERS):
+        return True
+    feats = parse_descriptor(cand.descriptor)
+    if feats.interval and feats.interval.bounded() and measurement_of(fact.attributes) is None:
+        return True
+    if feats.cardinality and not (fact.attributes.get("count")
+                                  or fact.attributes.get("quantity")):
+        return True
+    return False
+
+
 def _fact_laterality(fact: ClinicalFact) -> str:
     lat = str(fact.attributes.get("laterality", "")).lower().strip()
     return lat if lat in _LATERALITY else ""
@@ -129,8 +157,12 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
         cands = [c for c in cands if c]
         if not cands:
             return None
-        if llm is not None and _pv_kind:
-            seeds.extend(cands)                  # confirm downstream, don't auto-bill
+        # Narrowed: only a hit whose descriptor carries a distinguishing qualifier
+        # the note may not support is routed through entailment confirmation. A clean,
+        # plain concept match closes deterministically even in real mode — most simple
+        # encounters should close after authoritative resolution, without an LLM call.
+        if llm is not None and _pv_kind and any(_needs_verification(fact, c) for c in cands):
+            seeds.extend(cands)                  # qualified/ambiguous -> confirm downstream
             return None
         line = _decide(fact, cands, authority=authority, source=source)
         return line if line.resolved else None

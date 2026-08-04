@@ -16,11 +16,18 @@ from __future__ import annotations
 
 from .models import (
     CodingResult,
+    Destination,
     Outcome,
     ResolutionMethod,
     ResolvedLine,
     Verdict,
 )
+
+# Which destination wins when several apply: a hard stop first, then an operational
+# retry, then genuine coding judgement, then a provider question, then a do-not-bill
+# hold. A coder (REVIEW) only sees what truly needs a coder.
+_PRECEDENCE = [Destination.BLOCKED, Destination.SYSTEM_HOLD, Destination.REVIEW,
+               Destination.PROVIDER_QUERY, Destination.HOLD]
 
 # Autonomy floor. The category benchmark for hands-off release is ~95% coding
 # confidence; below it, a human reviews. Tune per cohort/payer, never per code.
@@ -47,48 +54,96 @@ def _line_confidence(line: ResolvedLine) -> float:
 
 def decide(result: CodingResult,
            floor: float = AUTONOMY_CONFIDENCE) -> Verdict:
-    """Set and return the release verdict, recording the audit trail on the
-    result. Fail-closed: unresolved conditions escalate or block, never auto."""
-    reasons: list[str] = []
+    """Set the release verdict AND route every open item to its real destination —
+    an operational failure to SYSTEM_HOLD (retry), a documentation gap to
+    PROVIDER_QUERY, a genuine coding judgement to REVIEW — instead of collapsing all
+    of them into one human queue. Fail-closed: nothing auto-releases unless the chain
+    closes. `verdict` stays AUTO_READY / REVIEW_REQUIRED / BLOCKED for compatibility;
+    `destination` + `routing` carry the actionable breakdown."""
+    routing: list[dict] = []
 
-    # 1. Gates. A hard stop dominates everything.
-    if any(g.outcome in (Outcome.BLOCKED, Outcome.ERROR) for g in result.gates):
-        blocked = [g.name for g in result.gates
-                   if g.outcome in (Outcome.BLOCKED, Outcome.ERROR)]
-        result.notes.append(f"BLOCKED by gate(s): {blocked}")
+    def route(dest: Destination, subject: str, reason: str, blocking: bool = True) -> None:
+        routing.append({"destination": dest.value, "subject": subject,
+                        "reason": reason, "blocking": blocking})
+
+    # 1. A hard gate stop dominates everything.
+    hard = [g.name for g in result.gates
+            if g.outcome in (Outcome.BLOCKED, Outcome.ERROR)]
+    if hard:
+        for name in hard:
+            route(Destination.BLOCKED, name, "hard release gate failed")
+        result.notes.append(f"BLOCKED by gate(s): {hard}")
+        result.routing = routing
+        result.destination = Destination.BLOCKED
         result.verdict = Verdict.BLOCKED
         return result.verdict
 
-    if any(g.outcome is Outcome.UNKNOWN for g in result.gates):
-        unknown = [g.name for g in result.gates if g.outcome is Outcome.UNKNOWN]
-        reasons.append(f"gate(s) UNKNOWN (unverifiable): {unknown}")
+    # 2. Gates that could not be verified: an OPERATIONAL failure (authority
+    #    unavailable) is a retry, not a coding problem; anything else is judgement.
+    for g in result.gates:
+        if g.outcome is Outcome.UNKNOWN:
+            if g.retryable:
+                route(Destination.SYSTEM_HOLD, g.name,
+                      f"authority unavailable ({g.detail}) — retry, do not send to a coder")
+            else:
+                route(Destination.REVIEW, g.name,
+                      f"unverifiable, needs coding/clinical judgement ({g.detail})")
 
-    # 2. Completeness — every performed fact must be accounted for.
-    abstained = [ln for ln in result.lines
-                 if ln.fact.billable and not ln.resolved]
-    if abstained:
-        reasons.append(f"{len(abstained)} performed fact(s) unresolved — "
-                       f"e.g. {abstained[0].fact.description!r} "
-                       f"({abstained[0].rationale})")
+    # 3. Every performed fact must be accounted for — but MATERIALLY. An unresolved
+    #    SECONDARY diagnosis (necessity already met by another resolved diagnosis)
+    #    does not change the billed claim's payment or necessity: clarify it via a
+    #    provider query, but do NOT block the release of the defensible claim. A
+    #    procedure/supply/etc. would ADD a billable line (material -> blocks); a code
+    #    that FITS but needs an undocumented element is a material PROVIDER_QUERY.
+    from .models import FactKind
+    necessity_met = bool(result.diagnosis_lines)   # a resolved diagnosis already supports the claim
+    for ln in result.lines:
+        if ln.fact.billable and not ln.resolved:
+            if ln.fact.kind is FactKind.DIAGNOSIS and necessity_met:
+                route(Destination.PROVIDER_QUERY, ln.fact.description,
+                      "secondary diagnosis could not be coded — non-material to the billed "
+                      "claim (necessity met by another diagnosis); clarify to add specificity",
+                      blocking=False)
+            elif ln.documentation_gap:
+                route(Destination.PROVIDER_QUERY, ln.fact.description, ln.documentation_gap)
+            else:
+                route(Destination.REVIEW, ln.fact.description, ln.rationale)
 
     billable = result.billable_lines
     if not billable:
-        reasons.append("no defensible billable line was produced")
+        route(Destination.REVIEW, "claim", "no defensible billable line was produced")
 
-    # 3. Confidence floor across every released line.
+    # 4. Confidence floor across every released line.
     low = [ln for ln in billable if _line_confidence(ln) < floor]
     if low:
         worst = min(billable, key=_line_confidence)
-        reasons.append(f"{len(low)} line(s) below autonomy floor {floor:.2f} "
-                       f"(min {_line_confidence(worst):.2f}, "
-                       f"{worst.method.value})")
+        route(Destination.REVIEW, "confidence",
+              f"{len(low)} line(s) below autonomy floor {floor:.2f} "
+              f"(min {_line_confidence(worst):.2f}, {worst.method.value})")
 
-    if reasons:
-        result.notes.extend(reasons)
-        result.verdict = Verdict.REVIEW_REQUIRED
-    else:
-        result.notes.append(
-            f"AUTO_READY — {len(billable)} line(s), all gates clear, "
-            f"min confidence >= {floor:.2f}")
+    result.routing = routing
+    # Only MATERIAL (blocking) items gate release. Non-material clarifications go out
+    # as provider queries in parallel while the defensible claim releases.
+    blocking = [r for r in routing if r.get("blocking", True)]
+    if not blocking:
+        result.destination = Destination.AUTO_READY
         result.verdict = Verdict.AUTO_READY
+        side = len(routing)
+        result.notes.append(
+            f"AUTO_READY — {len(billable)} line(s), all gates clear, no material block"
+            + (f"; {side} non-material clarification(s) → PROVIDER_QUERY" if side else ""))
+        for r in routing:
+            result.notes.append(f"  [{r['destination']}] (non-blocking) "
+                                f"{r['subject']}: {r['reason']}")
+        return result.verdict
+
+    present = {r["destination"] for r in blocking}
+    result.destination = next(d for d in _PRECEDENCE if d.value in present)
+    result.verdict = Verdict.REVIEW_REQUIRED
+    from collections import Counter
+    counts = Counter(r["destination"] for r in routing)
+    result.notes.append("routing → " + ", ".join(f"{k}×{v}" for k, v in sorted(counts.items())))
+    for r in routing:
+        tag = "" if r.get("blocking", True) else " (non-blocking)"
+        result.notes.append(f"  [{r['destination']}]{tag} {r['subject']}: {r['reason']}")
     return result.verdict

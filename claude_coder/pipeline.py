@@ -367,8 +367,9 @@ def apply_global_package(result: CodingResult, source: CodeSource) -> None:
 
 def render(result: CodingResult) -> str:
     """Human-readable audit trail — the explainability surface."""
+    dest = f"  →  {result.destination.value}" if result.destination else ""
     out = [f"Encounter {result.encounter_id}  DOS={result.date_of_service}",
-           f"VERDICT: {result.verdict.value}", ""]
+           f"VERDICT: {result.verdict.value}{dest}", ""]
     out.append("LINES:")
     for ln in result.lines:
         f = ln.fact
