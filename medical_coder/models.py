@@ -7,6 +7,7 @@ from typing import Any
 
 
 class FactStatus(str, Enum):
+    PRESENT = "present"
     PERFORMED = "performed"
     PLANNED = "planned"
     ORDERED = "ordered"
@@ -33,6 +34,9 @@ class DecisionState(str, Enum):
     CLAIM_CONTEXT_REQUIRED = "CLAIM_CONTEXT_REQUIRED"
     SOURCE_UNAVAILABLE = "SOURCE_UNAVAILABLE"
     COMPILER_ERROR = "COMPILER_ERROR"
+    EXTRACTION_CONFLICT = "EXTRACTION_CONFLICT"
+    TERMINOLOGY_AMBIGUOUS = "TERMINOLOGY_AMBIGUOUS"
+    DOCUMENT_UNREADABLE = "DOCUMENT_UNREADABLE"
 
 
 class GateStatus(str, Enum):
@@ -69,6 +73,10 @@ class Normalization:
     source: str
     confidence: float
     alternatives: tuple[str, ...] = ()
+    raw_phrase: str = ""
+    candidate_expansions: tuple[str, ...] = ()
+    resolution_factors: tuple[str, ...] = ()
+    target_artifact_id: str = ""
 
     def __post_init__(self) -> None:
         if not 0 <= self.confidence <= 1:
@@ -156,6 +164,34 @@ class CandidateDecision:
     state: DecisionState
     gates: tuple[GateResult, ...]
     autonomous_release: bool
+
+
+@dataclass(frozen=True)
+class ClaimLine:
+    artifact_id: str
+    diagnosis_artifact_ids: tuple[str, ...]
+    units: float
+    modifier_artifact_ids: tuple[str, ...] = ()
+    disposition: DecisionState = DecisionState.SUPPORTED_REPORTABLE
+    source_fact_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RoutingDecision:
+    route: str
+    reason: str
+    provider_query: str | None = None
+    affected_fact_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CodingResult:
+    encounter_id: str
+    state: str
+    claim_lines: tuple[ClaimLine, ...]
+    routing: RoutingDecision
+    certificate: "DecisionCertificate"
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

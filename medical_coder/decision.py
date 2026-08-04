@@ -19,6 +19,7 @@ from .terminology import Artifact, TerminologySnapshot
 
 MANDATORY_GATES = (
     "evidence",
+    "documentation",
     "autonomy_scope",
     "source_identity",
     "effective_date",
@@ -26,6 +27,11 @@ MANDATORY_GATES = (
     "descriptor_entailment",
     "specificity",
     "constraints",
+    "units",
+    "modifiers",
+    "sequencing",
+    "reportability",
+    "medical_necessity",
     "claim_context",
     "coverage",
     "provenance",
@@ -47,19 +53,31 @@ class DecisionEngine:
         coverage_evidence: dict[str, tuple[str, ...]] | None = None,
         scope_eligible: bool = True,
         scope_reason: str = "eligible for configured autonomy scope",
+        supplemental_gates: dict[str, tuple[GateResult, ...]] | None = None,
+        ptp_exception_artifact_ids: frozenset[str] = frozenset(),
     ) -> tuple[CandidateDecision, ...]:
         candidate_list = tuple(candidates)
+        unit_map = units or {}
         artifacts = {
             candidate.artifact_id: self.snapshot.artifact(candidate.artifact_id)
             for candidate in candidate_list
         }
-        selected_codes = {artifact.code for artifact in artifacts.values() if artifact is not None}
+        selected_codes = {
+            artifact.code
+            for artifact_id, artifact in artifacts.items()
+            if artifact is not None and artifact_id in unit_map
+        }
         available = {
             name
             for name, enabled in self.snapshot.manifest.get("capabilities", {}).items()
             if enabled is True
         }
         missing_capabilities = sorted(required_capabilities - available)
+        ptp_exception_codes = {
+            exception_artifact.code
+            for artifact_id in ptp_exception_artifact_ids
+            if (exception_artifact := self.snapshot.artifact(artifact_id)) is not None
+        }
         decisions = []
         for candidate in candidate_list:
             artifact = artifacts[candidate.artifact_id]
@@ -71,10 +89,12 @@ class DecisionEngine:
                     artifact,
                     selected_codes,
                     missing_capabilities,
-                    units or {},
+                    unit_map,
                     coverage_evidence or {},
                     scope_eligible,
                     scope_reason,
+                    supplemental_gates or {},
+                    ptp_exception_codes,
                 )
             )
         return tuple(decisions)
@@ -91,6 +111,8 @@ class DecisionEngine:
         coverage_evidence: dict[str, tuple[str, ...]],
         scope_eligible: bool,
         scope_reason: str,
+        supplemental_gates: dict[str, tuple[GateResult, ...]],
+        ptp_exception_codes: set[str],
     ) -> CandidateDecision:
         facts = [fact for fact in evidence.facts if fact.fact_id in candidate.supporting_fact_ids]
         gates: list[GateResult] = []
@@ -102,7 +124,7 @@ class DecisionEngine:
                 scope_reason,
             )
         )
-        performed = [fact for fact in facts if fact.status == FactStatus.PERFORMED]
+        performed = [fact for fact in facts if fact.status in {FactStatus.PERFORMED, FactStatus.PRESENT}]
         gates.append(
             self._gate(
                 "evidence",
@@ -154,17 +176,37 @@ class DecisionEngine:
             except UnsupportedPredicate:
                 entailment_reason = "source requirement uses an unsupported predicate"
         else:
-            normalized_ids = {
-                fact.normalization.concept_id
-                for fact in performed
+            material_tokens = self.snapshot.material_descriptor_tokens(artifact.artifact_id)
+            confirming_facts = [
+                fact for fact in performed
                 if fact.normalization
-                and fact.normalization.source == f"snapshot:{self.snapshot.snapshot_id}"
+                and fact.normalization.target_artifact_id == artifact.artifact_id
                 and not fact.normalization.alternatives
+            ]
+            evidence_tokens = {
+                token
+                for fact in confirming_facts
+                for token in self.snapshot.normalized_phrase(
+                    " ".join((fact.text, *map(str, fact.attributes.values())))
+                ).split()
             }
-            identity = artifact.concept_id or artifact.artifact_id
-            entailed = identity in normalized_ids
+            exact_descriptor = any(
+                "exact_authoritative_descriptor" in fact.normalization.resolution_factors
+                for fact in confirming_facts if fact.normalization
+            )
+            derived_confirmation = any(
+                "all_source_derived_material_descriptor_tokens_entailed" in fact.normalization.resolution_factors
+                for fact in confirming_facts if fact.normalization
+            )
+            entailed = bool(confirming_facts) and (
+                exact_descriptor
+                or derived_confirmation
+                or bool(material_tokens and material_tokens.issubset(evidence_tokens))
+            )
             if entailed:
-                entailment_reason = "unique exact terminology identity is source-validated"
+                entailment_reason = "licensed descriptor is independently confirmed by source-grounded evidence"
+            elif confirming_facts:
+                entailment_reason = "index or synonym retrieval is not independent descriptor confirmation"
         gates.append(
             GateResult(
                 "descriptor_entailment",
@@ -173,14 +215,12 @@ class DecisionEngine:
                 (self._source_ref(artifact),),
             )
         )
-        specificity = entailed and (
-            bool(artifact.requirements)
-            or any(
-                fact.normalization
-                and fact.normalization.source == f"snapshot:{self.snapshot.snapshot_id}"
-                and not fact.normalization.alternatives
-                for fact in performed
-            )
+        specificity = entailed and any(
+            fact.normalization
+            and fact.normalization.target_artifact_id == artifact.artifact_id
+            and fact.normalization.source == f"snapshot:{self.snapshot.snapshot_id}"
+            and not fact.normalization.alternatives
+            for fact in performed
         )
         gates.append(
             self._gate(
@@ -197,6 +237,7 @@ class DecisionEngine:
             selected_codes,
             context,
             units.get(candidate.artifact_id),
+            ptp_exception_codes,
         )
         if missing_capabilities:
             constraints_ok = False
@@ -219,16 +260,22 @@ class DecisionEngine:
                 "missing claim context: " + ", ".join(missing_context),
             )
         )
-        coverage_refs = coverage_evidence.get(candidate.artifact_id, ())
-        gates.append(
-            self._gate(
-                "coverage",
-                bool(coverage_refs),
-                "applicable coverage policy was evaluated",
-                "applicable coverage policy was not deterministically evaluated",
-                coverage_refs,
+        supplied = {gate.name: gate for gate in supplemental_gates.get(candidate.artifact_id, ())}
+        if "coverage" in supplied:
+            gates.append(supplied.pop("coverage"))
+            coverage_refs = gates[-1].source_refs if gates[-1].status == GateStatus.PASS else ()
+        else:
+            coverage_refs = coverage_evidence.get(candidate.artifact_id, ())
+            gates.append(
+                self._gate(
+                    "coverage",
+                    bool(coverage_refs),
+                    "applicable coverage policy was evaluated",
+                    "applicable coverage policy was not deterministically evaluated",
+                    coverage_refs,
+                )
             )
-        )
+        gates.extend(supplied.values())
         gates.append(
             self._gate(
                 "provenance",
@@ -250,7 +297,7 @@ class DecisionEngine:
             state = DecisionState.CANDIDATE_NOT_ENTAILED
         elif not constraints_ok:
             state = DecisionState.SOURCE_CONFLICT
-        elif not coverage_refs:
+        elif any(gate.status == GateStatus.FAIL for gate in gates if gate.name in MANDATORY_GATES):
             state = DecisionState.SOURCE_UNAVAILABLE
         else:
             state = DecisionState.SUPPORTED_REPORTABLE
@@ -262,7 +309,10 @@ class DecisionEngine:
         selected_codes: set[str],
         context: ClaimContext,
         units: float | None,
+        ptp_exception_codes: set[str],
     ) -> tuple[bool, str, tuple[str, ...]]:
+        if units is None:
+            return True, "candidate is not a service-line constraint target", ()
         rows = self.snapshot.constraints(
             ("cannot_coexist", "ptp_edit", "unit_limit", "add_on_relationship"),
             selected_codes,
@@ -280,6 +330,8 @@ class DecisionEngine:
                     if indicator == "9":
                         continue
                     if indicator == "1":
+                        if row["right_code"] in ptp_exception_codes:
+                            continue
                         return False, "pair edit requires independently established modifier-exception evidence", tuple(refs)
                     return False, "pair edit prohibits the reported combination", tuple(refs)
             if row["kind"] == "unit_limit" and row["target_code"] == artifact.code:

@@ -7,6 +7,10 @@ from .compiler import canonical_json, sha256_bytes
 from .models import CandidateDecision, ClaimContext, DecisionCertificate, EvidenceGraph
 
 
+def stable_hash(value: object) -> str:
+    return sha256_bytes(canonical_json(value))
+
+
 def build_certificate(
     encounter_id: str,
     snapshot_id: str,

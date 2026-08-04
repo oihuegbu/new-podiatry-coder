@@ -6,6 +6,8 @@ build/
 dist/
 *.egg-info/
 .env
+data/sources/licensed/
+var/
 data/codes/ncci_ptp.json
 data/codes/mue_practitioner_refreshed.json
 

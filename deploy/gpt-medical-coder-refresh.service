@@ -1,0 +1,17 @@
+[Unit]
+Description=Refresh and atomically activate authoritative medical-coding sources
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/gpt-medical-coder
+EnvironmentFile=/etc/gpt-medical-coder/service.env
+ExecStart=/opt/gpt-medical-coder/deploy/refresh-and-activate.sh
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/gpt-medical-coder/data /opt/gpt-medical-coder/build

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 from medical_coder.compiler import SourceCompiler, SourceIntegrityError
 from medical_coder.decision import DecisionEngine, MANDATORY_GATES
@@ -17,6 +19,8 @@ from medical_coder.models import (
     EvidenceFact,
     EvidenceGraph,
     FactStatus,
+    GateResult,
+    GateStatus,
     SourceSpan,
 )
 from medical_coder.terminology import TerminologySnapshot
@@ -51,7 +55,7 @@ class KernelTestCase(unittest.TestCase):
         (self.root / "source" / "items.json").write_text(json.dumps(source), encoding="utf-8")
         pack = {
             "pack_id": "test-pack",
-            "schema_version": 1,
+            "schema_version": 3,
             "capabilities": {
                 "closed_world_identity": True,
                 "temporal_validity": True,
@@ -118,6 +122,19 @@ class KernelTestCase(unittest.TestCase):
         self.assertEqual(manifest["snapshot_id"], again.name)
         self.assertEqual(manifest["capabilities"]["closed_world_identity"], True)
 
+    def test_concurrent_identical_publish_is_verified_and_leaves_no_staging_tree(self) -> None:
+        output = self.root / "concurrent-snapshots"
+
+        def publish_first(source, destination):
+            shutil.copytree(source, destination)
+            raise FileExistsError("simulated concurrent publication")
+
+        with patch("medical_coder.compiler.os.replace", side_effect=publish_first):
+            result = SourceCompiler(self.root).compile(self.root / "pack.json", output)
+        self.assertTrue((result / "manifest.json").is_file())
+        self.assertFalse(any(path.name.startswith(".") for path in output.iterdir()))
+        TerminologySnapshot(result)
+
     def test_search_is_closed_world_and_temporal(self) -> None:
         candidates = self.snapshot.search(
             self.evidence,
@@ -143,6 +160,12 @@ class KernelTestCase(unittest.TestCase):
             (candidate,),
             required_capabilities={"closed_world_identity", "temporal_validity"},
             coverage_evidence={candidate.artifact_id: ("policy-hash:section",)},
+            supplemental_gates={
+                candidate.artifact_id: tuple(
+                    GateResult(name, GateStatus.PASS, "test evidence", ("test-source",))
+                    for name in ("documentation", "units", "modifiers", "sequencing", "reportability", "medical_necessity")
+                )
+            },
         )
         self.assertEqual(decisions[0].state, DecisionState.SUPPORTED_REPORTABLE)
         self.assertTrue(decisions[0].autonomous_release)

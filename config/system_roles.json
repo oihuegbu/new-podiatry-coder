@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "clinical_terminology_systems": ["SNOMED-CT-US"],
+  "procedure_systems": ["CPT", "HCPCS"],
+  "diagnosis_systems": ["ICD-10-CM"],
+  "modifier_systems": ["MODIFIER"],
+  "place_of_service_system": "POS",
+  "procedure_fact_types": ["procedure", "service", "surgery"],
+  "diagnosis_fact_types": ["diagnosis", "condition", "finding", "symptom"],
+  "modifier_fact_types": ["modifier_evidence"],
+  "quantity_attribute_fields": ["units", "quantity", "count", "value"],
+  "constraint_exception_relations": {
+    "separate_site": ["site", "structure", "organ"],
+    "separate_session": ["session", "encounter"],
+    "repeat_service": ["repeat", "repeated"]
+  },
+  "sequencing_directive_fields": ["codeFirst", "useAdditionalCode", "codeAlso", "Excludes1", "Excludes2"],
+  "default_single_service_units": 1.0
+}

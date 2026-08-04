@@ -54,6 +54,110 @@
       "container": "codes",
       "required_fields": ["code", "long_description"],
       "output_path": "data/codes/cpt_codes.json"
+    },
+    {
+      "id": "pfs-procedure-attributes",
+      "authority": "CMS",
+      "landing_url": "https://www.cms.gov/medicare/payment/fee-schedules/physician/pfs-relative-value-files",
+      "allowed_hosts": ["www.cms.gov", "cms.gov"],
+      "detail_link_regex": "(?i)/rvu(?P<year>\\d{2})(?P<period>[a-d])(?:-\\d+)?/?$",
+      "download_link_regex": "(?i)\\.zip(?:[?].*)?$",
+      "parser": "delimited_archive",
+      "member_regex": "(?i)PPRRVU.*non.?QPP.*\\.(csv|txt)$",
+      "minimum_rows": 10000,
+      "output_path": "data/codes/global_period.json",
+      "identifier_regex": "^[A-Z0-9]{5}$",
+      "field_aliases": {
+        "target_code": ["hcpcs", "code"],
+        "global_period": ["glob days", "global"],
+        "bilateral_indicator": ["bilat"],
+        "status_indicator": ["status"],
+        "modifier": ["mod"]
+      },
+      "row_filters": {"modifier": [""]},
+      "output_shape": "code_map",
+      "output_code_field": "target_code",
+      "output_field_map": {
+        "global": "global_period",
+        "bilat": "bilateral_indicator",
+        "status": "status_indicator"
+      }
+    },
+    {
+      "id": "mcd-coverage-articles",
+      "authority": "CMS-MCD",
+      "direct_url": "https://downloads.cms.gov/medicare-coverage-database/downloads/exports/all_article.zip",
+      "allowed_hosts": ["downloads.cms.gov"],
+      "parser": "mcd_relational_archive",
+      "minimum_rows": 500,
+      "output_path": "data/codes/mcd_coverage_cache.json"
+    },
+    {
+      "id": "licensed-cpt-link-index",
+      "authority": "AMA",
+      "url_env": "AMA_CPT_LINK_SOURCE_URL",
+      "token_env": "AMA_CPT_API_TOKEN",
+      "allowed_hosts": ["api-platform.ama-assn.org", "developer-datalabs.ama-assn.org"],
+      "parser": "cpt_link_index",
+      "minimum_rows": 10000,
+      "output_path": "data/codes/cpt_link_index_terms.json",
+      "main_term_aliases": ["main term", "mainterm"],
+      "modifier_level_aliases": [
+        ["modifier 1", "subterm 1", "level 1"],
+        ["modifier 2", "subterm 2", "level 2"],
+        ["modifier 3", "subterm 3", "level 3"],
+        ["modifier 4", "subterm 4", "level 4"],
+        ["modifier 5", "subterm 5", "level 5"]
+      ],
+      "code_target_aliases": ["code", "code target", "code range", "cpt code"],
+      "see_aliases": ["see", "see reference"],
+      "see_also_aliases": ["see also", "see also reference"],
+      "membership_source": "data/codes/cpt_codes.json",
+      "membership_code_field": "code"
+    },
+    {
+      "id": "payer-contract-coverage-json",
+      "authority": "VERIFIED-PAYER-CONTRACT",
+      "url_env": "PAYER_CONTRACT_SOURCE_URL",
+      "token_env": "PAYER_CONTRACT_API_TOKEN",
+      "allowed_hosts_env": "PAYER_CONTRACT_ALLOWED_HOSTS",
+      "parser": "verified_json",
+      "minimum_rows": 1,
+      "container": "policies",
+      "required_fields": [
+        "policy_id", "title", "effective_from", "procedure_codes",
+        "covered_diagnosis_codes", "payer_identifiers", "contract_profiles",
+        "source_document_id", "source_section"
+      ],
+      "output_path": "data/codes/payer_contract_coverage.json"
+    },
+    {
+      "id": "snomed-ct-us-edition",
+      "authority": "NLM-SNOMED-CT-US",
+      "release_api": "https://uts-ws.nlm.nih.gov/releases?releaseType=snomed-ct-us-edition&current=true",
+      "download_api": "https://uts-ws.nlm.nih.gov/download",
+      "api_key_env": "UMLS_API_KEY",
+      "allowed_hosts": ["uts-ws.nlm.nih.gov", "download.nlm.nih.gov"],
+      "parser": "snomed_rf2",
+      "minimum_rows": 100000,
+      "maximum_download_bytes": 1073741824,
+      "output_path": "data/codes/snomed_us_terminology.json"
+    },
+    {
+      "id": "umls-snomed-cpt-candidate-terms",
+      "authority": "NLM-UMLS",
+      "release_api": "https://uts-ws.nlm.nih.gov/releases?releaseType=umls-metathesaurus-mrconso-file&current=true",
+      "download_api": "https://uts-ws.nlm.nih.gov/download",
+      "api_key_env": "UMLS_API_KEY",
+      "allowed_hosts": ["uts-ws.nlm.nih.gov", "download.nlm.nih.gov"],
+      "parser": "umls_mrconso_candidates",
+      "minimum_rows": 1000,
+      "maximum_download_bytes": 2147483648,
+      "target_sources": ["CPT"],
+      "clinical_sources": ["SNOMEDCT_US"],
+      "membership_source": "data/codes/cpt_codes.json",
+      "membership_code_field": "code",
+      "output_path": "data/codes/umls_cpt_candidate_terms.json"
     }
   ]
 }

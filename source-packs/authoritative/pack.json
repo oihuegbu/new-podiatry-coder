@@ -1,16 +1,35 @@
 {
   "pack_id": "imported-authoritative-core",
-  "schema_version": 1,
+  "schema_version": 3,
   "capabilities": {
     "closed_world_identity": true,
     "temporal_validity": true,
-    "descriptor_requirements": false,
+    "descriptor_requirements": true,
     "hierarchy": false,
     "professional_ptp": true,
     "practitioner_unit_limits": true,
     "add_on_relationships": true,
     "claim_context_rules": false,
-    "coverage_rules": false
+    "coverage_rules": true,
+    "authoritative_lookup_index": true,
+    "modifier_definitions": true,
+    "place_of_service_definitions": true
+  },
+  "semantic_derivations": {
+    "descriptor_token_requirements": {
+      "enabled": true,
+      "maximum_document_frequency_ratio": 0.2,
+      "minimum_token_length": 2
+    },
+    "source_derived_candidate_recall": {
+      "enabled": true,
+      "minimum_token_length": 6,
+      "minimum_common_substring_length": 6,
+      "minimum_common_substring_coverage": 0.75,
+      "minimum_sequence_similarity": 0.75,
+      "minimum_unique_coverage_margin": 0.1,
+      "maximum_hops": 2
+    }
   },
   "artifacts": [
     {
@@ -22,6 +41,7 @@
       "version_path": "metadata.release_id",
       "code_field": "code",
       "display_fields": ["long_description", "medium_description", "short_description"],
+      "search_fields": ["medium_description", "short_description", "consumer_description"],
       "effective_start_field": "effective_date",
       "billable_default": true,
       "concept_field": "concept_id"
@@ -49,6 +69,44 @@
       "effective_end_field": "effective_to",
       "status_field": "status",
       "billable_default": true
+    },
+    {
+      "path": "data/codes/modifiers.json",
+      "authority": "AMA-CMS",
+      "system": "MODIFIER",
+      "version": "2026",
+      "container": "modifiers",
+      "code_keyed": true,
+      "key_field_from_map": "code",
+      "code_field": "code",
+      "display_fields": ["name", "description"],
+      "effective_start_field": "effective_date",
+      "billable_default": false,
+      "concept_field": "metadata.concept_id"
+    },
+    {
+      "path": "data/codes/pos_codes.json",
+      "authority": "CMS",
+      "system": "POS",
+      "version": "2026",
+      "container": "codes",
+      "code_keyed": true,
+      "key_field_from_map": "code",
+      "code_field": "code",
+      "display_fields": ["name"],
+      "billable_default": false
+    },
+    {
+      "path": "data/codes/snomed_us_terminology.json",
+      "authority": "NLM-SNOMED-CT-US",
+      "system": "SNOMED-CT-US",
+      "license_restricted": true,
+      "container": "concepts",
+      "version_path": "metadata.release_id",
+      "code_field": "concept_id",
+      "display_fields": ["display_term"],
+      "status_field": "status",
+      "billable_default": false
     }
   ],
   "constraints": [
@@ -89,7 +147,107 @@
       "authority": "CMS",
       "container": "codes",
       "code_keyed": true,
+      "system": "CPT",
+      "code_field": "code",
+      "kind": "pfs_procedure_attributes",
       "properties": ["global", "bilat"]
+    }
+  ],
+  "lookup_maps": [
+    {
+      "path": "data/codes/icd10cm_index_terms.json",
+      "authority": "CDC-NCHS",
+      "system": "ICD-10-CM",
+      "container": "terms",
+      "term_kind": "official_alphabetic_index"
+    },
+    {
+      "path": "data/codes/cpt_link_index_terms.json",
+      "authority": "AMA-CPT-Link",
+      "system": "CPT",
+      "container": "terms",
+      "term_kind": "licensed_alphabetic_index"
+    },
+    {
+      "path": "data/codes/umls_cpt_candidate_terms.json",
+      "authority": "NLM-UMLS",
+      "system": "CPT",
+      "container": "terms",
+      "term_kind": "umls_concept_candidate"
+    },
+    {
+      "path": "data/codes/snomed_us_terminology.json",
+      "authority": "NLM-SNOMED-CT-US",
+      "system": "SNOMED-CT-US",
+      "container": "terms",
+      "term_kind": "official_snomed_description"
+    }
+  ],
+  "semantic_maps": [
+    {
+      "path": "data/codes/icd10cm_instructional_notes.json",
+      "authority": "CDC-NCHS",
+      "system": "ICD-10-CM",
+      "container": "codes",
+      "kind": "instructional_notes"
+    }
+  ],
+  "coverage_sources": [
+    {
+      "path": "data/codes/mcd_coverage_cache.json",
+      "authority": "CMS-MCD",
+      "payer_types": ["medicare-ffs"],
+      "container": "articles",
+      "policy_id_field": "policy_id",
+      "title_field": "title",
+      "effective_start_field": "effective_from",
+      "effective_end_field": "effective_to",
+      "procedure_fields": ["cpt_codes"],
+      "diagnosis_fields": {
+        "covered": ["covered_icd"],
+        "noncovered": ["noncovered_icd"]
+      },
+      "diagnosis_group_fields": [
+        {
+          "field": "covered_icd_groups",
+          "codes_field": "codes",
+          "procedure_scope_field": "cpt_scope",
+          "group_id_field": "group",
+          "role_field": "role",
+          "allowed_roles": ["unspecified", "primary_eligible", "required_secondary"],
+          "disposition": "covered"
+        }
+      ],
+      "jurisdiction_fields": ["states", "contractor"],
+      "properties": ["related_lcds"]
+    },
+    {
+      "path": "data/codes/payer_contract_coverage.json",
+      "authority": "PAYER-CONTRACT",
+      "container": "policies",
+      "policy_id_field": "policy_id",
+      "title_field": "title",
+      "effective_start_field": "effective_from",
+      "effective_end_field": "effective_to",
+      "procedure_fields": ["procedure_codes"],
+      "diagnosis_fields": {
+        "covered": ["covered_diagnosis_codes"],
+        "noncovered": ["noncovered_diagnosis_codes"]
+      },
+      "jurisdiction_fields": ["jurisdictions"],
+      "payer_type_fields": ["payer_types"],
+      "payer_identifier_fields": ["payer_identifiers"],
+      "contract_profile_fields": ["contract_profiles"],
+      "properties": ["source_document_id", "source_section"]
+    }
+  ],
+  "jurisdiction_sources": [
+    {
+      "path": "data/codes/mac_jurisdictions.json",
+      "authority": "CMS",
+      "container": "ab_mac_jurisdictions",
+      "canonical_field": "jurisdiction",
+      "alias_fields": ["aliases", "states", "contractor"]
     }
   ],
   "policy_documents": [

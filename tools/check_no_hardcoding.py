@@ -25,6 +25,7 @@ ALLOWED_NAMES = {
     "SOURCE_UNAVAILABLE",
     "COMPILER_ERROR",
 }
+NON_MEDICAL_PROTOCOL_LITERALS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 
 
 def violations(root: Path) -> list[str]:
@@ -34,7 +35,7 @@ def violations(root: Path) -> list[str]:
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 value = node.value.strip()
-                if value not in ALLOWED_NAMES and CODE_SHAPED.fullmatch(value):
+                if value not in ALLOWED_NAMES and value not in NON_MEDICAL_PROTOCOL_LITERALS and CODE_SHAPED.fullmatch(value):
                     found.append(f"{path}:{node.lineno}: code-shaped literal {value!r}")
     return found
 
