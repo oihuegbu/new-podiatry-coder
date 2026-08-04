@@ -114,6 +114,27 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
             fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
             rationale=f"not performed today (disposition={fact.disposition.value}) — not billed")
 
+    # An authoritative single index/descriptor hit is a strong CANDIDATE, not a
+    # finished verdict. The Alphabetic Index (or a descriptor index) gives a
+    # term->code lead that the CPT/ICD workflow requires confirming against the
+    # Tabular + the documented facts. So: in deterministic/test mode (no verifier) a
+    # clean single hit still resolves deterministically; but in real mode, for the
+    # verifiable kinds, the hit is SEEDED into propose-then-verify and billed only
+    # after descriptor ENTAILMENT + independent corroboration — never on the hit
+    # alone (which could carry an undocumented qualifier).
+    seeds: list[CandidateCode] = []
+    _pv_kind = fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING, FactKind.DIAGNOSIS)
+
+    def _take(cands, authority):
+        cands = [c for c in cands if c]
+        if not cands:
+            return None
+        if llm is not None and _pv_kind:
+            seeds.extend(cands)                  # confirm downstream, don't auto-bill
+            return None
+        line = _decide(fact, cands, authority=authority, source=source)
+        return line if line.resolved else None
+
     # AUTHORITATIVE FIRST: for a diagnosis, resolve through the ICD-10-CM
     # Alphabetic Index (clinician term -> code) before any embedding. This is the
     # permanent fix for the eponym / terse-descriptor gap — deterministic and
@@ -129,9 +150,9 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
         if len(idx) == 1:
             pool = _authoritative_pool(next(iter(idx)), source)
             if pool:
-                line = _decide(fact, pool, authority="ICD-10-CM Alphabetic Index", source=source)
-                if line.resolved:
-                    return line
+                r = _take(pool, "ICD-10-CM Alphabetic Index")
+                if r is not None:
+                    return r
         # SECOND authoritative layer: the SNOMED CT -> ICD-10-CM map (long-tail
         # eponyms/synonyms the ICD Index lacks). Same
         # single-code trust rule; no-op until the map is ingested (needs UMLS).
@@ -139,9 +160,9 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
         if len(snomed) == 1:
             pool = _authoritative_pool(next(iter(snomed)), source)
             if pool:
-                line = _decide(fact, pool, authority="SNOMED CT -> ICD-10-CM map", source=source)
-                if line.resolved:
-                    return line
+                r = _take(pool, "SNOMED CT -> ICD-10-CM map")
+                if r is not None:
+                    return r
 
     # AUTHORITATIVE FIRST (procedure axis, mechanic 5): resolve a procedure/supply/
     # imaging phrase through the CPT/HCPCS descriptor index before any embedding —
@@ -164,10 +185,9 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
                 cand = CandidateCode(code=code, system=fact.system, descriptor=str(desc),
                                      score=1.0, source="cms-table-of-drugs",
                                      authority={"source": "CMS Table of Drugs & Biologicals"})
-                line = _decide(fact, [cand],
-                               authority="CMS Table of Drugs & Biologicals", source=source)
-                if line.resolved:
-                    return line
+                r = _take([cand], "CMS Table of Drugs & Biologicals")
+                if r is not None:
+                    return r
 
         # AUTHORITATIVE FIRST: the AMA CPT Alphabetic Index (term -> code), the true
         # analog of the ICD Index. This is what resolves a documented procedure
@@ -185,9 +205,9 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
             cand = CandidateCode(code=code, system=fact.system, descriptor=str(desc),
                                  score=1.0, source="cpt-alphabetic-index",
                                  authority={"source": "AMA CPT Alphabetic Index"})
-            line = _decide(fact, [cand], authority="AMA CPT Alphabetic Index", source=source)
-            if line.resolved:
-                return line
+            r = _take([cand], "AMA CPT Alphabetic Index")
+            if r is not None:
+                return r
 
         # LEARNED verified-resolution index: a phrase this coder has resolved and had
         # confirmed across enough distinct encounters resolves DETERMINISTICALLY here
@@ -202,10 +222,9 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
             cand = CandidateCode(code=code, system=fact.system, descriptor=str(desc),
                                  score=1.0, source="learned-verified-index",
                                  authority={"source": "learned verified-resolution index"})
-            line = _decide(fact, [cand],
-                           authority="learned verified-resolution index", source=source)
-            if line.resolved:
-                return line
+            r = _take([cand], "learned verified-resolution index")
+            if r is not None:
+                return r
 
         pidx = source.procedure_index_codes(fact.description, fact.system)
         if len(pidx) == 1:
@@ -216,9 +235,9 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
             cand = CandidateCode(code=code, system=fact.system, descriptor=str(desc),
                                  score=1.0, source="cpt-descriptor-index",
                                  authority={"source": "CPT/HCPCS descriptor index"})
-            line = _decide(fact, [cand], authority="CPT/HCPCS descriptor index", source=source)
-            if line.resolved:
-                return line
+            r = _take([cand], "CPT/HCPCS descriptor index")
+            if r is not None:
+                return r
 
     # Multi-query RECALL: search the structured query AND the verbatim evidence
     # (which often carries the eponym / clinician term the descriptor lacks),
@@ -235,6 +254,13 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
             if c.code not in best or c.score > best[c.code].score:
                 best[c.code] = c
     pool = sorted(best.values(), key=lambda c: c.score, reverse=True)
+
+    # The authoritative index hits (if any) LEAD the shortlist as high-confidence
+    # candidates — but they are billed only if propose-then-verify below confirms
+    # entailment + corroboration, so a unique Index hit no longer auto-bills.
+    if seeds:
+        seen_codes = {c.code for c in seeds}
+        pool = list(seeds) + [c for c in pool if c.code not in seen_codes]
 
     # PROPOSE-THEN-VERIFY (when an LLM is available): widen the pool with
     # authoritative-validated LLM proposals, then accept the first candidate whose

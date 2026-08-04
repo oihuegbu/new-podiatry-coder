@@ -32,12 +32,20 @@ def _canonical(obj: Any) -> str:
 
 def build_certificate(result: CodingResult, note_text: str,
                       source_identity: dict[str, Any] | None = None) -> dict[str, Any]:
+    # Bind EVERY field that changes the bill or its justification: not just the code
+    # and evidence but the UNITS billed, the documented axes the code rests on, the
+    # line kind, and each gate's detail — so altering a unit count, an attribute, or
+    # a gate result invalidates the hash. (Omitting units let a 1 -> 9 unit change
+    # produce an identical certificate.)
     lines = [{
         "system": ln.chosen.system,
         "code": ln.chosen.code,
-        "modifiers": ln.modifiers,
+        "kind": ln.fact.kind.value,
+        "modifiers": sorted(ln.modifiers),
+        "units": ln.units,
         "descriptor": ln.chosen.descriptor,
         "method": ln.method.value,
+        "attributes": ln.fact.attributes,
         "evidence": [s.text for s in ln.fact.evidence],
         "authority": ln.chosen.authority,
     } for ln in result.billable_lines]
@@ -47,7 +55,8 @@ def build_certificate(result: CodingResult, note_text: str,
         "date_of_service": result.date_of_service,
         "note_sha256": _sha(note_text),
         "lines": lines,
-        "gates": [{"name": g.name, "outcome": g.outcome.value} for g in result.gates],
+        "gates": [{"name": g.name, "outcome": g.outcome.value, "detail": g.detail}
+                  for g in result.gates],
         "verdict": result.verdict.value,
         "source_identity": source_identity or {},
     }

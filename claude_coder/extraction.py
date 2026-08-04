@@ -72,10 +72,12 @@ def _coerce_kind(value: str) -> FactKind | None:
         return None
 
 
-def _coerce_disposition(value: str) -> Disposition:
+def _coerce_disposition(value) -> Disposition:
+    # Fail-closed: a missing (None) or unrecognized disposition is UNCLEAR, never
+    # assumed performed. Only an explicit, valid disposition is trusted.
     try:
         return Disposition(str(value).strip().lower())
-    except ValueError:
+    except (ValueError, AttributeError):
         return Disposition.UNCLEAR
 
 
@@ -116,7 +118,7 @@ def extract_facts(note_text: str, llm: LLMFn | None = None) -> list[ClinicalFact
             kind=kind,
             description=desc,
             attributes=item.get("attributes") or {},
-            disposition=_coerce_disposition(item.get("disposition", "performed_today")),
+            disposition=_coerce_disposition(item.get("disposition")),
             evidence=spans,
             confidence=float(item.get("confidence") or 0.0),
             fact_id=f"f{i+1}",

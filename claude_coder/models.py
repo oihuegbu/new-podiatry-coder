@@ -64,6 +64,11 @@ class ClinicalFact:
     kind: FactKind
     description: str
     attributes: dict[str, Any] = field(default_factory=dict)
+    # Direct construction states a known intent (the callers here are trusted code
+    # asserting a performed event). The fail-closed guard for UNTRUSTED input lives
+    # at the trust boundary — extraction._coerce_disposition maps a missing/malformed
+    # disposition from model output to UNCLEAR, so a real note never bills an event
+    # whose disposition was not explicitly documented.
     disposition: Disposition = Disposition.PERFORMED
     evidence: list[EvidenceSpan] = field(default_factory=list)
     confidence: float = 0.0

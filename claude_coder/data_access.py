@@ -24,6 +24,11 @@ from typing import Any, Protocol, runtime_checkable
 
 from .models import CandidateCode, Outcome
 
+# Sentinel distinguishing an authority check that COULD NOT RUN (data missing / a
+# lookup error) from a check that ran and found no restriction. A caller must never
+# read "unavailable" as "no edit": an unrunnable check stops autonomy (fail-closed).
+AUTHORITY_UNAVAILABLE = "__unavailable__"
+
 
 @runtime_checkable
 class CodeSource(Protocol):
@@ -64,7 +69,11 @@ class CodeSource(Protocol):
 
     def mue_limit(self, code: str, dos: str | None) -> int | None: ...
 
+    def mue_available(self) -> bool: ...
+
     def excludes1_refs(self, code: str, system: str) -> set[str]: ...
+
+    def data_fingerprint(self) -> dict[str, Any]: ...
 
 
 # Data-driven signals that a code is NOT a separately reportable line. These are
@@ -465,15 +474,16 @@ class AuthoritativeSource:
 
     def ncci_indicator(self, col1: str, col2: str, dos: str | None) -> str | None:
         """PTP modifier indicator ('0' no bypass, '1' bypass-with-modifier, '9'
-        deleted) via the real edit method `check_ncci`. None = no edit for the
-        pair. Robust to the edit's return shape."""
-        db = self._reference()
+        deleted) via the real edit method `check_ncci`. None = the check RAN and
+        found no edit for the pair; AUTHORITY_UNAVAILABLE = the check could not run
+        (a lookup error) — the caller must treat that as UNKNOWN, never as 'no edit'.
+        Robust to the edit's return shape."""
         try:
-            edit = db.check_ncci(col1, col2)     # type: ignore[attr-defined]
+            edit = self._reference().check_ncci(col1, col2)   # type: ignore[attr-defined]
         except Exception:
-            return None
+            return AUTHORITY_UNAVAILABLE                       # check could not run
         if not edit:
-            return None
+            return None                                        # ran; no edit for this pair
         if isinstance(edit, dict):
             for k in ("modifier_indicator", "indicator", "mi", "ptp_modifier"):
                 if k in edit:
@@ -519,6 +529,36 @@ class AuthoritativeSource:
             val = rec.get("mue_value")
             return int(val) if val is not None else None
         return int(rec) if isinstance(rec, int) else None
+
+    def mue_available(self) -> bool:
+        """Whether the MUE table is loaded at all. Lets the gate distinguish 'this
+        code has no published MUE' (limit None, fine) from 'the MUE table could not
+        be loaded' (assert nothing -> UNKNOWN)."""
+        try:
+            return isinstance(getattr(self._reference(), "mue", None), dict)
+        except Exception:
+            return False
+
+    def data_fingerprint(self) -> dict[str, Any]:
+        """A content fingerprint of the loaded authoritative editions, so the
+        release certificate binds the exact data the claim was coded against — a
+        changed code set / descriptor edition changes the fingerprint. Uses the
+        deployment's codes checksum when present, else per-system code counts."""
+        fp: dict[str, Any] = {}
+        try:
+            db = self._reference()
+            fp["counts"] = {s: len(getattr(db, s, {}) or {})
+                            for s in ("icd10", "cpt", "hcpcs")}
+        except Exception:
+            fp["counts"] = {}
+        try:
+            from app.core.config import DATA_DIR
+            chk = DATA_DIR / "qdrant_store" / "codes_checksum.txt"
+            if chk.exists():
+                fp["codes_checksum"] = chk.read_text().strip()[:64]
+        except Exception:
+            pass
+        return fp
 
     def _excludes1_map(self) -> dict[str, set[str]]:
         """{undotted category key -> set of undotted Excludes1 target prefixes} from
@@ -679,6 +719,12 @@ class MockSource:
 
     def mue_limit(self, code, dos):
         return self._mue.get(code)
+
+    def mue_available(self):
+        return True
+
+    def data_fingerprint(self):
+        return {"source": "mock"}
 
     def excludes1_refs(self, code, system):
         if system != "icd10" or not self._excl1_data:

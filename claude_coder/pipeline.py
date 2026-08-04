@@ -150,8 +150,13 @@ def code_encounter(
     # Actionable documentation guidance for whatever could not be coded confidently.
     from . import recommendations as _recs
     result.recommendations = _recs.build_recommendations(result)
+    try:
+        fingerprint = source.data_fingerprint()
+    except Exception:
+        fingerprint = {}
     result.certificate = certificate.build_certificate(
-        result, note_text, source_identity={"source": type(source).__name__})
+        result, note_text,
+        source_identity={"source": type(source).__name__, "data": fingerprint})
     return result
 
 
@@ -172,10 +177,24 @@ def dedup_lines(result: CodingResult) -> None:
         if keep is None:
             seen[key] = ln
             continue
-        # merge evidence for the audit trail, then drop the duplicate line
+        # A duplicate that carries NEW evidence is a separately-documented instance,
+        # not a re-mention: accumulate its units so a repeated service is not
+        # silently dropped (underbilled). The MUE gate caps the total — an
+        # accumulation past the unit limit BLOCKS release, so this can never silently
+        # overbill either. A duplicate whose evidence is already present is a
+        # re-mention of the same event and is simply merged.
+        keep_texts = {s.text for s in keep.fact.evidence}
+        new_spans = [s for s in ln.fact.evidence if s.text not in keep_texts]
         keep.fact.evidence = list(keep.fact.evidence) + list(ln.fact.evidence)
-        ln.excluded_reason = (f"duplicate of {ln.chosen.code} already on the claim "
-                              f"— merged into a single line")
+        if new_spans:
+            keep.units += ln.units
+            keep.rationale = (f"{keep.rationale}; merged a separately-documented "
+                              f"repeat — units accumulated (MUE-capped)")
+            ln.excluded_reason = (f"repeat of {ln.chosen.code} — units folded into "
+                                  f"the primary line (MUE governs the total)")
+        else:
+            ln.excluded_reason = (f"duplicate of {ln.chosen.code} already on the "
+                                  f"claim — merged into a single line")
 
 
 def apply_section_applicability(result: CodingResult) -> None:

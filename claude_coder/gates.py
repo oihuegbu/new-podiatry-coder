@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-from .data_access import CodeSource
+from .data_access import AUTHORITY_UNAVAILABLE, CodeSource
 from .models import CodingResult, GateResult, Outcome, ResolvedLine
 
 
@@ -84,8 +84,13 @@ def ncci_gate(result: CodingResult, source: CodeSource) -> GateResult:
                 continue
             ind = source.ncci_indicator(lines[i].chosen.code, lines[j].chosen.code,
                                         result.date_of_service)
+            if ind == AUTHORITY_UNAVAILABLE:   # the check could not run -> not clean
+                outcomes.append(Outcome.UNKNOWN)
+                detail.append(f"{lines[i].chosen.code}/{lines[j].chosen.code} "
+                              f"NCCI check unavailable")
+                continue
             if ind is None:
-                continue                       # this pair not in the edit table
+                continue                       # ran; this pair not in the edit table
             if ind == "0":                     # not separately reportable, no bypass
                 outcomes.append(Outcome.BLOCKED)
                 detail.append(f"{lines[i].chosen.code}/{lines[j].chosen.code} bundled (0)")
@@ -116,6 +121,10 @@ def mue_gate(result: CodingResult, source: CodeSource) -> GateResult:
             detail.append(f"{ln.chosen.code}: {units} > MUE {limit}")
         else:
             outcomes.append(Outcome.PASS)
+    if result.billable_lines and not source.mue_available():
+        return GateResult("mue", Outcome.UNKNOWN,
+                          "MUE table unavailable — unit limits cannot be asserted",
+                          "MUE (data)")
     if not outcomes:
         return GateResult("mue", Outcome.NOT_APPLICABLE, "no MUE-constrained lines",
                           "MUE (data)")
