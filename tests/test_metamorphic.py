@@ -205,3 +205,30 @@ def test_confidence_floor_is_strict():
                      gates=list(_GATES_OK))
     decide(r)
     assert r.verdict is Verdict.AUTO_READY
+
+
+def test_snomed_crosswalk_hit_is_verified_not_blindly_trusted():
+    """A SNOMED CT crosswalk hit is a CANDIDATE that must be entailment-confirmed, not
+    trusted deterministically — its default ICD map can be wrong for the documented
+    condition (e.g. bursitis mapping to a spur code). With a verifier that REJECTS the
+    mapped code, the fact must NOT resolve to it; with one that confirms, it does."""
+    from claude_coder import resolution
+    src = MockSource(records={("WW01", "icd10"): {"long_description": "Unrelated condition"}},
+                     snomed={"documented thing": {"WW01"}})
+    def fact():
+        return ClinicalFact(FactKind.DIAGNOSIS, "documented thing",
+                            evidence=[EvidenceSpan("documented thing")], disposition=Disposition.PERFORMED)
+    def stub(entailed):
+        def _s(system, user):
+            sl = system.lower()
+            if "propose" in sl:
+                return '{"codes": []}'
+            if "independently" in sl:                       # corroborate
+                return '{"entailed": %s, "missing_element": false, "reason": "x"}' % (
+                    "true" if entailed else "false")
+            return '{"choice": %d, "reason": "x"}' % (1 if entailed else 0)   # select
+        return _s
+    reject = resolution.resolve(fact(), src, llm=stub(False), corroborate=stub(False))
+    assert not reject.resolved                              # crosswalk default not blindly accepted
+    accept = resolution.resolve(fact(), src, llm=stub(True), corroborate=stub(True))
+    assert accept.resolved and accept.chosen.code == "WW01"  # confirmed -> resolves

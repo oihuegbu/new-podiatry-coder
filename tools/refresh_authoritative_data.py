@@ -11,7 +11,6 @@ Sources
 -------
 FREE / public (fetched automatically):
   • global_period   – CMS PFS RVU file            -> build_global_period.py
-  • snomed_icd10    – NLM SNOMED→ICD (Tuva mirror) -> build_snomed_icd10_map.py
   • icd10cm_index   – NCHS ICD-10-CM Alphabetic Index zip -> parse_icd10cm_index.py
 
 LICENSED (fetched from YOUR configured source — never a public download):
@@ -23,6 +22,12 @@ LICENSED (fetched from YOUR configured source — never a public download):
                                                          e.g. the AMA CPT data API
       If none is set, the stage is SKIPPED (not failed) with a clear note — the
       coder degrades gracefully to the descriptor index until the file is supplied.
+  • snomed_icd10    – SNOMED CT US Edition (official RF2) -> build_snomed_icd10_map.py
+      Unzip the licensed RF2 release and point the builder at it via ONE of:
+        SNOMED_RF2_DIR=/path/to/SnomedCT_…            the unzipped release dir
+        or place it under data/sources/ (or ~/snomed) — the builder auto-discovers.
+      If no release is present, the stage is SKIPPED (not failed) — the coder
+      degrades to the ICD Index + retrieval until the release is supplied.
 
 Usage
 -----

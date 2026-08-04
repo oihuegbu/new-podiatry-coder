@@ -153,16 +153,20 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
     seeds: list[CandidateCode] = []
     _pv_kind = fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING, FactKind.DIAGNOSIS)
 
-    def _take(cands, authority):
+    def _take(cands, authority, always_verify=False):
         cands = [c for c in cands if c]
         if not cands:
             return None
-        # Narrowed: only a hit whose descriptor carries a distinguishing qualifier
-        # the note may not support is routed through entailment confirmation. A clean,
-        # plain concept match closes deterministically even in real mode — most simple
-        # encounters should close after authoritative resolution, without an LLM call.
-        if llm is not None and _pv_kind and any(_needs_verification(fact, c) for c in cands):
-            seeds.extend(cands)                  # qualified/ambiguous -> confirm downstream
+        # Narrowed: a hit whose descriptor carries a distinguishing qualifier the note
+        # may not support is routed through entailment confirmation; a clean, plain
+        # index/descriptor match closes deterministically (most simple encounters
+        # should close after authoritative resolution, no LLM call). EXCEPTION: a
+        # SNOMED CT crosswalk hit (always_verify) maps a concept to a best-fit DEFAULT
+        # ICD code that can be less specific than — or wrong for — the documented
+        # condition, so it is ALWAYS entailment-confirmed, never trusted deterministically.
+        if (llm is not None and _pv_kind
+                and (always_verify or any(_needs_verification(fact, c) for c in cands))):
+            seeds.extend(cands)                  # qualified / crosswalk -> confirm downstream
             return None
         line = _decide(fact, cands, authority=authority, source=source)
         return line if line.resolved else None
@@ -185,14 +189,16 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
                 r = _take(pool, "ICD-10-CM Alphabetic Index")
                 if r is not None:
                     return r
-        # SECOND authoritative layer: the SNOMED CT -> ICD-10-CM map (long-tail
-        # eponyms/synonyms the ICD Index lacks). Same
-        # single-code trust rule; no-op until the map is ingested (needs UMLS).
+        # SECOND authoritative layer: the SNOMED CT -> ICD-10-CM crosswalk (the long-
+        # tail eponyms/synonyms the ICD Index lacks — e.g. an eponymous condition).
+        # A single crosswalk hit is a strong CANDIDATE, not a verdict: the concept's
+        # default ICD map can be less specific than, or wrong for, the documented
+        # condition, so it is ALWAYS entailment-confirmed (never trusted blindly).
         snomed = source.snomed_codes(fact.description, fact.system)
         if len(snomed) == 1:
             pool = _authoritative_pool(next(iter(snomed)), source)
             if pool:
-                r = _take(pool, "SNOMED CT -> ICD-10-CM map")
+                r = _take(pool, "SNOMED CT -> ICD-10-CM map", always_verify=True)
                 if r is not None:
                     return r
 
