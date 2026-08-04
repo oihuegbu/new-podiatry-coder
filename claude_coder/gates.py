@@ -142,6 +142,46 @@ def medical_necessity_gate(result: CodingResult) -> GateResult:
                       "necessity (structural)")
 
 
+def icd_excludes_gate(result: CodingResult, source: CodeSource) -> GateResult:
+    """ICD-10-CM Tabular Excludes1: two diagnoses in an Excludes1 relationship are
+    'NOT CODED HERE' — mutually exclusive, not reportable together, UNLESS the two
+    conditions are genuinely unrelated (an FY-guideline exception that is a human
+    judgement). This is the diagnosis-axis analogue of the NCCI procedure gate, read
+    from the authoritative instructional notes — never a baked-in pair list.
+
+    Fail-closed: a detected Excludes1 co-occurrence returns UNKNOWN (stops autonomy,
+    routes to review) rather than PASS or BLOCKED — the coder cannot deterministically
+    assert the two conditions are unrelated, so it cannot certify the set clean, and
+    it also must not silently drop a possibly-valid code."""
+    dx = [ln.chosen for ln in result.billable_lines
+          if ln.chosen and ln.chosen.system == "icd10"]
+    if len(dx) < 2:
+        return GateResult("icd_excludes1", Outcome.NOT_APPLICABLE,
+                          "fewer than two diagnoses", "ICD-10-CM Tabular (data)")
+    conflicts: list[str] = []
+    seen: set[frozenset[str]] = set()
+    for a in dx:
+        refs = source.excludes1_refs(a.code, "icd10")
+        if not refs:
+            continue
+        for b in dx:
+            if a.code == b.code:
+                continue
+            bu = str(b.code).replace(".", "").upper()
+            if any(bu.startswith(r) for r in refs):
+                pair = frozenset((a.code, b.code))
+                if pair not in seen:
+                    seen.add(pair)
+                    conflicts.append(f"{a.code}/{b.code}")
+    if conflicts:
+        return GateResult("icd_excludes1", Outcome.UNKNOWN,
+                          "Excludes1 pair(s) — confirm the conditions are unrelated "
+                          f"before reporting together: {'; '.join(conflicts)}",
+                          "ICD-10-CM Tabular (data)")
+    return GateResult("icd_excludes1", Outcome.PASS,
+                      "no Excludes1 conflicts among diagnoses", "ICD-10-CM Tabular (data)")
+
+
 def run_gates(result: CodingResult, note_text: str, source: CodeSource) -> list[GateResult]:
     """All mandatory gates. Add a gate here (never a code list) as coverage grows."""
     try:
@@ -152,6 +192,7 @@ def run_gates(result: CodingResult, note_text: str, source: CodeSource) -> list[
             medical_necessity_gate(result),
             ncci_gate(result, source),
             mue_gate(result, source),
+            icd_excludes_gate(result, source),
         ]
     except Exception as exc:  # a gate that crashes is ERROR, never a silent pass
         return [GateResult("gate_execution", Outcome.ERROR, str(exc), "runtime")]

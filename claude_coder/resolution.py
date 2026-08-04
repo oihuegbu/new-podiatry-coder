@@ -309,6 +309,99 @@ def upgrade_diagnosis_laterality(line: ResolvedLine, source: CodeSource) -> Reso
     return line
 
 
+def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
+                                 llm=None, corroborate=None) -> ResolvedLine:
+    """ICD-10-CM 'code to the highest documented specificity'. Entailment is
+    NECESSARY BUT NOT SUFFICIENT: an 'unspecified'/NOS descriptor is entailed by
+    every case in its concept, so a specific, equally-entailed sibling must win —
+    and it can only win if it is actually offered for comparison. Two steps, most
+    conservative first:
+
+      1. STRUCTURAL laterality upgrade (no LLM) — an unspecified-LATERALITY code to
+         the documented-side sibling in the SAME descriptor family. Handles the
+         narrow case only ('… unspecified <site>' -> '… right <site>').
+
+      2. VERIFIED specificity upgrade (when an entailment LLM is available) — for a
+         BROADER unspecified/NOS code that step 1 cannot bridge because its specific
+         counterpart lives in a different descriptor family (a fully-unspecified
+         '<concept>, unspecified' catch-all vs a site-and-side-specific
+         '<concept> of right <site>'):
+         gather the code's MORE-specific, on-concept, documented-side relatives from
+         its OWN authoritative category, offer {chosen + relatives} to the SAME
+         entailment verifier, and adopt a strictly-more-specific relative it selects
+         AND an independent model confirms. If a specific relative is selected but
+         the independent check REJECTS it, the choice is genuinely ambiguous —
+         escalate rather than silently bill the unspecified code when the record
+         supports a specific one (fail-closed).
+
+    Agnostic: 'unspecified' is descriptor text; relatives come from the code's own
+    authoritative category leaves; the judgement is the existing entailment
+    machinery. No code or family is named here."""
+    line = upgrade_diagnosis_laterality(line, source)          # step 1 (cheap)
+    fact = line.fact
+    if not (line.resolved and fact.kind is FactKind.DIAGNOSIS and line.chosen):
+        return line
+    if llm is None:
+        return line
+    lat = str(fact.attributes.get("laterality", "")).lower().strip()
+    if lat not in ("right", "left"):
+        return line                                # no documented side to sharpen to
+    desc = line.chosen.descriptor.lower()
+    if lat in desc or "unspecified" not in desc:
+        return line                                # already side-specific, or not unspecified
+    from .terminology import _dot
+    from . import verify as _verify
+    undot = line.chosen.code.replace(".", "").upper()
+    root = undot[:3]                               # the code's ICD-10-CM category
+    tok = lambda s: {t for t in re.split(r"[^a-z]+", s.lower()) if len(t) > 3}
+    concept = tok(_strip_laterality(desc))         # distinctive concept words of the chosen code
+    relatives: list[CandidateCode] = []
+    for sib in source.leaf_codes(root, "icd10"):
+        su = sib.replace(".", "").upper()
+        if su == undot:
+            continue
+        sdesc = (source.descriptions(su, "icd10") or [""])[0]
+        sl = sdesc.lower()
+        if not sdesc or lat not in sl or "unspecified" in _strip_laterality(sl):
+            continue                               # not strictly more specific / wrong side
+        if concept and not (concept & tok(_strip_laterality(sl))):
+            continue                               # off-concept sibling in the same category
+        cand = CandidateCode(code=_dot(su), system="icd10", descriptor=sdesc, score=1.0,
+                             source="specificity-relative",
+                             authority={"source": "ICD-10-CM specificity"})
+        if _evaluate(fact, cand, source) is not None:   # contradicts no documented attribute
+            relatives.append(cand)
+    if not relatives:
+        return line                                # no more-specific code exists -> keep it
+    # rank by concept overlap, keep the shortlist bounded and cheap
+    relatives.sort(key=lambda c: len(concept & tok(_strip_laterality(c.descriptor))),
+                   reverse=True)
+    shortlist = [line.chosen] + relatives[:6]
+    picked, why = _verify.select_entailed(fact, shortlist, source, llm)
+    if picked is None or picked.code == line.chosen.code:
+        return line                                # verifier keeps the unspecified code -> respect it
+    if corroborate is not None:
+        ok, why2, _missing = _verify.corroborate(fact, picked, source, corroborate)
+        if not ok:
+            prior = line.chosen
+            line.chosen = None
+            line.method = ResolutionMethod.ABSTAINED
+            line.alternatives = [prior] + relatives[:4]
+            line.documentation_gap = (
+                f"the record documents a {lat} side but resolution is split between the "
+                f"unspecified '{prior.descriptor}' and a more-specific code")
+            line.rationale = (
+                f"specificity ambiguous — documentation supports a more specific {lat} "
+                f"code than the unspecified '{prior.code}', but independent verification "
+                f"did not confirm the specific candidate — escalate")
+            return line
+    line.chosen = picked
+    line.method = ResolutionMethod.VERIFIED
+    line.rationale = (f"{line.rationale}; upgraded to the most specific entailed code "
+                      f"({why})" if why else f"{line.rationale}; upgraded to most specific entailed code")
+    return line
+
+
 def _candidate_from_code(code: str, source: CodeSource) -> CandidateCode:
     """Wrap an authoritative-Index code as a top-relevance candidate, descriptor
     from the authoritative record."""

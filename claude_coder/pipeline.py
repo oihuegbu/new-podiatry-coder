@@ -77,10 +77,15 @@ def code_encounter(
             learned.observe(encounter_id, fact.description, line.chosen.code,
                             line.chosen.system, line.chosen.descriptor,
                             [s.text for s in fact.evidence])
-        # ICD-10-CM specificity: upgrade an unspecified-laterality diagnosis to the
-        # documented-side sibling when one exists (authoritative, descriptor-driven).
+        # ICD-10-CM 'highest documented specificity': sharpen an unspecified/NOS
+        # diagnosis to the most-specific code the documentation entails — a
+        # structural laterality upgrade, then (in real mode) a verified upgrade past
+        # a broad catch-all to a specific on-concept relative. Authoritative and
+        # entailment-checked; escalates rather than billing an unspecified code when
+        # the record supports a specific one but verification is split.
         if line.resolved and fact.kind is FactKind.DIAGNOSIS:
-            line = resolution.upgrade_diagnosis_laterality(line, source)
+            line = resolution.refine_diagnosis_specificity(
+                line, source, verify_llm, corroborate_llm)
         if line.resolved and line.fact.billable:
             # Data-driven bundling filter: a resolved code the source declares
             # NOT separately reportable (bundled / non-covered / MUE 0) is kept

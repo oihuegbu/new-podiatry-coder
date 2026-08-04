@@ -64,6 +64,8 @@ class CodeSource(Protocol):
 
     def mue_limit(self, code: str, dos: str | None) -> int | None: ...
 
+    def excludes1_refs(self, code: str, system: str) -> set[str]: ...
+
 
 # Data-driven signals that a code is NOT a separately reportable line. These are
 # generic terms found in coverage/status fields or the descriptor itself (e.g.
@@ -518,6 +520,51 @@ class AuthoritativeSource:
             return int(val) if val is not None else None
         return int(rec) if isinstance(rec, int) else None
 
+    def _excludes1_map(self) -> dict[str, set[str]]:
+        """{undotted category key -> set of undotted Excludes1 target prefixes} from
+        the ICD-10-CM Tabular instructional notes (icd10cm_instructional_notes.json).
+        Excludes1 = 'NOT CODED HERE': the two conditions are mutually exclusive and
+        should not be reported together (unless genuinely unrelated — a human
+        judgement). Cached; {} if the file is absent."""
+        cache = getattr(self, "_excl1", None)
+        if cache is not None:
+            return cache
+        cache = {}
+        try:
+            import json
+            from app.core.config import DATA_DIR
+            with open(DATA_DIR / "codes" / "icd10cm_instructional_notes.json") as fh:
+                entries = json.load(fh).get("codes", {})
+            for key, rec in entries.items():
+                if not isinstance(rec, dict):
+                    continue
+                refs = rec.get("excludes1_code_refs") or []
+                pref = {str(r).replace(".", "").upper() for r in refs if r}
+                if pref:
+                    cache[str(key).replace(".", "").upper()] = pref
+        except Exception:
+            cache = {}
+        self._excl1 = cache
+        return cache
+
+    def excludes1_refs(self, code: str, system: str) -> set[str]:
+        """The Excludes1 target code-prefixes that apply to a diagnosis — gathered
+        from the code AND its ancestor categories (an Excludes1 at a 3-character
+        category governs every child code under it). A billed diagnosis whose code
+        starts with any
+        returned prefix is in an Excludes1 relationship with `code`. ICD-10-CM only;
+        empty when the notes file is absent (gate degrades to NOT_APPLICABLE)."""
+        if system != "icd10":
+            return set()
+        table = self._excludes1_map()
+        if not table:
+            return set()
+        undot = str(code).replace(".", "").upper()
+        out: set[str] = set()
+        for length in range(len(undot), 2, -1):        # code, then each ancestor category
+            out |= table.get(undot[:length], set())
+        return out
+
 
 class MockSource:
     """In-memory source for tests. Records use SYNTHETIC identifiers so the test
@@ -536,7 +583,8 @@ class MockSource:
                  cpt_index: dict[str, set] | None = None,
                  drug_index: dict[str, set] | None = None,
                  drug_units: dict[str, dict] | None = None,
-                 learned_index: dict[str, set] | None = None) -> None:
+                 learned_index: dict[str, set] | None = None,
+                 excludes1: dict[str, set] | None = None) -> None:
         self._records = records or {}
         self._retrieval = retrieval or {}
         self._ncci = ncci or {}
@@ -551,6 +599,9 @@ class MockSource:
         self._drug_map = drug_index or {}
         self._drug_units = drug_units or {}
         self._learned_map = learned_index or {}
+        self._excl1_data = {str(k).replace(".", "").upper():
+                            {str(r).replace(".", "").upper() for r in v}
+                            for k, v in (excludes1 or {}).items()}
 
     def global_period(self, code):
         return self._gp.get(code)
@@ -628,3 +679,12 @@ class MockSource:
 
     def mue_limit(self, code, dos):
         return self._mue.get(code)
+
+    def excludes1_refs(self, code, system):
+        if system != "icd10" or not self._excl1_data:
+            return set()
+        undot = str(code).replace(".", "").upper()
+        out = set()
+        for length in range(len(undot), 2, -1):
+            out |= self._excl1_data.get(undot[:length], set())
+        return out
