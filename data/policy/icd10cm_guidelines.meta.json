@@ -1,0 +1,10 @@
+{
+  "id": "icd10cm_guidelines",
+  "title": "ICD-10-CM Official Guidelines for Coding and Reporting",
+  "url": "https://www.cms.gov/files/document/fy-2026-icd-10-cm-coding-guidelines.pdf",
+  "sha256": "2e87b3b088d6032edf6cda8c946cf342619df0c07237055a0e3be68410a0c267",
+  "fetched_at": "2020-01-01T00:00:00+00:00",
+  "pages": 121,
+  "chars": 311212,
+  "last_checked": "2026-07-22T20:09:09+00:00"
+}

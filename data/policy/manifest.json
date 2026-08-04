@@ -1,0 +1,20 @@
+[
+  {
+    "id": "mbpm_ch15",
+    "title": "Medicare Benefit Policy Manual, Chapter 15 \u2014 Covered Medical and Other Health Services (incl. \u00a7290 Foot Care)",
+    "url": "https://www.cms.gov/Regulations-and-Guidance/Guidance/Manuals/Downloads/bp102c15.pdf",
+    "type": "pdf"
+  },
+  {
+    "id": "icd10cm_guidelines",
+    "title": "ICD-10-CM Official Guidelines for Coding and Reporting",
+    "url": "https://www.cms.gov/files/document/fy-2026-icd-10-cm-coding-guidelines.pdf",
+    "type": "pdf"
+  },
+  {
+    "id": "ncci_policy_manual",
+    "title": "Medicare NCCI Policy Manual (all chapters, effective Jan. 1, 2026)",
+    "url": "https://www.cms.gov/files/document/2026-ncci-medicare-policy-manual-all-chapters.pdf",
+    "type": "pdf"
+  }
+]

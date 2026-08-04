@@ -1,0 +1,100 @@
+{
+  "pack_id": "imported-authoritative-core",
+  "schema_version": 1,
+  "capabilities": {
+    "closed_world_identity": true,
+    "temporal_validity": true,
+    "descriptor_requirements": false,
+    "hierarchy": false,
+    "professional_ptp": true,
+    "practitioner_unit_limits": true,
+    "add_on_relationships": true,
+    "claim_context_rules": false,
+    "coverage_rules": false
+  },
+  "artifacts": [
+    {
+      "path": "data/codes/cpt_codes.json",
+      "authority": "AMA",
+      "system": "CPT",
+      "license_restricted": true,
+      "container": "codes",
+      "version_path": "metadata.release_id",
+      "code_field": "code",
+      "display_fields": ["long_description", "medium_description", "short_description"],
+      "effective_start_field": "effective_date",
+      "billable_default": true,
+      "concept_field": "concept_id"
+    },
+    {
+      "path": "data/codes/hcpcs_codes.json",
+      "authority": "CMS",
+      "system": "HCPCS",
+      "version": "2026-04",
+      "code_field": "code",
+      "display_fields": ["long_description", "short_description"],
+      "effective_start_field": "effective_from",
+      "effective_end_field": "effective_to",
+      "stale_end_before_start": "drop_end",
+      "billable_default": true
+    },
+    {
+      "path": "data/codes/icd10cm_codes.json",
+      "authority": "CDC-NCHS",
+      "system": "ICD-10-CM",
+      "version_field": "fy",
+      "code_field": "code",
+      "display_fields": ["description"],
+      "effective_start_field": "effective_from",
+      "effective_end_field": "effective_to",
+      "status_field": "status",
+      "billable_default": true
+    }
+  ],
+  "constraints": [
+    {
+      "path": "data/codes/ncci_ptp.json",
+      "authority": "CMS",
+      "kind": "ptp_edit",
+      "left_field": "left_code",
+      "right_field": "right_code",
+      "effective_start_field": "effective_start",
+      "effective_end_field": "effective_end",
+      "properties": ["modifier_indicator", "source_file", "source_url", "source_sha256"]
+    },
+    {
+      "path": "data/codes/ncci_aoc_edits.json",
+      "authority": "CMS",
+      "kind": "add_on_relationship",
+      "left_field": "code1",
+      "right_field": "code2",
+      "effective_start_field": "effective_date",
+      "effective_end_field": "end_date",
+      "properties": ["edit_type", "modifier", "description", "metadata"]
+    },
+    {
+      "path": "data/codes/mue_practitioner_refreshed.json",
+      "authority": "CMS",
+      "kind": "unit_limit",
+      "code_field": "target_code",
+      "value_field": "numeric_value",
+      "effective_start_field": "effective_start",
+      "effective_end_field": "effective_end",
+      "properties": ["adjudication_indicator", "rationale", "source_file", "source_url", "source_sha256"]
+    }
+  ],
+  "enrichments": [
+    {
+      "path": "data/codes/global_period.json",
+      "authority": "CMS",
+      "container": "codes",
+      "code_keyed": true,
+      "properties": ["global", "bilat"]
+    }
+  ],
+  "policy_documents": [
+    "data/policy/icd10cm_guidelines.txt",
+    "data/policy/mbpm_ch15.txt",
+    "data/policy/ncci_policy_manual.txt"
+  ]
+}

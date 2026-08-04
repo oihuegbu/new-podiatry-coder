@@ -1,0 +1,44 @@
+{
+ "description": "CMS Medicare Administrative Contractor (MAC) jurisdictions: which contractor processes Part A/B (and DME) claims for each state/territory. Used to scope LCDs/Billing & Coding Articles to the claims their issuing MAC actually adjudicates — an LCD from CGS (Kentucky/Ohio) does not govern a Florida claim. The CMS Coverage API dataset identifies each policy only by contractor NAME, and the same contractor can hold multiple jurisdictions (e.g. Noridian holds JE and JF), so applicability is resolved as the union of all states that contractor serves — the finest scope the source data supports.",
+ "source": "CMS 'Who are the MACs' / 'MACs by State' (A/B MAC jurisdictions JE/JF/J5/J6/J8/J15/JH/JJ/JK/JL/JM/JN; DME MAC jurisdictions A/B/C/D)",
+ "source_url": "https://www.cms.gov/medicare/coding-billing/medicare-administrative-contractors-macs/who-are-macs",
+ "retrieved": "2026-07-11",
+ "alias_note": "aliases are matched case-insensitively as substrings of a policy's contractor string. They must cover every spelling the source datasets use: the Coverage API abbreviates WPS as 'WPS Insurance Corporation' while the MCD bulk export truncates it to 'Wisconsin Physicians Service Insurance C' — an alias miss silently widens the policy to nationwide (conservative, but defeats jurisdiction scoping).",
+ "ab_mac_jurisdictions": [
+  {"jurisdiction": "JE", "contractor": "Noridian Healthcare Solutions", "aliases": ["noridian healthcare solutions", "noridian"], "states": ["CA", "HI", "NV", "AS", "GU", "MP"]},
+  {"jurisdiction": "JF", "contractor": "Noridian Healthcare Solutions", "aliases": ["noridian healthcare solutions", "noridian"], "states": ["AK", "AZ", "ID", "MT", "ND", "OR", "SD", "UT", "WA", "WY"]},
+  {"jurisdiction": "J5", "contractor": "Wisconsin Physicians Service Insurance Corporation", "aliases": ["wps insurance", "wisconsin physicians service"], "states": ["IA", "KS", "MO", "NE"]},
+  {"jurisdiction": "J6", "contractor": "National Government Services", "aliases": ["national government services"], "states": ["IL", "MN", "WI"]},
+  {"jurisdiction": "J8", "contractor": "Wisconsin Physicians Service Insurance Corporation", "aliases": ["wps insurance", "wisconsin physicians service"], "states": ["IN", "MI"]},
+  {"jurisdiction": "J15", "contractor": "CGS Administrators", "aliases": ["cgs administrators"], "states": ["KY", "OH"]},
+  {"jurisdiction": "JH", "contractor": "Novitas Solutions", "aliases": ["novitas solutions", "novitas"], "states": ["AR", "CO", "LA", "MS", "NM", "OK", "TX"]},
+  {"jurisdiction": "JJ", "contractor": "Palmetto GBA", "aliases": ["palmetto gba"], "states": ["AL", "GA", "TN"]},
+  {"jurisdiction": "JK", "contractor": "National Government Services", "aliases": ["national government services"], "states": ["CT", "ME", "MA", "NH", "NY", "RI", "VT"]},
+  {"jurisdiction": "JL", "contractor": "Novitas Solutions", "aliases": ["novitas solutions", "novitas"], "states": ["DE", "DC", "MD", "NJ", "PA"]},
+  {"jurisdiction": "JM", "contractor": "Palmetto GBA", "aliases": ["palmetto gba"], "states": ["NC", "SC", "VA", "WV"]},
+  {"jurisdiction": "JN", "contractor": "First Coast Service Options", "aliases": ["first coast service options", "first coast"], "states": ["FL", "PR", "VI"]}
+ ],
+ "dme_mac_jurisdictions": [
+  {"jurisdiction": "DME A", "contractor": "Noridian Healthcare Solutions", "aliases": ["noridian healthcare solutions", "noridian"], "states": ["CT", "DE", "DC", "ME", "MD", "MA", "NH", "NJ", "NY", "PA", "RI", "VT"]},
+  {"jurisdiction": "DME B", "contractor": "CGS Administrators", "aliases": ["cgs administrators"], "states": ["IL", "IN", "KY", "MI", "MN", "OH", "WI"]},
+  {"jurisdiction": "DME C", "contractor": "CGS Administrators", "aliases": ["cgs administrators"], "states": ["AL", "AR", "CO", "FL", "GA", "LA", "MS", "NM", "NC", "OK", "PR", "SC", "TN", "TX", "VI", "VA", "WV"]},
+  {"jurisdiction": "DME D", "contractor": "Noridian Healthcare Solutions", "aliases": ["noridian healthcare solutions", "noridian"], "states": ["AK", "AZ", "CA", "HI", "IA", "KS", "MO", "MT", "NE", "NV", "ND", "OR", "SD", "UT", "WA", "WY", "AS", "GU", "MP"]}
+ ],
+ "state_names": {
+  "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+  "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+  "district of columbia": "DC", "florida": "FL", "georgia": "GA", "hawaii": "HI",
+  "idaho": "ID", "illinois": "IL", "indiana": "IN", "iowa": "IA",
+  "kansas": "KS", "kentucky": "KY", "louisiana": "LA", "maine": "ME",
+  "maryland": "MD", "massachusetts": "MA", "michigan": "MI", "minnesota": "MN",
+  "mississippi": "MS", "missouri": "MO", "montana": "MT", "nebraska": "NE",
+  "nevada": "NV", "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM",
+  "new york": "NY", "north carolina": "NC", "north dakota": "ND", "ohio": "OH",
+  "oklahoma": "OK", "oregon": "OR", "pennsylvania": "PA", "puerto rico": "PR",
+  "rhode island": "RI", "south carolina": "SC", "south dakota": "SD",
+  "tennessee": "TN", "texas": "TX", "utah": "UT", "vermont": "VT",
+  "virginia": "VA", "washington": "WA", "west virginia": "WV",
+  "wisconsin": "WI", "wyoming": "WY", "american samoa": "AS", "guam": "GU",
+  "northern mariana islands": "MP", "virgin islands": "VI"
+ }
+}

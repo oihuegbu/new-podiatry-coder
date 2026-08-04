@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "professional-ptp",
+      "authority": "CMS",
+      "landing_url": "https://www.cms.gov/medicare/coding-billing/national-correct-coding-initiative-ncci-edits/medicare-ncci-procedure-procedure-ptp-edits",
+      "allowed_hosts": ["www.cms.gov", "cms.gov"],
+      "link_regex": "(?i)(\\d{4})q([1-4])-practitioner-ptp-edits.*?-f\\d.*?\\.zip$",
+      "release_regex": "(?i)(?P<year>\\d{4})q(?P<quarter>[1-4])",
+      "multi_file_release": true,
+      "strip_prefix": "/license/ama?file=",
+      "parser": "delimited_archive",
+      "member_regex": "(?i)\\.(txt|csv)$",
+      "minimum_rows": 100000,
+      "output_path": "data/codes/ncci_ptp.json",
+      "identifier_regex": "^[A-Z0-9]{5}$",
+      "field_aliases": {
+        "left_code": ["column 1", "column1"],
+        "right_code": ["column 2", "column2"],
+        "modifier_indicator": ["modifier"],
+        "effective_start": ["effective"],
+        "effective_end": ["deletion", "end"]
+      }
+    },
+    {
+      "id": "practitioner-mue",
+      "authority": "CMS",
+      "landing_url": "https://www.cms.gov/medicare/coding-billing/national-correct-coding-initiative-ncci-edits/medicare-ncci-medically-unlikely-edits-mues",
+      "allowed_hosts": ["www.cms.gov", "cms.gov"],
+      "link_regex": "(?i)(\\d{4})-?q([1-4])-practitioner-services-mue-table.*?\\.zip$",
+      "release_regex": "(?i)(?P<year>\\d{4})-?q(?P<quarter>[1-4])",
+      "multi_file_release": false,
+      "parser": "delimited_archive",
+      "member_regex": "(?i)\\.(txt|csv)$",
+      "minimum_rows": 10000,
+      "output_path": "data/codes/mue_practitioner_refreshed.json",
+      "identifier_regex": "^[A-Z0-9]{5}$",
+      "field_aliases": {
+        "target_code": ["hcpcs", "cpt", "code"],
+        "numeric_value": ["mue value", "mue values", "value"],
+        "adjudication_indicator": ["adjudication", "mai"],
+        "rationale": ["rationale"]
+      }
+    },
+    {
+      "id": "licensed-cpt-json",
+      "authority": "AMA",
+      "url_env": "AMA_CPT_SOURCE_URL",
+      "token_env": "AMA_CPT_API_TOKEN",
+      "allowed_hosts": ["api-platform.ama-assn.org", "developer-datalabs.ama-assn.org"],
+      "parser": "verified_json",
+      "minimum_rows": 10000,
+      "container": "codes",
+      "required_fields": ["code", "long_description"],
+      "output_path": "data/codes/cpt_codes.json"
+    }
+  ]
+}
+

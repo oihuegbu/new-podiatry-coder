@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "scope_id": "medium-private-surgical-practice",
+  "version": "2026-08-04",
+  "description": "Autonomous professional-claim lane for a declared medium-sized private surgical practice.",
+  "context_requirements": [
+    {
+      "field": "organizational_profile",
+      "operator": "equals",
+      "value": "medium-private-practice",
+      "reason": "organization is not the configured medium-sized private-practice profile"
+    },
+    {
+      "field": "practice_profile",
+      "operator": "equals",
+      "value": "surgical",
+      "reason": "encounter is outside the surgical-practice profile"
+    },
+    {
+      "field": "claim_type",
+      "operator": "equals",
+      "value": "professional",
+      "reason": "institutional and facility claims require a separate autonomy scope"
+    },
+    {
+      "field": "facility_type",
+      "operator": "in",
+      "value": ["office", "ambulatory", "hospital-outpatient"],
+      "reason": "facility type is outside the configured professional surgical lane"
+    },
+    {
+      "field": "payer_identifier",
+      "operator": "present",
+      "reason": "payer identity is required"
+    },
+    {
+      "field": "contract_profile",
+      "operator": "present",
+      "reason": "versioned payer contract profile is required"
+    }
+  ],
+  "required_capabilities": [
+    "closed_world_identity",
+    "temporal_validity",
+    "professional_ptp",
+    "practitioner_unit_limits",
+    "add_on_relationships"
+  ]
+}
