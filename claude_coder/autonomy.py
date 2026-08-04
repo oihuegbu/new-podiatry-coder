@@ -62,9 +62,13 @@ def decide(result: CodingResult,
     `destination` + `routing` carry the actionable breakdown."""
     routing: list[dict] = []
 
-    def route(dest: Destination, subject: str, reason: str, blocking: bool = True) -> None:
-        routing.append({"destination": dest.value, "subject": subject,
-                        "reason": reason, "blocking": blocking})
+    def route(dest: Destination, subject: str, reason: str, blocking: bool = True,
+              fact_id: str = "") -> None:
+        # fact_id is the STABLE join key back to this line's suggested-solution
+        # recommendation (descriptions are not unique); the pipeline uses it to make
+        # each routed item self-contained.
+        routing.append({"destination": dest.value, "subject": subject, "reason": reason,
+                        "blocking": blocking, "fact_id": fact_id})
 
     # 1. A hard gate stop dominates everything.
     hard = [g.name for g in result.gates
@@ -103,11 +107,13 @@ def decide(result: CodingResult,
                 route(Destination.PROVIDER_QUERY, ln.fact.description,
                       "secondary diagnosis could not be coded — non-material to the billed "
                       "claim (necessity met by another diagnosis); clarify to add specificity",
-                      blocking=False)
+                      blocking=False, fact_id=ln.fact.fact_id)
             elif ln.documentation_gap:
-                route(Destination.PROVIDER_QUERY, ln.fact.description, ln.documentation_gap)
+                route(Destination.PROVIDER_QUERY, ln.fact.description, ln.documentation_gap,
+                      fact_id=ln.fact.fact_id)
             else:
-                route(Destination.REVIEW, ln.fact.description, ln.rationale)
+                route(Destination.REVIEW, ln.fact.description, ln.rationale,
+                      fact_id=ln.fact.fact_id)
 
     billable = result.billable_lines
     if not billable:

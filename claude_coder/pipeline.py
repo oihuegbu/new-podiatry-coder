@@ -150,6 +150,10 @@ def code_encounter(
     # Actionable documentation guidance for whatever could not be coded confidently.
     from . import recommendations as _recs
     result.recommendations = _recs.build_recommendations(result)
+    # Make each routed item self-contained: attach its provider-facing suggested
+    # solution to the routing entry (joined by stable fact_id) so a PROVIDER_QUERY
+    # carries the exact question to send — no fragile description-based join needed.
+    _attach_recommendations(result)
     try:
         fingerprint = source.data_fingerprint()
     except Exception:
@@ -158,6 +162,21 @@ def code_encounter(
         result, note_text,
         source_identity={"source": type(source).__name__, "data": fingerprint})
     return result
+
+
+def _attach_recommendations(result: CodingResult) -> None:
+    """Attach each routed item's provider-facing suggested solution to its routing
+    entry, so a PROVIDER_QUERY (or any routed item) is self-contained. Joins on the
+    STABLE fact_id — a fact's free-text description is not unique — and falls back to
+    subject only when no fact_id is present."""
+    by_id = {r["fact_id"]: r for r in result.recommendations if r.get("fact_id")}
+    by_subject = {}
+    for r in result.recommendations:
+        by_subject.setdefault(r.get("subject"), r)
+    for item in result.routing:
+        rec = by_id.get(item.get("fact_id")) or by_subject.get(item.get("subject"))
+        if rec:
+            item["recommendation"] = rec["recommendation"]
 
 
 def dedup_lines(result: CodingResult) -> None:

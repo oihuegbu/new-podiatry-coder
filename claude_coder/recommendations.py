@@ -41,6 +41,7 @@ def build_recommendations(result: CodingResult) -> list[dict]:
             recs.append({
                 "issue": "documentation_gap",
                 "subject": ln.fact.description,
+                "fact_id": ln.fact.fact_id,
                 "detail": ln.documentation_gap,
                 "recommendation":
                     f"For '{ln.fact.description}', confirm and document: "
@@ -65,12 +66,13 @@ def build_recommendations(result: CodingResult) -> list[dict]:
         else:
             continue
         recs.append({"issue": "unresolved_service", "subject": ln.fact.description,
-                     "detail": ln.rationale, "recommendation": rec})
+                     "fact_id": ln.fact.fact_id, "detail": ln.rationale,
+                     "recommendation": rec})
 
     # 3. Gate-based remediation — what to fix to earn release.
     for g in result.gates:
         if g.outcome is Outcome.BLOCKED and g.name in _GATE_REMEDIATION:
-            recs.append({"issue": f"gate_{g.name}", "subject": g.name,
+            recs.append({"issue": f"gate_{g.name}", "subject": g.name, "fact_id": "",
                          "detail": g.detail,
                          "recommendation": _GATE_REMEDIATION[g.name]})
 

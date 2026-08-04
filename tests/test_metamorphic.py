@@ -112,3 +112,26 @@ def test_materiality_secondary_dx_non_blocking():
     assert r.verdict is Verdict.AUTO_READY   # released despite the unresolved secondary dx
     assert any(x["destination"] == Destination.PROVIDER_QUERY.value and not x["blocking"]
                for x in r.routing)
+
+
+def test_provider_query_is_self_contained():
+    """A PROVIDER_QUERY routing item carries its suggested-solution recommendation,
+    joined by the STABLE fact_id (not the non-unique description)."""
+    from claude_coder.models import GateResult
+    from claude_coder.autonomy import decide
+    from claude_coder import recommendations as recs, pipeline
+    gap = ResolvedLine(
+        fact=ClinicalFact(FactKind.PROCEDURE, "svc needing detail", evidence=[EvidenceSpan("svc")],
+                          disposition=Disposition.PERFORMED, fact_id="f7"),
+        chosen=None, method=ResolutionMethod.ABSTAINED)
+    gap.documentation_gap = "laterality not documented"
+    r = CodingResult("e", "2026-01-05", lines=[gap],
+                     gates=[GateResult("date_of_service", Outcome.PASS, "", "")])
+    decide(r)
+    r.recommendations = recs.build_recommendations(r)
+    pipeline._attach_recommendations(r)
+    pq = [x for x in r.routing if x["destination"] == "PROVIDER_QUERY"]
+    assert pq and pq[0]["fact_id"] == "f7"
+    assert "recommendation" in pq[0]
+    assert "confirm and document" in pq[0]["recommendation"]
+    assert "laterality not documented" in pq[0]["recommendation"]
