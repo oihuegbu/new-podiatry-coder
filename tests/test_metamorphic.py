@@ -5,6 +5,7 @@ the coded output changes in the REQUIRED way. Deterministic (MockSource + stub
 LLMs) — a repeatable measurement of coding-correctness properties. Synthetic codes
 only. Modeled on the retrocalcaneal-exostectomy note's structure.
 """
+import json
 from claude_coder.models import (ClinicalFact, CandidateCode, ResolvedLine, ResolutionMethod,
                                  FactKind, EvidenceSpan, CodingResult, Disposition, Outcome)
 from claude_coder.data_access import MockSource
@@ -149,7 +150,8 @@ def test_provider_query_is_self_contained():
 
 # ---- failure-path tests the mutation gate found were missing (kill the survivors) --
 from claude_coder.models import GateResult, Verdict
-from claude_coder.autonomy import decide, _line_confidence, _ARBITRATED_DISCOUNT, AUTONOMY_CONFIDENCE
+from claude_coder.autonomy import (decide, _line_confidence, _ARBITRATED_DISCOUNT,
+                                    AUTONOMY_CONFIDENCE, SHAKY_EXTRACTION)
 _GATES_OK = [GateResult(n, Outcome.PASS, "", "") for n in
              ("date_of_service", "verbatim_evidence", "code_active_on_dos",
               "medical_necessity", "ncci_ptp", "mue", "icd_excludes1")]
@@ -197,14 +199,45 @@ def test_arbitrated_confidence_is_discounted():
     assert conf(ResolutionMethod.VERIFIED) == 0.9
 
 
-def test_confidence_floor_is_strict():
-    """A line EXACTLY at the autonomy floor is NOT below it -> releases; the <=-mutant
-    would wrongly block it (kills the floor Lt->LtE mutant)."""
+def test_grounded_line_releases_on_closure_not_selfreport():
+    """CLOSURE over self-report: a GROUNDED (VERIFIED) line whose extraction confidence
+    is only MODERATE — well under the old 0.95 self-report floor but clear of the
+    documentation-shakiness floor — still AUTO-RELEASES, because grounding + cleared
+    gates are the release criterion, not the LLM's uncalibrated number. Kills the
+    mutant that reinstates a self-report floor gate on grounded lines."""
+    mid = (SHAKY_EXTRACTION + AUTONOMY_CONFIDENCE) / 2      # e.g. ~0.72: below old floor, above shaky
+    assert SHAKY_EXTRACTION < mid < AUTONOMY_CONFIDENCE
     r = CodingResult("e", "2026-01-05",
-                     lines=[_proc("AAA1", AUTONOMY_CONFIDENCE), _dx("D001", AUTONOMY_CONFIDENCE)],
-                     gates=list(_GATES_OK))
+                     lines=[_proc("AAA1", mid), _dx("D001", mid)], gates=list(_GATES_OK))
     decide(r)
     assert r.verdict is Verdict.AUTO_READY
+
+
+def test_arbitrated_line_is_not_autonomous():
+    """A single-model ARBITRATED pick is NOT grounded and never auto-releases, however
+    high its confidence — it needs a coder. Kills the mutant that treats ARBITRATED as
+    grounded (the `is ResolutionMethod.ARBITRATED` guard)."""
+    ln = _proc("AAA1", 0.99)
+    ln.method = ResolutionMethod.ARBITRATED
+    r = CodingResult("e", "2026-01-05", lines=[ln, _dx("D001", 0.99)], gates=list(_GATES_OK))
+    decide(r)
+    assert r.verdict is Verdict.REVIEW_REQUIRED
+    assert any("arbitrated" in n.lower() for n in r.notes)
+
+
+def test_shaky_extraction_blocks_even_when_grounded():
+    """A grounded code on a fact the note BARELY documents (extraction confidence below
+    SHAKY_EXTRACTION) still gets a human — the uncertainty is in the documentation. A
+    fact just AT the floor is not below it and releases. Kills the SHAKY_EXTRACTION
+    boundary/removal mutants."""
+    below = CodingResult("e", "2026-01-05",
+                         lines=[_proc("AAA1", SHAKY_EXTRACTION - 0.01)], gates=list(_GATES_OK))
+    decide(below)
+    assert below.verdict is Verdict.REVIEW_REQUIRED
+    at = CodingResult("e", "2026-01-05",
+                      lines=[_proc("AAA1", SHAKY_EXTRACTION), _dx("D001", 0.99)], gates=list(_GATES_OK))
+    decide(at)
+    assert at.verdict is Verdict.AUTO_READY
 
 
 def test_snomed_crosswalk_hit_is_verified_not_blindly_trusted():
@@ -232,3 +265,122 @@ def test_snomed_crosswalk_hit_is_verified_not_blindly_trusted():
     assert not reject.resolved                              # crosswalk default not blindly accepted
     accept = resolution.resolve(fact(), src, llm=stub(True), corroborate=stub(True))
     assert accept.resolved and accept.chosen.code == "WW01"  # confirmed -> resolves
+
+
+# ---- assertion axes: an uncertain or non-patient condition is not coded (ICD-10-CM) --
+def test_uncertain_or_nonpatient_fact_is_not_billable():
+    """ICD-10-CM outpatient rules: a SUSPECTED/probable condition is never coded as
+    confirmed, and a FAMILY-history / other-experiencer condition is not the patient's
+    coded condition. Both must be non-billable regardless of disposition. Kills the
+    mutant that drops either half of the assertion guard in ClinicalFact.billable."""
+    confirmed = ClinicalFact(FactKind.DIAGNOSIS, "d", evidence=[EvidenceSpan("d")],
+                             disposition=Disposition.PERFORMED)
+    assert confirmed.billable                                 # baseline: a plain confirmed dx bills
+    suspected = ClinicalFact(FactKind.DIAGNOSIS, "d", evidence=[EvidenceSpan("d")],
+                             disposition=Disposition.PERFORMED, certain=False)
+    assert not suspected.billable                             # suspected -> not coded as confirmed
+    family = ClinicalFact(FactKind.DIAGNOSIS, "d", evidence=[EvidenceSpan("d")],
+                          disposition=Disposition.PERFORMED, experiencer="family")
+    assert not family.billable                                # family history -> not the patient's code
+
+
+def test_extraction_sets_assertion_axes_and_drops_ruled_out():
+    """Extraction must map the note's certainty/experiencer onto the fact (so the
+    billable guard can act) and must DROP a ruled-out finding outright."""
+    from claude_coder.extraction import extract_facts
+    payload = {"facts": [
+        {"kind": "diagnosis", "description": "possible stress fracture", "certainty": "suspected",
+         "evidence": ["possible stress fracture"], "confidence": 0.9},
+        {"kind": "diagnosis", "description": "diabetes in mother", "experiencer": "family",
+         "evidence": ["mother has diabetes"], "confidence": 0.9},
+        {"kind": "diagnosis", "description": "cellulitis", "certainty": "ruled_out",
+         "evidence": ["cellulitis ruled out"], "confidence": 0.9},
+        {"kind": "diagnosis", "description": "onychomycosis", "certainty": "confirmed",
+         "evidence": ["onychomycosis"], "confidence": 0.9},
+        # an UNRECOGNIZED certainty must fail closed (not coded as confirmed)
+        {"kind": "diagnosis", "description": "vague finding", "certainty": "maybe-ish",
+         "evidence": ["vague finding"], "confidence": 0.9},
+        # an OMITTED certainty defaults to confirmed (a plainly documented condition)
+        {"kind": "diagnosis", "description": "hallux valgus",
+         "evidence": ["hallux valgus"], "confidence": 0.9},
+    ]}
+    facts = extract_facts("note", llm=lambda s, u: json.dumps(payload))
+    by_desc = {f.description: f for f in facts}
+    assert "cellulitis" not in by_desc                        # ruled_out dropped entirely
+    assert not by_desc["possible stress fracture"].certain and not by_desc["possible stress fracture"].billable
+    assert by_desc["diabetes in mother"].experiencer == "family" and not by_desc["diabetes in mother"].billable
+    assert by_desc["onychomycosis"].certain and by_desc["onychomycosis"].billable
+    assert not by_desc["vague finding"].certain and not by_desc["vague finding"].billable   # fail closed
+    assert by_desc["hallux valgus"].certain and by_desc["hallux valgus"].billable           # omitted -> confirmed
+
+
+# ---- defensibility invariants: evidence/candidate immutability + fail-closed defaults --
+def test_evidence_span_is_immutable():
+    """A captured evidence span is the atom of defensibility — it must be FROZEN so a
+    verbatim quote can never be silently rewritten after capture (kills the
+    EvidenceSpan frozen=True->False mutant)."""
+    import dataclasses, pytest
+    span = EvidenceSpan("verbatim quote")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        span.text = "tampered"
+
+
+def test_candidate_code_is_immutable():
+    """A candidate's code/descriptor/authority are copied from the authoritative
+    source, never authored by the coder — the record must be FROZEN so it cannot be
+    edited in flight (kills the CandidateCode frozen=True->False mutant)."""
+    import dataclasses, pytest
+    cand = CandidateCode("AAA1", "cpt", "descriptor from data")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cand.code = "BBB2"
+
+
+def test_gate_result_defaults_not_retryable():
+    """Fail-closed: a gate is NOT retryable unless a check EXPLICITLY marks it so —
+    the default must be False, or an operational-vs-coding misclassification would
+    silently route a real coding problem to a retry (kills the retryable
+    False->True default mutant)."""
+    g = GateResult("some_gate", Outcome.UNKNOWN)
+    assert g.retryable is False
+
+
+def test_extraction_skips_malformed_facts():
+    """Fail-closed input validation: a fact with an UNRECOGNIZED kind OR an empty
+    description is dropped — never emitted as a half-formed fact (kills the
+    `kind is None or not desc` Or->And mutant, which would let one half through)."""
+    from claude_coder.extraction import extract_facts
+    payload = {"facts": [
+        {"kind": "not_a_kind", "description": "has description", "evidence": ["x"]},
+        {"kind": "diagnosis", "description": "   ", "evidence": ["x"]},
+        {"kind": "diagnosis", "description": "onychomycosis", "evidence": ["onychomycosis"]},
+    ]}
+    facts = extract_facts("note", llm=lambda s, u: json.dumps(payload))
+    assert [f.description for f in facts] == ["onychomycosis"]   # only the well-formed one
+
+
+def test_extraction_preserves_attributes():
+    """A documented attribute set (anatomy/laterality/…) must reach the fact intact —
+    it is what lets the deterministic resolver pick a specific code (kills the
+    `attributes or {}` Or->And mutant, which would blank a present attribute dict)."""
+    from claude_coder.extraction import extract_facts
+    payload = {"facts": [{"kind": "diagnosis", "description": "bursitis",
+                          "attributes": {"laterality": "left", "anatomy": "heel"},
+                          "evidence": ["left heel bursitis"]}]}
+    (fact,) = extract_facts("note", llm=lambda s, u: json.dumps(payload))
+    assert fact.attributes == {"laterality": "left", "anatomy": "heel"}
+
+
+def test_default_llm_forwards_json_mode_and_zero_temperature():
+    """The production LLM wrapper must request STRICT JSON at temperature 0.0 — a fact
+    extractor that let the model prose-wrap or sample would break deterministic parsing
+    (kills the `json_mode=True` True->False mutant)."""
+    import app.core.llm_client as client
+    seen = {}
+    orig = client.chat_completion
+    client.chat_completion = lambda s, u, **kw: (seen.update(kw), ('{"facts": []}', {}))[1]
+    try:
+        from claude_coder.extraction import _default_llm
+        _default_llm("sys", "user")
+    finally:
+        client.chat_completion = orig
+    assert seen.get("json_mode") is True and seen.get("temperature") == 0.0

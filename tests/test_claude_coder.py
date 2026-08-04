@@ -1132,8 +1132,12 @@ class DiagnosisModifierTest(unittest.TestCase):
 
 
 class AutonomyVerifiedTest(unittest.TestCase):
-    """A cross-model-confirmed (VERIFIED) line clears the autonomy floor like a
-    deterministic one — gated only by how well the underlying fact is documented."""
+    """Release rests on CLOSURE, not a self-reported confidence number. A GROUNDED
+    line — deterministic authoritative match or a cross-model-confirmed (VERIFIED)
+    entailment — with its gates clear auto-releases regardless of the LLM's
+    (poorly calibrated) self-report; the only self-report still consulted is the
+    SHAKY_EXTRACTION floor, which reviews a fact the note barely documents. A
+    single-model ARBITRATED pick is not grounded and always reviews."""
 
     def _result(self, method, fact_conf):
         from claude_coder.models import (ClinicalFact, CodingResult, EvidenceSpan,
@@ -1152,10 +1156,31 @@ class AutonomyVerifiedTest(unittest.TestCase):
         decide(r)
         self.assertEqual(r.verdict, Verdict.AUTO_READY, r.notes)
 
-    def test_verified_line_low_fact_confidence_reviews(self):
+    def test_verified_line_moderate_confidence_releases_on_closure(self):
+        # The #4 change: a VERIFIED line whose extraction self-report is only moderate
+        # (0.80 — below the old 0.95 floor, well above the shaky floor) still releases,
+        # because grounding + cleared gates are the release criterion, not the number.
         from claude_coder.autonomy import decide
         from claude_coder.models import ResolutionMethod, Verdict
-        r = self._result(ResolutionMethod.VERIFIED, fact_conf=0.80)   # weakly documented
+        r = self._result(ResolutionMethod.VERIFIED, fact_conf=0.80)
+        decide(r)
+        self.assertEqual(r.verdict, Verdict.AUTO_READY, r.notes)
+
+    def test_verified_line_shaky_documentation_reviews(self):
+        # A fact the note BARELY documents (below SHAKY_EXTRACTION) gets a human even
+        # when its code is grounded — the uncertainty is in the documentation.
+        from claude_coder.autonomy import decide, SHAKY_EXTRACTION
+        from claude_coder.models import ResolutionMethod, Verdict
+        r = self._result(ResolutionMethod.VERIFIED, fact_conf=SHAKY_EXTRACTION - 0.1)
+        decide(r)
+        self.assertEqual(r.verdict, Verdict.REVIEW_REQUIRED)
+
+    def test_arbitrated_line_reviews(self):
+        # A single-model ARBITRATED pick is not grounded and never auto-releases,
+        # however high its self-reported confidence.
+        from claude_coder.autonomy import decide
+        from claude_coder.models import ResolutionMethod, Verdict
+        r = self._result(ResolutionMethod.ARBITRATED, fact_conf=0.98)
         decide(r)
         self.assertEqual(r.verdict, Verdict.REVIEW_REQUIRED)
 

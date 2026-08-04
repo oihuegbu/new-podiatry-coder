@@ -14,6 +14,7 @@ measurement of test adequacy, not a proxy for it.
 from __future__ import annotations
 
 import ast
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -55,10 +56,20 @@ def _sites(tree: ast.AST) -> list[tuple]:
 
 
 def _run_tests() -> bool:
-    """True if the suite PASSES (mutant survived), False if it FAILS (mutant killed)."""
+    """True if the suite PASSES (mutant survived), False if it FAILS (mutant killed).
+
+    Runs with bytecode writing DISABLED (`python -B` + PYTHONDONTWRITEBYTECODE). This
+    is not cosmetic: the gate rewrites the target module many times per second, and
+    consecutive mutants routinely yield SAME-SIZE source (e.g. `or`->`and` and
+    `True`->`False` both add one byte). CPython invalidates a cached .pyc on
+    (mtime, size) with SECOND-granular mtime, so within one second a stale .pyc from
+    the PREVIOUS mutant would be silently reused — masking real survivors as killed
+    (a false green) and killed mutants as survivors. With no .pyc ever written during
+    the loop, every run compiles from the current source, so the measurement is real."""
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     try:
-        r = subprocess.run([sys.executable, "-m", "pytest", *TESTS, "-x", "-q"],
-                           cwd=ROOT, capture_output=True, timeout=TIMEOUT)
+        r = subprocess.run([sys.executable, "-B", "-m", "pytest", *TESTS, "-x", "-q"],
+                           cwd=ROOT, capture_output=True, timeout=TIMEOUT, env=env)
         return r.returncode == 0
     except subprocess.TimeoutExpired:
         return False   # a hang/infinite loop counts as killed

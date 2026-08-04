@@ -59,12 +59,18 @@ def _necessity_authoritatively_met(result: CodingResult, source) -> bool:
 _PRECEDENCE = [Destination.BLOCKED, Destination.SYSTEM_HOLD, Destination.REVIEW,
                Destination.PROVIDER_QUERY, Destination.HOLD]
 
-# Autonomy floor. The category benchmark for hands-off release is ~95% coding
-# confidence; below it, a human reviews. Tune per cohort/payer, never per code.
+# Autonomy floor. Retained as the ROUTING PRECEDENCE anchor and the calibration
+# knob the metamorphic suite pins; it is NOT the release gate — release is gated on
+# CLOSURE (grounded resolution + cleared deterministic gates), see decide() §4.
 AUTONOMY_CONFIDENCE = 0.95
 # A single model tie-break is trusted less than a deterministic descriptor
 # entailment or a cross-model-confirmed one.
 _ARBITRATED_DISCOUNT = 0.9
+# The one place a self-reported number still gates: a fact whose own extraction
+# confidence is this low is not "the code is uncertain" but "the NOTE barely
+# documents the event" — the fact itself is shaky, so even a grounded code on it
+# gets a human. This is a floor on DOCUMENTATION clarity, not on code choice.
+SHAKY_EXTRACTION = 0.5
 
 
 def _line_confidence(line: ResolvedLine) -> float:
@@ -154,13 +160,29 @@ def decide(result: CodingResult,
     if not billable:
         route(Destination.REVIEW, "claim", "no defensible billable line was produced")
 
-    # 4. Confidence floor across every released line.
-    low = [ln for ln in billable if _line_confidence(ln) < floor]
-    if low:
-        worst = min(billable, key=_line_confidence)
-        route(Destination.REVIEW, "confidence",
-              f"{len(low)} line(s) below autonomy floor {floor:.2f} "
-              f"(min {_line_confidence(worst):.2f}, {worst.method.value})")
+    # 4. Release rests on CLOSURE, not on a self-reported confidence number. A line
+    #    is autonomous when its code is GROUNDED — resolved by a deterministic
+    #    authoritative match (DETERMINISTIC) or a code the documentation entails,
+    #    confirmed by an INDEPENDENT second model (VERIFIED) — AND every applicable
+    #    deterministic gate above cleared. A single-model tie-break (ARBITRATED) is
+    #    NOT grounded: one model's pick among candidates, with no independent
+    #    corroboration, is exactly the judgement call a coder owns. The LLM's
+    #    self-reported/agreement confidence is deliberately NOT the gate (it is poorly
+    #    calibrated); the only self-report still consulted is the SHAKY_EXTRACTION
+    #    floor — a fact the note barely documents gets a human even when its code is
+    #    grounded, because the uncertainty is in the DOCUMENTATION, not the code.
+    for ln in billable:
+        if ln.method is ResolutionMethod.ARBITRATED:
+            route(Destination.REVIEW, ln.fact.description,
+                  "code chosen by a single model among candidates (arbitrated), not "
+                  "grounded by an authoritative match or an independently verified "
+                  "entailment — needs a coder",
+                  fact_id=ln.fact.fact_id)
+        elif ln.fact.confidence < SHAKY_EXTRACTION:
+            route(Destination.REVIEW, ln.fact.description,
+                  f"the note barely documents this event (extraction confidence "
+                  f"{ln.fact.confidence:.2f} < {SHAKY_EXTRACTION:.2f}) — clarify before billing",
+                  fact_id=ln.fact.fact_id)
 
     result.routing = routing
     # Only MATERIAL (blocking) items gate release. Non-material clarifications go out

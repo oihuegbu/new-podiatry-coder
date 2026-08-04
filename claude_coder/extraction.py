@@ -52,6 +52,13 @@ For each fact return an object with:
         past — "history of", "resolved", "status post", or listed under past
         medical history.
   - "negated": true if the note denies/rules out this finding, else false
+  - "certainty": confirmed | suspected | ruled_out — a probable/possible/likely/
+        working/rule-out/differential condition is "suspected" and, per outpatient
+        coding rules, must NOT be coded as if confirmed; "confirmed" for a
+        definitively documented condition/finding; "ruled_out" for one the note
+        excludes. Default confirmed only when the note states the condition plainly.
+  - "experiencer": patient | family | other — whose condition/finding this is; a
+        family-history or other-person mention is NOT the patient's coded condition.
   - "evidence": a list of VERBATIM quotes copied exactly from the note that
         support this fact (never paraphrased)
   - "confidence": 0.0-1.0, your certainty this event is documented as stated
@@ -109,9 +116,20 @@ def extract_facts(note_text: str, llm: LLMFn | None = None) -> list[ClinicalFact
         desc = str(item.get("description", "")).strip()
         if kind is None or not desc:
             continue
-        # A negated finding is documentation of ABSENCE — never billed.
-        if item.get("negated") is True:
+        # A negated finding, or one the note RULES OUT, is documentation of ABSENCE
+        # — never billed. An OMITTED certainty defaults to confirmed (a plainly
+        # documented condition, per the prompt); an explicit value is taken as-is.
+        raw_cert = item.get("certainty")
+        certainty = str(raw_cert).strip().lower() if raw_cert is not None else "confirmed"
+        if item.get("negated") is True or certainty == "ruled_out":
             continue
+        # Fail-closed on both assertion axes: a condition is coded as present ONLY when
+        # it is explicitly CONFIRMED — suspected/probable/possible, or any unrecognized
+        # certainty, is not coded as confirmed; and it is the PATIENT's condition only
+        # when the experiencer is explicitly the patient — family/other, or any
+        # unrecognized experiencer, is not the patient's coded condition.
+        certain = certainty == "confirmed"
+        experiencer = str(item.get("experiencer", "patient")).strip().lower() or "patient"
         spans = [EvidenceSpan(text=str(q)) for q in (item.get("evidence") or [])
                  if str(q).strip()]
         facts.append(ClinicalFact(
@@ -119,6 +137,8 @@ def extract_facts(note_text: str, llm: LLMFn | None = None) -> list[ClinicalFact
             description=desc,
             attributes=item.get("attributes") or {},
             disposition=_coerce_disposition(item.get("disposition")),
+            certain=certain,
+            experiencer=experiencer,
             evidence=spans,
             confidence=float(item.get("confidence") or 0.0),
             fact_id=f"f{i+1}",

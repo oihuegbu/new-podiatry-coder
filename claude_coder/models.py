@@ -70,6 +70,13 @@ class ClinicalFact:
     # disposition from model output to UNCLEAR, so a real note never bills an event
     # whose disposition was not explicitly documented.
     disposition: Disposition = Disposition.PERFORMED
+    # Assertion axes (ICD-10-CM outpatient rules): `certain` is False for a
+    # suspected/probable/rule-out condition (never coded as confirmed); `experiencer`
+    # is "family"/"other" when the condition belongs to someone other than the
+    # patient (family history is not the patient's coded condition). Defaults assert
+    # the common case; extraction sets them from the note.
+    certain: bool = True
+    experiencer: str = "patient"
     evidence: list[EvidenceSpan] = field(default_factory=list)
     confidence: float = 0.0
     fact_id: str = ""
@@ -80,10 +87,13 @@ class ClinicalFact:
 
     @property
     def billable(self) -> bool:
-        # A documented diagnosis is codeable (it establishes necessity) unless it
-        # is purely historical. A procedure/supply/drug/imaging is codeable only
-        # if it was actually PERFORMED / dispensed today — never if merely
-        # ordered, planned or discussed.
+        # Never code an UNCERTAIN condition (suspected/probable/rule-out) as confirmed,
+        # nor a condition belonging to someone other than the PATIENT (family history
+        # / other) — ICD-10-CM outpatient coding rules. Then: a documented diagnosis
+        # is codeable (it establishes necessity) unless purely historical; a
+        # procedure/supply/drug/imaging is codeable only if actually PERFORMED today.
+        if not self.certain or self.experiencer != "patient":
+            return False
         if self.kind is FactKind.DIAGNOSIS:
             return self.disposition is not Disposition.HISTORICAL
         return self.disposition is Disposition.PERFORMED
