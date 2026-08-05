@@ -153,6 +153,22 @@ SOURCES: dict[str, dict] = {
         "cadence": "quarterly",
         "prepare": lambda tmp, args: [PY, "tools/build_ncci_aoc.py"],
     },
+    "icd10cm_codes": {
+        # ICD-10-CM code set — annual (FY effective Oct 1). Build product: the builder
+        # fetches the current fiscal year's CMS code-descriptions (order file) and writes
+        # the {code,description,effective_from,fy,status} snapshot the store reads.
+        "output": "icd10cm_codes.json",
+        "cadence": "annual",
+        "prepare": lambda tmp, args: [PY, "tools/build_icd10cm.py"],
+    },
+    "hcpcs": {
+        # HCPCS Level II — quarterly. Build product: the builder fetches the current CMS
+        # quarterly Alpha-Numeric (ANWEB) workbook and writes the snapshot the store reads
+        # (code/descriptions/coverage/action/dates). Parsed with the stdlib (no openpyxl).
+        "output": "hcpcs_codes.json",
+        "cadence": "quarterly",
+        "prepare": lambda tmp, args: [PY, "tools/build_hcpcs.py"],
+    },
     "snomed_icd10": {
         "output": "snomed_icd10_map.json",
         "cadence": "biannual",   # SNOMED CT US edition: Mar / Sep
