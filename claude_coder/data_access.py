@@ -477,11 +477,20 @@ class AuthoritativeSource:
     def ncci_indicator(self, col1: str, col2: str, dos: str | None) -> str | None:
         """PTP modifier indicator ('0' no bypass, '1' bypass-with-modifier, '9'
         deleted) via the real edit method `check_ncci`. None = the check RAN and
-        found no edit for the pair; AUTHORITY_UNAVAILABLE = the check could not run
-        (a lookup error) — the caller must treat that as UNKNOWN, never as 'no edit'.
-        Robust to the edit's return shape."""
+        found no edit for the pair (the loaded snapshot COVERS this DOS);
+        AUTHORITY_UNAVAILABLE = the check could not run — a lookup error OR the loaded
+        quarterly snapshot does not COVER this DOS — the caller treats that as UNKNOWN,
+        never as 'no edit', so an off-quarter DOS fails closed. Robust to return shape."""
+        ref = self._reference()
         try:
-            edit = self._reference().check_ncci(col1, col2)   # type: ignore[attr-defined]
+            # A quarterly NCCI snapshot only speaks for the dates it covers. If it does
+            # NOT cover this DOS, the check cannot run -> UNAVAILABLE (UNKNOWN/SYSTEM_HOLD),
+            # never a clean 'no edit'. Pass the DOS so the lookup is scoped to the release
+            # covering it (edit set and direction can change quarter to quarter).
+            available = getattr(ref, "ncci_data_available", None)
+            if available is not None and not available(dos):
+                return AUTHORITY_UNAVAILABLE                   # snapshot does not cover DOS
+            edit = ref.check_ncci(col1, col2, dos)   # type: ignore[attr-defined]
         except Exception:
             return AUTHORITY_UNAVAILABLE                       # check could not run
         if not edit:
@@ -502,7 +511,7 @@ class AuthoritativeSource:
         the whole claim."""
         db = self._reference()
         try:
-            edit = db.check_ncci(a, b)           # type: ignore[attr-defined]
+            edit = db.check_ncci(a, b, dos)      # type: ignore[attr-defined]
         except Exception:
             return None
         if not isinstance(edit, dict):

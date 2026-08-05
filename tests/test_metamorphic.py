@@ -384,3 +384,53 @@ def test_default_llm_forwards_json_mode_and_zero_temperature():
     finally:
         client.chat_completion = orig
     assert seen.get("json_mode") is True and seen.get("temperature") == 0.0
+
+
+# ---- NCCI gate must consult the DOS-scoped data and fail CLOSED off-quarter --------
+class _FakeNcciRef:
+    """Stand-in for CodeReferenceDB: records the args check_ncci was called with and
+    controls whether the loaded snapshot covers the DOS."""
+    def __init__(self, available=True, edit=None):
+        self._available = available
+        self._edit = edit
+        self.seen = None
+
+    def ncci_data_available(self, dos):
+        return self._available
+
+    def check_ncci(self, c1, c2, dos=None):
+        self.seen = (c1, c2, dos)
+        return self._edit
+
+
+def test_ncci_indicator_forwards_dos_and_fails_closed_off_quarter():
+    """Bug A: the DOS is forwarded to check_ncci (not dropped). Bug B: when the loaded
+    NCCI snapshot does NOT cover the DOS, the indicator is AUTHORITY_UNAVAILABLE (the
+    gate routes UNKNOWN/SYSTEM_HOLD), NEVER a clean None that would silently PASS."""
+    from claude_coder.data_access import AuthoritativeSource, AUTHORITY_UNAVAILABLE
+    src = AuthoritativeSource()
+    # covered DOS + a real edit -> returns the indicator AND forwarded the DOS
+    fake = _FakeNcciRef(available=True, edit={"code1": "A", "code2": "B",
+                                              "modifier_indicator": "0"})
+    src._db = fake
+    assert src.ncci_indicator("A", "B", "2026-08-01") == "0"
+    assert fake.seen == ("A", "B", "2026-08-01")          # DOS forwarded, not dropped
+    # covered DOS + no edit for this pair -> genuinely None
+    src._db = _FakeNcciRef(available=True, edit=None)
+    assert src.ncci_indicator("A", "B", "2026-08-01") is None
+    # snapshot does NOT cover the DOS -> UNAVAILABLE (fail closed), not None
+    src._db = _FakeNcciRef(available=False, edit={"code1": "A", "code2": "B",
+                                                  "modifier_indicator": "0"})
+    assert src.ncci_indicator("A", "B", "2026-01-05") == AUTHORITY_UNAVAILABLE
+
+
+def test_ncci_edit_forwards_dos():
+    """Bug A: the directional edit lookup passes the DOS so the returned payable/
+    component/modifier is the row active for the claim's DOS."""
+    from claude_coder.data_access import AuthoritativeSource
+    src = AuthoritativeSource()
+    fake = _FakeNcciRef(available=True, edit={"code1": "A", "code2": "B", "modifier": "1"})
+    src._db = fake
+    assert src.ncci_edit("A", "B", "2026-08-01") == {
+        "payable": "A", "component": "B", "modifier": "1"}
+    assert fake.seen == ("A", "B", "2026-08-01")          # DOS forwarded, not dropped
