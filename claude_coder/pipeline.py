@@ -58,8 +58,15 @@ def code_encounter(
         from . import provenance as _prov
         _prov.anchor_facts(note_text, facts)
         from app.core.config import OUTPUT_DIR
-        _prov.JsonlAuditRepository(OUTPUT_DIR / "audit").append(
-            encounter_id, "evidence_anchoring", _prov.anchoring_report(facts))
+        _repo = _prov.JsonlAuditRepository(OUTPUT_DIR / "audit")
+        _repo.append(encounter_id, "evidence_anchoring", _prov.anchoring_report(facts))
+        # Phase-1a (SHADOW): run the code-free eligibility engine and record which events
+        # WOULD become claim-line intents vs are non-claim/held -- for audit + diffing
+        # against today's performed==billable behavior. Relations are empty until Phase 2,
+        # so nothing is demoted yet; this establishes the seam, not a release change.
+        from . import eligibility as _elig
+        _repo.append(encounter_id, "eligibility_shadow",
+                     _elig.summary(_elig.evaluate(facts, [], encounter_id, date_of_service)))
     except Exception:
         pass
 

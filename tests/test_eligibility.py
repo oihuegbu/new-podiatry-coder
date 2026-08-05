@@ -1,0 +1,123 @@
+"""Phase-1 eligibility engine: tri-state gates + code-free ClaimLineIntent.
+
+The core safety property — a performed event is NOT automatically a claim line:
+an explicitly integral component is demoted to NON_CLAIM_EVIDENCE BEFORE retrieval, a
+non-performed event never becomes a line, and material ambiguity holds. Agnostic —
+synthetic facts/relations, no medical code."""
+from claude_coder import eligibility as el
+from claude_coder.eligibility import EligibilityState, ClaimComponent
+from claude_coder.models import (ClinicalFact, FactKind, Disposition, EvidenceSpan,
+                                 Outcome, RelationAssertion, RelationPredicate, RelationState)
+
+
+def _fact(kind=FactKind.PROCEDURE, desc="a performed service", anchored=True,
+          disp=Disposition.PERFORMED, fid="F1", attrs=None):
+    ev = [EvidenceSpan(text="quote", anchored=anchored, text_sha256="h1")]
+    return ClinicalFact(kind, desc, attributes=attrs or {}, disposition=disp,
+                        evidence=ev, fact_id=fid, confidence=0.9)
+
+
+def _partof(subj="F1", obj="F2", state=RelationState.ASSERTED):
+    return RelationAssertion(subject_event_id=subj, predicate=RelationPredicate.PART_OF,
+                             object_event_id=obj, state=state)
+
+
+# ------------------------------------------------------------------ gates
+def test_evidence_gate_tristate():
+    assert el._gate_evidence_required(_fact(anchored=True)).outcome is Outcome.PASS
+    assert el._gate_evidence_required(_fact(anchored=False)).outcome is Outcome.BLOCKED
+    bare = ClinicalFact(FactKind.PROCEDURE, "svc", evidence=[], fact_id="F1")
+    assert el._gate_evidence_required(bare).outcome is Outcome.BLOCKED
+
+
+def test_occurrence_gate():
+    assert el._gate_occurrence(_fact(disp=Disposition.PERFORMED)).outcome is Outcome.PASS
+    assert el._gate_occurrence(_fact(disp=Disposition.ORDERED)).outcome is Outcome.BLOCKED
+    assert el._gate_occurrence(_fact(disp=Disposition.HISTORICAL)).outcome is Outcome.BLOCKED
+
+
+def test_ownership_gate():
+    assert el._gate_actor_ownership(_fact()).outcome is Outcome.UNKNOWN            # unstated
+    same = _fact(attrs={"performer_id": "p1", "billing_entity_id": "p1"})
+    assert el._gate_actor_ownership(same).outcome is Outcome.PASS
+    other = _fact(attrs={"performer_id": "p2", "billing_entity_id": "p1"})
+    assert el._gate_actor_ownership(other).outcome is Outcome.BLOCKED
+
+
+def test_part_of_demotion_requires_explicit_integrality():
+    f = _fact(fid="F1")
+    assert el._gate_part_of_demotion(f, []).outcome is Outcome.PASS                 # no relation
+    assert el._gate_part_of_demotion(f, [_partof()]).outcome is Outcome.BLOCKED      # explicit
+    # weak/uncertain PART_OF does NOT demote (defers to the conflict gate)
+    assert el._gate_part_of_demotion(f, [_partof(state=RelationState.UNCERTAIN)]).outcome \
+        is Outcome.PASS
+    # documented distinctness overrides the demotion
+    sep = RelationAssertion("F1", RelationPredicate.SEPARATE_FROM, "F2",
+                            state=RelationState.ASSERTED)
+    assert el._gate_part_of_demotion(f, [_partof(), sep]).outcome is Outcome.PASS
+
+
+def test_conflict_gate_holds_on_uncertain_material_relation():
+    f = _fact(fid="F1")
+    assert el._gate_conflict(f, [_partof(state=RelationState.UNCERTAIN)]).outcome is Outcome.UNKNOWN
+    assert el._gate_conflict(f, [_partof()]).outcome is Outcome.PASS
+
+
+# ------------------------------------------------------------------ classification
+def _one(facts, relations=None):
+    return el.evaluate(facts, relations or [], "enc", "2026-08-01")[0]
+
+
+def test_clean_service_is_eligible():
+    i = _one([_fact()])
+    assert i.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL
+    assert i.component is ClaimComponent.SERVICE
+    assert i.clinical_action == "a performed service"
+    # the intent carries NO code
+    assert not hasattr(i, "code") and "code" not in i.attributes
+
+
+def test_explicit_integral_component_demoted_before_retrieval():
+    """The billable==performed fix: an event documented as part of another is NON_CLAIM,
+    so retrieval never searches a code for it."""
+    i = _one([_fact(fid="F1")], relations=[_partof("F1", "F2")])
+    assert i.state is EligibilityState.NON_CLAIM_EVIDENCE
+
+
+def test_non_performed_event_is_non_claim():
+    assert _one([_fact(disp=Disposition.ORDERED)]).state is EligibilityState.NON_CLAIM_EVIDENCE
+
+
+def test_unanchored_evidence_holds():
+    assert _one([_fact(anchored=False)]).state is EligibilityState.AUTO_HOLD
+
+
+def test_uncertain_relationship_holds():
+    i = _one([_fact(fid="F1")], relations=[_partof("F1", "F2", RelationState.UNCERTAIN)])
+    assert i.state is EligibilityState.AUTO_HOLD
+
+
+def test_contrary_ownership_holds():
+    i = _one([_fact(attrs={"performer_id": "p2", "billing_entity_id": "p1"})])
+    assert i.state is EligibilityState.AUTO_HOLD
+
+
+def test_diagnosis_is_support_not_service_line():
+    i = _one([_fact(kind=FactKind.DIAGNOSIS, desc="a documented condition")])
+    assert i.component is ClaimComponent.DIAGNOSIS_SUPPORT
+    assert i.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL
+    # a diagnosis is NOT demoted by a PART_OF relationship (not a service line)
+    j = el.evaluate([_fact(kind=FactKind.DIAGNOSIS, desc="dx", fid="D1")],
+                    [_partof("D1", "F2")], "enc", "2026-08-01")[0]
+    assert j.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL
+
+
+def test_summary_counts_by_state():
+    intents = el.evaluate(
+        [_fact(fid="F1"), _fact(fid="F2", disp=Disposition.ORDERED),
+         _fact(fid="F3", anchored=False)], [], "enc", "2026-08-01")
+    s = el.summary(intents)
+    assert s["total"] == 3
+    assert s["by_state"][EligibilityState.ELIGIBLE_FOR_RETRIEVAL.value] == 1
+    assert s["by_state"][EligibilityState.NON_CLAIM_EVIDENCE.value] == 1
+    assert s["by_state"][EligibilityState.AUTO_HOLD.value] == 1
