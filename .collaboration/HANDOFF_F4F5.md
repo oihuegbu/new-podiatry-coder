@@ -7,7 +7,7 @@
 - Independent reviewer: Codex
 - Branch: claude-medical-coder
 - Base SHA: 0a74a3ced3c27450589a56fc03c3516d6ab62580
-- Target SHA: <this commit — current branch HEAD after commit>
+- Target SHA: 5186c189315fac851cf321796caa0d2a050e6538  (F4/F5 code+tests; this docs-only line correction is a trailing commit)
 - Risk class: A (claim-affecting: candidate selection + claim-line count)
 - Control mode: ENFORCED_FAIL_CLOSED (corrections to already-enforced selection/dedup paths; the comparison now fails closed on incompatible/ambiguous input)
 - Claim-affecting: Yes
