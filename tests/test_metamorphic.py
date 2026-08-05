@@ -454,3 +454,67 @@ def test_opps_1833t_code_not_separately_billable():
     src._db = _Ref()
     assert src.separately_billable("OPPSX", "hcpcs", "2026-08-01") is Outcome.BLOCKED
     assert src.separately_billable("PAYX", "hcpcs", "2026-08-01") is not Outcome.BLOCKED
+
+
+# ---- #1: a residual/catch-all diagnosis needs distinctive descriptor grounding --------
+def test_residual_catchall_without_grounding_escalates():
+    """A residual/catch-all diagnosis code is entailed by almost anything in its bucket,
+    so it must share a DISTINCTIVE clinical term with the documented condition or escalate.
+    Agnostic: synthetic descriptors, no code named."""
+    from claude_coder.resolution import _residual_without_grounding
+    from claude_coder.models import ClinicalFact, CandidateCode, FactKind
+
+    def fact(d):
+        return ClinicalFact(FactKind.DIAGNOSIS, d)
+
+    def cand(desc):
+        return CandidateCode("X", "icd10", desc)
+
+    # residual code sharing NO distinctive term with the condition -> ungrounded guess
+    assert _residual_without_grounding(
+        fact("Haglund-type retrocalcaneal exostosis"),
+        cand("Other specified disorders of bone, ankle and foot"))
+    # residual code that NAMES the documented condition (bursitis) -> grounded, kept
+    assert not _residual_without_grounding(
+        fact("Retrocalcaneal bursitis"),
+        cand("Other bursitis, not elsewhere classified, right ankle and foot"))
+    # a specific (non-residual) code -> not subject to the gate
+    assert not _residual_without_grounding(
+        fact("Calcification at Achilles tendon insertion"),
+        cand("Calcific tendinitis, right ankle and foot"))
+
+
+def test_residual_catchall_escalates_through_resolve():
+    """End-to-end: resolve() escalates a diagnosis that verifies to a residual/catch-all
+    code with no distinctive descriptor overlap, but KEEPS a residual code that names the
+    documented condition. Exercises the wrapping guard in resolve(), not just the helper."""
+    from claude_coder import resolution
+    from claude_coder.data_access import MockSource
+    from claude_coder.models import (ClinicalFact, CandidateCode, EvidenceSpan, FactKind,
+                                      ResolutionMethod)
+
+    def stub(system, user):
+        sl = system.lower()
+        if "propose" in sl:
+            return '{"codes": []}'
+        if "independently" in sl:                       # corroborate
+            return '{"entailed": true, "missing_element": false, "reason": "x"}'
+        return '{"choice": 1, "reason": "x"}'           # select the sole candidate
+
+    # catch-all descriptor sharing no distinctive term with the condition -> escalate
+    src = MockSource(
+        records={("Z999", "icd10"): {"long_description": "Other specified disorders of bone, ankle and foot", "active": True}},
+        retrieval={("*", "icd10"): [CandidateCode("Z999", "icd10", "Other specified disorders of bone, ankle and foot", 0.9)]})
+    fact = ClinicalFact(FactKind.DIAGNOSIS, "Haglund-type retrocalcaneal exostosis",
+                        evidence=[EvidenceSpan("Haglund-type retrocalcaneal exostosis")])
+    line = resolution.resolve(fact, src, llm=stub, corroborate=stub)
+    assert not line.resolved and line.method is ResolutionMethod.ABSTAINED
+
+    # residual code that NAMES the documented condition (bursitis) -> grounded, kept
+    src2 = MockSource(
+        records={("Z998", "icd10"): {"long_description": "Other bursitis, not elsewhere classified, right ankle and foot", "active": True}},
+        retrieval={("*", "icd10"): [CandidateCode("Z998", "icd10", "Other bursitis, not elsewhere classified, right ankle and foot", 0.9)]})
+    fact2 = ClinicalFact(FactKind.DIAGNOSIS, "Retrocalcaneal bursitis",
+                         evidence=[EvidenceSpan("Retrocalcaneal bursitis")])
+    line2 = resolution.resolve(fact2, src2, llm=stub, corroborate=stub)
+    assert line2.resolved and line2.chosen.code == "Z998"

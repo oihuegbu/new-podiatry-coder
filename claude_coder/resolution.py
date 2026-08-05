@@ -43,6 +43,31 @@ _RECALL_POOL = 40
 # deterministically. Not medical codes or conditions; generic status vocabulary.
 _STATUS_QUALIFIERS = ("secondary", "revision", "delayed", "reconstruction", "sequela")
 
+# A residual/catch-all diagnosis descriptor ("other specified" / "not elsewhere
+# classified" / "unspecified" bucket) is entailed by almost any case in its broad
+# category, so entailment alone is not grounding -- it must ALSO share a DISTINCTIVE
+# clinical term with the documentation. These are the residual markers and the generic
+# ICD-grammar words excluded from the distinctive-token overlap. No conditions/codes.
+_RESIDUAL_MARKERS = ("other specified", "not elsewhere classified", "unspecified",
+                     "other disorders of", "other and unspecified")
+_GENERIC_TOKENS = set(_LATERALITY) | {
+    "other", "specified", "unspecified", "elsewhere", "classified", "disorders",
+    "disorder", "site", "sites", "region", "part", "parts", "certain"}
+
+
+def _distinctive_tokens(text: str) -> set[str]:
+    return {t for t in re.split(r"[^a-z]+", text.lower())
+            if len(t) > 4 and t not in _GENERIC_TOKENS}
+
+
+def _residual_without_grounding(fact: ClinicalFact, chosen: CandidateCode) -> bool:
+    """A DIAGNOSIS resolved to a RESIDUAL/catch-all code whose descriptor shares NO
+    distinctive clinical term with the documented condition -- an ungrounded guess."""
+    desc = chosen.descriptor.lower()
+    if not any(m in desc for m in _RESIDUAL_MARKERS):
+        return False
+    return not (_distinctive_tokens(fact.description) & _distinctive_tokens(desc))
+
 
 def _needs_verification(fact: ClinicalFact, cand: CandidateCode) -> bool:
     """Does this authoritative hit carry a distinguishing qualifier the documentation
@@ -310,7 +335,21 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
     # an empty recall pool, since a validated proposal can rescue a missed concept.
     if llm is not None and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING,
                                          FactKind.DIAGNOSIS):
-        return _propose_then_verify(fact, source, pool, llm, corroborate)
+        line = _propose_then_verify(fact, source, pool, llm, corroborate)
+        # #1 grounding: a DIAGNOSIS that verified only to a residual/catch-all category
+        # with no distinctive descriptor overlap is an ungrounded guess (entailment
+        # against a catch-all is near-tautological) -- escalate, never bill it verified.
+        if (line.resolved and fact.kind is FactKind.DIAGNOSIS
+                and _residual_without_grounding(fact, line.chosen)):
+            return ResolvedLine(
+                fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
+                alternatives=[line.chosen],
+                documentation_gap=("the condition resolved only to a residual/catch-all "
+                    "category whose descriptor shares no distinctive clinical term with the "
+                    "documentation -- pin the specific condition or confirm the catch-all"),
+                rationale=("residual/catch-all code with no distinctive descriptor "
+                    "grounding -- escalate rather than bill a non-specific code"))
+        return line
 
     if not pool:
         return ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
