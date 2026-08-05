@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -43,50 +44,75 @@ from app.core.config import NCCI_FILE
 from app.compliance.refresh import runner, parsers as P
 from app.compliance.refresh.sources import SOURCES_BY_ID
 
+_QSTART = {1: "01-01", 2: "04-01", 3: "07-01", 4: "10-01"}
 
-def _payloads(args, src) -> tuple[list[tuple[bytes, str]], str | None]:
-    """(raw_bytes, name) for each PTP file + the resolved effective date."""
+
+def _all_quarter_files(src) -> list[tuple[str, str]]:
+    """Every PRACTITIONER PTP edit zip URL on the CMS page (ALL quarters), as
+    (url, quarter_effective_date), oldest quarter first. CMS keeps only current+prior
+    quarter, but each file is CUMULATIVE (retains deleted edits) — unioning all
+    available quarters maximizes historical completeness.
+
+    Mirrors runner._resolve_ncci_ptp's URL extraction: the hrefs sit behind a
+    '/license/ama?file=' wrapper that must be STRIPPED to reach the direct /files/zip/
+    URL (downloading the wrapper returns an HTML license page, not the zip — the cause
+    of the earlier 0-rows failure). Unlike the runner, this keeps ALL quarters, not
+    just the newest."""
+    html = runner.download(src.url, timeout=120).decode("utf-8", errors="replace")
+    hits = re.findall(
+        r'href="([^"]*?(\d{4})q([1-4])-practitioner-ptp-edits[^"]*?-f\d[^"]*?\.zip)"',
+        html, re.I)
+    out = {}
+    for href, yr, q in hits:
+        url = runner._abs(src.url, re.sub(r"^/license/ama\?file=", "", href))
+        out[url] = f"{yr}-{_QSTART[int(q)]}"
+    return sorted(out.items(), key=lambda kv: kv[1])   # oldest quarter first
+
+
+def _payloads(args, src) -> list[tuple[bytes, str, str | None]]:
+    """(raw_bytes, name, quarter_effective_date) for every PTP file, oldest quarter first."""
     if args.file:
-        return [(Path(f).read_bytes(), Path(f).name) for f in args.file], args.effective_from
-    urls, eff = runner._resolve_urls(src)
-    if not urls:
-        raise SystemExit("ABORT: no NCCI PTP file resolved from the CMS landing page "
+        return [(Path(f).read_bytes(), Path(f).name, args.effective_from) for f in args.file]
+    quarters = _all_quarter_files(src)
+    if not quarters:
+        raise SystemExit("ABORT: no practitioner PTP zip resolved from the CMS landing page "
                          "(page format changed, or offline). Re-run with --file.")
-    return [(runner.download(u, timeout=300), u.rsplit("/", 1)[-1]) for u in urls], eff
+    return [(runner.download(u, timeout=300), u.rsplit("/", 1)[-1], eff) for u, eff in quarters]
 
 
 def build(args) -> int:
     src = SOURCES_BY_ID["ncci_ptp"]
-    payloads, eff = _payloads(args, src)
-    eff = args.effective_from or eff or date.today().isoformat()
+    payloads = _payloads(args, src)                 # oldest quarter first
+    newest_eff = args.effective_from or (payloads[-1][2] if payloads else None) or date.today().isoformat()
 
-    tmp = NCCI_FILE.with_suffix(".json.tmp")
-    total = 0
-    # Stream the (large) output so a ~2M-pair snapshot never materializes fully in
-    # memory. Parse one PTP file at a time and dump its rows immediately.
-    with open(tmp, "w") as out:
-        out.write("[")
-        first = True
-        for raw, name in payloads:
-            text = runner._payload_text(src, raw)
-            rows, _cols = P.parse_ncci(text, eff)   # (col1, col2, mod_ind, eff_from, eff_to)
-            for c1, c2, mod, eff_from, eff_to in rows:
-                if not first:
-                    out.write(",")
-                first = False
-                # keys the store reads verbatim: code1/code2/modifier/effective_date/end_date
-                json.dump({"code1": c1, "code2": c2, "modifier": mod,
-                           "effective_date": eff_from, "end_date": eff_to}, out)
-                total += 1
-            print(f"  parsed {name}: running total {total} pairs")
-        out.write("]")
+    # UNION all quarters: key each edit by (code1, code2, effective_from); the NEWEST
+    # quarter processed last wins, so an edit's end_date reflects the latest release
+    # (an edit deleted this quarter carries its real deletion date, not an open one).
+    merged: dict[tuple[str, str, str], tuple[str, str]] = {}
+    for raw, name, file_eff in payloads:
+        text = runner._payload_text(src, raw)
+        rows, _cols = P.parse_ncci(text, file_eff or newest_eff)   # (c1,c2,mod,eff_from,eff_to)
+        for c1, c2, mod, eff_from, eff_to in rows:
+            merged[(c1, c2, eff_from)] = (mod, eff_to)
+        print(f"  parsed {name}: {len(rows)} rows -> merged total {len(merged)}")
 
-    if total == 0:
-        tmp.unlink(missing_ok=True)
+    if not merged:
         raise SystemExit("ABORT: 0 PTP pairs parsed — payload was a landing page or an "
                          "unrecognized format; refusing to overwrite the snapshot.")
+    tmp = NCCI_FILE.with_suffix(".json.tmp")
+    with open(tmp, "w") as out:                     # stream the ~2M-pair snapshot
+        out.write("[")
+        first = True
+        for (c1, c2, eff_from), (mod, eff_to) in merged.items():
+            if not first:
+                out.write(",")
+            first = False
+            json.dump({"code1": c1, "code2": c2, "modifier": mod,
+                       "effective_date": eff_from, "end_date": eff_to}, out)
+        out.write("]")
     os.replace(tmp, NCCI_FILE)   # atomic: a reader never sees a partial file
-    print(f"wrote {NCCI_FILE} — {total} NCCI PTP pairs (effective {eff})")
+    print(f"wrote {NCCI_FILE} — {len(merged)} NCCI PTP pairs "
+          f"(unioned {len(payloads)} quarterly file(s), newest effective {newest_eff})")
     return 0
 
 
