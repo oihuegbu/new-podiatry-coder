@@ -54,6 +54,7 @@ def code_encounter(
     # record a shadow audit artifact. Fail-safe — anchoring only adds offsets to spans
     # (billing/gates read span text, unchanged) and a write failure must not affect
     # release. Retrieval still consumes ClinicalFacts today; ClaimLineIntent is Phase 1.
+    _elig_state: dict = {}
     try:
         from . import provenance as _prov
         _prov.anchor_facts(note_text, facts)
@@ -68,13 +69,32 @@ def code_encounter(
         _intents = _elig.evaluate(facts, [], encounter_id, date_of_service)
         _repo.append(encounter_id, "eligibility_shadow", _elig.summary(_intents))
         _repo.append(encounter_id, "eligibility_diff", _elig.shadow_diff(facts, _intents))
+        _elig_state = {e: it for it in _intents for e in it.clinical_event_ids}
     except Exception:
-        pass
+        _elig_state = {}
 
+    # Phase 1c: retrieval consumes the eligibility decision. A billable event only reaches
+    # code retrieval via an ELIGIBLE ClaimLineIntent; one explicitly demoted as an integral
+    # component (NON_CLAIM_EVIDENCE) is diverted BEFORE retrieval -- a performed event is not
+    # automatically searched for a code. ENABLED ONE GATE AT A TIME: only the part_of gate
+    # diverts for now (a billable fact turns NON_CLAIM only via an explicit PART_OF -- an
+    # occurrence-based NON_CLAIM is already non-billable). Evidence/ownership/conflict stay
+    # SHADOW until validated on more notes. Relations are empty until Phase 2, so the divert
+    # set is currently empty (shadow-diff verified zero divergence) -- behavior-identical now.
+    from .eligibility import EligibilityState as _ES
     lines = []
     for fact in facts:
+        _it = _elig_state.get(fact.fact_id)
         if fact.kind is FactKind.EM:
             line = em.resolve_em(fact, source)      # MDM-driven leveling
+        elif (fact.billable and _it is not None
+              and _it.state is _ES.NON_CLAIM_EVIDENCE):
+            _r = "; ".join(f"{d.gate}: {d.detail}" for d in _it.decisions
+                           if d.outcome is not Outcome.PASS) or _it.state.value
+            line = ResolvedLine(
+                fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
+                rationale=f"diverted before retrieval — documented integral component, "
+                          f"not an independent claim line ({_r})")
         else:
             line = resolution.resolve(fact, source, llm=verify_llm,
                                       corroborate=corroborate_llm,
