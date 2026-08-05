@@ -137,3 +137,45 @@ def test_length_measurement_gives_no_specificity_to_area_candidate():
     line = resolve(fact, src)
     assert not (line.method is ResolutionMethod.DETERMINISTIC
                 and line.chosen is not None and line.chosen.code == "AREA_C")
+
+
+# ---- Codex review F4-R1: bounded interval must not close without a supporting measurement -
+def test_interval_unsupported_helper():
+    from claude_coder.resolution import _interval_unsupported
+    from claude_coder.ontology import parse_descriptor
+    feats = parse_descriptor("size 16 sq. in. or less")
+    length = ClinicalFact(FactKind.SUPPLY, "d", attributes={"depth_mm": 5})
+    area = ClinicalFact(FactKind.SUPPLY, "d", attributes={"size_sqin": 10})
+    missing = ClinicalFact(FactKind.SUPPLY, "d", attributes={})
+    assert _interval_unsupported(length, feats) is True        # wrong dimension
+    assert _interval_unsupported(missing, feats) is True       # no measurement at all
+    assert _interval_unsupported(area, feats) is False         # compatible + in range
+    assert _interval_unsupported(missing, parse_descriptor("plain dressing")) is False  # no interval
+
+
+def test_single_authoritative_interval_hit_without_supporting_measurement_abstains():
+    """Codex F4-R1: a LONE authoritative interval-qualified SUPPLY (bypasses propose-then-
+    verify) must NOT close deterministically when the documentation has no dimension-
+    compatible measurement -- it abstains with a provider-query documentation gap."""
+    area = CandidateCode("AREA_C", "hcpcs",
+                         "wound dressing, sterile, size 16 sq. in. or less", 0.9)
+    src = MockSource(retrieval={("*", "hcpcs"): [area]})
+    fact = ClinicalFact(FactKind.SUPPLY, "wound dressing", attributes={"depth_mm": 5},
+                        disposition=Disposition.PERFORMED,
+                        evidence=[EvidenceSpan("wound dressing applied, depth 5 mm")],
+                        confidence=0.99)
+    line = resolve(fact, src)
+    assert line.chosen is None                                 # not billed deterministically
+    assert line.documentation_gap                              # provider query for the measurement
+
+
+def test_supported_interval_hit_still_resolves():
+    area = CandidateCode("AREA_C", "hcpcs",
+                         "wound dressing, sterile, size 16 sq. in. or less", 0.9)
+    src = MockSource(retrieval={("*", "hcpcs"): [area]})
+    fact = ClinicalFact(FactKind.SUPPLY, "wound dressing", attributes={"size_sqin": 10},
+                        disposition=Disposition.PERFORMED,
+                        evidence=[EvidenceSpan("wound dressing 10 sq in applied")],
+                        confidence=0.99)
+    line = resolve(fact, src)
+    assert line.chosen is not None and line.chosen.code == "AREA_C"

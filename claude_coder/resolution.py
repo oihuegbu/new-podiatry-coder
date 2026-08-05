@@ -82,7 +82,7 @@ def _needs_verification(fact: ClinicalFact, cand: CandidateCode) -> bool:
     if any(q in d for q in _STATUS_QUALIFIERS):
         return True
     feats = parse_descriptor(cand.descriptor)
-    if feats.interval and feats.interval.bounded() and measurement_of(fact.attributes) is None:
+    if _interval_unsupported(fact, feats):
         return True
     if feats.cardinality and not (fact.attributes.get("count")
                                   or fact.attributes.get("quantity")):
@@ -103,6 +103,39 @@ class _Match:
     specificity: int
     support: int = 0
     rationale: list[str] = field(default_factory=list)
+    interval_unsupported: bool = False
+
+
+def _measure_in_range(fact: ClinicalFact, feats) -> "bool | None":
+    """True/False/None: is the UNIQUE dimension-compatible documented measurement within a
+    descriptor's bounded interval? None when there is no bounded interval, or no unique
+    compatible convertible measurement (incomparable)."""
+    if not (feats.interval and feats.interval.bounded() and feats.interval.unit):
+        return None
+    from . import measurement as _meas
+    idim, _ = _meas.unit_dimension(feats.interval.unit)
+    if idim is None:
+        return None
+    dm = _meas.measurement_for_dimension(fact.attributes, idim)
+    if dm is None:
+        return None
+    dv = _meas.convert(dm.value, dm.dimension, dm.unit, feats.interval.unit)
+    if dv is None and dm.unit == feats.interval.unit:
+        dv = dm.value
+    if dv is None:
+        return None
+    return feats.interval.contains(dv)
+
+
+def _interval_unsupported(fact: ClinicalFact, feats) -> bool:
+    """A descriptor REQUIRES a bounded measurement interval the documentation does NOT
+    support: a bounded interval is present but there is no unique dimension-compatible
+    convertible in-range measurement (missing / incompatible / unitless / ambiguous /
+    unconvertible). Such a code must never close deterministically nor skip verification.
+    (Codex review F4-R1.)"""
+    if not (feats.interval and feats.interval.bounded()):
+        return False
+    return _measure_in_range(fact, feats) is not True
 
 
 def _fact_text(fact: ClinicalFact) -> str:
@@ -131,20 +164,10 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
     # measurement neither ELIMINATES a candidate nor earns SPECIFICITY credit -- fail-closed
     # on the comparison. (Codex review F4: the old specificity path used a bare, unit-blind
     # number and could deterministically prefer a dimensionally-incompatible candidate.)
-    _in_range = None
-    if feats.interval and feats.interval.bounded() and feats.interval.unit:
-        from . import measurement as _meas
-        _idim, _idf = _meas.unit_dimension(feats.interval.unit)
-        if _idim is not None:
-            _dm = _meas.measurement_for_dimension(fact.attributes, _idim)
-            if _dm is not None:
-                _dv = _meas.convert(_dm.value, _dm.dimension, _dm.unit, feats.interval.unit)
-                if _dv is None and _dm.unit == feats.interval.unit:
-                    _dv = _dm.value
-                if _dv is not None:
-                    _in_range = feats.interval.contains(_dv)
+    _in_range = _measure_in_range(fact, feats)
     if _in_range is False:
         return None                     # documented measurement out of the code's range
+    _iu = bool(feats.interval and feats.interval.bounded()) and _in_range is not True
 
     # SPECIFICITY — count the constraining attributes the descriptor POSITIVELY
     # accounts for; a more specific code wins ties.
@@ -173,7 +196,7 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
     support = support_score(desc_text, _fact_text(fact))
     reasons.append(f"recall {cand.score:.2f}")
 
-    return _Match(cand, feats, cand.score, spec, support, reasons)
+    return _Match(cand, feats, cand.score, spec, support, reasons, interval_unsupported=_iu)
 
 
 def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
@@ -693,6 +716,17 @@ def _decide(fact: ClinicalFact, pool: list[CandidateCode],
                              > (nxt.specificity, nxt.support)))
 
     tag = f" ({authority})" if authority else ""
+    if deterministic and getattr(top, "interval_unsupported", False):
+        # Codex F4-R1: the leader's descriptor requires a bounded measurement its
+        # documentation does not support (dimension-compatible + convertible + in range).
+        return ResolvedLine(
+            fact=fact, chosen=None, alternatives=[m.candidate for m in survivors[:5]],
+            method=ResolutionMethod.ABSTAINED,
+            documentation_gap=("the code's descriptor requires a measurement within a "
+                "specific range and the documentation provides no compatible measurement "
+                "of that dimension -- document the measurement or use a less-specific code"),
+            rationale="bounded-interval code not supported by a dimension-compatible "
+                      "documented measurement -- not billed deterministically")
     if deterministic:
         return ResolvedLine(
             fact=fact, chosen=top.candidate,

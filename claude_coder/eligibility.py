@@ -250,47 +250,103 @@ def _service_key(intent: "ClaimLineIntent"):
             str(a.get("laterality", "")).lower(), toks)
 
 
-def _distinct_intents(a: "ClaimLineIntent", b: "ClaimLineIntent") -> bool:
-    """Two same-key intents are DISTINCT services (must NOT merge) when documentation
-    establishes distinctness: an explicit distinctness fact on either (a SEPARATE_FROM /
-    distinct site/session), or a differing performer, approach, or site. A merge can drop a
-    line, so ANY documented distinctness prohibits it. (Codex review F5.)"""
-    if a.distinctness_facts or b.distinctness_facts:
-        return True
+_DISTINCT_ATTR_AXES = ("performer_id", "performer", "approach", "distinct_site",
+                       "distinct_session", "distinct_objective")
+
+
+def _known_known_conflict(a: "ClaimLineIntent", b: "ClaimLineIntent") -> bool:
+    """Two intents conflict on a distinguishing attribute ONLY when BOTH carry a KNOWN
+    value and they differ. Known-plus-missing does NOT conflict (it reconciles). (F5-R1.)"""
     aa, ba = a.attributes or {}, b.attributes or {}
-    for axis in ("performer_id", "performer", "approach", "distinct_site",
-                 "distinct_session", "distinct_objective"):
-        if str(aa.get(axis, "")).strip().lower() != str(ba.get(axis, "")).strip().lower():
+    for axis in _DISTINCT_ATTR_AXES:
+        va = str(aa.get(axis, "")).strip().lower()
+        vb = str(ba.get(axis, "")).strip().lower()
+        if va and vb and va != vb:
             return True
     return False
 
 
-def merge_duplicate_intents(intents: list["ClaimLineIntent"]) -> list["ClaimLineIntent"]:
-    """same_episode_merge: multiple mentions of the SAME service (identical key, same
-    episode + state, and NO documented distinctness) become ONE intent with accumulated
-    evidence, distinctness facts, decisions, and mention count -- never multiple claim
-    lines. An explicit SEPARATE_FROM / distinct site / differing performer PROHIBITS the
-    merge, so an explicitly distinct service is never suppressed."""
-    result: list = []
-    for it in intents:
-        target = None
-        for m in result:
-            if (m.service_episode_id == it.service_episode_id and m.state is it.state
-                    and _service_key(m) == _service_key(it) and not _distinct_intents(m, it)):
-                target = m
-                break
-        if target is None:
-            result.append(it)
-            continue
-        target.clinical_event_ids = list(dict.fromkeys(
-            list(target.clinical_event_ids) + list(it.clinical_event_ids)))
-        target.source_span_ids = list(dict.fromkeys(
-            list(target.source_span_ids) + list(it.source_span_ids)))
-        target.distinctness_facts = list(dict.fromkeys(
-            list(target.distinctness_facts) + list(it.distinctness_facts)))
-        target.decisions = list(target.decisions) + list(it.decisions)
-        target.mention_count += it.mention_count
-    return result
+def _reconcile_attrs(target: "ClaimLineIntent", src: "ClaimLineIntent") -> None:
+    """Known-plus-missing reconciliation: fill a missing distinguishing attribute on the
+    target from a known value on the source, without losing provenance."""
+    for axis in _DISTINCT_ATTR_AXES:
+        if not str(target.attributes.get(axis, "")).strip() and str(src.attributes.get(axis, "")).strip():
+            target.attributes[axis] = src.attributes[axis]
+
+
+def merge_duplicate_intents(intents: list["ClaimLineIntent"],
+                            separate_pairs: set | None = None) -> list["ClaimLineIntent"]:
+    """same_episode_merge, PAIR-AWARE (Codex F5-R1): duplicate mentions (same key/episode/
+    state) merge into ONE intent EXCEPT across a cannot-link -- an explicit SEPARATE_FROM
+    (by event id) or a KNOWN-KNOWN attribute conflict. Cannot-links PROPAGATE one hop over
+    coreference (a duplicate of an event inherits that event's separations), so an ambiguous
+    duplicate adjacent to a SEPARATE_FROM is kept separate rather than merged into the wrong
+    service. Known-plus-missing reconciles. No merged cluster contains both endpoints of a
+    SEPARATE_FROM."""
+    n = len(intents)
+    pairs = set(separate_pairs or set())
+
+    def same_key(i, j):
+        return (intents[i].service_episode_id == intents[j].service_episode_id
+                and intents[i].state is intents[j].state
+                and _service_key(intents[i]) == _service_key(intents[j]))
+
+    def event_separated(i, j):
+        for ea in intents[i].clinical_event_ids:
+            for eb in intents[j].clinical_event_ids:
+                if frozenset((ea, eb)) in pairs:
+                    return True
+        return False
+
+    # initial intent-level cannot-link: known-known conflict OR an explicit event separation
+    cannot = [[False] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _known_known_conflict(intents[i], intents[j]) or event_separated(i, j):
+                cannot[i][j] = cannot[j][i] = True
+
+    # one-hop propagation over INITIAL coreference (same key, not initially cannot-linked):
+    # a coref inherits its partner's separations. Symmetric -> order-independent; an
+    # ambiguous duplicate between two mutually-separate services inherits BOTH -> isolated.
+    base = [row[:] for row in cannot]
+    for i in range(n):
+        for j in range(n):
+            if i != j and same_key(i, j) and not base[i][j]:
+                for k in range(n):
+                    if base[i][k]:
+                        cannot[j][k] = cannot[k][j] = True
+
+    # union same-key, not-cannot-linked intents
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if same_key(i, j) and not cannot[i][j] and find(i) != find(j):
+                parent[find(i)] = find(j)
+
+    # build one merged intent per cluster, in first-seen order
+    rep: dict = {}
+    order: list = []
+    for idx in range(n):
+        r = find(idx)
+        if r not in rep:
+            rep[r] = intents[idx]
+            order.append(r)
+        else:
+            t, src = rep[r], intents[idx]
+            t.clinical_event_ids = list(dict.fromkeys(t.clinical_event_ids + src.clinical_event_ids))
+            t.source_span_ids = list(dict.fromkeys(t.source_span_ids + src.source_span_ids))
+            t.distinctness_facts = list(dict.fromkeys(t.distinctness_facts + src.distinctness_facts))
+            t.decisions = list(t.decisions) + list(src.decisions)
+            t.mention_count += src.mention_count
+            _reconcile_attrs(t, src)
+    return [rep[r] for r in order]
 
 
 def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: str,
@@ -331,7 +387,11 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
             state=state, decisions=decisions,
             service_episode_id=_ep_map.get(f.fact_id),
             distinctness_facts=_distinctness_facts(f, relations)))
-    return merge_duplicate_intents(intents)
+    _separate_pairs = {frozenset((r.subject_event_id, r.object_event_id))
+                       for r in relations
+                       if r.predicate is RelationPredicate.SEPARATE_FROM
+                       and r.state is RelationState.ASSERTED}
+    return merge_duplicate_intents(intents, _separate_pairs)
 
 
 def eligible_intents(intents: list[ClaimLineIntent]) -> list[ClaimLineIntent]:

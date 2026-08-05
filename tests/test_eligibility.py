@@ -219,3 +219,41 @@ def test_true_duplicate_merge_unions_decisions_and_mentions():
     both = el.evaluate([_fact(fid="F1"), _fact(fid="F2")], [], "enc", "2026-08-01")[0]
     assert both.mention_count == 2
     assert len(both.decisions) == 2 * len(single.decisions)          # both mentions retained
+
+
+# ---- Codex review F5-R1: pair-aware, propagating cannot-link + known-plus-missing --------
+def _in_one_intent(intents, a, b):
+    return any(a in i.clinical_event_ids and b in i.clinical_event_ids for i in intents)
+
+
+def test_attribute_distinguished_third_event_isolated_duplicates_merge():
+    """Common case: F1/F2 share a performer, F3 has a DIFFERENT known performer. F3 is
+    isolated (known-known conflict); F1/F2 merge into one intent."""
+    fs = [_fact(fid="F1", attrs={"performer_id": "p1"}),
+          _fact(fid="F2", attrs={"performer_id": "p1"}),
+          _fact(fid="F3", attrs={"performer_id": "p3"})]
+    intents = el.evaluate(fs, [], "enc", "2026-08-01")
+    assert _in_one_intent(intents, "F1", "F2")                 # duplicates merged
+    assert not _in_one_intent(intents, "F1", "F3")
+    assert not _in_one_intent(intents, "F2", "F3")             # distinct service not collapsed
+
+
+def test_separate_from_never_collapses_a_distinct_service():
+    """Codex F5-R1 reproduction: F1/F2/F3 same key, F1 SEPARATE_FROM F3. No cluster may
+    contain both endpoints of the SEPARATE_FROM, and the ambiguous duplicate F2 must NOT be
+    merged into the service explicitly distinct from F1."""
+    sep = RelationAssertion("F1", RelationPredicate.SEPARATE_FROM, "F3",
+                            state=RelationState.ASSERTED)
+    fs = [_fact(fid="F1"), _fact(fid="F2"), _fact(fid="F3")]
+    intents = el.evaluate(fs, [sep], "enc", "2026-08-01")
+    assert not _in_one_intent(intents, "F1", "F3")             # SEPARATE_FROM endpoints apart
+    assert not _in_one_intent(intents, "F2", "F3")             # duplicate not attached to F3
+
+
+def test_known_plus_missing_reconciles_not_splits():
+    """A known performer on one duplicate and a MISSING performer on the other must
+    reconcile into one intent (not two), filling the missing value."""
+    fs = [_fact(fid="F1", attrs={"performer_id": "p1"}), _fact(fid="F2", attrs={})]
+    intents = el.evaluate(fs, [], "enc", "2026-08-01")
+    assert len(intents) == 1 and intents[0].mention_count == 2
+    assert intents[0].attributes.get("performer_id") == "p1"   # reconciled, provenance kept
