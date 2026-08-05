@@ -128,3 +128,51 @@ existed to remove (plus a `--resume` seeding bug that could re-run every
 already-CLEAN note). The third was caught only when the user asked whether
 the review had been done — which is precisely the failure the
 "unconditional and self-initiated" requirement above exists to prevent.
+
+## Claude–Codex collaboration
+
+<!-- COLLABORATION_PROTOCOL: primary-implementer -->
+
+`COLLABORATION.md` is the project-wide collaboration contract. Read and apply
+it to every work item, not only the evidence/service graph phases. Unless the
+user explicitly switches roles, Claude is the primary implementer and Codex is
+the independent reviewer.
+
+Before writing code, Claude must record the objective, non-goals, risk class,
+control mode, claim-affecting status, base commit, invariants, authoritative
+sources, acceptance/negative cases, affected boundaries, and rollback plan.
+Use the issue or pull-request contract defined by the repository.
+
+Claude's implementation cycle is:
+
+1. trace the complete current execution and data path;
+2. implement the smallest complete architectural source change;
+3. add focused positive, negative, failure, boundary, and adjacent-class tests;
+4. run repository guards and affected broad tests;
+5. perform the unconditional post-fix review required above;
+6. commit and push an exact target SHA;
+7. publish `.collaboration/HANDOFF_TEMPLATE.md` as `READY_FOR_REVIEW`;
+8. stop writing until Codex returns its independent review.
+
+Claude must respond to every review finding as `ACCEPTED`, `DISPUTED`, or
+`SUPERSEDED`, with evidence. If accepted, implement the remediation, rerun
+checks and the post-fix review, publish a new exact SHA, and return it to Codex.
+The finding remains open until Codex reviews the implementation and verifies
+it. If Codex establishes a new issue during remediation review, repeat the
+cycle.
+
+If Claude can disprove a Codex recommendation with executable evidence or a
+controlling authoritative source, dispute it explicitly; Codex is expected to
+narrow or rescind it. Do not implement a known-worse change merely to create
+agreement. Escalate genuine product choices or unresolved competing authority
+to the user.
+
+New claim-affecting controls must declare one explicit mode:
+`OBSERVATIONAL`, `ENFORCED_FAIL_CLOSED`, or `DISABLED`. Observation must
+not affect claim output. Enforcement must be tied to a documented invariant,
+auditable, reversible, and independently reviewed.
+
+Independent review is valid only for the exact reviewed commit. Claude must not
+mark a pull request ready unless the body has `Review status: VERIFIED`, its
+`Review target SHA` equals the current head, and all applicable gates pass.
+Any new commit resets review to `PENDING`.

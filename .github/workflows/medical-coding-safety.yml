@@ -3,7 +3,7 @@ name: Medical coding safety
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, claude-medical-coder]
 
 permissions:
   contents: read
@@ -18,8 +18,8 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: python -m pip install -r requirements.txt
-      - run: python -m compileall -q app tests tools
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m compileall -q app claude_coder tests tools
       - run: python tests/check_no_hardcoding.py
       - run: python tests/check_rule_coverage.py
       - run: python tests/check_clause_coverage.py

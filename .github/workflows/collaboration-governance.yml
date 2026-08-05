@@ -1,0 +1,55 @@
+name: Collaboration governance
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+      - ready_for_review
+      - converted_to_draft
+  push:
+    branches:
+      - main
+      - claude-medical-coder
+
+permissions:
+  contents: read
+
+jobs:
+  repository-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python tools/check_collaboration_contract.py
+
+  pull-request-contract:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate work item, handoff, and current target
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python tools/check_collaboration_contract.py
+          --pr-body-env PR_BODY
+          --expected-head-env PR_HEAD_SHA
+      - name: Require SHA-bound independent verification
+        if: github.event.pull_request.draft == false
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python tools/check_collaboration_contract.py
+          --pr-body-env PR_BODY
+          --expected-head-env PR_HEAD_SHA
+          --require-reviewed

@@ -1,0 +1,93 @@
+name: Claude-Codex work item
+description: Define a repository change before implementation
+title: "[work-item] "
+labels:
+  - collaboration
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Complete this contract before implementation. See COLLABORATION.md.
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective and non-goals
+      description: State the outcome and boundaries.
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk class
+      options:
+        - A — claim-affecting
+        - B — operational
+        - C — non-behavioral
+    validations:
+      required: true
+  - type: dropdown
+    id: claim_affecting
+    attributes:
+      label: Claim-affecting
+      options:
+        - "Yes"
+        - "No"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Control mode
+      options:
+        - OBSERVATIONAL
+        - ENFORCED_FAIL_CLOSED
+        - DISABLED
+    validations:
+      required: true
+  - type: input
+    id: base
+    attributes:
+      label: Base commit
+      description: Exact 40-character Git SHA.
+    validations:
+      required: true
+  - type: input
+    id: roles
+    attributes:
+      label: Implementer and independent reviewer
+      description: Name both; they must differ.
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Invariants and authoritative sources
+      description: Include versions, effective dates, and citations.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance and negative cases
+      description: Include failures that must remain non-billable or blocked.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Affected boundaries
+      description: Data, callers, processes, retries, deployment, and audit.
+    validations:
+      required: true
+  - type: textarea
+    id: rollback
+    attributes:
+      label: Rollback or disable strategy
+    validations:
+      required: true
+  - type: textarea
+    id: uncertainty
+    attributes:
+      label: Known uncertainty and expected review evidence
+    validations:
+      required: true
