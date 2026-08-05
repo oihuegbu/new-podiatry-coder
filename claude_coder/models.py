@@ -47,9 +47,16 @@ class Disposition(str, Enum):
 
 @dataclass(frozen=True)
 class EvidenceSpan:
-    """Verbatim text copied from the note — the atom of defensibility."""
+    """Verbatim text copied from the note — the atom of defensibility. Phase-0 adds the
+    VERIFIED anchor: the exact [start, end) offset of the quote in the source and its
+    content hash. `anchored` is True only when note_text[start:end] == text was proven;
+    an unanchorable quote keeps text (for audit) but anchored=False — never a guess."""
     text: str
     section: str | None = None
+    start: int | None = None
+    end: int | None = None
+    text_sha256: str | None = None
+    anchored: bool = False
 
 
 @dataclass
@@ -223,3 +230,47 @@ class CodingResult:
     def diagnosis_lines(self) -> list[ResolvedLine]:
         return [ln for ln in self.billable_lines
                 if ln.fact.kind is FactKind.DIAGNOSIS]
+
+
+class RelationPredicate(str, Enum):
+    """Generic CLINICAL relationships between events — never code logic. The eligibility
+    engine (Phase 1) reads these; it does not let any single one decide billability."""
+    PART_OF = "part_of"
+    USED_IN = "used_in"
+    REASON_FOR = "reason_for"
+    SAME_EPISODE_AS = "same_episode_as"
+    SEPARATE_FROM = "separate_from"
+    PERFORMED_BY = "performed_by"
+    ON_BEHALF_OF = "on_behalf_of"
+
+
+class RelationState(str, Enum):
+    ASSERTED = "asserted"
+    NEGATED = "negated"
+    UNCERTAIN = "uncertain"
+
+
+@dataclass
+class RelationAssertion:
+    """A first-class, content-addressed edge between two clinical events (fact_ids).
+    Records what the DOCUMENTATION asserts about their relationship, with the evidence
+    and how sure the extractor was — separate from any eligibility/billability decision.
+    Identity is (subject, predicate, object): the same edge asserted twice merges and
+    accumulates support instead of creating a duplicate line."""
+    subject_event_id: str
+    predicate: RelationPredicate
+    object_event_id: str
+    state: RelationState = RelationState.ASSERTED
+    evidence_span_ids: list[str] = field(default_factory=list)
+    extraction_source: str = ""
+    confidence: float = 0.0
+    reconciliation_status: str = "unreconciled"
+    support: int = 1
+
+    @property
+    def relation_id(self) -> str:
+        import hashlib
+        pred = self.predicate.value if isinstance(self.predicate, RelationPredicate) \
+            else str(self.predicate)
+        raw = f"{self.subject_event_id}|{pred}|{self.object_event_id}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]

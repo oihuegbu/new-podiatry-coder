@@ -50,6 +50,18 @@ def code_encounter(
 
     from .models import FactKind
     facts = extraction.extract_facts(note_text, extract_llm)
+    # Phase-0 (SHADOW): anchor every evidence quote to a verified source offset+hash and
+    # record a shadow audit artifact. Fail-safe — anchoring only adds offsets to spans
+    # (billing/gates read span text, unchanged) and a write failure must not affect
+    # release. Retrieval still consumes ClinicalFacts today; ClaimLineIntent is Phase 1.
+    try:
+        from . import provenance as _prov
+        _prov.anchor_facts(note_text, facts)
+        from app.core.config import OUTPUT_DIR
+        _prov.JsonlAuditRepository(OUTPUT_DIR / "audit").append(
+            encounter_id, "evidence_anchoring", _prov.anchoring_report(facts))
+    except Exception:
+        pass
 
     lines = []
     for fact in facts:
