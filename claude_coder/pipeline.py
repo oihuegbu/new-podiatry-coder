@@ -57,7 +57,8 @@ def code_encounter(
             line = em.resolve_em(fact, source)      # MDM-driven leveling
         else:
             line = resolution.resolve(fact, source, llm=verify_llm,
-                                      corroborate=corroborate_llm)
+                                      corroborate=corroborate_llm,
+                                      dos=date_of_service)
         # A fact that went through propose-then-verify is already resolved-or-
         # escalated on authoritative entailment; don't second-guess it with the
         # weaker arbitration fallback. (Diagnoses verify too when they reach the

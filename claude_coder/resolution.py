@@ -27,7 +27,7 @@ import re
 from dataclasses import dataclass, field
 
 from .data_access import CodeSource
-from .models import CandidateCode, ClinicalFact, FactKind, ResolutionMethod, ResolvedLine
+from .models import CandidateCode, ClinicalFact, FactKind, Outcome, ResolutionMethod, ResolvedLine
 from .ontology import (DescriptorFeatures, measurement_of, parse_descriptor,
                        support_score)
 
@@ -161,7 +161,7 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
 
 
 def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
-            llm=None, corroborate=None) -> ResolvedLine:
+            llm=None, corroborate=None, dos: str | None = None) -> ResolvedLine:
     if not fact.billable:
         return ResolvedLine(
             fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
@@ -285,9 +285,16 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
             cand = CandidateCode(code=code, system=fact.system, descriptor=str(desc),
                                  score=1.0, source="learned-verified-index",
                                  authority={"source": "learned verified-resolution index"})
-            r = _take([cand], "learned verified-resolution index")
-            if r is not None:
-                return r
+            # Fix5: the learned index is keyed on phrase->code WITHOUT clinical context
+            # (system already partitions, but anatomy/laterality/approach/measurement do
+            # not) and its freshness check fails open, so a learned hit must NOT bill
+            # deterministically. It contributes a CANDIDATE that still passes verification.
+            if _LEARNED_DETERMINISTIC:
+                r = _take([cand], "learned verified-resolution index")
+                if r is not None:
+                    return r
+            else:
+                seeds.append(cand)
 
         pidx = source.procedure_index_codes(fact.description, fact.system)
         if len(pidx) == 1:
@@ -335,7 +342,7 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
     # an empty recall pool, since a validated proposal can rescue a missed concept.
     if llm is not None and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING,
                                          FactKind.DIAGNOSIS):
-        line = _propose_then_verify(fact, source, pool, llm, corroborate)
+        line = _propose_then_verify(fact, source, pool, llm, corroborate, dos=dos)
         # #1 grounding: a DIAGNOSIS that verified only to a residual/catch-all category
         # with no distinctive descriptor overlap is an ungrounded guess (entailment
         # against a catch-all is near-tautological) -- escalate, never bill it verified.
@@ -355,7 +362,7 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
         return ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
                             rationale="no candidate retrieved for the concept")
 
-    return _decide(fact, pool, source=source)
+    return _decide(fact, pool, source=source, dos=dos)
 
 
 def _strip_laterality(text: str) -> str:
@@ -524,6 +531,29 @@ def _authoritative_pool(code: str, source: CodeSource) -> list[CandidateCode]:
 
 
 VERIFY_K = 8           # shortlist size sent to the entailment-selection call
+_MIN_RETRIEVED_SLOTS = 4   # Fix4: authoritative-retrieval slots reserved in the shortlist
+                           # so LLM memory proposals can never fully displace recall
+_LEARNED_DETERMINISTIC = False  # Fix5: learned index is recall-only until re-keyed with
+                                # full clinical context (system/anatomy/laterality/...)
+
+
+def _active_only(cands: list[CandidateCode], source: CodeSource,
+                 dos: str | None) -> list[CandidateCode]:
+    """Fix3: drop candidates DEFINITIVELY inactive on the DOS before they can occupy
+    scarce shortlist slots. Conservative: only an explicit BLOCKED (missing/terminated
+    on DOS) is removed; UNKNOWN/PASS are kept (the code_active_on_dos gate is the
+    backstop). No-op when the DOS is unknown."""
+    if not dos:
+        return cands
+    keep = []
+    for c in cands:
+        try:
+            if source.active_on(c.code, c.system, dos) is Outcome.BLOCKED:
+                continue
+        except Exception:
+            pass
+        keep.append(c)
+    return keep
 MAX_RESELECT = 2       # re-selection attempts after a WRONG-CODE (not documentation-gap) rejection
 
 
@@ -538,7 +568,8 @@ def _ranked(fact: ClinicalFact, pool: list[CandidateCode],
 
 
 def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
-                         pool: list[CandidateCode], llm, corroborate=None) -> ResolvedLine:
+                         pool: list[CandidateCode], llm, corroborate=None,
+                         dos: str | None = None) -> ResolvedLine:
     """Recall as candidate GENERATOR, authoritative descriptor + entailment as TRUTH.
     Widen the pool with validated LLM proposals, select the candidate whose OFFICIAL
     descriptor the documentation entails, then (when a corroborator is supplied)
@@ -548,13 +579,19 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     from . import verify as _verify
     proposals = [c for c in _verify.propose_codes(fact, source, llm)
                  if _evaluate(fact, c, source) is not None]
+    retrieved = [m.candidate for m in _ranked(fact, pool, source)]
+    # Fix4: reserve a floor of shortlist slots for authoritative RETRIEVAL so LLM
+    # memory proposals cannot crowd it out. Keep up to (VERIFY_K - floor) proposals
+    # first, then retrieved, then any leftover proposals fill remaining room.
+    prop_cap = max(0, VERIFY_K - _MIN_RETRIEVED_SLOTS)
     order: list[CandidateCode] = []
     seen: set[str] = set()
-    for c in proposals + [m.candidate for m in _ranked(fact, pool, source)]:
+    for c in proposals[:prop_cap] + retrieved + proposals[prop_cap:]:
         if c.code not in seen:
             seen.add(c.code)
             order.append(c)
-    shortlist = order[:VERIFY_K]
+    # Fix3: drop DOS-inactive candidates before capping to the shortlist.
+    shortlist = _active_only(order, source, dos)[:VERIFY_K]
     tried: set[str] = set()
     last_reason = ""
     for _ in range(1 + MAX_RESELECT):
@@ -607,10 +644,13 @@ def _verified_line(fact: ClinicalFact, chosen: CandidateCode,
 
 def _decide(fact: ClinicalFact, pool: list[CandidateCode],
             authority: str | None = None,
-            source: CodeSource | None = None) -> ResolvedLine:
+            source: CodeSource | None = None,
+            dos: str | None = None) -> ResolvedLine:
     """Structured decision over a candidate pool: eliminate contradictions,
     rank by relevance (recall) then specificity, pick deterministically when the
     leader is clear, else hand the shortlist to arbitration."""
+    if source is not None and dos:
+        pool = _active_only(pool, source, dos)   # Fix3: no DOS-inactive deterministic pick
     survivors = _ranked(fact, pool, source)
     if not survivors:
         return ResolvedLine(

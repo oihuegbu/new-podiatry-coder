@@ -970,7 +970,11 @@ class LearnedIndexTest(unittest.TestCase):
         self.assertTrue(learned.entry_current(e, ""))                      # current unknown -> trust
         self.assertTrue(learned.entry_current({"descriptor": ""}, "x"))    # nothing stored -> trust
 
-    def test_resolution_uses_learned_index(self):
+    def test_learned_index_is_recall_only_not_deterministic(self):
+        # Fix5: a learned phrase->code mapping is a RECALL candidate, never a privileged
+        # deterministic bill (its key lacks clinical context and its freshness check
+        # fails open). With an LLM verifier that does NOT confirm entailment, the learned
+        # hit must ESCALATE — proving it lost deterministic trust.
         from claude_coder.data_access import MockSource
         from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
                                          ResolutionMethod)
@@ -984,10 +988,19 @@ class LearnedIndexTest(unittest.TestCase):
                             description="a documented service phrase",
                             evidence=[EvidenceSpan("a documented service phrase")],
                             confidence=0.95)
-        line = resolve(fact, src)                    # no LLM -> deterministic hit
-        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
-        self.assertEqual(line.chosen.code, "PROC_X")
-        self.assertIn("learned verified-resolution index", line.rationale)
+
+        def reject(system, user):
+            sl = system.lower()
+            if "propose" in sl:
+                return '{"codes": []}'
+            if "independently" in sl:
+                return '{"entailed": false, "missing_element": false, "reason": "no"}'
+            return '{"choice": 0, "reason": "none entailed"}'
+
+        line = resolve(fact, src, llm=reject, corroborate=reject)
+        self.assertFalse(line.resolved)                       # not billed on learned trust
+        self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
+        self.assertNotIn("learned verified-resolution index", line.rationale)
 
 
 class RecommendationsTest(unittest.TestCase):

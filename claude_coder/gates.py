@@ -198,10 +198,31 @@ def icd_excludes_gate(result: CodingResult, source: CodeSource) -> GateResult:
                       "no Excludes1 conflicts among diagnoses", "ICD-10-CM Tabular (data)")
 
 
+def source_manifest_gate(result: CodingResult) -> GateResult:
+    """Fail closed on a MISSING REQUIRED authoritative source. Degradation is loud:
+    an absent required source (a code table / edit-policy file) BLOCKS release; absent
+    OPTIONAL recall aids are recorded (NOT_APPLICABLE detail) but do not block."""
+    try:
+        from .capability import build_manifest
+        man = build_manifest()
+    except Exception as exc:
+        return GateResult("source_manifest", Outcome.ERROR, f"manifest unavailable: {exc}",
+                          "capability manifest", retryable=True)
+    if man.get("missing_required"):
+        return GateResult("source_manifest", Outcome.BLOCKED,
+                          "required source(s) missing: " + ", ".join(man["missing_required"]),
+                          "capability manifest")
+    degraded = man.get("degraded_optional") or []
+    detail = ("all required sources loaded"
+              + (f"; optional absent: {', '.join(degraded)}" if degraded else ""))
+    return GateResult("source_manifest", Outcome.PASS, detail, "capability manifest")
+
+
 def run_gates(result: CodingResult, note_text: str, source: CodeSource) -> list[GateResult]:
     """All mandatory gates. Add a gate here (never a code list) as coverage grows."""
     try:
         return [
+            source_manifest_gate(result),
             dos_gate(result),
             evidence_gate(result, note_text),
             code_active_gate(result, source),

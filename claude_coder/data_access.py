@@ -122,8 +122,15 @@ class AuthoritativeSource:
             table: dict[str, dict] = {}
             try:
                 import json
-                from app.core.config import DATA_DIR
-                with open(DATA_DIR / "codes" / f"{system}_codes.json") as fh:
+                from app.core.config import ICD10_FILE, CPT_FILE, HCPCS_FILE
+                # Resolve the rich-descriptor file from CENTRAL CONFIG, not an f-string:
+                # the ICD file is 'icd10cm_codes.json', so f"{system}_codes.json" built a
+                # non-existent 'icd10_codes.json' and silently fell back (descriptor tiers
+                # lost for ICD). Config is the single source of truth for these paths.
+                _path = {"icd10": ICD10_FILE, "cpt": CPT_FILE, "hcpcs": HCPCS_FILE}.get(system)
+                if _path is None:
+                    raise FileNotFoundError(f"no configured rich-record file for {system}")
+                with open(_path) as fh:
                     data = json.load(fh)
                 rows = (data if isinstance(data, list)
                         else data.get("codes") or data.get(system)
@@ -573,6 +580,11 @@ class AuthoritativeSource:
             chk = DATA_DIR / "qdrant_store" / "codes_checksum.txt"
             if chk.exists():
                 fp["codes_checksum"] = chk.read_text().strip()[:64]
+        except Exception:
+            pass
+        try:
+            from .capability import build_manifest
+            fp["source_manifest"] = build_manifest()
         except Exception:
             pass
         return fp

@@ -591,3 +591,83 @@ def test_ncci_gate_reports_ptp_suppression_not_not_applicable():
 
     clean = CodingResult("enc", "2026-08-01", lines=[line], ncci_suppressed=[])
     assert ncci_gate(clean, MockSource()).outcome is Outcome.NOT_APPLICABLE
+
+
+# ---- retrieval/decision hardening (manifest, DOS filter, proposal crowding) --------
+def test_source_manifest_gate_fails_closed_on_missing_required(monkeypatch):
+    """A MISSING REQUIRED authoritative source BLOCKS release (fail closed); absent
+    OPTIONAL aids are recorded but PASS. gates imports build_manifest lazily, so we
+    patch the capability module it reaches."""
+    from claude_coder import capability, gates
+    from claude_coder.models import CodingResult, Outcome
+
+    res = CodingResult("enc", "2026-08-01")
+    monkeypatch.setattr(capability, "build_manifest", lambda: {
+        "missing_required": ["cpt_codes"], "degraded_optional": [], "sources": [],
+        "status": "BLOCKED"})
+    g = gates.source_manifest_gate(res)
+    assert g.outcome is Outcome.BLOCKED and "cpt_codes" in g.detail
+
+    monkeypatch.setattr(capability, "build_manifest", lambda: {
+        "missing_required": [], "degraded_optional": ["cpt_synonyms"], "sources": [],
+        "status": "OK"})
+    g2 = gates.source_manifest_gate(res)
+    assert g2.outcome is Outcome.PASS and "cpt_synonyms" in g2.detail
+
+
+def test_dos_inactive_candidates_filtered_before_shortlist():
+    """Fix3: a candidate DEFINITIVELY inactive on the DOS is dropped before it can take
+    a scarce shortlist slot; UNKNOWN/PASS are kept; no DOS -> no filtering."""
+    from claude_coder.resolution import _active_only
+    from claude_coder.models import CandidateCode, Outcome
+
+    class S:
+        def active_on(self, code, system, dos):
+            return {"OLD": Outcome.BLOCKED, "MAYBE": Outcome.UNKNOWN}.get(code, Outcome.PASS)
+
+    cands = [CandidateCode("OLD", "cpt", "x"), CandidateCode("MAYBE", "cpt", "y"),
+             CandidateCode("NEW", "cpt", "z")]
+    kept = [c.code for c in _active_only(cands, S(), "2026-08-01")]
+    assert kept == ["MAYBE", "NEW"]                       # only definitively-inactive dropped
+    assert len(_active_only(cands, S(), None)) == 3        # no DOS -> keep all
+
+
+def test_llm_proposals_cannot_crowd_out_retrieval():
+    """Fix4: with 6 LLM proposals and 4 retrieved candidates whose correct one is ranked
+    LAST, the reserved retrieval floor keeps it in the 8-slot shortlist so verification
+    can select it. Under the old proposals-first ordering it would be crowded out and the
+    line would escalate. Synthetic codes."""
+    import json
+    from claude_coder.resolution import resolve
+    from claude_coder.data_access import MockSource
+    from claude_coder.models import ClinicalFact, EvidenceSpan, CandidateCode, FactKind
+
+    recs = {(f"P{i}", "cpt"): {"long_description": f"proposed service {i}", "active": True}
+            for i in range(6)}
+    recs[("RCODE", "cpt")] = {"long_description": "the correct retrieved service", "active": True}
+    for d in ("D1", "D2", "D3"):
+        recs[(d, "cpt")] = {"long_description": f"distractor {d}", "active": True}
+    retrieved = [CandidateCode("D1", "cpt", "distractor D1", 0.9),
+                 CandidateCode("D2", "cpt", "distractor D2", 0.8),
+                 CandidateCode("D3", "cpt", "distractor D3", 0.7),
+                 CandidateCode("RCODE", "cpt", "the correct retrieved service", 0.6)]
+    src = MockSource(records=recs, retrieval={("*", "cpt"): retrieved})
+    fact = ClinicalFact(FactKind.PROCEDURE, "the correct retrieved service",
+                        evidence=[EvidenceSpan("the correct retrieved service performed")])
+
+    def stub(system, user):
+        sl = system.lower()
+        if "propose" in sl:
+            return '{"codes": ["P0","P1","P2","P3","P4","P5"]}'
+        if "independently" in sl:
+            return '{"entailed": true, "missing_element": false, "reason": "x"}'
+        choice = 0
+        for ln in user.splitlines():
+            st = ln.strip()
+            num = st.split(".", 1)[0].strip()
+            if num.isdigit() and "retrieved service" in st.lower():
+                choice = int(num); break
+        return json.dumps({"choice": choice, "reason": "retrieved"})
+
+    line = resolve(fact, src, llm=stub, corroborate=stub)
+    assert line.resolved and line.chosen.code == "RCODE"
