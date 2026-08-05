@@ -14,6 +14,7 @@ dispositions, actor ids, relationship assertions and evidence anchoring; no medi
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -58,6 +59,9 @@ class ClaimLineIntent:
     source_span_ids: list[str]
     state: EligibilityState
     decisions: list[EligibilityDecision] = field(default_factory=list)
+    service_episode_id: str | None = None
+    mention_count: int = 1
+    distinctness_facts: list[str] = field(default_factory=list)
 
 
 def _intent_id(encounter_id: str, fact_id: str, action: str) -> str:
@@ -181,12 +185,97 @@ def _classify(decisions: list[EligibilityDecision]) -> EligibilityState:
     return EligibilityState.ELIGIBLE_FOR_RETRIEVAL
 
 
+@dataclass
+class ServiceEpisode:
+    """A clinically coherent session grouping related events (same encounter/DOS, linked
+    by relationships). CONTEXT ONLY -- an episode never suppresses a claim line; it just
+    scopes deduplication and distinctness analysis (SAME_EPISODE_AS != PART_OF !=
+    non-reportable)."""
+    episode_id: str
+    encounter_id: str
+    date_of_service: str | None
+    event_ids: list[str]
+    grouping_signals: list[str] = field(default_factory=list)
+
+
+def _episode_id(encounter_id: str, dos_key: str) -> str:
+    return hashlib.sha256(f"{encounter_id}|{dos_key}".encode("utf-8")).hexdigest()[:16]
+
+
+def build_episodes(facts: list[ClinicalFact], relations: list, encounter_id: str,
+                   dos: str | None):
+    """Group events into service episodes. For a single encounter this is one episode per
+    DOS (the operative session); relationships that link events reinforce it. Returns
+    (episodes, fact_id -> episode_id). Grouping is non-suppressing."""
+    groups: dict[str, list[str]] = {}
+    for f in facts:
+        groups.setdefault(dos or "unknown", []).append(f.fact_id)
+    linked = any(r.predicate in (RelationPredicate.SAME_EPISODE_AS, RelationPredicate.PART_OF,
+                                 RelationPredicate.USED_IN) and r.state is not RelationState.NEGATED
+                 for r in (relations or []))
+    episodes: list[ServiceEpisode] = []
+    ep_map: dict[str, str] = {}
+    for dos_key, ids in groups.items():
+        eid = _episode_id(encounter_id, dos_key)
+        signals = ["same_encounter_dos"] + (["linked_by_relationship"] if linked else [])
+        episodes.append(ServiceEpisode(eid, encounter_id, dos, ids, signals))
+        for i in ids:
+            ep_map[i] = eid
+    return episodes, ep_map
+
+
+def _distinctness_facts(fact: ClinicalFact, relations: list) -> list[str]:
+    """The DOCUMENTED facts that make a component potentially separate (a SEPARATE_FROM
+    assertion, or a distinct site/session/objective attribute). Recorded, not acted on as
+    a modifier -- Phase 1c/post-retrieval decides reportability."""
+    out: list[str] = []
+    for r in _relations_for(fact, relations):
+        if r.predicate is RelationPredicate.SEPARATE_FROM and r.state is RelationState.ASSERTED:
+            out.append(f"separate_from:{r.object_event_id}")
+    a = fact.attributes or {}
+    for axis in ("distinct_site", "distinct_session", "distinct_objective", "distinct_encounter"):
+        if a.get(axis):
+            out.append(f"{axis}:{a.get(axis)}")
+    return out
+
+
+def _service_key(intent: "ClaimLineIntent"):
+    """Deterministic identity of 'the same performed service': kind + anatomy + laterality
+    + the DISTINCTIVE action tokens. Used only to merge EXACT duplicates -- differently
+    worded services keep separate intents (a merge can drop a line, so it is conservative)."""
+    toks = tuple(sorted(t for t in re.split(r"[^a-z0-9]+", (intent.clinical_action or "").lower())
+                        if len(t) > 3))
+    a = intent.attributes or {}
+    return (intent.fact_kind, str(a.get("anatomy", "")).lower(),
+            str(a.get("laterality", "")).lower(), toks)
+
+
+def merge_duplicate_intents(intents: list["ClaimLineIntent"]) -> list["ClaimLineIntent"]:
+    """same_episode_merge: multiple mentions of the SAME service (identical key, same
+    episode, same eligibility state) become ONE intent with accumulated evidence + mention
+    count -- never multiple claim lines. Conservative: only identical keys merge."""
+    by: dict = {}
+    order: list = []
+    for it in intents:
+        k = (it.service_episode_id, it.state, _service_key(it))
+        if k not in by:
+            by[k] = it
+            order.append(k)
+        else:
+            m = by[k]
+            m.clinical_event_ids = list(dict.fromkeys(m.clinical_event_ids + it.clinical_event_ids))
+            m.source_span_ids = list(dict.fromkeys(m.source_span_ids + it.source_span_ids))
+            m.mention_count += it.mention_count
+    return [by[k] for k in order]
+
+
 def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: str,
              date_of_service: str | None) -> list[ClaimLineIntent]:
     """Run the eligibility gates over every fact and produce a ClaimLineIntent for each.
     Service facts run the full service-line gate set; a diagnosis is a DIAGNOSIS_SUPPORT
     intent (eligible when billable) -- never a service line, never demoted by PART_OF."""
     relations = relations or []
+    _episodes, _ep_map = build_episodes(facts, relations, encounter_id, date_of_service)
     intents: list[ClaimLineIntent] = []
     for f in facts:
         span_ids = [s.text_sha256 for s in (f.evidence or []) if getattr(s, "text_sha256", None)]
@@ -215,8 +304,10 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
             fact_kind=f.kind.value, clinical_action=f.description,
             attributes=dict(f.attributes or {}), date_of_service=date_of_service,
             billing_entity_id=billing_id, source_span_ids=span_ids,
-            state=state, decisions=decisions))
-    return intents
+            state=state, decisions=decisions,
+            service_episode_id=_ep_map.get(f.fact_id),
+            distinctness_facts=_distinctness_facts(f, relations)))
+    return merge_duplicate_intents(intents)
 
 
 def eligible_intents(intents: list[ClaimLineIntent]) -> list[ClaimLineIntent]:

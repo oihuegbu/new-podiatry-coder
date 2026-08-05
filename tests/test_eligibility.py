@@ -121,3 +121,57 @@ def test_summary_counts_by_state():
     assert s["by_state"][EligibilityState.ELIGIBLE_FOR_RETRIEVAL.value] == 1
     assert s["by_state"][EligibilityState.NON_CLAIM_EVIDENCE.value] == 1
     assert s["by_state"][EligibilityState.AUTO_HOLD.value] == 1
+
+
+# ------------------------------------------------------------------ Phase 1b
+from claude_coder.eligibility import ServiceEpisode  # noqa: E402
+
+
+def test_episode_groups_same_dos_and_is_attached():
+    intents = el.evaluate([_fact(fid="F1"), _fact(fid="F2", desc="another service")],
+                          [], "enc", "2026-08-01")
+    eids = {i.service_episode_id for i in intents}
+    assert len(eids) == 1 and None not in eids                 # one episode, attached
+
+
+def test_episode_grouping_does_not_suppress_a_line():
+    """SAME_EPISODE_AS groups for context but must NOT demote (grouping != integrality)."""
+    same_ep = RelationAssertion("F1", RelationPredicate.SAME_EPISODE_AS, "F2",
+                                state=RelationState.ASSERTED)
+    intents = el.evaluate([_fact(fid="F1"), _fact(fid="F2", desc="another service")],
+                          [same_ep], "enc", "2026-08-01")
+    assert all(i.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL for i in intents)
+    assert len(intents) == 2                                    # both survive, not merged
+
+
+def test_identical_service_mentions_merge_to_one_intent():
+    """same_episode_merge: the same service mentioned twice -> ONE intent, mention_count 2,
+    unioned evidence -- never two claim lines."""
+    intents = el.evaluate([_fact(fid="F1"), _fact(fid="F2")], [], "enc", "2026-08-01")
+    assert len(intents) == 1
+    m = intents[0]
+    assert m.mention_count == 2
+    assert set(m.clinical_event_ids) == {"F1", "F2"}
+
+
+def test_distinct_services_do_not_merge():
+    a = _fact(fid="F1", attrs={"anatomy": "calcaneus", "laterality": "right"})
+    b = _fact(fid="F2", attrs={"anatomy": "calcaneus", "laterality": "left"})   # diff laterality
+    intents = el.evaluate([a, b], [], "enc", "2026-08-01")
+    assert len(intents) == 2                                    # different key -> not merged
+
+
+def test_documented_distinctness_recorded_and_overrides_demotion():
+    sep = RelationAssertion("F1", RelationPredicate.SEPARATE_FROM, "F2",
+                            state=RelationState.ASSERTED)
+    partof = RelationAssertion("F1", RelationPredicate.PART_OF, "F2",
+                               state=RelationState.ASSERTED)
+    i = el.evaluate([_fact(fid="F1")], [partof, sep], "enc", "2026-08-01")[0]
+    assert i.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL   # distinctness overrides part_of
+    assert any("separate_from" in d for d in i.distinctness_facts)
+
+
+def test_build_episodes_signals():
+    eps, ep_map = el.build_episodes([_fact(fid="F1")], [], "enc", "2026-08-01")
+    assert len(eps) == 1 and "same_encounter_dos" in eps[0].grouping_signals
+    assert ep_map["F1"] == eps[0].episode_id
