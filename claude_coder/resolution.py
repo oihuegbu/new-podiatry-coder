@@ -650,7 +650,13 @@ def _decide(fact: ClinicalFact, pool: list[CandidateCode],
     rank by relevance (recall) then specificity, pick deterministically when the
     leader is clear, else hand the shortlist to arbitration."""
     if source is not None and dos:
-        pool = _active_only(pool, source, dos)   # Fix3: no DOS-inactive deterministic pick
+        active = _active_only(pool, source, dos)   # Fix3: no DOS-inactive deterministic pick
+        if pool and not active:                    # all candidates inactive on the DOS
+            return ResolvedLine(
+                fact=fact, chosen=None, alternatives=pool[:5],
+                method=ResolutionMethod.ABSTAINED,
+                rationale="every candidate is inactive/terminated on the date of service")
+        pool = active
     survivors = _ranked(fact, pool, source)
     if not survivors:
         return ResolvedLine(
