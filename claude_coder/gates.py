@@ -198,6 +198,36 @@ def icd_excludes_gate(result: CodingResult, source: CodeSource) -> GateResult:
                       "no Excludes1 conflicts among diagnoses", "ICD-10-CM Tabular (data)")
 
 
+def claim_ownership_gate(result: CodingResult) -> GateResult:
+    """Tri-state claim ownership: a billed line is BLOCKED only when the documentation
+    attributes it to a DIFFERENT actor than the billing entity (performer id != billing
+    id). Unstated ownership is non-blocking (assumed billing provider) so notes that do
+    not spell out their billing entity are not self-DoS'd. Decisions use actor IDs, never
+    names."""
+    from .ownership import fact_ownership, classify_ownership
+    blocked: list[str] = []
+    unstated = 0
+    for ln in result.billable_lines:
+        o = fact_ownership(ln.fact)
+        st = classify_ownership(o.performer_id, o.billing_entity_id)
+        if st is Outcome.BLOCKED:
+            blocked.append(ln.chosen.code if ln.chosen else ln.fact.description)
+        elif st is Outcome.UNKNOWN:
+            unstated += 1
+    if not result.billable_lines:
+        return GateResult("claim_ownership", Outcome.NOT_APPLICABLE, "no billable lines",
+                          "ownership")
+    if blocked:
+        return GateResult("claim_ownership", Outcome.BLOCKED,
+                          f"billed by an entity that did not perform the service: {blocked}",
+                          "ownership")
+    return GateResult("claim_ownership", Outcome.PASS,
+                      f"no contrary ownership evidence"
+                      + (f" ({unstated} unstated -> assumed billing provider)"
+                         if unstated else ""),
+                      "ownership")
+
+
 def source_manifest_gate(result: CodingResult) -> GateResult:
     """Fail closed on a MISSING REQUIRED authoritative source. Degradation is loud:
     an absent required source (a code table / edit-policy file) BLOCKS release; absent
@@ -223,6 +253,7 @@ def run_gates(result: CodingResult, note_text: str, source: CodeSource) -> list[
     try:
         return [
             source_manifest_gate(result),
+            claim_ownership_gate(result),
             dos_gate(result),
             evidence_gate(result, note_text),
             code_active_gate(result, source),
