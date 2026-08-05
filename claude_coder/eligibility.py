@@ -314,6 +314,48 @@ def eligible_intents(intents: list[ClaimLineIntent]) -> list[ClaimLineIntent]:
     return [i for i in intents if i.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL]
 
 
+def shadow_diff(facts: list[ClinicalFact], intents: list[ClaimLineIntent]) -> dict:
+    """Compare the eligibility engine to TODAY'S behavior (performed==billable: every
+    billable fact reaches retrieval). Categorizes each currently-retrieved fact by what
+    the engine would do -- so divergence is measured on real notes BEFORE the engine is
+    allowed to gate retrieval (Phase 1c). Purely observational.
+
+      agree_eligible        both would send it to retrieval
+      would_hold            engine holds it (unanchored evidence / contrary ownership /
+                            unresolved relationship) that today bills
+      would_suppress        engine marks it non-claim (not performed / explicitly integral)
+                            that today bills
+      eligible_not_billable engine would retrieve a fact today skips (should be empty)
+    """
+    billable_ids = {f.fact_id for f in facts if f.billable}
+    state_by_fact: dict[str, str] = {}
+    for it in intents:
+        for eid in it.clinical_event_ids:
+            state_by_fact[eid] = it.state.value
+    agree, would_hold, would_suppress = [], [], []
+    for f in facts:
+        if f.fact_id not in billable_ids:
+            continue
+        st = state_by_fact.get(f.fact_id)
+        if st == EligibilityState.ELIGIBLE_FOR_RETRIEVAL.value:
+            agree.append(f.description)
+        elif st == EligibilityState.AUTO_HOLD.value:
+            would_hold.append(f.description)
+        elif st == EligibilityState.NON_CLAIM_EVIDENCE.value:
+            would_suppress.append(f.description)
+    eligible_not_billable = [
+        e for it in intents if it.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL
+        for e in it.clinical_event_ids if e not in billable_ids]
+    return {
+        "billable_current": len(billable_ids),
+        "agree_eligible": agree,
+        "would_hold": would_hold,
+        "would_suppress": would_suppress,
+        "eligible_not_billable": eligible_not_billable,
+        "divergent": bool(would_hold or would_suppress or eligible_not_billable),
+    }
+
+
 def summary(intents: list[ClaimLineIntent]) -> dict:
     """Shadow audit summary: counts by state + component, for diffing against the current
     performed==billable behavior."""

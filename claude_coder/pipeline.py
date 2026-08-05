@@ -65,8 +65,9 @@ def code_encounter(
         # against today's performed==billable behavior. Relations are empty until Phase 2,
         # so nothing is demoted yet; this establishes the seam, not a release change.
         from . import eligibility as _elig
-        _repo.append(encounter_id, "eligibility_shadow",
-                     _elig.summary(_elig.evaluate(facts, [], encounter_id, date_of_service)))
+        _intents = _elig.evaluate(facts, [], encounter_id, date_of_service)
+        _repo.append(encounter_id, "eligibility_shadow", _elig.summary(_intents))
+        _repo.append(encounter_id, "eligibility_diff", _elig.shadow_diff(facts, _intents))
     except Exception:
         pass
 

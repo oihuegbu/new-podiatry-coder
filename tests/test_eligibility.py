@@ -175,3 +175,24 @@ def test_build_episodes_signals():
     eps, ep_map = el.build_episodes([_fact(fid="F1")], [], "enc", "2026-08-01")
     assert len(eps) == 1 and "same_encounter_dos" in eps[0].grouping_signals
     assert ep_map["F1"] == eps[0].episode_id
+
+
+# ------------------------------------------------------------------ Phase 1c shadow-diff
+def test_shadow_diff_agrees_when_no_relations():
+    facts = [_fact(fid="F1"), _fact(fid="F2", desc="another service")]
+    d = el.shadow_diff(facts, el.evaluate(facts, [], "enc", "2026-08-01"))
+    assert d["divergent"] is False
+    assert len(d["agree_eligible"]) == 2 and not d["would_hold"] and not d["would_suppress"]
+
+
+def test_shadow_diff_flags_hold_on_unanchored_evidence():
+    facts = [_fact(fid="F1", anchored=False)]        # billable today, engine holds it
+    d = el.shadow_diff(facts, el.evaluate(facts, [], "enc", "2026-08-01"))
+    assert d["divergent"] is True and len(d["would_hold"]) == 1 and not d["would_suppress"]
+
+
+def test_shadow_diff_flags_suppress_on_explicit_integral():
+    facts = [_fact(fid="F1")]
+    rels = [_partof("F1", "F2")]                     # explicitly integral -> engine suppresses
+    d = el.shadow_diff(facts, el.evaluate(facts, rels, "enc", "2026-08-01"))
+    assert d["divergent"] is True and len(d["would_suppress"]) == 1
