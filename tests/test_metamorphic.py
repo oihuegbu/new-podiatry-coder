@@ -509,6 +509,11 @@ def test_residual_catchall_escalates_through_resolve():
                         evidence=[EvidenceSpan("Haglund-type retrocalcaneal exostosis")])
     line = resolution.resolve(fact, src, llm=stub, corroborate=stub)
     assert not line.resolved and line.method is ResolutionMethod.ABSTAINED
+    # routes to coder REVIEW, not PROVIDER_QUERY: no documentation_gap, and the
+    # residual candidate is surfaced as an alternative for the coder to classify.
+    assert line.documentation_gap is None
+    assert any(a.code == "Z999" for a in line.alternatives)
+    assert "classification" in line.rationale.lower()
 
     # residual code that NAMES the documented condition (bursitis) -> grounded, kept
     src2 = MockSource(
@@ -518,3 +523,71 @@ def test_residual_catchall_escalates_through_resolve():
                          evidence=[EvidenceSpan("Retrocalcaneal bursitis")])
     line2 = resolution.resolve(fact2, src2, llm=stub, corroborate=stub)
     assert line2.resolved and line2.chosen.code == "Z998"
+
+
+# ---- reviewer-feedback fixes: surfacing, routing, gate transparency --------------
+def test_unconfirmed_candidates_surface_as_coder_review_not_doc_gap():
+    """When verification could not confirm a code but candidate code(s) WERE
+    retrieved, the recommendation must NAME them and frame the open question as a
+    coding decision (coder review) — not 'clarify the documentation'. A residual/
+    'other'/NEC candidate is flagged. Unresolved DIAGNOSIS lines are included; a
+    HISTORICAL (non-billable) condition produces no recommendation. Synthetic codes."""
+    from claude_coder.recommendations import build_recommendations
+    from claude_coder.models import (CodingResult, ResolvedLine, ClinicalFact,
+                                     CandidateCode, FactKind, ResolutionMethod, Disposition)
+
+    # unresolved billable DIAGNOSIS with a residual/NEC candidate retrieved
+    dx = ClinicalFact(FactKind.DIAGNOSIS, "documented bursitis of the ankle")
+    dx_line = ResolvedLine(
+        fact=dx, chosen=None, method=ResolutionMethod.ABSTAINED,
+        alternatives=[CandidateCode("QQ999", "icd10",
+                      "Other bursitis, not elsewhere classified, right ankle and foot")],
+        rationale="no candidate's authoritative descriptor is fully entailed (verified)")
+    # a HISTORICAL condition -> not billable -> must NOT generate a recommendation
+    hist = ClinicalFact(FactKind.DIAGNOSIS, "old unrelated condition",
+                        disposition=Disposition.HISTORICAL)
+    hist_line = ResolvedLine(fact=hist, chosen=None, method=ResolutionMethod.ABSTAINED,
+                             alternatives=[CandidateCode("HH000", "icd10", "whatever")])
+    # an unresolved procedure with NO candidates -> genuinely thin documentation
+    proc = ClinicalFact(FactKind.PROCEDURE, "an ambiguous procedure")
+    proc_line = ResolvedLine(fact=proc, chosen=None, method=ResolutionMethod.ABSTAINED,
+                             alternatives=[], rationale="nothing retrieved")
+
+    res = CodingResult("enc", "2026-08-01", lines=[dx_line, hist_line, proc_line])
+    recs = build_recommendations(res)
+
+    coder = [r for r in recs if r["issue"] == "coder_review"]
+    assert any("ICD10 QQ999" in r["recommendation"] for r in coder), "candidate not named"
+    assert any("residual" in r["recommendation"].lower() for r in coder), "residual not flagged"
+    # the residual-code recommendation must NOT tell the provider to clarify documentation
+    assert all("insufficient" not in r["recommendation"].lower() for r in coder)
+    # historical / non-billable condition produced no recommendation
+    assert not any(r["subject"] == "old unrelated condition" for r in recs)
+    # no-candidate procedure falls back to a documentation-thin recommendation
+    assert any(r["issue"] == "unresolved_service" and r["subject"] == "an ambiguous procedure"
+               for r in recs)
+
+
+def test_ncci_gate_reports_ptp_suppression_not_not_applicable():
+    """When NCCI PTP bundled a component during reconciliation, leaving a single
+    released procedure, the gate must report PASS 'PTP applied ... bundled' — not the
+    misleading NOT_APPLICABLE 'fewer than two procedures'. With no suppression it is
+    correctly NOT_APPLICABLE. Synthetic codes; MockSource needs no edit table (only
+    one released line, so no pairwise lookup)."""
+    from claude_coder.gates import ncci_gate
+    from claude_coder.data_access import MockSource
+    from claude_coder.models import (CodingResult, ResolvedLine, ClinicalFact,
+                                     CandidateCode, FactKind, ResolutionMethod, Outcome)
+
+    proc = ClinicalFact(FactKind.PROCEDURE, "a comprehensive procedure")
+    line = ResolvedLine(fact=proc, chosen=CandidateCode("AA111", "cpt", "comprehensive"),
+                        method=ResolutionMethod.VERIFIED)
+
+    supp = CodingResult("enc", "2026-08-01", lines=[line],
+                        ncci_suppressed=[("BB222", "AA111")])
+    g = ncci_gate(supp, MockSource())
+    assert g.outcome is Outcome.PASS
+    assert "PTP applied" in g.detail and "BB222 bundled into AA111" in g.detail
+
+    clean = CodingResult("enc", "2026-08-01", lines=[line], ncci_suppressed=[])
+    assert ncci_gate(clean, MockSource()).outcome is Outcome.NOT_APPLICABLE

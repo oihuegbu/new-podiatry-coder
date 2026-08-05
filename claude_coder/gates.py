@@ -103,6 +103,12 @@ def ncci_gate(result: CodingResult, source: CodeSource) -> GateResult:
                     outcomes.append(Outcome.UNKNOWN)
                     detail.append(f"{lines[i].chosen.code}/{lines[j].chosen.code} needs modifier (1)")
     if len(lines) < 2:
+        supp = getattr(result, "ncci_suppressed", [])
+        if supp:
+            pairs = "; ".join(f"{c} bundled into {p}" for c, p in supp)
+            return GateResult("ncci_ptp", Outcome.PASS,
+                              f"NCCI PTP applied in reconciliation ({pairs}); no unresolved "
+                              f"conflicts among released line(s)", "NCCI PTP (data)")
         return GateResult("ncci_ptp", Outcome.NOT_APPLICABLE, "fewer than two procedures",
                           "NCCI PTP (data)")
     return GateResult("ncci_ptp", _worst(outcomes) if outcomes else Outcome.PASS,

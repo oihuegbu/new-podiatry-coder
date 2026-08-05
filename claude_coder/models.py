@@ -196,6 +196,11 @@ class CodingResult:
     notes: list[str] = field(default_factory=list)
     certificate: dict[str, Any] | None = None   # tamper-evident evidence packet
     bypassed_ncci: list = field(default_factory=list)   # code pairs cleared by a modifier
+    # NCCI PTP component codes DEMOTED during reconciliation (bundled into a payable
+    # comprehensive code). Recorded as (component, payable) so the NCCI gate can report
+    # that PTP was MATERIAL even when the RELEASED claim ends up with a single procedure
+    # — instead of the misleading "fewer than two procedures / NOT_APPLICABLE".
+    ncci_suppressed: list = field(default_factory=list)
     # actionable documentation recommendations (what to document/clarify to code it)
     recommendations: list[dict] = field(default_factory=list)
     # the actionable next-step destination (set by autonomy.decide) and the per-item

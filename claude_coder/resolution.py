@@ -344,11 +344,11 @@ def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
             return ResolvedLine(
                 fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
                 alternatives=[line.chosen],
-                documentation_gap=("the condition resolved only to a residual/catch-all "
-                    "category whose descriptor shares no distinctive clinical term with the "
-                    "documentation -- pin the specific condition or confirm the catch-all"),
-                rationale=("residual/catch-all code with no distinctive descriptor "
-                    "grounding -- escalate rather than bill a non-specific code"))
+                rationale=("the documented condition mapped only to a residual/catch-all "
+                    f"code ({line.chosen.code}) whose descriptor shares no distinctive "
+                    "clinical term with the documentation -- a coder CLASSIFICATION/mapping "
+                    "decision (identify the specific code, or confirm the residual bucket); "
+                    "not a provider documentation gap, and not billed on a non-specific code"))
         return line
 
     if not pool:

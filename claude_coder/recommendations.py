@@ -49,25 +49,59 @@ def build_recommendations(result: CodingResult) -> list[dict]:
                     f"supported; if not, a less-specific code applies.",
             })
 
-    # 2. Billable services that could not be resolved at all — the documentation was
-    #    too thin or ambiguous to pick any code.
+    # 2. Billable services/conditions that did not resolve to a released code. When
+    #    the pipeline DID retrieve candidate code(s) but verification could not confirm
+    #    one, the open question is a CODING decision (which code / separately reportable
+    #    vs integral / policy) — a coder review, NOT a documentation query; surface the
+    #    specific candidate code(s) so the coder starts from them, and flag a residual/
+    #    'other'/NEC bucket when that is what was retrieved. Only when NOTHING was
+    #    retrieved is the note genuinely too thin to code. DIAGNOSIS lines are included
+    #    (they previously produced no recommendation at all).
+    from .resolution import _RESIDUAL_MARKERS
     for ln in result.lines:
         if not (ln.fact.billable and not ln.resolved and not ln.documentation_gap):
             continue
         if ln.fact.kind is FactKind.EM:
-            rec = ("Document the medical decision-making elements (problems "
-                   "addressed, data reviewed, risk) or the total visit time so the "
-                   "E/M level can be determined.")
-        elif ln.fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING,
-                              FactKind.SUPPLY, FactKind.DRUG):
-            rec = (f"Documentation was insufficient to select a specific code for "
-                   f"'{ln.fact.description}' — clarify the exact service (procedure, "
-                   f"site, laterality, technique, and any product/dose).")
-        else:
+            recs.append({"issue": "unresolved_service", "subject": ln.fact.description,
+                         "fact_id": ln.fact.fact_id, "detail": ln.rationale,
+                         "recommendation": (
+                             "Document the medical decision-making elements (problems "
+                             "addressed, data reviewed, risk) or the total visit time so "
+                             "the E/M level can be determined.")})
             continue
-        recs.append({"issue": "unresolved_service", "subject": ln.fact.description,
-                     "fact_id": ln.fact.fact_id, "detail": ln.rationale,
-                     "recommendation": rec})
+        if ln.fact.kind not in (FactKind.PROCEDURE, FactKind.IMAGING, FactKind.SUPPLY,
+                                FactKind.DRUG, FactKind.DIAGNOSIS):
+            continue
+        cands = [c for c in ln.alternatives if c.code]
+        if cands:
+            names = ", ".join(dict.fromkeys(
+                f"{c.system.upper()} {c.code}" for c in cands[:4]))
+            residual = next((c for c in cands
+                             if any(m in c.descriptor.lower() for m in _RESIDUAL_MARKERS)),
+                            None)
+            extra = ("" if residual is None else
+                     f" {residual.system.upper()} {residual.code} is a residual/'other'/"
+                     f"NEC category — if used, confirm no more-specific code applies and "
+                     f"evaluate any diagnosis-pair (tabular) or PTP interaction before "
+                     f"release.")
+            recs.append({
+                "issue": "coder_review", "subject": ln.fact.description,
+                "fact_id": ln.fact.fact_id, "detail": ln.rationale,
+                "recommendation": (
+                    f"Candidate code(s) {names} were identified for "
+                    f"'{ln.fact.description}' but not confirmed by independent "
+                    f"verification. This is a coding decision — code selection, or "
+                    f"whether the service is separately reportable vs integral, or a "
+                    f"payer-policy question — not necessarily a documentation gap. "
+                    f"Coder to review and select/confirm.{extra}")})
+        else:
+            recs.append({
+                "issue": "unresolved_service", "subject": ln.fact.description,
+                "fact_id": ln.fact.fact_id, "detail": ln.rationale,
+                "recommendation": (
+                    f"No candidate code was retrieved for '{ln.fact.description}' — "
+                    f"clarify the exact service/condition (site, laterality, technique, "
+                    f"and any product/dose) so it can be coded.")})
 
     # 3. Gate-based remediation — what to fix to earn release.
     for g in result.gates:

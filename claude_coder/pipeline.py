@@ -321,6 +321,7 @@ def apply_ncci_bundling(result: CodingResult, source: CodeSource) -> None:
                 comp.excluded_reason = (
                     f"bundled into {edit.get('payable')} per NCCI PTP "
                     f"(no distinct-service modifier justified)")
+                result.ncci_suppressed.append((comp.chosen.code, edit.get("payable")))
 
 
 def apply_integral_bundling(result: CodingResult, source: CodeSource) -> None:
@@ -404,6 +405,10 @@ def render(result: CodingResult) -> str:
         else:
             tag = "not billed" if not f.billable else "ESCALATE"
             out.append(f"  ⚠ {tag}  «{f.description}»  — {ln.rationale}")
+            cand = list(dict.fromkeys(f"{c.system.upper()} {c.code}"
+                                      for c in ln.alternatives if c.code))
+            if f.billable and cand:
+                out.append(f"      candidates (unconfirmed): {', '.join(cand[:5])}")
         if f.evidence:
             out.append(f"      evidence: «{f.evidence[0].text[:70]}»")
     out.append("")
