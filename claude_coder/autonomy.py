@@ -178,10 +178,13 @@ def decide(result: CodingResult,
                   "grounded by an authoritative match or an independently verified "
                   "entailment — needs a coder",
                   fact_id=ln.fact.fact_id)
-        elif ln.fact.confidence < SHAKY_EXTRACTION:
+        elif ln.fact.min_confidence < SHAKY_EXTRACTION:
+            _wk = ln.fact.weakest_axis
+            _axis = f", weakest axis '{_wk}'" if _wk else ""
             route(Destination.REVIEW, ln.fact.description,
-                  f"the note barely documents this event (extraction confidence "
-                  f"{ln.fact.confidence:.2f} < {SHAKY_EXTRACTION:.2f}) — clarify before billing",
+                  f"the note barely documents this event (confidence "
+                  f"{ln.fact.min_confidence:.2f} < {SHAKY_EXTRACTION:.2f}{_axis}) — "
+                  f"clarify before billing",
                   fact_id=ln.fact.fact_id)
 
     result.routing = routing

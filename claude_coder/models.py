@@ -86,11 +86,31 @@ class ClinicalFact:
     experiencer: str = "patient"
     evidence: list[EvidenceSpan] = field(default_factory=list)
     confidence: float = 0.0
+    # Per-axis extraction confidence (e.g. occurrence, action, anatomy, laterality,
+    # performer, relationship, measurement, temporal). Kept SEPARATE so a high overall
+    # read cannot conceal a weak axis; gating uses the weakest, never an average. Empty
+    # until extraction populates it -> min_confidence falls back to the scalar.
+    axis_confidence: dict[str, float] = field(default_factory=dict)
     fact_id: str = ""
 
     @property
     def system(self) -> str:
         return SYSTEM_FOR_KIND[self.kind]
+
+    @property
+    def min_confidence(self) -> float:
+        """The WEAKEST signal that should gate autonomy: the minimum over the recorded
+        per-axis confidences AND the scalar (never an average). Falls back to the scalar
+        when no per-axis values exist."""
+        vals = list(self.axis_confidence.values())
+        return min([self.confidence, *vals]) if vals else self.confidence
+
+    @property
+    def weakest_axis(self) -> str | None:
+        """The name of the lowest-confidence axis, or None when none are recorded."""
+        if not self.axis_confidence:
+            return None
+        return min(self.axis_confidence, key=self.axis_confidence.get)
 
     @property
     def billable(self) -> bool:
