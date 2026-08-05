@@ -200,11 +200,18 @@ class ModifierTest(unittest.TestCase):
                 "ML": {"description": "Left side of the body"},
                 "MB": {"description": "Bilateral procedure"}}
         eng = ModifierEngine(defs=defs)
-        self.assertEqual(eng.assign(self._fact("right"), "Excision, lesion, each"), ["MR"])
-        self.assertEqual(eng.assign(self._fact("left"), "Excision, lesion, each"), ["ML"])
+        # A side/bilateral modifier is asserted ONLY for a code the fee schedule marks
+        # laterality-eligible (a bilateral-surgery indicator is present); pass a real one.
+        self.assertEqual(eng.assign(self._fact("right"), "Excision, lesion, each", bilat="0"), ["MR"])
+        self.assertEqual(eng.assign(self._fact("left"), "Excision, lesion, each", bilat="0"), ["ML"])
         self.assertEqual(eng.assign(self._fact("bilateral"), "Excision, lesion", bilat="1"), ["MB"])
         # descriptor already encodes the side -> no modifier (no double-coding)
-        self.assertEqual(eng.assign(self._fact("right"), "Excision, lesion, right side"), [])
+        self.assertEqual(eng.assign(self._fact("right"), "Excision, lesion, right side", bilat="0"), [])
+        # a code with NO bilateral indicator -- a consumed supply/implant/drug billed as
+        # a device/supply code (not on the PFS) -- never earns a side modifier. This is
+        # the agnostic rule behind the A4570-RT / C1713-RT error class: laterality
+        # requires positive fee-schedule eligibility, never a default.
+        self.assertEqual(eng.assign(self._fact("right"), "Anchor/screw for bone", bilat=None), [])
 
 
 class EMLevelingTest(unittest.TestCase):

@@ -69,7 +69,13 @@ class ModifierEngine:
         Empty, too, when the descriptor already encodes the side."""
         lat = str(fact.attributes.get("laterality", "")).lower().strip()
         desc = descriptor.lower()
-        if bilat == "9":                         # concept does not apply -> no modifier
+        # Assert a side/bilateral modifier ONLY for a code whose authoritative
+        # fee-schedule record carries a bilateral-surgery indicator. A MISSING
+        # indicator (None) means the code is not a laterality-bearing service -- a
+        # consumed supply/implant or drug billed as a device/supply code, which is
+        # not on the PFS at all -- so no RT/LT/50 (fail-closed; the A4570-RT error
+        # class). '9' means the concept explicitly does not apply.
+        if not bilat or bilat == "9":
             return []
         if "bilateral" in desc:
             return []
