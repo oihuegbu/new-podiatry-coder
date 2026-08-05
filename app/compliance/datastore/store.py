@@ -2890,13 +2890,17 @@ class ComplianceDataStore:
                 pass
             else:
                 quarter_index = (release_date.month - 1) // 3
-                start = date(release_date.year, quarter_index * 3 + 1, 1)
                 end_month = (quarter_index + 1) * 3
-                bounds = (
-                    start,
-                    date(start.year, end_month,
-                         calendar.monthrange(start.year, end_month)[1]),
-                )
+                release_end = date(release_date.year, end_month,
+                                   calendar.monthrange(release_date.year, end_month)[1])
+                # The CMS PTP file is CUMULATIVE and RETAINS deleted edits with their
+                # effective_to, so it is an accurate historical record covering the prior
+                # + current year through the release quarter (the range with dense
+                # deletion retention) — not just the release quarter. check_ncci filters
+                # each pair by its own effective window; DOS beyond the release quarter
+                # (future edits we don't hold) or before this window still fail closed.
+                start = date(release_date.year - 1, 1, 1)
+                bounds = (start, release_end)
         self._ncci_release_window = bounds
         self._ncci_release_window_loaded = True
         return bounds
