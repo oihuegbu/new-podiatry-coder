@@ -124,11 +124,22 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
     if fl and fl != "bilateral" and feats.laterality and fl not in feats.laterality:
         return None
 
-    # ELIMINATION — a documented measurement must fall in the descriptor's range.
+    # ELIMINATION — a documented measurement must fall in the descriptor's range, but
+    # ONLY when the documented value and the descriptor interval share a DIMENSION
+    # (typed). A unitless value, or one whose dimension differs (a mm length vs a
+    # "sq in" area), must NOT eliminate a candidate -- fail-closed on the comparison.
     measure = measurement_of(fact.attributes)
     if measure is not None and feats.interval and feats.interval.bounded():
-        if not feats.interval.contains(measure):
-            return None
+        from . import measurement as _meas
+        tm = _meas.typed_measurement_of(fact.attributes)
+        idim, _idf = _meas.unit_dimension(feats.interval.unit)
+        if (tm is not None and tm.dimension is not None
+                and idim is not None and tm.dimension == idim):
+            docval = _meas.convert(tm.value, tm.dimension, tm.unit, feats.interval.unit)
+            if docval is None and tm.unit == feats.interval.unit:
+                docval = tm.value
+            if docval is not None and not feats.interval.contains(docval):
+                return None
 
     # SPECIFICITY — count the constraining attributes the descriptor POSITIVELY
     # accounts for; a more specific code wins ties.
