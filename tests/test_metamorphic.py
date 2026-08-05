@@ -434,3 +434,23 @@ def test_ncci_edit_forwards_dos():
     assert src.ncci_edit("A", "B", "2026-08-01") == {
         "payable": "A", "component": "B", "modifier": "1"}
     assert fake.seen == ("A", "B", "2026-08-01")          # DOS forwarded, not dropped
+
+
+# ---- #2: an OPPS (1833(t)) facility code is not separately reportable on the pro claim --
+def test_opps_1833t_code_not_separately_billable():
+    """A HCPCS code paid under OPPS (Social Security Act 1833(t)) -- a facility charge
+    such as a device pass-through code -- is BLOCKED from the practitioner's professional
+    claim, from its authoritative statute field. A code without that statute (and no other
+    non-reportable signal) is kept. Agnostic: synthetic codes, statute-driven."""
+    from claude_coder.data_access import AuthoritativeSource
+    from claude_coder.models import Outcome
+
+    class _Ref:
+        hcpcs = {"OPPSX": {"code": "OPPSX", "statute": "1833(T)", "description": "device"},
+                 "PAYX": {"code": "PAYX", "statute": None, "description": "payable supply"}}
+        mue = {}
+
+    src = AuthoritativeSource()
+    src._db = _Ref()
+    assert src.separately_billable("OPPSX", "hcpcs", "2026-08-01") is Outcome.BLOCKED
+    assert src.separately_billable("PAYX", "hcpcs", "2026-08-01") is not Outcome.BLOCKED

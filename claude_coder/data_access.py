@@ -464,6 +464,12 @@ class AuthoritativeSource:
         descriptor), or an MUE of 0, means it is not separately reportable and
         must not appear as its own line. No such signal -> UNKNOWN (kept)."""
         rec = self.lookup(code, system) or {}
+        # A HCPCS code paid under OPPS (Social Security Act 1833(t)) -- e.g. a device
+        # pass-through code -- is a facility / hospital-outpatient charge, NOT separately
+        # reportable on the practitioner's PROFESSIONAL claim (paid under 1848). Read the
+        # authoritative statute field; agnostic (no code named).
+        if "1833(t)" in str(rec.get("statute", "")).lower():
+            return Outcome.BLOCKED
         blob = " ".join(str(rec.get(k, "")).lower() for k in (
             "coverage", "coverage_status", "payment_indicator", "status_indicator",
             "separately_payable", "billable", "long_description", "description"))

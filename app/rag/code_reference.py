@@ -137,6 +137,8 @@ class CodeReferenceDB:
                         "effective_from": _clean_date(entry.get("add_date")),
                         "effective_to": _clean_date(eff_to) if eff_to else _OPEN,
                         "temporal_authority": True,
+                        # OPPS (1833(t)) statute -> facility charge, not on the pro claim.
+                        "statute": entry.get("statute"),
                     }
         logger.info(f"Loaded {len(self.hcpcs)} HCPCS codes")
 

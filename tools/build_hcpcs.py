@@ -112,6 +112,7 @@ def build(args) -> int:
             "coverage_code": g(row, "COV") or None,
             "betos": g(row, "BETOS") or None,
             "action_code": g(row, "ACTION CD") or None,
+            "statute": g(row, "STATUTE") or None,   # e.g. "1833(T)" = OPPS/facility-paid
             "add_date": _iso(g(row, "ADD DT")),
             "metadata": {"source_file": xlsx, "source_zip": f"{tag}-alpha-numeric-hcpcs-file"},
         }
