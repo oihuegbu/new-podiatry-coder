@@ -135,6 +135,13 @@ SOURCES: dict[str, dict] = {
         "output": "ncci_data.json",
         "prepare": lambda tmp, args: [PY, "tools/build_ncci_ptp.py"],
     },
+    "mue": {
+        # NCCI Practitioner MUE — quarterly (Jan/Apr/Jul/Oct). Build product (committed,
+        # ~3.5MB): the builder fetches the newest CMS MUE quarter and writes the snapshot
+        # the compliance store reads, so it is reproduced from source on refresh/deploy.
+        "output": "mue_practitioner.json",
+        "prepare": lambda tmp, args: [PY, "tools/build_mue.py"],
+    },
     "snomed_icd10": {
         "output": "snomed_icd10_map.json",
         "prepare": lambda tmp, args: [PY, "tools/build_snomed_icd10_map.py"],
