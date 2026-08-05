@@ -196,3 +196,26 @@ def test_shadow_diff_flags_suppress_on_explicit_integral():
     rels = [_partof("F1", "F2")]                     # explicitly integral -> engine suppresses
     d = el.shadow_diff(facts, el.evaluate(facts, rels, "enc", "2026-08-01"))
     assert d["divergent"] is True and len(d["would_suppress"]) == 1
+
+
+# ---- Codex review F5: distinctness-aware dedup ----
+def test_separate_from_prohibits_merge_of_identical_events():
+    """Two otherwise-identical events with an explicit SEPARATE_FROM must NOT merge -- a
+    merge would suppress a documented distinct service."""
+    sep = RelationAssertion("F1", RelationPredicate.SEPARATE_FROM, "F2",
+                            state=RelationState.ASSERTED)
+    intents = el.evaluate([_fact(fid="F1"), _fact(fid="F2")], [sep], "enc", "2026-08-01")
+    assert len(intents) == 2
+
+
+def test_differing_performer_prohibits_merge():
+    a = _fact(fid="F1", attrs={"performer_id": "p1"})
+    b = _fact(fid="F2", attrs={"performer_id": "p2"})
+    assert len(el.evaluate([a, b], [], "enc", "2026-08-01")) == 2
+
+
+def test_true_duplicate_merge_unions_decisions_and_mentions():
+    single = el.evaluate([_fact(fid="F1")], [], "enc", "2026-08-01")[0]
+    both = el.evaluate([_fact(fid="F1"), _fact(fid="F2")], [], "enc", "2026-08-01")[0]
+    assert both.mention_count == 2
+    assert len(both.decisions) == 2 * len(single.decisions)          # both mentions retained

@@ -250,23 +250,47 @@ def _service_key(intent: "ClaimLineIntent"):
             str(a.get("laterality", "")).lower(), toks)
 
 
+def _distinct_intents(a: "ClaimLineIntent", b: "ClaimLineIntent") -> bool:
+    """Two same-key intents are DISTINCT services (must NOT merge) when documentation
+    establishes distinctness: an explicit distinctness fact on either (a SEPARATE_FROM /
+    distinct site/session), or a differing performer, approach, or site. A merge can drop a
+    line, so ANY documented distinctness prohibits it. (Codex review F5.)"""
+    if a.distinctness_facts or b.distinctness_facts:
+        return True
+    aa, ba = a.attributes or {}, b.attributes or {}
+    for axis in ("performer_id", "performer", "approach", "distinct_site",
+                 "distinct_session", "distinct_objective"):
+        if str(aa.get(axis, "")).strip().lower() != str(ba.get(axis, "")).strip().lower():
+            return True
+    return False
+
+
 def merge_duplicate_intents(intents: list["ClaimLineIntent"]) -> list["ClaimLineIntent"]:
     """same_episode_merge: multiple mentions of the SAME service (identical key, same
-    episode, same eligibility state) become ONE intent with accumulated evidence + mention
-    count -- never multiple claim lines. Conservative: only identical keys merge."""
-    by: dict = {}
-    order: list = []
+    episode + state, and NO documented distinctness) become ONE intent with accumulated
+    evidence, distinctness facts, decisions, and mention count -- never multiple claim
+    lines. An explicit SEPARATE_FROM / distinct site / differing performer PROHIBITS the
+    merge, so an explicitly distinct service is never suppressed."""
+    result: list = []
     for it in intents:
-        k = (it.service_episode_id, it.state, _service_key(it))
-        if k not in by:
-            by[k] = it
-            order.append(k)
-        else:
-            m = by[k]
-            m.clinical_event_ids = list(dict.fromkeys(m.clinical_event_ids + it.clinical_event_ids))
-            m.source_span_ids = list(dict.fromkeys(m.source_span_ids + it.source_span_ids))
-            m.mention_count += it.mention_count
-    return [by[k] for k in order]
+        target = None
+        for m in result:
+            if (m.service_episode_id == it.service_episode_id and m.state is it.state
+                    and _service_key(m) == _service_key(it) and not _distinct_intents(m, it)):
+                target = m
+                break
+        if target is None:
+            result.append(it)
+            continue
+        target.clinical_event_ids = list(dict.fromkeys(
+            list(target.clinical_event_ids) + list(it.clinical_event_ids)))
+        target.source_span_ids = list(dict.fromkeys(
+            list(target.source_span_ids) + list(it.source_span_ids)))
+        target.distinctness_facts = list(dict.fromkeys(
+            list(target.distinctness_facts) + list(it.distinctness_facts)))
+        target.decisions = list(target.decisions) + list(it.decisions)
+        target.mention_count += it.mention_count
+    return result
 
 
 def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: str,

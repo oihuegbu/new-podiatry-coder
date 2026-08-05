@@ -124,22 +124,27 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
     if fl and fl != "bilateral" and feats.laterality and fl not in feats.laterality:
         return None
 
-    # ELIMINATION — a documented measurement must fall in the descriptor's range, but
-    # ONLY when the documented value and the descriptor interval share a DIMENSION
-    # (typed). A unitless value, or one whose dimension differs (a mm length vs a
-    # "sq in" area), must NOT eliminate a candidate -- fail-closed on the comparison.
-    measure = measurement_of(fact.attributes)
-    if measure is not None and feats.interval and feats.interval.bounded():
+    # TYPED, DIMENSION-GUARDED, role-safe measurement comparison, used for BOTH
+    # elimination and specificity. A documented value is compared to a descriptor interval
+    # ONLY when they share a dimension UNAMBIGUOUSLY (exactly one documented measurement of
+    # that dimension) and the unit converts. An incompatible, unitless, or ambiguous
+    # measurement neither ELIMINATES a candidate nor earns SPECIFICITY credit -- fail-closed
+    # on the comparison. (Codex review F4: the old specificity path used a bare, unit-blind
+    # number and could deterministically prefer a dimensionally-incompatible candidate.)
+    _in_range = None
+    if feats.interval and feats.interval.bounded() and feats.interval.unit:
         from . import measurement as _meas
-        tm = _meas.typed_measurement_of(fact.attributes)
-        idim, _idf = _meas.unit_dimension(feats.interval.unit)
-        if (tm is not None and tm.dimension is not None
-                and idim is not None and tm.dimension == idim):
-            docval = _meas.convert(tm.value, tm.dimension, tm.unit, feats.interval.unit)
-            if docval is None and tm.unit == feats.interval.unit:
-                docval = tm.value
-            if docval is not None and not feats.interval.contains(docval):
-                return None
+        _idim, _idf = _meas.unit_dimension(feats.interval.unit)
+        if _idim is not None:
+            _dm = _meas.measurement_for_dimension(fact.attributes, _idim)
+            if _dm is not None:
+                _dv = _meas.convert(_dm.value, _dm.dimension, _dm.unit, feats.interval.unit)
+                if _dv is None and _dm.unit == feats.interval.unit:
+                    _dv = _dm.value
+                if _dv is not None:
+                    _in_range = feats.interval.contains(_dv)
+    if _in_range is False:
+        return None                     # documented measurement out of the code's range
 
     # SPECIFICITY — count the constraining attributes the descriptor POSITIVELY
     # accounts for; a more specific code wins ties.
@@ -147,9 +152,9 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
     if fl and fl in feats.laterality:
         spec += 1
         reasons.append(f"laterality {fl}")
-    if measure is not None and feats.interval and feats.interval.bounded():
+    if _in_range is True:
         spec += 1
-        reasons.append(f"measure {measure:g} in range")
+        reasons.append("documented measurement within the code's range")
 
     # SUPPORT (mechanic 2) — how many concept tokens the note shares with the
     # code's AUTHORITATIVE descriptors. Scored over ALL description tiers (long /

@@ -106,3 +106,34 @@ def test_unitless_measurement_does_not_eliminate():
     line = resolve(fact, src)
     assert not (line.method is ResolutionMethod.DETERMINISTIC
                 and line.chosen is not None and line.chosen.code == "SUP_MED")
+
+
+# ---- Codex review F4: dimension-guarded specificity + semantic-role matching ----
+def test_measurement_for_dimension_selects_by_dimension():
+    assert meas.measurement_for_dimension({"size_sqin": 30}, "area").value == 30
+    assert meas.measurement_for_dimension({"depth_mm": 30}, "area") is None       # no area value
+    assert meas.measurement_for_dimension({"depth_mm": 30}, "length").value == 30
+
+
+def test_measurement_for_dimension_ambiguous_role_returns_none():
+    """Two same-dimension measurements (width vs depth) against one axis are ambiguous ->
+    no deterministic comparison."""
+    assert meas.measurement_for_dimension({"width_cm": 3, "depth_cm": 5}, "length") is None
+    assert len(meas.measurements_of({"width_cm": 3, "depth_cm": 5})) == 2
+
+
+def test_length_measurement_gives_no_specificity_to_area_candidate():
+    """Codex F4 reproduction: an area-qualified candidate and a plain one at equal recall;
+    a LENGTH measurement must NOT award the area candidate specificity and deterministically
+    select it (the old unit-blind specificity path did)."""
+    area = CandidateCode("AREA_C", "hcpcs",
+                         "wound dressing, sterile, size 16 sq. in. or less, each", 0.9)
+    plain = CandidateCode("PLAIN_C", "hcpcs", "wound dressing, sterile, each", 0.9)
+    src = MockSource(retrieval={("*", "hcpcs"): [area, plain]})
+    fact = ClinicalFact(FactKind.SUPPLY, "wound dressing", attributes={"depth_mm": 5},
+                        disposition=Disposition.PERFORMED,
+                        evidence=[EvidenceSpan("wound dressing applied, depth 5 mm")],
+                        confidence=0.99)
+    line = resolve(fact, src)
+    assert not (line.method is ResolutionMethod.DETERMINISTIC
+                and line.chosen is not None and line.chosen.code == "AREA_C")

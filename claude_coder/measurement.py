@@ -139,3 +139,27 @@ def compare(a: Measurement, b: Measurement) -> int | None:
             return None
         bv = b.value
     return (a.value > bv) - (a.value < bv)
+
+
+def measurements_of(attributes: dict) -> list["Measurement"]:
+    """EVERY typed measurement in a fact's attributes (each carrying value/unit/dimension/
+    role). Unlike typed_measurement_of (first match), this returns all of them so the
+    caller can select the one whose DIMENSION fits a descriptor axis."""
+    out: list[Measurement] = []
+    for key, val in (attributes or {}).items():
+        k = str(key).lower()
+        if any(w in k for w in ("area", "size", "measure", "depth", "length", "sq",
+                                "width", "diameter", "thickness", "height")):
+            m = parse_measurement(val, key=key)
+            if m is not None:
+                out.append(m)
+    return out
+
+
+def measurement_for_dimension(attributes: dict, dimension: str):
+    """The UNIQUE documented measurement of `dimension`, or None. None when NO measurement
+    matches (incompatible dimension) OR when MORE THAN ONE does (ambiguous role -- e.g.
+    width vs depth against a length axis): an ambiguous or absent match must never drive a
+    deterministic comparison."""
+    matches = [m for m in measurements_of(attributes) if m.dimension == dimension]
+    return matches[0] if len(matches) == 1 else None
