@@ -124,9 +124,11 @@ def fetch_cpt_index(tmp: Path, args) -> Path | None:
 SOURCES: dict[str, dict] = {
     "global_period": {
         "output": "global_period.json",
+        "cadence": "quarterly",   # CMS PFS RVU: quarterly revisions (RVU26A..D)
         "prepare": lambda tmp, args: [PY, "tools/build_global_period.py"],
     },
     "ncci_ptp": {
+        "cadence": "quarterly",
         # NCCI Procedure-to-Procedure edits — quarterly (Jan/Apr/Jul/Oct). Build
         # product (gitignored like snomed_icd10_map): the builder fetches the newest
         # CMS quarter and writes the snapshot the compliance store reads, so it is
@@ -140,14 +142,25 @@ SOURCES: dict[str, dict] = {
         # ~3.5MB): the builder fetches the newest CMS MUE quarter and writes the snapshot
         # the compliance store reads, so it is reproduced from source on refresh/deploy.
         "output": "mue_practitioner.json",
+        "cadence": "quarterly",
         "prepare": lambda tmp, args: [PY, "tools/build_mue.py"],
+    },
+    "ncci_aoc": {
+        # NCCI Add-On Code edits — quarterly. Build product (committed): the builder
+        # fetches the newest CMS add-on-code quarter and writes the {code1,code2,modifier,
+        # effective_date,end_date} snapshot store._ingest_ncci_aoc reads.
+        "output": "ncci_aoc_edits.json",
+        "cadence": "quarterly",
+        "prepare": lambda tmp, args: [PY, "tools/build_ncci_aoc.py"],
     },
     "snomed_icd10": {
         "output": "snomed_icd10_map.json",
+        "cadence": "biannual",   # SNOMED CT US edition: Mar / Sep
         "prepare": lambda tmp, args: [PY, "tools/build_snomed_icd10_map.py"],
     },
     "icd10cm_index": {
         "output": "icd10cm_index_terms.json",
+        "cadence": "annual",     # NCHS ICD-10-CM: FY effective Oct 1
         "fetch": fetch_icd_index,
         "prepare": lambda tmp, xml: [PY, "tools/parse_icd10cm_index.py", str(xml),
                                      str(CODES / "icd10cm_index_terms.json")],
@@ -197,6 +210,38 @@ def _verify(output: str) -> dict:
             "sha256": _sha256(path), "bytes": path.stat().st_size}
 
 
+# ── cadence (for the scheduler's --due filter) ──────────────────────────────────
+# Months (1-12) each cadence FIRES on. A quarterly source is only fetched at the
+# quarter boundary it changes on; a scheduler runs this tool often with --due and it
+# no-ops except in those months. Sources with no cadence are "on request" only.
+_CADENCE_MONTHS = {
+    "weekly":    set(range(1, 13)),
+    "quarterly": {1, 4, 7, 10},
+    "biannual":  {3, 9},
+    "annual":    {1, 10},          # ICD FY (Oct), CPT (Jan)
+}
+
+
+def _due(name: str, month: int) -> bool:
+    cad = SOURCES[name].get("cadence")
+    return cad is not None and month in _CADENCE_MONTHS.get(cad, set())
+
+
+def integrate() -> None:
+    """INTEGRATE — rebuild compliance.db from the refreshed JSON snapshots in one
+    deliberate step, so the runtime store reflects the new sources immediately (mirrors
+    app startup: CodeReferenceDB.load_all + ComplianceDataStore.build_or_load). Doing it
+    here, once, also removes the cold-build hazard for whatever loads the store next."""
+    print("\n== integrate: rebuilding compliance.db from refreshed snapshots ==")
+    for suffix in ("", "-wal", "-shm"):
+        (DATA_DIR / f"compliance.db{suffix}").unlink(missing_ok=True)
+    from app.rag.code_reference import CodeReferenceDB
+    from app.compliance.datastore.store import ComplianceDataStore
+    CodeReferenceDB().load_all()
+    ComplianceDataStore().build_or_load()
+    print("  compliance.db rebuilt from the current snapshots")
+
+
 def run_source(name: str, args) -> dict:
     spec = SOURCES[name]
     print(f"\n== {name} {'(LICENSED)' if spec.get('licensed') else ''} ==")
@@ -237,15 +282,34 @@ def main() -> int:
                     help=f"sources to refresh (default: all). one of: {', '.join(SOURCES)}")
     ap.add_argument("--icd-url", help="override the NCHS ICD-10-CM index zip URL")
     ap.add_argument("--dry-run", action="store_true", help="show commands, change nothing")
+    ap.add_argument("--due", action="store_true",
+                    help="only refresh sources whose cadence fires THIS month (scheduler mode)")
+    ap.add_argument("--no-integrate", action="store_true",
+                    help="skip rebuilding compliance.db after packaging")
     args = ap.parse_args()
 
     bad = [n for n in args.sources if n not in SOURCES]
     if bad:
         ap.error(f"unknown source(s) {bad}; choose from {', '.join(SOURCES)}")
     names = args.sources or list(SOURCES)
+    if args.due and not args.sources:                 # scheduler: only what's due this month
+        month = time.gmtime().tm_mon
+        names = [n for n in names if _due(n, month)]
+        print(f"--due: month {month} -> {names or '(nothing due this month)'}")
     manifest = {}
     for name in names:
         manifest[name] = run_source(name, args)
+
+    # INTEGRATE: fold the refreshed snapshots into compliance.db in one deliberate step,
+    # but only if at least one source actually produced output (never rebuild off a
+    # run where everything failed/skipped).
+    packaged = any(r.get("codes") for r in manifest.values())
+    if not args.dry_run and not args.no_integrate and packaged:
+        try:
+            integrate()
+        except Exception as exc:                      # integration failure must be loud
+            manifest["_integrate"] = {"status": f"ERROR: {exc}"}
+            print(f"  integrate ERROR: {exc}")
 
     if not args.dry_run:
         (CODES / "_manifest.json").write_text(json.dumps(
@@ -255,10 +319,10 @@ def main() -> int:
     for n, r in manifest.items():
         print(f"  {n:16} {r['status']}"
               + (f"  ({r.get('codes')} codes)" if r.get("codes") else ""))
-    # non-zero exit only if a NON-licensed source hard-errored
+    # non-zero exit if a NON-licensed source hard-errored, or integration failed
     hard = [n for n, r in manifest.items()
             if str(r["status"]).startswith("ERROR")
-            and not SOURCES[n].get("licensed") and not SOURCES[n].get("optional")]
+            and not SOURCES.get(n, {}).get("licensed") and not SOURCES.get(n, {}).get("optional")]
     return 1 if hard else 0
 
 
