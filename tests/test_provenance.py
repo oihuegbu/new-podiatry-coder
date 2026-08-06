@@ -98,3 +98,65 @@ def test_distinct_edges_preserved():
 
 def test_null_repository_is_noop():
     prov.NullAuditRepository().append("enc", "kind", {"x": 1})   # must not raise
+
+
+# ---- Phase 3: durable, hash-chained, append-only SQLite provenance store ----------------
+def test_sqlite_audit_durable_append_and_chain(tmp_path):
+    from claude_coder.provenance import SqliteAuditRepository
+    repo = SqliteAuditRepository(tmp_path / "prov.db")
+    h1 = repo.append("enc1", "kindA", {"x": 1})
+    h2 = repo.append("enc1", "kindB", {"y": 2})
+    assert h1 and h2 and h1 != h2
+    recs = repo.records("enc1")
+    assert len(recs) == 2
+    assert recs[0]["record"] == {"x": 1} and recs[1]["record"] == {"y": 2}
+    assert recs[1]["previous_record_sha256"] == recs[0]["record_sha256"]   # hash-chained
+    assert recs[0]["control_mode"] == "ENFORCED_FAIL_CLOSED"
+    # durable across a fresh handle (a separate connection sees committed rows)
+    assert len(SqliteAuditRepository(tmp_path / "prov.db").records("enc1")) == 2
+    # per-encounter isolation
+    repo.append("enc2", "kindA", {"z": 3})
+    assert len(repo.records("enc2")) == 1 and len(repo.records()) == 3
+
+
+def test_sqlite_audit_is_append_only(tmp_path):
+    import sqlite3
+    from claude_coder.provenance import SqliteAuditRepository
+    dbp = tmp_path / "prov.db"
+    SqliteAuditRepository(dbp).append("e", "k", {"a": 1})
+    conn = sqlite3.connect(str(dbp))
+    try:
+        for sql in ("UPDATE audit_log SET kind='x'", "DELETE FROM audit_log"):
+            raised = False
+            try:
+                conn.execute(sql)
+                conn.commit()
+            except sqlite3.Error:
+                raised = True
+            assert raised, f"append-only trigger did not block: {sql}"
+    finally:
+        conn.close()
+
+
+def test_sqlite_audit_strict_fails_closed_else_swallows(tmp_path):
+    from claude_coder.provenance import SqliteAuditRepository
+    bad = tmp_path                                   # a directory cannot open as a db file
+    raised = False
+    try:
+        SqliteAuditRepository(bad, strict=True).append("e", "k", {"a": 1})
+    except Exception:
+        raised = True
+    assert raised                                    # strict -> raise -> pipeline SYSTEM_HOLD
+    assert SqliteAuditRepository(bad, strict=False).append("e", "k", {"a": 1}) == ""
+
+
+def test_sqlite_audit_record_hash_verifies(tmp_path):
+    import json
+    from claude_coder.provenance import SqliteAuditRepository, _sha
+    repo = SqliteAuditRepository(tmp_path / "prov.db")
+    repo.append("e", "k", {"a": 1})
+    rec = repo.records("e")[0]
+    entry = {"encounter_id": rec["encounter_id"], "kind": rec["kind"],
+             "recorded_at": rec["recorded_at"], "control_mode": rec["control_mode"],
+             "previous_record_sha256": rec["previous_record_sha256"], "record": rec["record"]}
+    assert _sha(json.dumps(entry, sort_keys=True, default=str)) == rec["record_sha256"]

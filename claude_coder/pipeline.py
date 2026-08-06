@@ -66,8 +66,8 @@ def code_encounter(
         relations = _prov.bind_relation_evidence(extracted.relations, facts)
         relations = _prov.validate_relations(relations, facts)
         if audit_repository is None:
-            from app.core.config import OUTPUT_DIR
-            audit_repository = _prov.JsonlAuditRepository(OUTPUT_DIR / "audit", strict=True)
+            from app.core.config import PROVENANCE_DB
+            audit_repository = _prov.SqliteAuditRepository(PROVENANCE_DB, strict=True)
         audit_hashes = [audit_repository.append(
             encounter_id, "evidence_anchoring", _prov.anchoring_report(facts))]
         audit_hashes.append(audit_repository.append(encounter_id, "relation_graph", {

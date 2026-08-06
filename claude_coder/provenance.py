@@ -233,6 +233,103 @@ class NullAuditRepository(AuditRepository):
         return _sha(json.dumps(payload, sort_keys=True, default=str))
 
 
+class SqliteAuditRepository(AuditRepository):
+    """Phase 3: durable, hash-chained, append-only provenance store in a DEDICATED SQLite
+    database (WAL, synchronous=FULL, INSERT-only enforced by triggers), kept separate from
+    the authoritative compliance.db (different lifecycle/retention). Same contract as
+    JsonlAuditRepository: append() returns the entry's record_sha256, entries are per-
+    encounter hash-chained, and in strict mode a write failure RAISES so the pipeline routes
+    SYSTEM_HOLD (release provenance is fail-closed, never an empty-success fallback).
+
+    Swap PostgreSQL in behind AuditRepository only if a scale trigger appears (multi-host
+    concurrent writers, high write concurrency, or HA-replication/PITR compliance) -- the
+    seam and the hash-chained record shape are unchanged, so it is not a rewrite.
+    """
+
+    _DDL = (
+        "CREATE TABLE IF NOT EXISTS audit_log ("
+        " seq INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " encounter_id TEXT NOT NULL,"
+        " kind TEXT NOT NULL,"
+        " recorded_at TEXT NOT NULL,"
+        " control_mode TEXT NOT NULL,"
+        " previous_record_sha256 TEXT NOT NULL,"
+        " record_json TEXT NOT NULL,"
+        " record_sha256 TEXT NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_encounter ON audit_log(encounter_id, seq)",
+        "CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_log"
+        " BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END",
+        "CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit_log"
+        " BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END",
+    )
+
+    def __init__(self, db_path, *, strict: bool = True) -> None:
+        self.db_path = Path(db_path)
+        self.strict = strict
+
+    def _connect(self):
+        import sqlite3
+        if self.db_path.parent and str(self.db_path.parent):
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=FULL")
+        for stmt in self._DDL:
+            conn.execute(stmt)
+        return conn
+
+    def append(self, encounter_id: str, kind: str, record: dict) -> str:
+        try:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT record_sha256 FROM audit_log WHERE encounter_id=?"
+                    " ORDER BY seq DESC LIMIT 1", (str(encounter_id),)).fetchone()
+                previous = row[0] if row else ""
+                entry = {
+                    "encounter_id": encounter_id,
+                    "kind": kind,
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                    "control_mode": "ENFORCED_FAIL_CLOSED",
+                    "previous_record_sha256": previous,
+                    "record": record,
+                }
+                entry["record_sha256"] = _sha(json.dumps(entry, sort_keys=True, default=str))
+                conn.execute(
+                    "INSERT INTO audit_log(encounter_id, kind, recorded_at, control_mode,"
+                    " previous_record_sha256, record_json, record_sha256)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (encounter_id, kind, entry["recorded_at"], entry["control_mode"],
+                     previous, json.dumps(record, sort_keys=True, default=str),
+                     entry["record_sha256"]))
+                conn.commit()
+                return entry["record_sha256"]
+            finally:
+                conn.close()
+        except Exception:
+            if self.strict:
+                raise
+            return ""
+
+    def records(self, encounter_id: str | None = None) -> list[dict]:
+        """Read the chained records back (verification/audit; not release-gating)."""
+        conn = self._connect()
+        try:
+            q = ("SELECT encounter_id, kind, recorded_at, control_mode,"
+                 " previous_record_sha256, record_json, record_sha256 FROM audit_log")
+            args: tuple = ()
+            if encounter_id is not None:
+                q += " WHERE encounter_id=?"
+                args = (str(encounter_id),)
+            q += " ORDER BY seq"
+            return [{"encounter_id": r[0], "kind": r[1], "recorded_at": r[2],
+                     "control_mode": r[3], "previous_record_sha256": r[4],
+                     "record": json.loads(r[5]), "record_sha256": r[6]}
+                    for r in conn.execute(q, args).fetchall()]
+        finally:
+            conn.close()
+
+
 class JsonlAuditRepository(AuditRepository):
     """Per-encounter hash-chained JSONL artifact.
 

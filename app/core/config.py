@@ -60,6 +60,9 @@ DATA_DIR = BASE_DIR / "data"
 QDRANT_DIR = BASE_DIR / Path(os.getenv("QDRANT_PATH", "data/qdrant_store"))
 QDRANT_URL: str = os.getenv("QDRANT_URL", "")  # if set, connect to Qdrant server; else use local path
 OUTPUT_DIR = BASE_DIR / "output" / "results"
+# Phase-3 durable provenance store (SQLite): a DEDICATED database, separate from the
+# authoritative compliance.db (different lifecycle + retention). Append-only, WAL.
+PROVENANCE_DB = BASE_DIR / Path(os.getenv("PROVENANCE_DB", "output/provenance.db"))
 LOGS_DIR = BASE_DIR / "logs"
 
 ATTACHMENTS_DIR = BASE_DIR / "doctors_notes"
