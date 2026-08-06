@@ -9,7 +9,13 @@ services:
       - qdrant_data:/qdrant/storage
 
   app:
-    build: .
+    build:
+      context: .
+      # Deployed image is the lean runtime `app` stage (production deps only,
+      # no pytest). The Dockerfile `test` stage is built explicitly with
+      # `docker build --target test`; pinning target here keeps every
+      # `docker compose build`/`up --build` path on the runtime stage.
+      target: app
     depends_on:
       - qdrant
     env_file: .env

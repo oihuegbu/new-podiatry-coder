@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS app
 
 # System dependencies: poppler for pdf2image, curl for healthchecks
 RUN apt-get update && \
@@ -35,3 +35,19 @@ RUN mkdir -p output/results logs data/result_cache
 ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "run.py"]
+
+
+# --- test stage ---------------------------------------------------------------
+# The deployed image is the `app` stage above; it deliberately carries only
+# production deps (requirements.txt) and no test framework. This stage extends
+# it with the dev-only test deps (requirements-dev.txt -> pytest) so the suite
+# runs from a CLEAN, reproducible build instead of a hand-`pip install`ed pytest
+# inside a running container (which lives only in that container's writable layer
+# and vanishes on recreate). Built explicitly and never deployed:
+#     docker build --target test -t podiatry-coder-test .
+#     docker run --rm podiatry-coder-test            # -> python -m pytest -q
+# Every deploy path uses `docker compose build app` (compose pins target: app),
+# so this stage never reaches production even though it is the last stage here.
+FROM app AS test
+RUN pip install --no-cache-dir --timeout 120 --retries 5 -r requirements-dev.txt
+CMD ["python", "-m", "pytest", "-q"]
