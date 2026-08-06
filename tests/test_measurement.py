@@ -10,6 +10,21 @@ from claude_coder.data_access import MockSource
 from claude_coder.models import ResolutionMethod
 
 
+def _request(fact):
+    from claude_coder.eligibility import (ClaimComponent, ClaimLineIntent,
+                                          EligibilityState, RetrievalRequest)
+    if not fact.fact_id:
+        fact.fact_id = "fact"
+    intent = ClaimLineIntent(
+        intent_id=f"test-{fact.fact_id}", encounter_id="test",
+        component=ClaimComponent.SERVICE, clinical_event_ids=[fact.fact_id],
+        fact_kind=fact.kind.value, clinical_action=fact.description,
+        attributes=dict(fact.attributes), date_of_service=None,
+        billing_entity_id=None, source_span_ids=[],
+        state=EligibilityState.ELIGIBLE_FOR_RETRIEVAL)
+    return RetrievalRequest(intent, fact)
+
+
 # ---------------------------------------------------------------- the primitive
 def test_parse_detects_dimension_from_value_or_key():
     assert meas.parse_measurement("30 sq in").dimension == "area"
@@ -78,7 +93,7 @@ def test_same_dimension_measurement_still_eliminates():
                         disposition=Disposition.PERFORMED,
                         evidence=[EvidenceSpan("wound dressing 30 sq in applied")],
                         confidence=0.99)
-    line = resolve(fact, src)
+    line = resolve(_request(fact), src)
     assert line.method is ResolutionMethod.DETERMINISTIC and line.chosen.code == "SUP_MED"
 
 
@@ -90,7 +105,7 @@ def test_incompatible_dimension_measurement_does_not_eliminate():
                         disposition=Disposition.PERFORMED,
                         evidence=[EvidenceSpan("wound dressing applied, depth 30 mm")],
                         confidence=0.99)
-    line = resolve(fact, src)
+    line = resolve(_request(fact), src)
     assert not (line.method is ResolutionMethod.DETERMINISTIC
                 and line.chosen is not None and line.chosen.code == "SUP_MED")
 
@@ -103,7 +118,7 @@ def test_unitless_measurement_does_not_eliminate():
                         disposition=Disposition.PERFORMED,
                         evidence=[EvidenceSpan("wound dressing size 30 applied")],
                         confidence=0.99)
-    line = resolve(fact, src)
+    line = resolve(_request(fact), src)
     assert not (line.method is ResolutionMethod.DETERMINISTIC
                 and line.chosen is not None and line.chosen.code == "SUP_MED")
 
@@ -134,7 +149,7 @@ def test_length_measurement_gives_no_specificity_to_area_candidate():
                         disposition=Disposition.PERFORMED,
                         evidence=[EvidenceSpan("wound dressing applied, depth 5 mm")],
                         confidence=0.99)
-    line = resolve(fact, src)
+    line = resolve(_request(fact), src)
     assert not (line.method is ResolutionMethod.DETERMINISTIC
                 and line.chosen is not None and line.chosen.code == "AREA_C")
 
@@ -164,7 +179,7 @@ def test_single_authoritative_interval_hit_without_supporting_measurement_abstai
                         disposition=Disposition.PERFORMED,
                         evidence=[EvidenceSpan("wound dressing applied, depth 5 mm")],
                         confidence=0.99)
-    line = resolve(fact, src)
+    line = resolve(_request(fact), src)
     assert line.chosen is None                                 # not billed deterministically
     assert line.documentation_gap                              # provider query for the measurement
 
@@ -177,5 +192,65 @@ def test_supported_interval_hit_still_resolves():
                         disposition=Disposition.PERFORMED,
                         evidence=[EvidenceSpan("wound dressing 10 sq in applied")],
                         confidence=0.99)
-    line = resolve(fact, src)
+    line = resolve(_request(fact), src)
     assert line.chosen is not None and line.chosen.code == "AREA_C"
+
+
+def test_same_dimension_wrong_semantic_role_does_not_support_interval():
+    cand = CandidateCode("DEPTH_C", "hcpcs", "Dressing, depth more than 1 mm", 1.0)
+    src = MockSource(records={("DEPTH_C", "hcpcs"): {"active": True}},
+                     retrieval={("*", "hcpcs"): [cand]})
+    fact = ClinicalFact(FactKind.SUPPLY, "dressing", attributes={"width_mm": "2 mm"},
+                        disposition=Disposition.PERFORMED,
+                        evidence=[EvidenceSpan("dressing width 2 mm")], confidence=0.99)
+    line = resolve(_request(fact), src)
+    assert line.chosen is None and line.documentation_gap
+
+
+def test_verified_path_cannot_override_unsupported_interval():
+    cand = CandidateCode("AREA_C", "hcpcs", "Dressing, area more than 1 sq in", 1.0)
+    src = MockSource(records={("AREA_C", "hcpcs"): {"active": True}},
+                     retrieval={("*", "hcpcs"): [cand]})
+    fact = ClinicalFact(FactKind.SUPPLY, "dressing", attributes={"depth_mm": "2 mm"},
+                        disposition=Disposition.PERFORMED,
+                        evidence=[EvidenceSpan("dressing depth 2 mm")], confidence=0.99)
+
+    def agree(system, _user):
+        if "propose" in system.lower():
+            return '{"codes":[]}'
+        if "independently" in system.lower():
+            return '{"entailed":true,"missing_element":false,"reason":"agree"}'
+        return '{"choice":1,"reason":"agree"}'
+
+    line = resolve(_request(fact), src, llm=agree, corroborate=agree)
+    assert line.chosen is None and line.documentation_gap
+
+
+# ---- Codex F4-R1 re-review: verified path must also abstain (model agreement != support) -
+def test_unsupported_interval_not_billed_via_verified_path():
+    """Even with select + independent corroboration AGREEING, a code whose bounded interval
+    lacks a dimension-compatible documented measurement must NOT bill through the verified
+    path. The required-constraint gate applies regardless of model agreement, fact kind, or
+    candidate source. Covers both the one-model and corroborated verified paths."""
+    proc = CandidateCode("PROC_RANGE", "cpt", "excision, area 16 sq. cm. or less", 0.9)
+    src = MockSource(
+        records={("PROC_RANGE", "cpt"): {"long_description": "excision, area 16 sq. cm. or less",
+                                         "active": True}},
+        retrieval={("*", "cpt"): [proc]})
+    fact = ClinicalFact(FactKind.PROCEDURE, "excision", attributes={"depth_mm": 5},
+                        disposition=Disposition.PERFORMED, fact_id="fx",
+                        evidence=[EvidenceSpan("excision performed, depth 5 mm")],
+                        confidence=0.99)
+
+    def agree(system, user):
+        sl = system.lower()
+        if "propose" in sl:
+            return '{"codes": []}'
+        if "independently" in sl:
+            return '{"entailed": true, "missing_element": false, "reason": "x"}'
+        return '{"choice": 1, "reason": "x"}'
+
+    corroborated = resolve(_request(fact), src, llm=agree, corroborate=agree)
+    assert corroborated.chosen is None and corroborated.documentation_gap
+    one_model = resolve(_request(fact), src, llm=agree)
+    assert one_model.chosen is None and one_model.documentation_gap

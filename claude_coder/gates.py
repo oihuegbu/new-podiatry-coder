@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 
 from .data_access import AUTHORITY_UNAVAILABLE, CodeSource
-from .models import CodingResult, GateResult, Outcome, ResolvedLine
+from .models import CodingResult, FactKind, GateResult, Outcome, ResolvedLine
 
 
 def _norm(s: str) -> str:
@@ -199,32 +199,34 @@ def icd_excludes_gate(result: CodingResult, source: CodeSource) -> GateResult:
 
 
 def claim_ownership_gate(result: CodingResult) -> GateResult:
-    """Tri-state claim ownership: a billed line is BLOCKED only when the documentation
-    attributes it to a DIFFERENT actor than the billing entity (performer id != billing
-    id). Unstated ownership is non-blocking (assumed billing provider) so notes that do
-    not spell out their billing entity are not self-DoS'd. Decisions use actor IDs, never
-    names."""
+    """Tri-state claim ownership over structured actor and organization identities."""
     from .ownership import fact_ownership, classify_ownership
     blocked: list[str] = []
     unstated = 0
     for ln in result.billable_lines:
+        if ln.fact.kind is FactKind.DIAGNOSIS:
+            continue
         o = fact_ownership(ln.fact)
-        st = classify_ownership(o.performer_id, o.billing_entity_id)
+        st = classify_ownership(o.performer_id, o.billing_entity_id,
+                                o.organization_id, o.performer_function)
         if st is Outcome.BLOCKED:
             blocked.append(ln.chosen.code if ln.chosen else ln.fact.description)
         elif st is Outcome.UNKNOWN:
             unstated += 1
-    if not result.billable_lines:
+    owned_lines = [ln for ln in result.billable_lines if ln.fact.kind is not FactKind.DIAGNOSIS]
+    if not owned_lines:
         return GateResult("claim_ownership", Outcome.NOT_APPLICABLE, "no billable lines",
                           "ownership")
     if blocked:
         return GateResult("claim_ownership", Outcome.BLOCKED,
                           f"billed by an entity that did not perform the service: {blocked}",
                           "ownership")
+    if unstated:
+        return GateResult("claim_ownership", Outcome.UNKNOWN,
+                          f"ownership unresolved for {unstated} billed line(s)",
+                          "ownership", retryable=True)
     return GateResult("claim_ownership", Outcome.PASS,
-                      f"no contrary ownership evidence"
-                      + (f" ({unstated} unstated -> assumed billing provider)"
-                         if unstated else ""),
+                      "all billed services are owned by the billing entity",
                       "ownership")
 
 

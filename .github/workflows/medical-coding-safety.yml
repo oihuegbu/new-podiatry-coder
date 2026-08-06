@@ -19,6 +19,10 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install -r requirements-dev.txt
+      - name: Prepare required authoritative NCCI snapshot
+        run: >-
+          python tools/refresh_authoritative_data.py
+          ncci_ptp --no-integrate
       - run: python -m compileall -q app claude_coder tests tools
       - run: python tests/check_no_hardcoding.py
       - run: python tests/check_rule_coverage.py

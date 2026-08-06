@@ -1,11 +1,8 @@
 """Claim ownership — is the billing entity the one that actually performed the service?
 
-Tri-state and fail-safe: a billed service is BLOCKED only when there is POSITIVE evidence
-that a DIFFERENT actor performed it (performer id != billing-entity id). When ownership is
-simply unstated — the common case, since most notes imply the biller from the signing
-provider — the result is UNRESOLVED, which the gate treats as non-blocking (assumed
-billing provider). This avoids self-DoS'ing every note that does not spell out its billing
-entity, while still blocking a service the documentation attributes to someone else.
+Tri-state and fail-closed: unknown identity is UNKNOWN and cannot authorize retrieval.
+Person-to-organization claims pass only with an explicit organization association and
+performer function; a person id is never compared as though it were an organization id.
 
 Decisions rest on resolved ACTOR IDENTIFIERS, never on name-string equality (which would
 false-block the same person written two ways). Phase 1 populates actor ids via entity
@@ -29,14 +26,23 @@ class Ownership:
     performer_name: str | None = None          # display only, never used for the decision
 
 
-def classify_ownership(performer_id: str | None,
-                       billing_entity_id: str | None) -> Outcome:
-    """PASS when the billing entity performed the service; BLOCKED when a DIFFERENT actor
-    did (positive contrary evidence); UNKNOWN when either identity is unstated (never
-    blocks — the gate assumes the billing provider)."""
+def classify_ownership(performer_id: str | None, billing_entity_id: str | None,
+                       organization_id: str | None = None,
+                       performer_function: str | None = None) -> Outcome:
+    """Resolve claim ownership without name matching or implicit identity assumptions.
+
+    A self-billing individual passes by id equality. A practitioner billing on behalf of
+    an organization passes when the structured actor record explicitly binds the
+    performer to that organization and records the function performed. Missing identity
+    remains UNKNOWN; positive mismatch is BLOCKED.
+    """
     if not performer_id or not billing_entity_id:
         return Outcome.UNKNOWN
-    return Outcome.PASS if str(performer_id) == str(billing_entity_id) else Outcome.BLOCKED
+    if str(performer_id) == str(billing_entity_id):
+        return Outcome.PASS
+    if organization_id and performer_function and str(organization_id) == str(billing_entity_id):
+        return Outcome.PASS
+    return Outcome.BLOCKED
 
 
 def fact_ownership(fact) -> Ownership:

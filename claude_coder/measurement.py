@@ -163,3 +163,23 @@ def measurement_for_dimension(attributes: dict, dimension: str):
     deterministic comparison."""
     matches = [m for m in measurements_of(attributes) if m.dimension == dimension]
     return matches[0] if len(matches) == 1 else None
+
+
+def measurement_for_constraint(attributes: dict, dimension: str,
+                               semantic_role: str | None):
+    """The unique measurement matching BOTH physical dimension and semantic role.
+
+    A width is not a depth merely because both are lengths. Descriptor or fact role
+    ambiguity returns None and therefore cannot drive deterministic/verified selection.
+    """
+    role = str(semantic_role or "").strip().lower()
+    if not role:
+        return None
+    matches = []
+    for m in measurements_of(attributes):
+        source = str(m.source_attribute or m.semantic_role or "").lower()
+        words = re.findall(r"[a-z]+", source)
+        fact_role = next((w for w in words if w in _DIM_WORDS or w in ("size", "height")), None)
+        if m.dimension == dimension and fact_role == role:
+            matches.append(m)
+    return matches[0] if len(matches) == 1 else None

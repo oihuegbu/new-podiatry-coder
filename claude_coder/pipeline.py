@@ -30,8 +30,12 @@ def code_encounter(
     verify_llm: LLMFn | None = None,
     corroborate_llm: LLMFn | None = None,
     modifier_engine: "ModifierEngine | None" = None,
+    billing_context: dict | None = None,
+    audit_repository=None,
+    document_version: str | None = None,
+    model_profiles: dict | None = None,
 ) -> CodingResult:
-    from .models import Outcome
+    from .models import GateResult, Outcome
     from .modifiers import ModifierEngine
     source = source or AuthoritativeSource()
     modifier_engine = modifier_engine or ModifierEngine()
@@ -47,58 +51,99 @@ def code_encounter(
         verify_llm = default_verify_llm
         if corroborate_llm is None:
             corroborate_llm = default_corroborate_llm
+    profiles = model_profiles or _model_profile_identity(
+        extract_llm, verify_llm, corroborate_llm)
 
     from .models import FactKind
-    facts = extraction.extract_facts(note_text, extract_llm)
-    # Phase-0 (SHADOW): anchor every evidence quote to a verified source offset+hash and
-    # record a shadow audit artifact. Fail-safe — anchoring only adds offsets to spans
-    # (billing/gates read span text, unchanged) and a write failure must not affect
-    # release. Retrieval still consumes ClinicalFacts today; ClaimLineIntent is Phase 1.
-    _elig_state: dict = {}
+    # Enforced evidence/service graph. Any extraction, anchoring, graph-integrity,
+    # eligibility, or durable-audit failure stops before the first retrieval call.
     try:
         from . import provenance as _prov
-        _prov.anchor_facts(note_text, facts)
-        from app.core.config import OUTPUT_DIR
-        _repo = _prov.JsonlAuditRepository(OUTPUT_DIR / "audit")
-        _repo.append(encounter_id, "evidence_anchoring", _prov.anchoring_report(facts))
-        # Phase-1a (SHADOW): run the code-free eligibility engine and record which events
-        # WOULD become claim-line intents vs are non-claim/held -- for audit + diffing
-        # against today's performed==billable behavior. Relations are empty until Phase 2,
-        # so nothing is demoted yet; this establishes the seam, not a release change.
         from . import eligibility as _elig
-        _intents = _elig.evaluate(facts, [], encounter_id, date_of_service)
-        _repo.append(encounter_id, "eligibility_shadow", _elig.summary(_intents))
-        _repo.append(encounter_id, "eligibility_diff", _elig.shadow_diff(facts, _intents))
-        _elig_state = {e: it for it in _intents for e in it.clinical_event_ids}
-    except Exception:
-        _elig_state = {}
+        extracted = extraction.extract_note(note_text, extract_llm, billing_context)
+        facts = extracted.facts
+        _prov.anchor_facts(note_text, facts, document_version=document_version)
+        relations = _prov.bind_relation_evidence(extracted.relations, facts)
+        relations = _prov.validate_relations(relations, facts)
+        if audit_repository is None:
+            from app.core.config import OUTPUT_DIR
+            audit_repository = _prov.JsonlAuditRepository(OUTPUT_DIR / "audit", strict=True)
+        audit_hashes = [audit_repository.append(
+            encounter_id, "evidence_anchoring", _prov.anchoring_report(facts))]
+        audit_hashes.append(audit_repository.append(encounter_id, "relation_graph", {
+            "schema_version": extracted.schema_version,
+            "relations": [{"relation_id": r.relation_id,
+                           "subject_event_id": r.subject_event_id,
+                           "predicate": r.predicate.value,
+                           "object_event_id": r.object_event_id,
+                           "state": r.state.value,
+                           "evidence_span_ids": r.evidence_span_ids,
+                           "confidence": r.confidence} for r in relations],
+        }))
+        intents = _elig.evaluate(facts, relations, encounter_id, date_of_service)
+        audit_hashes.append(audit_repository.append(encounter_id, "eligibility_enforced", {
+            "control_mode": "ENFORCED_FAIL_CLOSED",
+            "model_profiles": profiles,
+            "summary": _elig.summary(intents),
+            "diff": _elig.shadow_diff(facts, intents),
+        }))
+    except Exception as exc:
+        return _system_hold_result(encounter_id, date_of_service,
+                                   "pre_retrieval_integrity", exc, source)
 
-    # Phase 1c: retrieval consumes the eligibility decision. A billable event only reaches
-    # code retrieval via an ELIGIBLE ClaimLineIntent; one explicitly demoted as an integral
-    # component (NON_CLAIM_EVIDENCE) is diverted BEFORE retrieval -- a performed event is not
-    # automatically searched for a code. ENABLED ONE GATE AT A TIME: only the part_of gate
-    # diverts for now (a billable fact turns NON_CLAIM only via an explicit PART_OF -- an
-    # occurrence-based NON_CLAIM is already non-billable). Evidence/ownership/conflict stay
-    # SHADOW until validated on more notes. Relations are empty until Phase 2, so the divert
-    # set is currently empty (shadow-diff verified zero divergence) -- behavior-identical now.
+    # Hard capability boundary: only the canonical event of an ELIGIBLE intent can
+    # construct a RetrievalRequest. Holds, non-claim evidence, missing intents and
+    # merged mentions are accounted for without invoking any retrieval implementation.
     from .eligibility import EligibilityState as _ES
+    from .eligibility import RetrievalRequest
+    _elig_state = {e: it for it in intents for e in it.clinical_event_ids}
+    pre_retrieval_gates = []
     lines = []
     for fact in facts:
         _it = _elig_state.get(fact.fact_id)
-        if fact.kind is FactKind.EM:
-            line = em.resolve_em(fact, source)      # MDM-driven leveling
-        elif (fact.billable and _it is not None
-              and _it.state is _ES.NON_CLAIM_EVIDENCE):
+        if _it is None:
+            line = ResolvedLine(
+                fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
+                rationale="missing ClaimLineIntent — retrieval prohibited",
+                excluded_reason="pre-retrieval integrity hold")
+            pre_retrieval_gates.append(GateResult(
+                f"eligibility_intent:{fact.fact_id}", Outcome.UNKNOWN,
+                "no eligibility intent was produced for the extracted event",
+                "eligibility-before-retrieval", retryable=True))
+        elif _it.state is not _ES.ELIGIBLE_FOR_RETRIEVAL:
             _r = "; ".join(f"{d.gate}: {d.detail}" for d in _it.decisions
                            if d.outcome is not Outcome.PASS) or _it.state.value
             line = ResolvedLine(
                 fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
-                rationale=f"diverted before retrieval — documented integral component, "
-                          f"not an independent claim line ({_r})")
+                rationale=f"diverted before retrieval ({_it.state.value}: {_r})",
+                excluded_reason=f"eligibility state {_it.state.value}")
+            if _it.state is _ES.AUTO_HOLD:
+                actor_unknown = any(d.gate == "actor_ownership"
+                                    and d.outcome is Outcome.UNKNOWN for d in _it.decisions)
+                hard_integrity = any(
+                    d.outcome is Outcome.BLOCKED
+                    and d.gate in ("evidence_required", "actor_ownership")
+                    for d in _it.decisions)
+                pre_retrieval_gates.append(GateResult(
+                    f"eligibility_hold:{fact.fact_id}",
+                    Outcome.BLOCKED if hard_integrity else Outcome.UNKNOWN, _r,
+                    "eligibility-before-retrieval", retryable=actor_unknown))
+        elif fact.fact_id != _it.clinical_event_ids[0]:
+            line = ResolvedLine(
+                fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
+                rationale=f"merged into eligible intent {_it.intent_id}; no duplicate retrieval",
+                excluded_reason="duplicate mention represented by canonical claim-line intent")
         else:
-            line = resolution.resolve(fact, source, llm=verify_llm,
-                                      corroborate=corroborate_llm,
-                                      dos=date_of_service)
+            try:
+                if fact.kind is FactKind.EM:
+                    line = em.resolve_em(RetrievalRequest(_it, fact), source)
+                else:
+                    line = resolution.resolve(
+                        RetrievalRequest(_it, fact), source, llm=verify_llm,
+                        corroborate=corroborate_llm, dos=date_of_service)
+            except Exception as exc:
+                return _system_hold_result(encounter_id, date_of_service,
+                                           f"retrieval_execution:{fact.fact_id}", exc, source)
         # A fact that went through propose-then-verify is already resolved-or-
         # escalated on authoritative entailment; don't second-guess it with the
         # weaker arbitration fallback. (Diagnoses verify too when they reach the
@@ -168,6 +213,9 @@ def code_encounter(
         encounter_id=encounter_id,
         date_of_service=date_of_service,
         lines=lines,
+        claim_line_intents=intents,
+        relations=relations,
+        audit_record_hashes=audit_hashes,
     )
     # Mechanic 4 — collapse duplicate resolved codes into one line before anything
     # downstream reasons about the claim as a set.
@@ -186,7 +234,7 @@ def code_encounter(
     apply_integral_bundling(result, source)
 
     apply_global_package(result, source)
-    result.gates = gates.run_gates(result, note_text, source)
+    result.gates = pre_retrieval_gates + gates.run_gates(result, note_text, source)
     decide(result, source=source)
     # Actionable documentation guidance for whatever could not be coded confidently.
     from . import recommendations as _recs
@@ -199,10 +247,68 @@ def code_encounter(
         fingerprint = source.data_fingerprint()
     except Exception:
         fingerprint = {}
-    result.certificate = certificate.build_certificate(
-        result, note_text,
-        source_identity={"source": type(source).__name__, "data": fingerprint})
+    try:
+        result.audit_record_hashes.append(audit_repository.append(
+            encounter_id, "release_decision", {
+                "verdict": result.verdict.value,
+                "destination": result.destination.value if result.destination else None,
+                "billable_event_ids": [ln.fact.fact_id for ln in result.billable_lines],
+                "gate_outcomes": [{"name": g.name, "outcome": g.outcome.value}
+                                  for g in result.gates],
+            }))
+        result.certificate = certificate.build_certificate(
+            result, note_text,
+            source_identity={"source": type(source).__name__, "data": fingerprint,
+                             "models": profiles,
+                             "extraction_schema": extracted.schema_version})
+    except Exception as exc:
+        result.gates.append(GateResult(
+            "release_evidence_persistence", Outcome.UNKNOWN,
+            f"release evidence could not be persisted: {type(exc).__name__}",
+            "audit/certificate integrity", retryable=True))
+        decide(result, source=source)
+        result.certificate = None
     return result
+
+
+def _system_hold_result(encounter_id: str, date_of_service: str | None,
+                        stage: str, exc: Exception, source) -> CodingResult:
+    """Typed fail-closed result for any pre-retrieval operational/integrity failure."""
+    from .models import GateResult, Outcome
+    result = CodingResult(encounter_id=encounter_id, date_of_service=date_of_service)
+    result.gates = [GateResult(stage, Outcome.UNKNOWN,
+                               f"{stage} failed ({type(exc).__name__})",
+                               "enforced pipeline boundary", retryable=True)]
+    decide(result, source=source)
+    return result
+
+
+def _model_profile_identity(extract_llm, verify_llm, corroborate_llm) -> dict:
+    """Auditable provider/profile identity; no credential values are ever included."""
+    def callable_name(fn):
+        return None if fn is None else f"{getattr(fn, '__module__', '')}.{getattr(fn, '__qualname__', type(fn).__name__)}"
+
+    profiles = {
+        "extraction": {"callable": callable_name(extract_llm)},
+        "verification": {"callable": callable_name(verify_llm)},
+        "corroboration": {"callable": callable_name(corroborate_llm)},
+    }
+    try:
+        from app.core import config
+        profiles["extraction"].update({"provider": config.LLM_PROVIDER,
+                                       "model": (config.CLAUDE_MODEL if config.LLM_PROVIDER == "claude"
+                                                 else config.OPENAI_MODEL)})
+        profiles["verification"].update({"provider": "openai", "model": config.OPENAI_MODEL})
+        profiles["corroboration"].update({
+            "provider": "claude",
+            "model": config.CLAUDE_VERIFY_MODEL or config.CLAUDE_MODEL,
+            "effort": config.CLAUDE_VERIFY_EFFORT or config.CLAUDE_EFFORT})
+    except Exception:
+        profiles["identity_status"] = "configuration_unavailable"
+    profiles["independent_providers"] = (
+        profiles["verification"].get("provider") !=
+        profiles["corroboration"].get("provider"))
+    return profiles
 
 
 def _attach_recommendations(result: CodingResult) -> None:

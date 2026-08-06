@@ -65,6 +65,80 @@ class TestFailClosedRelease(unittest.TestCase):
         self.assertFalse(report["unanimous"])
         self.assertFalse(report["input_consistent"])
 
+    def test_hcpcs_noncoverage_reason_preserves_statutory_authority(self):
+        store = ComplianceDataStore()
+        store._conn = sqlite3.connect(":memory:")
+        store.conn.execute(
+            "CREATE TABLE hcpcs_coverage ("
+            "code TEXT PRIMARY KEY, coverage_code TEXT NOT NULL, statute TEXT)"
+        )
+        store.conn.execute(
+            "INSERT INTO hcpcs_coverage VALUES (?,?,?)",
+            ("SYNTHETIC", "S", "CMS statutory source"),
+        )
+        reason = store.hcpcs_noncoverage_reason("SYNTHETIC")
+        self.assertIn("non-covered by Medicare statute", reason)
+        self.assertIn("statutory authority: CMS statutory source", reason)
+
+    def test_hcpcs_statute_migration_is_additive_and_reingests(self):
+        store = ComplianceDataStore()
+        store._conn = sqlite3.connect(":memory:")
+        store.conn.executescript(
+            """
+            CREATE TABLE code_set (code_system TEXT);
+            INSERT INTO code_set VALUES ('HCPCS');
+            CREATE TABLE hcpcs_coverage (
+                code TEXT PRIMARY KEY,
+                coverage_code TEXT NOT NULL
+            );
+            INSERT INTO hcpcs_coverage VALUES ('SYNTHETIC', 'S');
+            """
+        )
+        with patch.object(store, "_ingest_hcpcs") as ingest:
+            self.assertTrue(store._ensure_hcpcs_coverage_schema())
+        columns = {
+            row[1] for row in store.conn.execute(
+                "PRAGMA table_info(hcpcs_coverage)"
+            )
+        }
+        self.assertIn("statute", columns)
+        self.assertEqual(
+            store.conn.execute("SELECT COUNT(*) FROM hcpcs_coverage").fetchone()[0],
+            0,
+        )
+        ingest.assert_called_once_with()
+        self.assertFalse(store._ensure_hcpcs_coverage_schema())
+
+    def test_hcpcs_statute_migration_rolls_back_on_reingest_failure(self):
+        store = ComplianceDataStore()
+        store._conn = sqlite3.connect(":memory:")
+        store.conn.executescript(
+            """
+            CREATE TABLE code_set (code_system TEXT);
+            INSERT INTO code_set VALUES ('HCPCS');
+            CREATE TABLE hcpcs_coverage (
+                code TEXT PRIMARY KEY,
+                coverage_code TEXT NOT NULL
+            );
+            INSERT INTO hcpcs_coverage VALUES ('SYNTHETIC', 'S');
+            """
+        )
+        with patch.object(
+                store, "_ingest_hcpcs",
+                side_effect=RuntimeError("simulated source read failure")):
+            with self.assertRaisesRegex(RuntimeError, "source read failure"):
+                store._ensure_hcpcs_coverage_schema()
+        columns = {
+            row[1] for row in store.conn.execute(
+                "PRAGMA table_info(hcpcs_coverage)"
+            )
+        }
+        self.assertNotIn("statute", columns)
+        self.assertEqual(
+            store.conn.execute("SELECT COUNT(*) FROM hcpcs_coverage").fetchone()[0],
+            1,
+        )
+
     def test_structural_code_classes_come_from_edition_bound_authority(self):
         store = ComplianceDataStore()
         store.build_or_load()

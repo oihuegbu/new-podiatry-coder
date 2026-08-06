@@ -68,6 +68,7 @@ MANIFEST: dict[str, dict[str, dict]] = {
         "betos":             {"waived": "BETOS/RBCS analytics classification — no billing rule"},
         "action_code":       {"waived": "lifecycle change marker; discontinuation is already "
                                         "captured via effective_to ingestion"},
+        "statute":           {"consumer": "hcpcs_noncoverage_reason"},
         "metadata":          {"waived": "provenance"},
     },
     "codes/icd10cm_codes.json []": {
@@ -114,19 +115,16 @@ MANIFEST: dict[str, dict[str, dict]] = {
         "code":           {"consumer": "_ingest_mue"},
         "mue_value":      {"consumer": "_ingest_mue"},
         "effective_date": {"consumer": "_ingest_mue"},
+        "end_date":       {"consumer": "_ingest_mue"},
         "description":    {"consumer": "_ingest_mue"},  # carries the MAI digit
         "source_file":    {"waived": "provenance"},
     },
     "codes/ncci_data.json []": {
         "code1":          {"consumer": "_ingest_ncci"},
         "code2":          {"consumer": "_ingest_ncci"},
-        "edit_type":      {"waived": "constant 'ptp' tag for this file"},
         "effective_date": {"consumer": "_ingest_ncci"},
         "end_date":       {"consumer": "_ingest_ncci"},
         "modifier":       {"consumer": "_ingest_ncci"},
-        "description":    {"waived": "human-readable restatement of the modifier indicator"},
-        "metadata":       {"waived": "provenance"},
-        "source_file":    {"waived": "provenance"},
     },
     "codes/ncci_aoc_edits.json []": {
         "code1":          {"consumer": "_ingest_ncci_aoc"},

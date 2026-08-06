@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,23 +50,67 @@ def anchor_offsets(note_text: str, exact_text: str) -> tuple[int, int] | None:
     return i, j
 
 
-def anchor_span(note_text: str, span: EvidenceSpan) -> EvidenceSpan:
+def _span_id(document_sha256: str, document_version: str, span: EvidenceSpan,
+             start: int, end: int) -> str:
+    raw = "|".join((document_sha256, document_version, str(start), str(end),
+                    _sha(span.text), str(span.section or ""), str(span.page or "")))
+    return _sha(raw)
+
+
+def anchor_span(note_text: str, span: EvidenceSpan, *, start_hint: int | None = None,
+                document_version: str | None = None) -> EvidenceSpan:
     """Return a copy of `span` carrying its verified offsets + content hash, or an
     UNANCHORED copy (anchored=False) when the quote is not verbatim in the source."""
-    pos = anchor_offsets(note_text, span.text)
+    doc_hash = _sha(note_text)
+    version = str(document_version or doc_hash)
+    hint = span.start if start_hint is None else start_hint
+    pos = None
+    if isinstance(hint, int) and hint >= 0:
+        end = hint + len(span.text)
+        if note_text[hint:end] == span.text:
+            pos = (hint, end)
+    if pos is None:
+        pos = anchor_offsets(note_text, span.text)
     if pos is None:
         return replace(span, start=None, end=None,
-                       text_sha256=_sha(span.text), anchored=False)
+                       text_sha256=_sha(span.text), anchored=False,
+                       document_sha256=doc_hash, document_version=version, span_id=None)
     i, j = pos
-    return replace(span, start=i, end=j, text_sha256=_sha(span.text), anchored=True)
+    return replace(span, start=i, end=j, text_sha256=_sha(span.text), anchored=True,
+                   document_sha256=doc_hash, document_version=version,
+                   span_id=_span_id(doc_hash, version, span, i, j))
 
 
-def anchor_facts(note_text: str, facts: list) -> list:
+def anchor_facts(note_text: str, facts: list, document_version: str | None = None) -> list:
     """Anchor every fact's evidence spans IN PLACE (facts are mutable; spans are frozen,
     so each span is replaced with an anchored copy). Transparent to billing — only adds
-    offsets/hash; the span text is unchanged."""
+    offsets/hash; the span text is unchanged. Repeated quotations are assigned
+    successive exact occurrences when available, while an extractor-supplied offset
+    is accepted only after exact slice verification."""
+    occurrences: dict[str, list[int]] = {}
+    used: dict[str, int] = {}
     for f in facts:
-        f.evidence = [anchor_span(note_text, s) for s in (f.evidence or [])]
+        anchored = []
+        for s in (f.evidence or []):
+            hint = s.start
+            if hint is None and s.text:
+                if s.text not in occurrences:
+                    positions, start = [], 0
+                    while True:
+                        pos = note_text.find(s.text, start)
+                        if pos < 0:
+                            break
+                        positions.append(pos)
+                        start = pos + max(1, len(s.text))
+                    occurrences[s.text] = positions
+                idx = used.get(s.text, 0)
+                positions = occurrences[s.text]
+                if idx < len(positions):
+                    hint = positions[idx]
+                    used[s.text] = idx + 1
+            anchored.append(anchor_span(note_text, s, start_hint=hint,
+                                        document_version=document_version))
+        f.evidence = anchored
     return facts
 
 
@@ -117,40 +162,119 @@ def merge_relations(relations: list[RelationAssertion]) -> list[RelationAssertio
     return list(by_id.values())
 
 
+class RelationIntegrityError(ValueError):
+    """A relation graph cannot safely drive eligibility."""
+
+
+_SYMMETRIC = {"separate_from", "same_episode_as"}
+
+
+def bind_relation_evidence(relations: list[RelationAssertion], facts: list) -> list[RelationAssertion]:
+    """Resolve extractor event references to verified location-specific span ids."""
+    by_event = {f.fact_id: [s.span_id for s in (f.evidence or []) if s.anchored and s.span_id]
+                for f in facts}
+    bound = []
+    for rel in relations or []:
+        span_ids: list[str] = []
+        for ref in rel.evidence_span_ids or []:
+            if str(ref).startswith("event:"):
+                span_ids.extend(by_event.get(str(ref).split(":", 1)[1], []))
+            else:
+                span_ids.append(str(ref))
+        bound.append(replace(rel, evidence_span_ids=list(dict.fromkeys(span_ids))))
+    return bound
+
+
+def validate_relations(relations: list[RelationAssertion], facts: list) -> list[RelationAssertion]:
+    """Validate graph identity before a relation can suppress or separate an event.
+
+    Invalid input fails closed rather than being silently dropped, because dropping a
+    malformed edge can turn an unknown relationship into an apparently eligible line.
+    """
+    event_ids = {f.fact_id for f in facts if f.fact_id}
+    span_ids = {s.span_id for f in facts for s in (f.evidence or []) if s.span_id}
+    normalized: list[RelationAssertion] = []
+    for rel in relations or []:
+        if rel.subject_event_id not in event_ids or rel.object_event_id not in event_ids:
+            raise RelationIntegrityError(
+                f"relation {rel.relation_id} references an unknown clinical event")
+        pred = rel.predicate.value if hasattr(rel.predicate, "value") else str(rel.predicate)
+        if rel.subject_event_id == rel.object_event_id:
+            raise RelationIntegrityError(f"relation {rel.relation_id} is self-referential")
+        if not 0.0 <= float(rel.confidence) <= 1.0:
+            raise RelationIntegrityError(f"relation {rel.relation_id} has invalid confidence")
+        if not rel.evidence_span_ids:
+            raise RelationIntegrityError(f"relation {rel.relation_id} has no anchored evidence")
+        if set(rel.evidence_span_ids or []) - span_ids:
+            raise RelationIntegrityError(
+                f"relation {rel.relation_id} references unverified evidence spans")
+        current = rel
+        if pred in _SYMMETRIC and rel.subject_event_id > rel.object_event_id:
+            current = replace(rel, subject_event_id=rel.object_event_id,
+                              object_event_id=rel.subject_event_id)
+        normalized.append(current)
+    return merge_relations(normalized)
+
+
 # ---------------------------------------------------- append-only repository seam
 class AuditRepository:
     """Append-only shadow audit sink. Phase 3 replaces the implementation with a durable
     store (PostgreSQL) behind THIS interface, so Phase-0 callers never change."""
 
-    def append(self, encounter_id: str, kind: str, record: dict) -> None:  # pragma: no cover
+    def append(self, encounter_id: str, kind: str, record: dict) -> str:  # pragma: no cover
         raise NotImplementedError
 
 
 class NullAuditRepository(AuditRepository):
     """Default no-op sink (tests / environments without a writable output dir)."""
 
-    def append(self, encounter_id: str, kind: str, record: dict) -> None:
-        return None
+    def append(self, encounter_id: str, kind: str, record: dict) -> str:
+        payload = {"encounter_id": encounter_id, "kind": kind, "record": record}
+        return _sha(json.dumps(payload, sort_keys=True, default=str))
 
 
 class JsonlAuditRepository(AuditRepository):
-    """Per-encounter append-only JSONL artifact. Never raises into the caller — a
-    shadow write failure must not affect release."""
+    """Per-encounter hash-chained JSONL artifact.
 
-    def __init__(self, root) -> None:
+    Enforced callers require a successful durable append before release. A failure
+    raises and the pipeline routes SYSTEM_HOLD; there is no empty-success fallback.
+    """
+
+    def __init__(self, root, *, strict: bool = True) -> None:
         self.root = Path(root)
+        self.strict = strict
 
-    def append(self, encounter_id: str, kind: str, record: dict) -> None:
+    def append(self, encounter_id: str, kind: str, record: dict) -> str:
         try:
             self.root.mkdir(parents=True, exist_ok=True)
             safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(encounter_id))
-            line = json.dumps({
+            path = self.root / f"{safe}.jsonl"
+            previous = ""
+            if path.exists() and path.stat().st_size:
+                with open(path, encoding="utf-8") as prior:
+                    tail = [line for line in prior.read().splitlines() if line.strip()]
+                if not tail:
+                    raise OSError("audit chain has no readable final record")
+                last = json.loads(tail[-1])
+                # One-time deterministic bridge from pre-chain shadow records.
+                previous = str(last.get("record_sha256") or
+                               _sha(json.dumps(last, sort_keys=True, default=str)))
+            entry = {
                 "encounter_id": encounter_id,
                 "kind": kind,
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "control_mode": "ENFORCED_FAIL_CLOSED",
+                "previous_record_sha256": previous,
                 "record": record,
-            }, default=str)
-            with open(self.root / f"{safe}.jsonl", "a") as fh:
+            }
+            entry["record_sha256"] = _sha(json.dumps(entry, sort_keys=True, default=str))
+            line = json.dumps(entry, sort_keys=True, default=str)
+            with open(path, "a") as fh:
                 fh.write(line + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            return entry["record_sha256"]
         except Exception:
-            return None
+            if self.strict:
+                raise
+            return ""

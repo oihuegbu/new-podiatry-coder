@@ -380,6 +380,32 @@ class ComplianceDataStore:
                 self._record_seed_provenance(src)
         self.conn.commit()
 
+    def _ensure_hcpcs_coverage_schema(self) -> bool:
+        """Migrate HCPCS coverage provenance without rebuilding unrelated data."""
+        columns = {
+            row[1] for row in self.conn.execute(
+                "PRAGMA table_info(hcpcs_coverage)"
+            )
+        }
+        if "statute" in columns:
+            return False
+        self.conn.execute("SAVEPOINT hcpcs_statute_migration")
+        try:
+            self.conn.execute(
+                "ALTER TABLE hcpcs_coverage ADD COLUMN statute TEXT"
+            )
+            self.conn.execute(
+                "DELETE FROM code_set WHERE code_system='HCPCS'"
+            )
+            self.conn.execute("DELETE FROM hcpcs_coverage")
+            self._ingest_hcpcs()
+            self.conn.execute("RELEASE SAVEPOINT hcpcs_statute_migration")
+        except Exception:
+            self.conn.execute("ROLLBACK TO SAVEPOINT hcpcs_statute_migration")
+            self.conn.execute("RELEASE SAVEPOINT hcpcs_statute_migration")
+            raise
+        return True
+
     def _ensure_migrations(self) -> None:
         """Idempotent additive migrations for DBs built by an earlier version."""
         self.conn.executescript(
@@ -455,7 +481,8 @@ class ComplianceDataStore:
             );
             CREATE TABLE IF NOT EXISTS hcpcs_coverage (
                 code TEXT NOT NULL PRIMARY KEY,
-                coverage_code TEXT NOT NULL
+                coverage_code TEXT NOT NULL,
+                statute TEXT
             );
             CREATE TABLE IF NOT EXISTS icd10_chronic (
                 code    TEXT NOT NULL PRIMARY KEY,
@@ -464,6 +491,7 @@ class ComplianceDataStore:
             """
         )
         self.conn.commit()
+        self._ensure_hcpcs_coverage_schema()
 
         # modifier.systems: added when CPT-vs-HCPCS applicability was sourced
         # from AMA/CMS data instead of being unavailable. Re-ingest on upgrade
@@ -1084,7 +1112,8 @@ class ComplianceDataStore:
             -- status can't see (most HCPCS II codes aren't on the PFS).
             CREATE TABLE hcpcs_coverage (
                 code TEXT NOT NULL PRIMARY KEY,
-                coverage_code TEXT NOT NULL
+                coverage_code TEXT NOT NULL,
+                statute TEXT
             );
 
             -- AHRQ HCUP Chronic Condition Indicator Refined (CCIR): per
@@ -1153,7 +1182,7 @@ class ComplianceDataStore:
     def _ingest_hcpcs(self) -> None:
         with open(HCPCS_FILE) as f:
             data = json.load(f)
-        rows, cov_rows, skipped, seen = [], [], 0, set()
+        rows, coverage_rows, skipped, seen = [], [], 0, set()
         for e in data:
             raw = (e.get("code", "") or "").strip().upper()
             # HCPCS file is dirty (fixed-width artifacts) — extract the clean leading token
@@ -1166,8 +1195,9 @@ class ComplianceDataStore:
                 continue
             seen.add(code)
             cov = str(e.get("coverage_code") or "").strip().upper()
-            if cov:
-                cov_rows.append((code, cov))
+            statute = " ".join(str(e.get("statute") or "").split()) or None
+            if cov or statute:
+                coverage_rows.append((code, cov, statute))
             desc = (e.get("short_description") or "").strip()
             # add_date (not effective_from) is the real introduction date —
             # verified: effective_from shifts on every quarterly pricing/
@@ -1191,10 +1221,12 @@ class ComplianceDataStore:
             ))
         self.conn.executemany("INSERT INTO code_set VALUES (?,?,?,?,?,?)", rows)
         self.conn.executemany(
-            "INSERT OR REPLACE INTO hcpcs_coverage VALUES (?,?)", cov_rows
+            "INSERT OR REPLACE INTO hcpcs_coverage "
+            "(code, coverage_code, statute) VALUES (?,?,?)",
+            coverage_rows,
         )
         logger.info(f"  code_set[HCPCS]: {len(rows)} unique codes ({skipped} dirty rows "
-                    f"skipped, {len(cov_rows)} coverage codes)")
+                    f"skipped, {len(coverage_rows)} coverage records)")
 
     def _ingest_ncci(self) -> None:
         # A refresh can move the authoritative release quarter. Invalidate
@@ -2288,7 +2320,8 @@ class ComplianceDataStore:
         (non-covered by statute). None for covered/carrier-judgment codes
         (C/D) or codes not in the HCPCS file."""
         row = self.conn.execute(
-            "SELECT coverage_code FROM hcpcs_coverage WHERE code=?", (_norm(code),)
+            "SELECT coverage_code, statute FROM hcpcs_coverage WHERE code=?",
+            (_norm(code),),
         ).fetchone()
         if not row:
             return None
@@ -2297,7 +2330,12 @@ class ComplianceDataStore:
             "M": "coverage code 'M' — non-covered by Medicare",
             "S": "coverage code 'S' — non-covered by Medicare statute",
         }
-        return meanings.get(row[0])
+        reason = meanings.get(row[0])
+        if not reason:
+            return None
+        statute = " ".join(str(row[1] or "").split())
+        return (f"{reason}; statutory authority: {statute}"
+                if statute else reason)
 
     def pos_info(self, code: str) -> dict | None:
         if not code:

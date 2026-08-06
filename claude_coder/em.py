@@ -87,8 +87,12 @@ def _select(level: str, new_patient: bool | None, setting: str, candidates) -> "
     return None
 
 
-def resolve_em(fact: ClinicalFact, source: CodeSource, top_k: int = 40) -> ResolvedLine:
+def resolve_em(request, source: CodeSource, top_k: int = 40) -> ResolvedLine:
     """Resolve an evaluation-and-management fact to a level-appropriate code."""
+    from .eligibility import RetrievalRequest
+    if not isinstance(request, RetrievalRequest):
+        raise TypeError("E/M retrieval requires an eligible RetrievalRequest")
+    fact = request.fact
     a = fact.attributes
     level = mdm_level(str(a.get("problems", "")).lower(),
                       str(a.get("data", "")).lower(),

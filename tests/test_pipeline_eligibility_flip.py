@@ -7,7 +7,8 @@ from claude_coder.pipeline import code_encounter
 from claude_coder.models import CandidateCode
 
 _FACTS = ('{"facts":[{"kind":"procedure","description":"excision of lesion",'
-          '"attributes":{},"disposition":"performed_today","negated":false,'
+          '"attributes":{"performer_id":"actor-1","billing_entity_id":"actor-1"},'
+          '"disposition":"performed_today","negated":false,'
           '"evidence":["excision of lesion performed"],"confidence":0.99}]}')
 _NOTE = "excision of lesion performed today"
 
@@ -31,7 +32,8 @@ def test_eligible_service_reaches_retrieval_and_resolves():
     """Baseline: with the real engine (empty relations) a performed service is ELIGIBLE
     and resolves as today."""
     r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
-                       extract_llm=lambda s, u: _FACTS, verify_llm=_sel, corroborate_llm=_sel)
+                       extract_llm=lambda s, u: _FACTS, verify_llm=_sel,
+                       corroborate_llm=_sel, audit_repository=_audit())
     assert any(ln.chosen and ln.chosen.code == "PROC_X" for ln in r.lines)
 
 
@@ -55,8 +57,14 @@ def test_integral_component_diverted_before_retrieval(monkeypatch):
     monkeypatch.setattr("claude_coder.eligibility.evaluate", fake_eval)
 
     r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
-                       extract_llm=lambda s, u: _FACTS, verify_llm=_sel, corroborate_llm=_sel)
+                       extract_llm=lambda s, u: _FACTS, verify_llm=_sel,
+                       corroborate_llm=_sel, audit_repository=_audit())
     # nothing was retrieved/billed for the diverted service
     assert not any(ln.chosen and ln.chosen.code == "PROC_X" for ln in r.lines)
     diverted = [ln for ln in r.lines if "diverted before retrieval" in ln.rationale]
     assert diverted and "integral component" in diverted[0].rationale
+
+
+def _audit():
+    from claude_coder.provenance import NullAuditRepository
+    return NullAuditRepository()

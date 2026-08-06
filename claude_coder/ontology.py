@@ -37,6 +37,7 @@ class Interval:
     low_inc: bool = True
     high_inc: bool = True
     unit: str | None = None
+    semantic_role: str | None = None
 
     def contains(self, x: float) -> bool:
         if self.low is not None:
@@ -94,8 +95,13 @@ def _parse_interval(text: str) -> Interval | None:
     if low is None and high is None:
         return None
     unit_m = _UNIT.search(t)
+    first_number = re.search(_NUM, t)
+    prefix = t[:first_number.start()] if first_number else t
+    roles = re.findall(r"\b(area|size|depth|length|thickness|diameter|width|height)\b",
+                       prefix)
     return Interval(low=low, high=high, low_inc=low_inc, high_inc=high_inc,
-                    unit=(unit_m.group(1) if unit_m else None))
+                    unit=(unit_m.group(1) if unit_m else None),
+                    semantic_role=(roles[-1] if roles else None))
 
 
 def _tokens(text: str) -> list[str]:

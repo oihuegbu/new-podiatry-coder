@@ -13,6 +13,23 @@ from claude_coder.data_access import MockSource
 from claude_coder.models import CandidateCode, Outcome, ResolutionMethod, Verdict
 from claude_coder.pipeline import code_encounter
 
+
+def _request(fact):
+    from claude_coder.eligibility import (ClaimComponent, ClaimLineIntent,
+                                          EligibilityState, RetrievalRequest)
+    from claude_coder.models import FactKind
+    if not fact.fact_id:
+        fact.fact_id = "fact"
+    intent = ClaimLineIntent(
+        intent_id=f"test-{fact.fact_id}", encounter_id="test",
+        component=(ClaimComponent.DIAGNOSIS_SUPPORT
+                   if fact.kind is FactKind.DIAGNOSIS else ClaimComponent.SERVICE),
+        clinical_event_ids=[fact.fact_id], fact_kind=fact.kind.value,
+        clinical_action=fact.description, attributes=dict(fact.attributes),
+        date_of_service=None, billing_entity_id=None, source_span_ids=[],
+        state=EligibilityState.ELIGIBLE_FOR_RETRIEVAL)
+    return RetrievalRequest(intent, fact)
+
 # A note whose text contains, verbatim, every evidence span the extractor emits.
 # Fully synthetic — the pipeline's disposition/negation logic turns on the
 # LINGUISTIC markers ('denies …', 'Plan … next visit'), not any clinical term.
@@ -27,13 +44,14 @@ NOTE = (
 # diagnosis, one PLANNED procedure (must not bill), one NEGATED finding (drop).
 FACTS_JSON = """{"facts":[
  {"kind":"procedure","description":"excision of lesion alpha",
-  "attributes":{"laterality":"right","anatomy":"site two"},
+  "attributes":{"laterality":"right","anatomy":"site two","performer_id":"actor-1","billing_entity_id":"actor-1"},
   "disposition":"performed_today","negated":false,
   "evidence":["excision of lesion alpha, right site two"],
-  "confidence":0.97},
+  "confidence":0.97,"axis_confidence":{"occurrence":0.99,"action":0.99,"evidence":0.99,"temporal":0.99,"performer":0.99,"relationship":0.99}},
  {"kind":"diagnosis","description":"condition alpha of the right side",
   "attributes":{"laterality":"right"},"disposition":"performed_today","negated":false,
-  "evidence":["condition alpha, right side"],"confidence":0.98},
+  "evidence":["condition alpha, right side"],"confidence":0.98,
+  "axis_confidence":{"occurrence":0.99,"action":0.99,"evidence":0.99,"temporal":0.99,"assertion":0.99,"experiencer":0.99}},
  {"kind":"procedure","description":"procedure beta correction","attributes":{},
   "disposition":"planned","negated":false,
   "evidence":["Plan procedure beta correction next visit"],"confidence":0.9},
@@ -68,8 +86,10 @@ def _arbitrate_stub(system, user):
 class AutonomousCoderTest(unittest.TestCase):
 
     def _run(self, note=NOTE, dos="2026-03-14"):
+        from claude_coder.provenance import NullAuditRepository
         return code_encounter("enc-1", note, dos, source=_source(),
-                              extract_llm=_extract_stub, arbitrate_llm=_arbitrate_stub)
+                              extract_llm=_extract_stub, arbitrate_llm=_arbitrate_stub,
+                              audit_repository=NullAuditRepository())
 
     def test_happy_path_auto_ready(self):
         r = self._run()
@@ -98,7 +118,9 @@ class AutonomousCoderTest(unittest.TestCase):
         # a note that does NOT contain the procedure's evidence span
         r = self._run(note="Assessment: condition alpha, right side.")
         ev = next(g for g in r.gates if g.name == "verbatim_evidence")
-        self.assertEqual(ev.outcome, Outcome.BLOCKED)
+        hold = next(g for g in r.gates if g.name.startswith("eligibility_hold:"))
+        self.assertEqual(hold.outcome, Outcome.BLOCKED)
+        self.assertEqual(ev.outcome, Outcome.PASS)
         self.assertEqual(r.verdict, Verdict.BLOCKED)
 
     def test_missing_dos_blocks_release(self):
@@ -138,7 +160,7 @@ class OntologyResolutionTest(unittest.TestCase):
                             attributes={"size_sqin": 30}, disposition=Disposition.PERFORMED,
                             evidence=[EvidenceSpan("wound dressing 30 sq in applied")],
                             confidence=0.99)
-        line = resolve(fact, src)
+        line = resolve(_request(fact), src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
         self.assertEqual(line.chosen.code, "SUP_MED", line.rationale)
 
@@ -155,7 +177,7 @@ class OntologyResolutionTest(unittest.TestCase):
                             attributes={"laterality": "right"},
                             evidence=[EvidenceSpan("some condition, right side")],
                             confidence=0.99)
-        line = resolve(fact, src)
+        line = resolve(_request(fact), src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
         self.assertEqual(line.chosen.code, "DX_RIGHT", line.rationale)
 
@@ -174,12 +196,15 @@ class BundlingExclusionTest(unittest.TestCase):
                          retrieval={("*", "hcpcs"): [cand]},
                          nonbillable={"BUNDLED_X"})
         facts = ('{"facts":[{"kind":"supply","description":"bundled service",'
-                 '"attributes":{},"disposition":"performed_today","negated":false,'
+                 '"attributes":{"performer_id":"actor-1","billing_entity_id":"actor-1"},'
+                 '"disposition":"performed_today","negated":false,'
                  '"evidence":["bundled service provided"],"confidence":0.99}]}')
         r = code_encounter("e", "bundled service provided during the visit",
                            "2026-03-14", source=src,
                            extract_llm=lambda s, u: facts,
-                           arbitrate_llm=lambda s, u: '{"choice":0,"confidence":0}')
+                           arbitrate_llm=lambda s, u: '{"choice":0,"confidence":0}',
+                           audit_repository=__import__("claude_coder.provenance",
+                               fromlist=["NullAuditRepository"]).NullAuditRepository())
         self.assertNotIn("BUNDLED_X", {ln.chosen.code for ln in r.billable_lines})
         self.assertTrue(any(ln.excluded_reason for ln in r.lines))
 
@@ -236,7 +261,7 @@ class EMLevelingTest(unittest.TestCase):
                             attributes={"problems": "moderate", "data": "moderate",
                                         "risk": "low", "new_patient": False},
                             evidence=[EvidenceSpan("office visit")], confidence=0.9)
-        line = resolve_em(fact, src)
+        line = resolve_em(_request(fact), src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
         self.assertEqual(line.chosen.code, "EM_MOD", line.rationale)
 
@@ -377,7 +402,7 @@ class TerminologyIndexTest(unittest.TestCase):
                          index={"a documented condition": {"C11.1"}})
         fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="a documented condition",
                             evidence=[EvidenceSpan("a documented condition")], confidence=0.99)
-        line = resolve(fact, src)
+        line = resolve(_request(fact), src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
         self.assertEqual(line.chosen.code, "C11.1")
         self.assertIn("Alphabetic Index", line.rationale)
@@ -394,7 +419,7 @@ class TerminologyIndexTest(unittest.TestCase):
                          index={}, snomed={"a documented condition": {"C22.2"}})
         fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="a documented condition",
                             evidence=[EvidenceSpan("a documented condition")], confidence=0.95)
-        line = resolve(fact, src)
+        line = resolve(_request(fact), src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
         self.assertEqual(line.chosen.code, "C22.2")
         self.assertIn("SNOMED", line.rationale)
@@ -414,7 +439,7 @@ class TerminologyIndexTest(unittest.TestCase):
         fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="a documented condition",
                             attributes={"laterality": "right"},
                             evidence=[EvidenceSpan("a documented condition")], confidence=0.99)
-        line = resolve(fact, src)
+        line = resolve(_request(fact), src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
         self.assertEqual(line.chosen.code, "DX41")     # right-side leaf, not the category
 
@@ -588,7 +613,7 @@ class ProcedureIndexTest(unittest.TestCase):
                             description="some service on a named structure",
                             evidence=[EvidenceSpan("some service on a named structure")],
                             confidence=0.99)
-        line = resolve(fact, src)
+        line = resolve(_request(fact), src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
         self.assertEqual(line.chosen.code, "PROC_OST")
         self.assertIn("descriptor index", line.rationale)
@@ -612,7 +637,7 @@ class SupportRankingTest(unittest.TestCase):
                          retrieval={("*", "cpt"): [neigh, match]})  # neighbour listed first
         fact = ClinicalFact(kind=FactKind.PROCEDURE, description="excision of bursa",
                             evidence=[EvidenceSpan("the bursa was excised")], confidence=0.9)
-        line = resolve(fact, src)
+        line = resolve(_request(fact), src)
         self.assertEqual(line.chosen.code, "P_MATCH", line.rationale)
 
     def test_support_never_eliminates_terse_code(self):
@@ -630,7 +655,7 @@ class SupportRankingTest(unittest.TestCase):
                             description="ankle brachial index with doppler",
                             evidence=[EvidenceSpan("ABI with Doppler waveforms")],
                             confidence=0.9)
-        line = resolve(fact, src)
+        line = resolve(_request(fact), src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
         self.assertEqual(line.chosen.code, "P_TERSE")
 
@@ -654,7 +679,7 @@ class CptAlphabeticIndexTest(unittest.TestCase):
                             description="a documented procedure phrase",
                             evidence=[EvidenceSpan("a documented procedure phrase")],
                             confidence=0.95)
-        line = resolve(fact, src)
+        line = resolve(_request(fact), src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
         self.assertEqual(line.chosen.code, "PROC_IDX")
         self.assertIn("CPT Alphabetic Index", line.rationale)
@@ -715,7 +740,7 @@ class DrugTableTest(unittest.TestCase):
         fact = ClinicalFact(kind=FactKind.DRUG, description="substance alpha",
                             evidence=[EvidenceSpan("substance alpha 30 mg IV")],
                             confidence=0.95)
-        line = resolve(fact, src)
+        line = resolve(_request(fact), src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
         self.assertEqual(line.chosen.code, "DRUG_KETO")
         self.assertIn("Table of Drugs", line.rationale)
@@ -805,7 +830,7 @@ class ProposeVerifyTest(unittest.TestCase):
     def test_rejects_near_synonym_accepts_entailed(self):
         from claude_coder.models import ResolutionMethod
         from claude_coder.resolution import resolve
-        line = resolve(self._fact(), self._src(), llm=self._llm())
+        line = resolve(_request(self._fact()), self._src(), llm=self._llm())
         self.assertEqual(line.method, ResolutionMethod.VERIFIED)
         self.assertEqual(line.chosen.code, "CODEALPHA")   # not the higher-recall near-synonym
 
@@ -819,14 +844,14 @@ class ProposeVerifyTest(unittest.TestCase):
             records={("CODEALPHA", "cpt"): {"long_description": self.ALPHA, "active": True},
                      ("CODEBETA", "cpt"): {"long_description": self.BETA, "active": True}},
             retrieval={("*", "cpt"): [CandidateCode("CODEBETA", "cpt", self.BETA, 0.95)]})
-        line = resolve(self._fact(), src, llm=self._llm(propose=["CODEALPHA"]))
+        line = resolve(_request(self._fact()), src, llm=self._llm(propose=["CODEALPHA"]))
         self.assertEqual(line.method, ResolutionMethod.VERIFIED)
         self.assertEqual(line.chosen.code, "CODEALPHA")
 
     def test_escalates_when_nothing_entailed(self):
         from claude_coder.models import ResolutionMethod
         from claude_coder.resolution import resolve
-        line = resolve(self._fact(), self._src(), llm=self._llm(entail=False))
+        line = resolve(_request(self._fact()), self._src(), llm=self._llm(entail=False))
         self.assertFalse(line.resolved)
         self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
         self.assertIn("verified", line.rationale)
@@ -850,7 +875,7 @@ class ProposeVerifyTest(unittest.TestCase):
     def test_corroboration_agreement_accepts(self):
         from claude_coder.models import ResolutionMethod
         from claude_coder.resolution import resolve
-        line = resolve(self._fact(), self._src(), llm=self._llm(),
+        line = resolve(_request(self._fact()), self._src(), llm=self._llm(),
                        corroborate=self._corroborator(confirm=True))
         self.assertEqual(line.method, ResolutionMethod.VERIFIED)
         self.assertEqual(line.chosen.code, "CODEALPHA")
@@ -861,7 +886,7 @@ class ProposeVerifyTest(unittest.TestCase):
         # escalate as a provider query, do NOT down-code to something that omits it.
         from claude_coder.models import ResolutionMethod
         from claude_coder.resolution import resolve
-        line = resolve(self._fact(), self._src(), llm=self._llm(),
+        line = resolve(_request(self._fact()), self._src(), llm=self._llm(),
                        corroborate=self._corroborator(confirm=False, missing=True))
         self.assertFalse(line.resolved)
         self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
@@ -900,7 +925,7 @@ class ProposeVerifyTest(unittest.TestCase):
 
         fact = ClinicalFact(kind=FactKind.PROCEDURE, description="act alpha",
                             evidence=[EvidenceSpan("act alpha performed")], confidence=0.9)
-        line = resolve(fact, src, llm=sel, corroborate=corr)
+        line = resolve(_request(fact), src, llm=sel, corroborate=corr)
         self.assertEqual(line.method, ResolutionMethod.VERIFIED)
         self.assertEqual(line.chosen.code, "A2")     # re-selected past the rejected A1
 
@@ -997,7 +1022,7 @@ class LearnedIndexTest(unittest.TestCase):
                 return '{"entailed": false, "missing_element": false, "reason": "no"}'
             return '{"choice": 0, "reason": "none entailed"}'
 
-        line = resolve(fact, src, llm=reject, corroborate=reject)
+        line = resolve(_request(fact), src, llm=reject, corroborate=reject)
         self.assertFalse(line.resolved)                       # not billed on learned trust
         self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
         self.assertNotIn("learned verified-resolution index", line.rationale)
@@ -1106,7 +1131,7 @@ class LateralityUpgradeTest(unittest.TestCase):
         fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="some condition",
                             attributes={"laterality": "right"},
                             evidence=[EvidenceSpan("some condition, right side")], confidence=0.98)
-        line = resolve(fact, src)
+        line = resolve(_request(fact), src)
         self.assertEqual(line.chosen.code, "DX9")           # retrieval gives unspecified
         line = upgrade_diagnosis_laterality(line, src)
         self.assertEqual(line.chosen.code, "DX1")           # upgraded to the right sibling
@@ -1146,7 +1171,9 @@ class DiagnosisModifierTest(unittest.TestCase):
         r = code_encounter("e", "some condition, right side documented", "2026-03-14",
                            source=src, extract_llm=lambda s, u: facts,
                            arbitrate_llm=lambda s, u: '{"choice":0,"confidence":0}',
-                           modifier_engine=ModifierEngine(defs={"MR": {"description": "Right side of the body"}}))
+                           modifier_engine=ModifierEngine(defs={"MR": {"description": "Right side of the body"}}),
+                           audit_repository=__import__("claude_coder.provenance",
+                               fromlist=["NullAuditRepository"]).NullAuditRepository())
         dxln = next(ln for ln in r.billable_lines if ln.chosen.code == "DX_UNSPEC")
         self.assertEqual(dxln.modifiers, [])           # never RT/LT on a diagnosis
 
@@ -1242,7 +1269,7 @@ class DiagnosisVerifyTest(unittest.TestCase):
         fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="condition alpha",
                             evidence=[EvidenceSpan("condition alpha documented")],
                             confidence=0.95)
-        line = resolve(fact, src, llm=sel, corroborate=corr)
+        line = resolve(_request(fact), src, llm=sel, corroborate=corr)
         self.assertEqual(line.method, ResolutionMethod.VERIFIED)
         self.assertEqual(line.chosen.code, "DXR")   # not the higher-recall wrong code
 

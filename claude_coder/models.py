@@ -57,6 +57,13 @@ class EvidenceSpan:
     end: int | None = None
     text_sha256: str | None = None
     anchored: bool = False
+    # Location-specific provenance. text_sha256 proves content but is not an
+    # identity: the same quotation can occur more than once in a document. The
+    # span id binds document/version + offsets + content (and optional page/section).
+    document_sha256: str | None = None
+    document_version: str | None = None
+    span_id: str | None = None
+    page: int | None = None
 
 
 @dataclass
@@ -235,6 +242,13 @@ class CodingResult:
     # RIGHT place (retry / provider / coder / hold) instead of one review queue.
     destination: "Destination | None" = None
     routing: list[dict] = field(default_factory=list)
+    # Enforced pre-retrieval lineage. These are deliberately first-class rather
+    # than hidden in a log so the certificate can bind the exact eligibility graph
+    # that authorized every retrieval call.
+    claim_line_intents: list[Any] = field(default_factory=list)
+    relations: list["RelationAssertion"] = field(default_factory=list)
+    audit_record_hashes: list[str] = field(default_factory=list)
+    control_mode: str = "ENFORCED_FAIL_CLOSED"
 
     @property
     def billable_lines(self) -> list[ResolvedLine]:

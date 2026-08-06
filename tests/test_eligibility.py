@@ -12,8 +12,12 @@ from claude_coder.models import (ClinicalFact, FactKind, Disposition, EvidenceSp
 
 def _fact(kind=FactKind.PROCEDURE, desc="a performed service", anchored=True,
           disp=Disposition.PERFORMED, fid="F1", attrs=None):
-    ev = [EvidenceSpan(text="quote", anchored=anchored, text_sha256="h1")]
-    return ClinicalFact(kind, desc, attributes=attrs or {}, disposition=disp,
+    ev = [EvidenceSpan(text="quote", anchored=anchored, text_sha256="h1",
+                       span_id="span-1" if anchored else None)]
+    if attrs is None:
+        attrs = ({} if kind is FactKind.DIAGNOSIS else
+                 {"performer_id": "actor-1", "billing_entity_id": "actor-1"})
+    return ClinicalFact(kind, desc, attributes=attrs, disposition=disp,
                         evidence=ev, fact_id=fid, confidence=0.9)
 
 
@@ -37,11 +41,14 @@ def test_occurrence_gate():
 
 
 def test_ownership_gate():
-    assert el._gate_actor_ownership(_fact()).outcome is Outcome.UNKNOWN            # unstated
+    assert el._gate_actor_ownership(_fact(attrs={})).outcome is Outcome.UNKNOWN    # unstated
     same = _fact(attrs={"performer_id": "p1", "billing_entity_id": "p1"})
     assert el._gate_actor_ownership(same).outcome is Outcome.PASS
     other = _fact(attrs={"performer_id": "p2", "billing_entity_id": "p1"})
     assert el._gate_actor_ownership(other).outcome is Outcome.BLOCKED
+    organization = _fact(attrs={"performer_id": "p2", "performer_function": "operator",
+                                "organization_id": "org1", "billing_entity_id": "org1"})
+    assert el._gate_actor_ownership(organization).outcome is Outcome.PASS
 
 
 def test_part_of_demotion_requires_explicit_integrality():
@@ -100,6 +107,10 @@ def test_uncertain_relationship_holds():
 def test_contrary_ownership_holds():
     i = _one([_fact(attrs={"performer_id": "p2", "billing_entity_id": "p1"})])
     assert i.state is EligibilityState.AUTO_HOLD
+
+
+def test_unknown_ownership_holds():
+    assert _one([_fact(attrs={})]).state is EligibilityState.AUTO_HOLD
 
 
 def test_diagnosis_is_support_not_service_line():
@@ -248,6 +259,8 @@ def test_separate_from_never_collapses_a_distinct_service():
     intents = el.evaluate(fs, [sep], "enc", "2026-08-01")
     assert not _in_one_intent(intents, "F1", "F3")             # SEPARATE_FROM endpoints apart
     assert not _in_one_intent(intents, "F2", "F3")             # duplicate not attached to F3
+    held = [i for i in intents if "F2" in i.clinical_event_ids]
+    assert len(held) == 1 and held[0].state is EligibilityState.AUTO_HOLD
 
 
 def test_known_plus_missing_reconciles_not_splits():
@@ -257,3 +270,20 @@ def test_known_plus_missing_reconciles_not_splits():
     intents = el.evaluate(fs, [], "enc", "2026-08-01")
     assert len(intents) == 1 and intents[0].mention_count == 2
     assert intents[0].attributes.get("performer_id") == "p1"   # reconciled, provenance kept
+
+
+# ---- Codex F5-R1 re-review: ambiguous duplicate must be HELD, not an extra eligible line -
+def test_ambiguous_duplicate_is_held_not_an_extra_eligible_line():
+    """F1 SEPARATE_FROM F3, F2 a same-key mention assignable to neither. The two explicit
+    anchors stay ELIGIBLE and separate; the unassignable duplicate is AUTO_HOLD so it cannot
+    become an additional billable retrieval path (no cardinality inflation / overbill)."""
+    sep = RelationAssertion("F1", RelationPredicate.SEPARATE_FROM, "F3",
+                            state=RelationState.ASSERTED)
+    fs = [_fact(fid="F1"), _fact(fid="F2"), _fact(fid="F3")]
+    intents = el.evaluate(fs, [sep], "enc", "2026-08-01")
+    st = {tuple(i.clinical_event_ids): i.state for i in intents}
+    assert st.get(("F1",)) is EligibilityState.ELIGIBLE_FOR_RETRIEVAL
+    assert st.get(("F3",)) is EligibilityState.ELIGIBLE_FOR_RETRIEVAL
+    assert st.get(("F2",)) is EligibilityState.AUTO_HOLD
+    assert sum(1 for i in intents
+               if i.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL) == 2

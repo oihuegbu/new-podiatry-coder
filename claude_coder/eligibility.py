@@ -1,4 +1,4 @@
-"""Phase-1 eligibility engine (SHADOW) — decide which documented events may become a
+"""Enforced eligibility engine — decide which documented events may become a
 code-search candidate BEFORE any code retrieval, producing a code-free ClaimLineIntent.
 
 This is the plane that fixes `billable == performed`: a performed event is not
@@ -7,9 +7,9 @@ automatically a claim line. Each billable fact runs a sequence of TRI-STATE gate
 clears them becomes an ELIGIBLE intent. Integral / not-performed / supporting events stay
 in the record as NON_CLAIM_EVIDENCE; material ambiguity becomes AUTO_HOLD.
 
-Runs in shadow: it emits intents + a decision trace for audit/diffing; it does not yet
-gate retrieval (that flip is Phase 1c, one gate at a time). Agnostic — reads fact kinds,
-dispositions, actor ids, relationship assertions and evidence anchoring; no medical code.
+The pipeline treats ClaimLineIntent as a hard capability boundary: only an eligible
+intent can construct a RetrievalRequest. Agnostic — reads fact kinds, dispositions,
+actor ids, relationship assertions and evidence anchoring; no medical code.
 """
 from __future__ import annotations
 
@@ -64,12 +64,34 @@ class ClaimLineIntent:
     distinctness_facts: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class RetrievalRequest:
+    """The only accepted input to code retrieval.
+
+    It binds one eligible intent to its source fact and validates that no caller can
+    substitute a different event after eligibility was decided.
+    """
+    intent: ClaimLineIntent
+    fact: ClinicalFact
+
+    def __post_init__(self) -> None:
+        if self.intent.state is not EligibilityState.ELIGIBLE_FOR_RETRIEVAL:
+            raise ValueError("retrieval requires an ELIGIBLE ClaimLineIntent")
+        if self.fact.fact_id not in self.intent.clinical_event_ids:
+            raise ValueError("retrieval fact is not a member of the eligible intent")
+        if self.fact.kind.value != self.intent.fact_kind:
+            raise ValueError("retrieval fact kind differs from the eligible intent")
+        if self.fact.description != self.intent.clinical_action:
+            raise ValueError("retrieval action differs from the eligible intent")
+
+
 def _intent_id(encounter_id: str, fact_id: str, action: str) -> str:
     raw = f"{encounter_id}|{fact_id}|{action}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-_SERVICE_KINDS = (FactKind.PROCEDURE, FactKind.IMAGING, FactKind.SUPPLY, FactKind.DRUG)
+_SERVICE_KINDS = (FactKind.PROCEDURE, FactKind.IMAGING, FactKind.SUPPLY,
+                  FactKind.DRUG, FactKind.EM)
 
 
 # --------------------------------------------------------------- tri-state gates
@@ -101,21 +123,32 @@ def _gate_occurrence(fact: ClinicalFact) -> EligibilityDecision:
 
 def _gate_actor_ownership(fact: ClinicalFact) -> EligibilityDecision:
     o = fact_ownership(fact)
-    st = classify_ownership(o.performer_id, o.billing_entity_id)
+    st = classify_ownership(o.performer_id, o.billing_entity_id,
+                            o.organization_id, o.performer_function)
     if st is Outcome.BLOCKED:
         return EligibilityDecision("actor_ownership", Outcome.BLOCKED,
                                    "performed by a different actor than the billing entity",
                                    "claim ownership")
     if st is Outcome.UNKNOWN:
         return EligibilityDecision("actor_ownership", Outcome.UNKNOWN,
-                                   "ownership unstated (assumed billing provider)",
+                                   "ownership identity/organization is not fully resolved",
                                    "claim ownership")
     return EligibilityDecision("actor_ownership", Outcome.PASS, "owned by billing entity",
                                "claim ownership")
 
 
+_SYMMETRIC_PREDICATES = {RelationPredicate.SEPARATE_FROM,
+                         RelationPredicate.SAME_EPISODE_AS}
+
+
 def _relations_for(fact: ClinicalFact, relations: list) -> list:
-    return [r for r in relations if r.subject_event_id == fact.fact_id]
+    return [r for r in relations if r.subject_event_id == fact.fact_id
+            or (r.predicate in _SYMMETRIC_PREDICATES
+                and r.object_event_id == fact.fact_id)]
+
+
+def _connects(r, left: str, right: str) -> bool:
+    return {r.subject_event_id, r.object_event_id} == {left, right}
 
 
 def _gate_part_of_demotion(fact: ClinicalFact, relations: list) -> EligibilityDecision:
@@ -129,8 +162,10 @@ def _gate_part_of_demotion(fact: ClinicalFact, relations: list) -> EligibilityDe
         return EligibilityDecision("part_of_demotion", Outcome.PASS,
                                    "no explicit integral-component relationship",
                                    "documented relationship")
-    distinct = [r for r in rels if r.predicate is RelationPredicate.SEPARATE_FROM
-                and r.state is RelationState.ASSERTED]
+    distinct = [r for p in part_of for r in relations
+                if r.predicate is RelationPredicate.SEPARATE_FROM
+                and r.state is RelationState.ASSERTED
+                and _connects(r, p.subject_event_id, p.object_event_id)]
     if distinct:
         return EligibilityDecision("part_of_demotion", Outcome.PASS,
                                    "explicit PART_OF but documented distinctness present",
@@ -180,7 +215,7 @@ def _classify(decisions: list[EligibilityDecision]) -> EligibilityState:
            if g in ("evidence_required", "actor_ownership")):
         return EligibilityState.AUTO_HOLD
     if any(o is Outcome.UNKNOWN for g, o in by.items()
-           if g in ("conflict", "documentation_minimum")):
+           if g in ("actor_ownership", "conflict", "documentation_minimum")):
         return EligibilityState.AUTO_HOLD
     return EligibilityState.ELIGIBLE_FOR_RETRIEVAL
 
@@ -309,12 +344,25 @@ def merge_duplicate_intents(intents: list["ClaimLineIntent"],
     # a coref inherits its partner's separations. Symmetric -> order-independent; an
     # ambiguous duplicate between two mutually-separate services inherits BOTH -> isolated.
     base = [row[:] for row in cannot]
+    ambiguous_coreference: set[int] = set()
     for i in range(n):
         for j in range(n):
             if i != j and same_key(i, j) and not base[i][j]:
                 for k in range(n):
                     if base[i][k]:
                         cannot[j][k] = cannot[k][j] = True
+                        ambiguous_coreference.add(j)
+
+    # A third indistinguishable mention between explicitly separate endpoints cannot be
+    # assigned to either service without inventing cardinality. It is evidence, not a
+    # third retrieval line: hold that mention and preserve the two explicit endpoints.
+    for idx in ambiguous_coreference:
+        intent = intents[idx]
+        intent.state = EligibilityState.AUTO_HOLD
+        intent.decisions.append(EligibilityDecision(
+            "coreference_assignment", Outcome.UNKNOWN,
+            "duplicate mention cannot be assigned to either explicitly distinct event",
+            "event identity reconciliation"))
 
     # union same-key, not-cannot-linked intents
     parent = list(range(n))
@@ -346,6 +394,29 @@ def merge_duplicate_intents(intents: list["ClaimLineIntent"],
             t.decisions = list(t.decisions) + list(src.decisions)
             t.mention_count += src.mention_count
             _reconcile_attrs(t, src)
+
+    # Codex F5-R1 re-review: an ambiguous duplicate -- a SINGLETON that had same-key
+    # siblings but NO DIRECT cannot-link (no SEPARATE_FROM on its own events, no known-known
+    # conflict) -- was isolated only by INHERITED separations and cannot be assigned to a
+    # service. Keeping it ELIGIBLE would add an extra billable line (overbilling). Route it
+    # to AUTO_HOLD so it can never create an additional retrieval/claim path; the two
+    # explicit anchors stay eligible and separate. Never guess which service owns it.
+    from collections import Counter as _Counter
+    _size = _Counter(find(i) for i in range(n))
+    for i in range(n):
+        r = find(i)
+        if _size[r] != 1:
+            continue
+        has_sib = any(j != i and same_key(i, j) for j in range(n))
+        is_anchor = any(same_key(i, j) and base[i][j] for j in range(n))
+        if has_sib and not is_anchor:
+            amb = rep[r]
+            amb.state = EligibilityState.AUTO_HOLD
+            amb.decisions = list(amb.decisions) + [EligibilityDecision(
+                "coreference", Outcome.UNKNOWN,
+                "ambiguous duplicate mention: same-key to mutually-distinct services -- "
+                "cannot assign; held so it cannot become an extra billable line",
+                "coreference reconciliation")]
     return [rep[r] for r in order]
 
 
@@ -358,7 +429,7 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
     _episodes, _ep_map = build_episodes(facts, relations, encounter_id, date_of_service)
     intents: list[ClaimLineIntent] = []
     for f in facts:
-        span_ids = [s.text_sha256 for s in (f.evidence or []) if getattr(s, "text_sha256", None)]
+        span_ids = [s.span_id for s in (f.evidence or []) if getattr(s, "span_id", None)]
         billing_id = (f.attributes or {}).get("billing_entity_id")
         if f.kind is FactKind.DIAGNOSIS:
             decisions = [_gate_evidence_required(f), _gate_occurrence(f)]
@@ -376,7 +447,7 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
             state = _classify(decisions)
             component = ClaimComponent.SERVICE
         else:
-            continue                                   # E/M etc. handled elsewhere for now
+            continue
         intents.append(ClaimLineIntent(
             intent_id=_intent_id(encounter_id, f.fact_id, f.description),
             encounter_id=encounter_id, component=component,

@@ -142,7 +142,7 @@ def decide(result: CodingResult,
     #    PROVIDER_QUERY; anything else needs a coder.
     dx_non_material = _necessity_authoritatively_met(result, source)
     for ln in result.lines:
-        if ln.fact.billable and not ln.resolved:
+        if ln.fact.billable and not ln.resolved and not ln.excluded_reason:
             if ln.fact.kind is FactKind.DIAGNOSIS and dx_non_material:
                 route(Destination.PROVIDER_QUERY, ln.fact.description,
                       "diagnosis could not be coded — non-material: every billed procedure's "

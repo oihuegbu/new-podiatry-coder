@@ -108,6 +108,7 @@ def chat_completion(
     effort: str | None = None,
     json_schema: dict | None = None,
     use_batch: bool | None = None,
+    provider: str | None = None,
 ) -> tuple[str, dict]:
     """`json_schema`: a strict JSON Schema the response must conform to,
     enforced by the provider's structured-output API (Anthropic
@@ -116,10 +117,13 @@ def chat_completion(
     CLAUDE_EFFORT). `use_batch`: per-call override of ANTHROPIC_USE_BATCH —
     pass False for an interactive/low-latency call (the Batches API is ~50%
     cheaper but adds minutes of latency, unsuitable for a sequential loop)."""
+    selected_provider = str(provider or LLM_PROVIDER).strip().lower()
+    if selected_provider not in {"openai", "claude"}:
+        raise ValueError(f"unsupported LLM provider: {selected_provider}")
     last_exc: Exception | None = None
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
-            if LLM_PROVIDER == "claude":
+            if selected_provider == "claude":
                 return _claude_chat_completion(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
@@ -403,5 +407,4 @@ def _claude_chat_completion(
             response.usage, "cache_creation_input_tokens", 0) or 0,
     }
     return content, usage
-
 

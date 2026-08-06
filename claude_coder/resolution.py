@@ -116,7 +116,8 @@ def _measure_in_range(fact: ClinicalFact, feats) -> "bool | None":
     idim, _ = _meas.unit_dimension(feats.interval.unit)
     if idim is None:
         return None
-    dm = _meas.measurement_for_dimension(fact.attributes, idim)
+    dm = _meas.measurement_for_constraint(
+        fact.attributes, idim, feats.interval.semantic_role)
     if dm is None:
         return None
     dv = _meas.convert(dm.value, dm.dimension, dm.unit, feats.interval.unit)
@@ -199,8 +200,13 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
     return _Match(cand, feats, cand.score, spec, support, reasons, interval_unsupported=_iu)
 
 
-def resolve(fact: ClinicalFact, source: CodeSource, top_k: int = _RECALL_POOL,
+def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
             llm=None, corroborate=None, dos: str | None = None) -> ResolvedLine:
+    """Resolve an eligible retrieval request, never a raw clinical fact."""
+    from .eligibility import RetrievalRequest
+    if not isinstance(request, RetrievalRequest):
+        raise TypeError("code retrieval requires an eligible RetrievalRequest")
+    fact = request.fact
     if not fact.billable:
         return ResolvedLine(
             fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
@@ -616,9 +622,14 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     selection finds nothing OR the second model disagrees. Nothing bills on recall
     alone, and nothing bills on a single model's say-so."""
     from . import verify as _verify
-    proposals = [c for c in _verify.propose_codes(fact, source, llm)
-                 if _evaluate(fact, c, source) is not None]
-    retrieved = [m.candidate for m in _ranked(fact, pool, source)]
+    proposed_matches = [_evaluate(fact, c, source)
+                        for c in _verify.propose_codes(fact, source, llm)]
+    retrieved_matches = _ranked(fact, pool, source)
+    unsupported = [m.candidate for m in [*proposed_matches, *retrieved_matches]
+                   if m is not None and m.interval_unsupported]
+    proposals = [m.candidate for m in proposed_matches
+                 if m is not None and not m.interval_unsupported]
+    retrieved = [m.candidate for m in retrieved_matches if not m.interval_unsupported]
     # Fix4: reserve a floor of shortlist slots for authoritative RETRIEVAL so LLM
     # memory proposals cannot crowd it out. Keep up to (VERIFY_K - floor) proposals
     # first, then retrieved, then any leftover proposals fill remaining room.
@@ -631,6 +642,8 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
             order.append(c)
     # Fix3: drop DOS-inactive candidates before capping to the shortlist.
     shortlist = _active_only(order, source, dos)[:VERIFY_K]
+    if not shortlist and unsupported:
+        return _bounded_interval_hold(fact, unsupported)
     tried: set[str] = set()
     last_reason = ""
     for _ in range(1 + MAX_RESELECT):
@@ -644,6 +657,26 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
                 method=ResolutionMethod.ABSTAINED,
                 rationale="no candidate's authoritative descriptor is fully entailed by "
                           "the documentation (verified) — escalate")
+        chosen_match = _evaluate(fact, chosen, source)
+        if chosen_match is None:
+            return ResolvedLine(
+                fact=fact, chosen=None, alternatives=shortlist,
+                method=ResolutionMethod.ABSTAINED,
+                rationale="verifier selected a candidate that contradicts documented axes")
+        if chosen_match.interval_unsupported:
+            return _bounded_interval_hold(fact, [chosen] + unsupported)
+        # Codex F4-R1 re-review: the unsupported-required-constraint gate applies to the
+        # VERIFIED path too -- a bounded-interval code whose measurement the documentation
+        # does not support must abstain regardless of selection OR corroborator agreement.
+        if _interval_unsupported(fact, parse_descriptor(chosen.descriptor)):
+            return ResolvedLine(
+                fact=fact, chosen=None, alternatives=shortlist,
+                method=ResolutionMethod.ABSTAINED,
+                documentation_gap=("the code's descriptor requires a measurement within a "
+                    "specific range and the documentation provides no compatible measurement "
+                    "of that dimension -- document the measurement or use a less-specific code"),
+                rationale="selected code requires a bounded measurement the documentation "
+                          "does not support -- not billed regardless of model agreement")
         if corroborate is None:                      # no second model configured
             return _verified_line(fact, chosen, shortlist, why)
         ok, why2, missing = _verify.corroborate(fact, chosen, source, corroborate)
@@ -669,6 +702,20 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
         method=ResolutionMethod.ABSTAINED,
         rationale=f"no candidate confirmed by independent second-model verification "
                   f"after re-selection ({last_reason}) — escalate")
+
+
+def _bounded_interval_hold(fact: ClinicalFact,
+                           candidates: list[CandidateCode]) -> ResolvedLine:
+    """A model agreement cannot override an unsupported descriptor constraint."""
+    unique = list({c.code: c for c in candidates}.values())
+    return ResolvedLine(
+        fact=fact, chosen=None, alternatives=unique[:5],
+        method=ResolutionMethod.ABSTAINED,
+        documentation_gap=("the code descriptor requires a bounded measurement and the "
+                           "documentation has no unique dimension-compatible, convertible "
+                           "measurement supporting that interval"),
+        rationale="bounded descriptor interval is unsupported; deterministic and model-"
+                  "verified paths must abstain")
 
 
 def _verified_line(fact: ClinicalFact, chosen: CandidateCode,

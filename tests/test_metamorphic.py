@@ -12,6 +12,22 @@ from claude_coder.data_access import MockSource
 from claude_coder import resolution, gates, extraction, ontology
 
 
+def _request(fact):
+    from claude_coder.eligibility import (ClaimComponent, ClaimLineIntent,
+                                          EligibilityState, RetrievalRequest)
+    if not fact.fact_id:
+        fact.fact_id = "fact"
+    intent = ClaimLineIntent(
+        intent_id=f"test-{fact.fact_id}", encounter_id="test",
+        component=(ClaimComponent.DIAGNOSIS_SUPPORT
+                   if fact.kind is FactKind.DIAGNOSIS else ClaimComponent.SERVICE),
+        clinical_event_ids=[fact.fact_id], fact_kind=fact.kind.value,
+        clinical_action=fact.description, attributes=dict(fact.attributes),
+        date_of_service=None, billing_entity_id=None, source_span_ids=[],
+        state=EligibilityState.ELIGIBLE_FOR_RETRIEVAL)
+    return RetrievalRequest(intent, fact)
+
+
 def test_laterality_flip():
     src = MockSource(records={
         ("QQ01", "icd10"): {"long_description": "Widgetopathy of right gizmo"},
@@ -20,7 +36,7 @@ def test_laterality_flip():
     def code(side):
         f = ClinicalFact(FactKind.DIAGNOSIS, "widgetopathy of gizmo", attributes={"laterality": side},
                          evidence=[EvidenceSpan(f"widgetopathy {side} gizmo")], disposition=Disposition.PERFORMED)
-        return resolution.resolve(f, src).chosen
+        return resolution.resolve(_request(f), src).chosen
     r, l = code("right"), code("left")
     assert r and l and "right" in r.descriptor.lower() and "left" in l.descriptor.lower() and r.code != l.code
 
@@ -261,9 +277,9 @@ def test_snomed_crosswalk_hit_is_verified_not_blindly_trusted():
                     "true" if entailed else "false")
             return '{"choice": %d, "reason": "x"}' % (1 if entailed else 0)   # select
         return _s
-    reject = resolution.resolve(fact(), src, llm=stub(False), corroborate=stub(False))
+    reject = resolution.resolve(_request(fact()), src, llm=stub(False), corroborate=stub(False))
     assert not reject.resolved                              # crosswalk default not blindly accepted
-    accept = resolution.resolve(fact(), src, llm=stub(True), corroborate=stub(True))
+    accept = resolution.resolve(_request(fact()), src, llm=stub(True), corroborate=stub(True))
     assert accept.resolved and accept.chosen.code == "WW01"  # confirmed -> resolves
 
 
@@ -507,7 +523,7 @@ def test_residual_catchall_escalates_through_resolve():
         retrieval={("*", "icd10"): [CandidateCode("Z999", "icd10", "Other specified disorders of bone, ankle and foot", 0.9)]})
     fact = ClinicalFact(FactKind.DIAGNOSIS, "Haglund-type retrocalcaneal exostosis",
                         evidence=[EvidenceSpan("Haglund-type retrocalcaneal exostosis")])
-    line = resolution.resolve(fact, src, llm=stub, corroborate=stub)
+    line = resolution.resolve(_request(fact), src, llm=stub, corroborate=stub)
     assert not line.resolved and line.method is ResolutionMethod.ABSTAINED
     # routes to coder REVIEW, not PROVIDER_QUERY: no documentation_gap, and the
     # residual candidate is surfaced as an alternative for the coder to classify.
@@ -521,7 +537,7 @@ def test_residual_catchall_escalates_through_resolve():
         retrieval={("*", "icd10"): [CandidateCode("Z998", "icd10", "Other bursitis, not elsewhere classified, right ankle and foot", 0.9)]})
     fact2 = ClinicalFact(FactKind.DIAGNOSIS, "Retrocalcaneal bursitis",
                          evidence=[EvidenceSpan("Retrocalcaneal bursitis")])
-    line2 = resolution.resolve(fact2, src2, llm=stub, corroborate=stub)
+    line2 = resolution.resolve(_request(fact2), src2, llm=stub, corroborate=stub)
     assert line2.resolved and line2.chosen.code == "Z998"
 
 
@@ -669,5 +685,5 @@ def test_llm_proposals_cannot_crowd_out_retrieval():
                 choice = int(num); break
         return json.dumps({"choice": choice, "reason": "retrieved"})
 
-    line = resolve(fact, src, llm=stub, corroborate=stub)
+    line = resolve(_request(fact), src, llm=stub, corroborate=stub)
     assert line.resolved and line.chosen.code == "RCODE"

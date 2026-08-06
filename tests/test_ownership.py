@@ -1,8 +1,8 @@
 """Tri-state claim ownership (Phase-0).
 
-Safety property: BLOCK only on POSITIVE evidence a different actor performed the service;
-unstated ownership never blocks (assumed billing provider) so it cannot self-DoS the
-common case. Decisions use actor IDs, not names. Agnostic — synthetic ids, no code."""
+Safety property: positive identity/organization evidence is required for ownership;
+unknown cannot authorize retrieval or release. Decisions use actor IDs, not names.
+Agnostic — synthetic ids, no code."""
 from claude_coder import ownership as own
 from claude_coder import gates
 from claude_coder.models import (Outcome, CodingResult, ResolvedLine, ClinicalFact,
@@ -23,6 +23,7 @@ def test_classify_ownership_tristate_by_id():
     assert own.classify_ownership(None, "prov-1") is Outcome.UNKNOWN       # unstated
     assert own.classify_ownership("prov-1", None) is Outcome.UNKNOWN
     assert own.classify_ownership(None, None) is Outcome.UNKNOWN
+    assert own.classify_ownership("prov-1", "org-1", "org-1", "operator") is Outcome.PASS
 
 
 def test_fact_ownership_reads_ids_not_names():
@@ -49,11 +50,17 @@ def test_gate_passes_when_owner_matches():
     assert gates.claim_ownership_gate(res).outcome is Outcome.PASS
 
 
-def test_gate_unstated_ownership_does_not_block():
-    """The self-DoS guard: a note that does not state actor ids must PASS, not block."""
+def test_gate_unstated_ownership_is_unknown_and_retryable():
     res = CodingResult("enc", "2026-08-01", lines=[_billable_line({})])
     g = gates.claim_ownership_gate(res)
-    assert g.outcome is Outcome.PASS and "unstated" in g.detail
+    assert g.outcome is Outcome.UNKNOWN and g.retryable is True
+
+
+def test_gate_passes_practitioner_on_behalf_of_organization():
+    res = CodingResult("enc", "2026-08-01", lines=[_billable_line({
+        "performer_id": "prov-1", "performer_function": "operator",
+        "organization_id": "org-1", "billing_entity_id": "org-1"})])
+    assert gates.claim_ownership_gate(res).outcome is Outcome.PASS
 
 
 def test_gate_not_applicable_without_billable_lines():

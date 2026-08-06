@@ -2831,9 +2831,26 @@ class CodingValidator:
                               if t in self._cond_lex
                               and self._icd_token_df.get(t, 0) <= 150]
                 decisive = own_entity or own_only
-                own_documented = (
-                    any(self._desc_documented(t, note_words, low_note) for t in decisive)
-                    or _any_term_documented(own_syn))
+                direct_own = any(
+                    self._desc_documented(t, note_words, low_note) for t in decisive)
+                if own_entity:
+                    # A branch-specific synonym may protect a rare billed entity only
+                    # when the synonym itself contributes a documented condition entity.
+                    # Generic qualifier/anatomy tokens in a flattened Index phrase cannot
+                    # stand in for an absent entity.
+                    entity_syn = set()
+                    for term in own_syn:
+                        tt = self._tokens(term)
+                        if any(
+                            (t in self._cond_lex and self._icd_token_df.get(t, 0) <= 150)
+                            or (len(t) >= 4 and t not in sites
+                                and t not in self._DESC_STOPWORDS
+                                and self._icd_token_df.get(t, 0) <= 25)
+                            for t in tt):
+                            entity_syn.add(term)
+                    own_documented = direct_own or _any_term_documented(entity_syn)
+                else:
+                    own_documented = direct_own or _any_term_documented(own_syn)
                 # swap-driving evidence: clinical view only (incidental
                 # tourniquet/positioning/prep anatomy never drives a swap)
                 sib_documented = (
@@ -2868,8 +2885,7 @@ class CodingValidator:
                     entity_only = [t for t in own_entity
                                    if t not in self._anatomy_lexicon()
                                    and not _refines_documented(t)]
-                    if (entity_only and len(entity_only) == len(own_entity)
-                            and not _terms_documented(norm, 3)):
+                    if entity_only and len(entity_only) == len(own_entity):
                         undoc_axis = (sorted(own_entity), sib_code, sib_desc)
 
             def _dotted(c):
@@ -3150,17 +3166,37 @@ class CodingValidator:
                             break
                     if target is None:
                         # neither qualifier documented → Index bare-term default
+                        candidates = []
                         for bc in sorted(tmap.get(base, set())):
                             if norm.startswith(bc.rstrip("0") or bc[:3]):
                                 continue  # routes back to the billed family
                             billable = self.store.icd10_billable_under(bc)
                             if billable and billable[0][0] == bc:
-                                target = _dotted(bc)
+                                common = 0
+                                while (common < min(len(norm), len(bc))
+                                       and norm[common] == bc[common]):
+                                    common += 1
+                                candidates.append((common, bc))
+                        if candidates:
+                            # A flattened Index can contain the same leaf
+                            # phrase under several unrelated main-term paths.
+                            # Prefer a unique route structurally closest to
+                            # the billed family; if none is related, accept
+                            # only a unique bare-term route.  Ties remain
+                            # unresolved rather than selecting by code order.
+                            best_affinity = max(a for a, _ in candidates)
+                            if best_affinity:
+                                best = [bc for a, bc in candidates
+                                        if a == best_affinity]
+                            else:
+                                best = [bc for _, bc in candidates]
+                            if len(best) == 1:
+                                target = _dotted(best[0])
                                 why = (f"neither '{q}' nor a counterpart "
                                        f"qualifier is documented with the "
-                                       f"condition — the Index's bare "
-                                       f"'{base}' default applies")
-                                break
+                                       f"condition — the Index's unique "
+                                       f"bare '{base}' route nearest the "
+                                       f"billed family applies")
                     if target is None:
                         continue
                     tdesc = (self.db.validate_icd10(target) or {}).get(
@@ -6324,12 +6360,22 @@ class CodingValidator:
             # could not see Index-phrase evidence the sibling-swap check
             # (_check_billed_vs_sibling) had accepted for years.
             if self.store is not None:
-                sib_ix = {t.lower() for t in
-                          self.store.icd10_index_terms(sib_code,
-                                                       min_level=4)}
-                own_ix = {t.lower() for t in
-                          self.store.icd10_index_terms(code, min_level=4)
-                          } - sib_ix
+                sib_ix = {
+                    t.lower() for t in
+                    self.store.icd10_index_terms(sib_code, min_level=4)
+                }
+                sib_ix_keys = {
+                    frozenset(self._stem(tok) for tok in _toks(term))
+                    for term in sib_ix
+                    if _toks(term)
+                }
+                own_ix = {
+                    term.lower() for term in
+                    self.store.icd10_index_terms(code, min_level=4)
+                    if _toks(term)
+                    and frozenset(self._stem(tok) for tok in _toks(term))
+                    not in sib_ix_keys
+                }
                 if any(toks and all(self._desc_documented(t, note_words,
                                                           low_note)
                                     for t in toks)

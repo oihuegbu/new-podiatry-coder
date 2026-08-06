@@ -1448,7 +1448,9 @@ def main():
     # Real indicator-1 PTP pair and a no-edit pair, both from the live table.
     pair_row = store.conn.execute(
         "SELECT col1, col2 FROM ncci_ptp WHERE modifier_indicator='1' "
-        "AND col1 NOT LIKE '99%' AND col2 NOT LIKE '99%' LIMIT 1").fetchone()
+        "AND col1 NOT LIKE '99%' AND col2 NOT LIKE '99%' "
+        "AND effective_from <= ? AND effective_to >= ? LIMIT 1",
+        (ncci_dos.isoformat(), ncci_dos.isoformat())).fetchone()
     if pair_row:
         c1, c2 = pair_row[0], pair_row[1]
         col2_line = {"code": c2, "modifiers": ["59"]}
@@ -1709,7 +1711,9 @@ def main():
     print("\n[separation-modifier placement (NCCI column-2)]")
     pair = store.conn.execute(
         "SELECT col1, col2 FROM ncci_ptp WHERE modifier_indicator='1' "
-        "AND col1 NOT LIKE '99%' AND col2 NOT LIKE '99%' LIMIT 1").fetchone()
+        "AND col1 NOT LIKE '99%' AND col2 NOT LIKE '99%' "
+        "AND effective_from <= ? AND effective_to >= ? LIMIT 1",
+        (ncci_dos.isoformat(), ncci_dos.isoformat())).fetchone()
     if pair:
         c1, c2 = pair["col1"], pair["col2"]
         l1, l2 = {"code": c1, "modifiers": ["59"]}, {"code": c2, "modifiers": []}

@@ -21,11 +21,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("note", help="path to a note file, or '-' for stdin")
     ap.add_argument("--dos", help="date of service YYYY-MM-DD (required for release)")
     ap.add_argument("--id", default="enc-1", help="encounter id")
+    ap.add_argument("--billing-context", help="JSON file containing billing_entity_id and known participants")
+    ap.add_argument("--document-version", help="immutable source-document version/id")
     ap.add_argument("--json", action="store_true", help="print the release certificate as JSON")
     args = ap.parse_args(argv)
 
     note = sys.stdin.read() if args.note == "-" else open(args.note).read()
-    result = code_encounter(args.id, note, args.dos)
+    billing_context = None
+    if args.billing_context:
+        with open(args.billing_context) as fh:
+            billing_context = json.load(fh)
+        if not isinstance(billing_context, dict):
+            ap.error("--billing-context must contain a JSON object")
+    result = code_encounter(args.id, note, args.dos,
+                            billing_context=billing_context,
+                            document_version=args.document_version)
 
     if args.json:
         print(json.dumps(result.certificate, indent=2))

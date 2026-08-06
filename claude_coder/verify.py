@@ -40,16 +40,18 @@ def default_verify_llm(system: str, user: str) -> str:
     # use_batch=False: propose/verify are interactive, latency-sensitive calls; the
     # Batches API (~minutes/call) would make the loop unusable.
     from app.core.llm_client import chat_completion
-    out, _ = chat_completion(system, user, temperature=0.0, json_mode=True,
-                             use_batch=False)
+    from app.core.config import OPENAI_MODEL
+    out, _ = chat_completion(system, user, model=OPENAI_MODEL, provider="openai",
+                             temperature=0.0, json_mode=True, use_batch=False)
     return out
 
 
 def default_corroborate_llm(system: str, user: str) -> str:
     """The INDEPENDENT second opinion — a different/stronger model (CLAUDE_VERIFY_
     MODEL/EFFORT, typically the Opus verification tier) so agreement is genuine
-    cross-model corroboration, not the same model re-confirming itself. Falls back
-    to the default model when unset (a weaker same-model second pass)."""
+    cross-provider corroboration, not the same provider re-confirming itself. The
+    verifier is pinned to OpenAI and this corroborator to Anthropic; an optional
+    CLAUDE_VERIFY_MODEL selects the Anthropic tier."""
     from app.core.llm_client import chat_completion
     model = effort = None
     try:
@@ -58,7 +60,7 @@ def default_corroborate_llm(system: str, user: str) -> str:
         effort = getattr(config, "CLAUDE_VERIFY_EFFORT", "") or None
     except Exception:
         pass
-    out, _ = chat_completion(system, user, model=model, effort=effort,
+    out, _ = chat_completion(system, user, model=model, effort=effort, provider="claude",
                              temperature=0.0, json_mode=True, use_batch=False)
     return out
 
