@@ -420,6 +420,20 @@ def merge_duplicate_intents(intents: list["ClaimLineIntent"],
     return [rep[r] for r in order]
 
 
+def _diagnosis_links(fact: ClinicalFact, relations: list) -> list[str]:
+    """Service events this diagnosis justifies/supports (REASON_FOR, asserted).
+    Makes the diagnosis-to-service linkage first-class (bound in the certificate via the
+    decision) rather than a bare DIAGNOSIS_SUPPORT label. (Review gap: diagnoses remained
+    independent retrieval candidates with no required service linkage.)"""
+    out: list[str] = []
+    for r in relations:
+        if (r.subject_event_id == fact.fact_id
+                and r.predicate is RelationPredicate.REASON_FOR
+                and r.state is RelationState.ASSERTED):
+            out.append(r.object_event_id)
+    return list(dict.fromkeys(out))
+
+
 def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: str,
              date_of_service: str | None) -> list[ClaimLineIntent]:
     """Run the eligibility gates over every fact and produce a ClaimLineIntent for each.
@@ -432,13 +446,25 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
         span_ids = [s.span_id for s in (f.evidence or []) if getattr(s, "span_id", None)]
         billing_id = (f.attributes or {}).get("billing_entity_id")
         if f.kind is FactKind.DIAGNOSIS:
-            decisions = [_gate_evidence_required(f), _gate_occurrence(f)]
+            core = [_gate_evidence_required(f), _gate_occurrence(f)]
             state = (EligibilityState.ELIGIBLE_FOR_RETRIEVAL
-                     if all(d.outcome is Outcome.PASS for d in decisions)
+                     if all(d.outcome is Outcome.PASS for d in core)
                      else (EligibilityState.NON_CLAIM_EVIDENCE
                            if any(d.gate == "occurrence" and d.outcome is Outcome.BLOCKED
-                                  for d in decisions)
+                                  for d in core)
                            else EligibilityState.AUTO_HOLD))
+            # Record the diagnosis-to-service linkage (REASON_FOR / SUPPORTS) as a
+            # first-class decision bound in the certificate. RECORDED, NOT BLOCKING -- an
+            # encounter diagnosis without an explicit documented link is still codeable (it
+            # establishes necessity), and relations are LLM-extracted and often incomplete;
+            # a downstream necessity gate can consult these links.
+            _links = _diagnosis_links(f, relations)
+            decisions = core + [EligibilityDecision(
+                "diagnosis_linkage",
+                Outcome.PASS if _links else Outcome.UNKNOWN,
+                (f"supports service event(s): {', '.join(_links)}" if _links
+                 else "no documented REASON_FOR link to a service (recorded)"),
+                "diagnosis-to-service linkage")]
             component = ClaimComponent.DIAGNOSIS_SUPPORT
         elif f.kind in _SERVICE_KINDS:
             decisions = [_gate_evidence_required(f), _gate_occurrence(f),

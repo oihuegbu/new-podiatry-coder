@@ -287,3 +287,24 @@ def test_ambiguous_duplicate_is_held_not_an_extra_eligible_line():
     assert st.get(("F2",)) is EligibilityState.AUTO_HOLD
     assert sum(1 for i in intents
                if i.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL) == 2
+
+
+# ---- Review gap: diagnosis-to-service linkage is first-class (recorded, non-blocking) ----
+def test_diagnosis_records_service_linkage_without_blocking():
+    rel = RelationAssertion("D1", RelationPredicate.REASON_FOR, "S1",
+                            state=RelationState.ASSERTED)
+    dx = _fact(kind=FactKind.DIAGNOSIS, fid="D1", desc="a documented condition")
+    svc = _fact(fid="S1", desc="a performed service")
+    intents = el.evaluate([dx, svc], [rel], "enc", "2026-08-01")
+    di = next(i for i in intents if "D1" in i.clinical_event_ids)
+    link = next(d for d in di.decisions if d.gate == "diagnosis_linkage")
+    assert link.outcome is Outcome.PASS and "S1" in link.detail
+    assert di.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL          # linkage never blocks
+
+
+def test_unlinked_diagnosis_stays_eligible_linkage_unknown():
+    dx = _fact(kind=FactKind.DIAGNOSIS, fid="D1", desc="a documented condition")
+    di = el.evaluate([dx], [], "enc", "2026-08-01")[0]
+    link = next(d for d in di.decisions if d.gate == "diagnosis_linkage")
+    assert link.outcome is Outcome.UNKNOWN                              # recorded, not blocking
+    assert di.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL
