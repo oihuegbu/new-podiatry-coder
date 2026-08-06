@@ -168,6 +168,35 @@ def chat_completion(
     raise last_exc  # pragma: no cover — loop always returns or raises
 
 
+# Newer OpenAI models (the GPT-5 family and o-series reasoning models) changed the
+# chat-completions parameter contract: `max_tokens` was renamed to
+# `max_completion_tokens`, and they reject a non-default `temperature`. Rather than
+# hardcode a model-name list that silently goes stale as OpenAI ships new models, we
+# LEARN each model's quirks from the API's own 400 signal on first use and cache them,
+# so subsequent calls send the correct shape directly. For models that accept the
+# classic parameters (e.g. gpt-4o) the request is byte-for-byte unchanged.
+_OPENAI_UNSUPPORTED_PARAMS: dict[str, set[str]] = {}
+
+
+def _openai_unsupported_param(exc: Exception) -> str | None:
+    """If `exc` is an OpenAI 400 rejecting a parameter we know how to adapt
+    (`max_tokens` -> `max_completion_tokens`, or a non-default `temperature`),
+    return that parameter name; otherwise None (caller re-raises)."""
+    body = getattr(exc, "body", None)
+    err = body.get("error") if isinstance(body, dict) else {}
+    code = (err or {}).get("code")
+    param = (err or {}).get("param")
+    if code in ("unsupported_parameter", "unsupported_value") and param in (
+            "max_tokens", "temperature"):
+        return param
+    msg = str(exc).lower()
+    if "unsupported" in msg or "not supported" in msg:
+        for p in ("max_tokens", "temperature"):
+            if p in msg:
+                return p
+    return None
+
+
 def _openai_chat_completion(
     system_prompt: str,
     user_prompt: str,
@@ -178,27 +207,53 @@ def _openai_chat_completion(
     json_schema: dict | None = None,
 ) -> tuple[str, dict]:
     client = get_openai_client()
-    kwargs: dict = {
-        "model": model or OPENAI_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    if json_schema is not None:
-        # strict=True is what makes OpenAI grammar-enforce the schema; without
-        # it the schema is advisory only. Our schemas already satisfy strict
-        # mode's constraints (all-required, additionalProperties: false).
-        kwargs["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {"name": "result", "strict": True, "schema": json_schema},
-        }
-    elif json_mode:
-        kwargs["response_format"] = {"type": "json_object"}
+    mdl = model or OPENAI_MODEL
 
-    response = client.chat.completions.create(**kwargs)
+    def _build(unsupported: set[str]) -> dict:
+        kw: dict = {
+            "model": mdl,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        if "temperature" not in unsupported:
+            kw["temperature"] = temperature
+        # `max_tokens` was renamed to `max_completion_tokens` on newer models.
+        kw["max_completion_tokens" if "max_tokens" in unsupported else "max_tokens"] = max_tokens
+        if json_schema is not None:
+            # strict=True is what makes OpenAI grammar-enforce the schema; without
+            # it the schema is advisory only. Our schemas already satisfy strict
+            # mode's constraints (all-required, additionalProperties: false).
+            kw["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "result", "strict": True, "schema": json_schema},
+            }
+        elif json_mode:
+            kw["response_format"] = {"type": "json_object"}
+        return kw
+
+    unsupported = set(_OPENAI_UNSUPPORTED_PARAMS.get(mdl, ()))
+    response = None
+    # Bounded by the number of parameters we know how to adapt (max_tokens,
+    # temperature): each iteration either succeeds, adapts one newly-rejected
+    # parameter and retries, or re-raises an error we cannot adapt.
+    for _ in range(3):
+        try:
+            response = client.chat.completions.create(**_build(unsupported))
+            break
+        except Exception as exc:  # noqa: BLE001 — only param-shape 400s are adapted; others re-raise
+            param = _openai_unsupported_param(exc)
+            if param is None or param in unsupported:
+                raise
+            unsupported.add(param)
+            _OPENAI_UNSUPPORTED_PARAMS[mdl] = set(unsupported)
+            logger.warning(
+                f"OpenAI model {mdl!r} rejected '{param}'; adapting request "
+                f"(max_tokens->max_completion_tokens / drop temperature) and retrying"
+            )
+    assert response is not None  # loop only exits via break or a raise
+
     if response.choices[0].finish_reason == "length":
         raise _TruncatedResponse(f"finish_reason=length at {max_tokens} tokens")
     content = response.choices[0].message.content or ""
