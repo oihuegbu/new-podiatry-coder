@@ -167,19 +167,36 @@ def measurement_for_dimension(attributes: dict, dimension: str):
 
 def measurement_for_constraint(attributes: dict, dimension: str,
                                semantic_role: str | None):
-    """The unique measurement matching BOTH physical dimension and semantic role.
+    """The unique measurement satisfying a descriptor's dimensional constraint.
 
-    A width is not a depth merely because both are lengths. Descriptor or fact role
-    ambiguity returns None and therefore cannot drive deterministic/verified selection.
+    Always gated on physical DIMENSION (a length never satisfies an area constraint) and
+    on UNIQUENESS (an ambiguous match cannot drive deterministic/verified selection). Role
+    gating is asymmetric:
+
+    - A SPECIFIC sub-axis constraint -- depth / width / diameter / thickness, i.e. a role
+      word present in _DIM_WORDS whose dimension differs from the word itself -- must be met
+      by a measurement carrying that SAME axis. A width is not a depth merely because both
+      are lengths; among several same-dimension measurements the matching axis is selected.
+    - A DIMENSION-LEVEL constraint -- the role names the dimension itself (e.g. "area"), or
+      is a generic magnitude ("size") or absent -- is satisfied by the UNIQUE measurement of
+      that dimension regardless of the documenting vocabulary, so "size 10 sq cm" satisfies
+      an "area ... sq cm" descriptor. Two measurements of the dimension remain ambiguous.
+
+    (Codex review F4-R1; role-vocabulary robustness -- descriptor and note need not use the
+    same word for the same physical dimension.)
     """
     role = str(semantic_role or "").strip().lower()
-    if not role:
-        return None
+    specific = role in _DIM_WORDS and _DIM_WORDS[role] != role
     matches = []
     for m in measurements_of(attributes):
-        source = str(m.source_attribute or m.semantic_role or "").lower()
-        words = re.findall(r"[a-z]+", source)
-        fact_role = next((w for w in words if w in _DIM_WORDS or w in ("size", "height")), None)
-        if m.dimension == dimension and fact_role == role:
-            matches.append(m)
+        if m.dimension != dimension:
+            continue
+        if specific:
+            source = str(m.source_attribute or m.semantic_role or "").lower()
+            words = re.findall(r"[a-z]+", source)
+            fact_role = next(
+                (w for w in words if w in _DIM_WORDS or w in ("size", "height")), None)
+            if fact_role != role:
+                continue
+        matches.append(m)
     return matches[0] if len(matches) == 1 else None

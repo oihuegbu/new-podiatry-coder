@@ -254,3 +254,41 @@ def test_unsupported_interval_not_billed_via_verified_path():
     assert corroborated.chosen is None and corroborated.documentation_gap
     one_model = resolve(_request(fact), src, llm=agree)
     assert one_model.chosen is None and one_model.documentation_gap
+
+
+# ---- role-vocabulary robustness: descriptor and note need not use the same role word ----
+def test_constraint_dimension_level_role_accepts_any_vocabulary():
+    """A dimension-level axis ("area") is satisfied by a measurement of that dimension
+    however it is documented -- "size 10 sq cm" satisfies an "area ... sq cm" descriptor.
+    Regression: the old exact role-word gate falsely abstained this valid, in-range case."""
+    assert meas.measurement_for_constraint({"size_sqcm": 10}, "area", "area").value == 10
+    assert meas.measurement_for_constraint({"area_sqcm": 10}, "area", "size").value == 10
+    assert meas.measurement_for_constraint({"size_sqin": 30}, "area", None).value == 30
+
+
+def test_constraint_specific_subaxis_still_requires_matching_axis():
+    """A specific sub-axis constraint keeps its safety: a width does not satisfy a depth,
+    the matching axis is selected among several lengths, and a bare dimension role over two
+    same-dimension measurements is ambiguous -> None."""
+    assert meas.measurement_for_constraint({"width_cm": 3}, "length", "depth") is None
+    assert meas.measurement_for_constraint(
+        {"width_cm": 3, "depth_mm": 5}, "length", "depth").value == 5
+    assert meas.measurement_for_constraint(
+        {"width_cm": 3, "depth_mm": 5}, "length", "length") is None
+
+
+def test_supported_area_vocabulary_measurement_resolves_end_to_end():
+    """End-to-end regression: an area-qualified candidate ("area 16 sq cm or less") with a
+    documented in-range measurement written as "size" (size_sqcm=10) must RESOLVE, not
+    abstain. The descriptor and the note used different words for the same physical
+    dimension; that vocabulary gap must not hold a valid, in-range claim."""
+    cand = CandidateCode("AREA_C", "cpt", "excision, area 16 sq. cm. or less", 0.9)
+    src = MockSource(
+        records={("AREA_C", "cpt"): {"long_description": "excision, area 16 sq. cm. or less",
+                                     "active": True}},
+        retrieval={("*", "cpt"): [cand]})
+    fact = ClinicalFact(FactKind.PROCEDURE, "excision", attributes={"size_sqcm": 10},
+                        disposition=Disposition.PERFORMED,
+                        evidence=[EvidenceSpan("excision performed")], confidence=0.99)
+    line = resolve(_request(fact), src)
+    assert line.chosen is not None and line.chosen.code == "AREA_C"
