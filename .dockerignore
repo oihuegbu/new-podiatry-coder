@@ -10,3 +10,9 @@ logs/
 *.log
 .venv/
 venv/
+# Gitignored authoritative data must never be smuggled into the image via the build
+# context — a clean-checkout build must be built solely from committed source (Codex F6-R8).
+# The test stage regenerates the REQUIRED NCCI snapshot deterministically from CMS; the
+# optional SNOMED crosswalk (licensed source) is simply absent-optional in the test image.
+data/codes/ncci_data.json
+data/codes/snomed_icd10_map.json

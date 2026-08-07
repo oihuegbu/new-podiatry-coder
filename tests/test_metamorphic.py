@@ -14,7 +14,8 @@ from claude_coder import resolution, gates, extraction, ontology
 
 def _request(fact):
     from claude_coder.eligibility import (ClaimComponent, ClaimLineIntent,
-                                          EligibilityState, RetrievalRequest)
+                                          EligibilityState, RetrievalRequest,
+                                          fact_snapshot_digest)
     if not fact.fact_id:
         fact.fact_id = "fact"
     intent = ClaimLineIntent(
@@ -24,7 +25,8 @@ def _request(fact):
         clinical_event_ids=[fact.fact_id], fact_kind=fact.kind.value,
         clinical_action=fact.description, attributes=dict(fact.attributes),
         date_of_service=None, billing_entity_id=None, source_span_ids=[],
-        state=EligibilityState.ELIGIBLE_FOR_RETRIEVAL)
+        state=EligibilityState.ELIGIBLE_FOR_RETRIEVAL,
+        fact_digest=fact_snapshot_digest(fact))
     return RetrievalRequest(intent, fact)
 
 
@@ -360,18 +362,25 @@ def test_gate_result_defaults_not_retryable():
     assert g.retryable is False
 
 
-def test_extraction_skips_malformed_facts():
-    """Fail-closed input validation: a fact with an UNRECOGNIZED kind OR an empty
-    description is dropped — never emitted as a half-formed fact (kills the
-    `kind is None or not desc` Or->And mutant, which would let one half through)."""
-    from claude_coder.extraction import extract_facts
-    payload = {"facts": [
-        {"kind": "not_a_kind", "description": "has description", "evidence": ["x"]},
-        {"kind": "diagnosis", "description": "   ", "evidence": ["x"]},
-        {"kind": "diagnosis", "description": "onychomycosis", "evidence": ["onychomycosis"]},
-    ]}
-    facts = extract_facts("note", llm=lambda s, u: json.dumps(payload))
-    assert [f.description for f in facts] == ["onychomycosis"]   # only the well-formed one
+def test_extraction_rejects_malformed_facts():
+    """Fail-closed input validation (Codex F6-R1): a fact with an UNRECOGNIZED kind or an
+    empty description is a malformed claim-affecting assertion -- it must RAISE a typed
+    error (the pipeline turns it into a retryable SYSTEM_HOLD with zero retrieval), never
+    be silently dropped, because a silent drop can turn a real event into 'no findings'."""
+    import pytest
+    from claude_coder.extraction import extract_facts, ExtractionSchemaError
+    bad_kind = {"facts": [
+        {"kind": "not_a_kind", "description": "has description", "evidence": ["x"]}]}
+    empty_desc = {"facts": [
+        {"kind": "diagnosis", "description": "   ", "evidence": ["x"]}]}
+    good = {"facts": [
+        {"kind": "diagnosis", "description": "onychomycosis", "evidence": ["onychomycosis"]}]}
+    with pytest.raises(ExtractionSchemaError):
+        extract_facts("note", llm=lambda s, u: json.dumps(bad_kind))
+    with pytest.raises(ExtractionSchemaError):
+        extract_facts("note", llm=lambda s, u: json.dumps(empty_desc))
+    facts = extract_facts("note", llm=lambda s, u: json.dumps(good))
+    assert [f.description for f in facts] == ["onychomycosis"]   # the well-formed one resolves
 
 
 def test_extraction_preserves_attributes():
@@ -687,3 +696,33 @@ def test_llm_proposals_cannot_crowd_out_retrieval():
 
     line = resolve(_request(fact), src, llm=stub, corroborate=stub)
     assert line.resolved and line.chosen.code == "RCODE"
+
+
+# ---- Codex F6-R3: necessity is per-service, requiring an explicit REASON_FOR linkage -----
+def test_necessity_requires_per_service_diagnosis_linkage():
+    from claude_coder.models import (ClinicalFact, CodingResult, EvidenceSpan, FactKind,
+                                      ResolutionMethod, ResolvedLine, CandidateCode,
+                                      RelationAssertion, RelationPredicate, RelationState,
+                                      Outcome)
+    from claude_coder.gates import medical_necessity_gate
+
+    def _line(code, kind, fid):
+        f = ClinicalFact(kind=kind, description="x", attributes={}, fact_id=fid,
+                         evidence=[EvidenceSpan("x")])
+        sysname = "cpt" if kind is FactKind.PROCEDURE else "icd10"
+        return ResolvedLine(fact=f, chosen=CandidateCode(code, sysname, "d", 0.9),
+                            method=ResolutionMethod.DETERMINISTIC)
+
+    proc = _line("P1", FactKind.PROCEDURE, "pf")
+    dx = _line("D1", FactKind.DIAGNOSIS, "df")
+    # a procedure and an UNRELATED diagnosis -> not defensible -> UNKNOWN (hold)
+    unlinked = CodingResult("e", "2026-08-01", lines=[proc, dx])
+    assert medical_necessity_gate(unlinked).outcome is Outcome.UNKNOWN
+    # the diagnosis explicitly justifies the procedure (REASON_FOR) -> PASS
+    linked = CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[
+        RelationAssertion(subject_event_id="df", predicate=RelationPredicate.REASON_FOR,
+                          object_event_id="pf", state=RelationState.ASSERTED)])
+    assert medical_necessity_gate(linked).outcome is Outcome.PASS
+    # no diagnosis at all -> BLOCKED
+    none_dx = CodingResult("e", "2026-08-01", lines=[proc])
+    assert medical_necessity_gate(none_dx).outcome is Outcome.BLOCKED

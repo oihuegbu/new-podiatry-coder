@@ -14,6 +14,7 @@ actor ids, relationship assertions and evidence anchoring; no medical code.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -62,6 +63,30 @@ class ClaimLineIntent:
     service_episode_id: str | None = None
     mention_count: int = 1
     distinctness_facts: list[str] = field(default_factory=list)
+    # R7: canonical digest of the fact snapshot eligibility approved; re-checked before
+    # retrieval so no retrieval/release-relevant field can be mutated afterward.
+    fact_digest: str = ""
+
+
+def fact_snapshot_digest(fact) -> str:
+    """Canonical digest of every retrieval/release-relevant field of a fact, captured at
+    eligibility time and re-verified before retrieval so no field can change afterward:
+    kind, clinical action, disposition, ALL attributes (measurements + actor ids live here),
+    and anchored evidence-span identity. (Codex F6-R7.)"""
+    evidence = sorted(
+        (str(getattr(sp, "span_id", "") or ""),
+         str(getattr(sp, "text_sha256", "") or
+             hashlib.sha256(str(getattr(sp, "text", "")).encode()).hexdigest()))
+        for sp in (getattr(fact, "evidence", None) or []))
+    payload = {
+        "kind": fact.kind.value,
+        "description": fact.description,
+        "disposition": getattr(getattr(fact, "disposition", None), "value", None),
+        "attributes": fact.attributes or {},
+        "evidence": evidence,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -83,6 +108,16 @@ class RetrievalRequest:
             raise ValueError("retrieval fact kind differs from the eligible intent")
         if self.fact.description != self.intent.clinical_action:
             raise ValueError("retrieval action differs from the eligible intent")
+        # R7: the fact must be byte-identical to what eligibility approved. Attributes
+        # (measurements + actor ids) are re-checked against the eligibility-time snapshot
+        # (always, so directly-built intents cannot bypass it); the canonical digest
+        # additionally binds disposition and anchored evidence-span identity. Any change
+        # rejects the request and yields zero retrieval. (Codex F6-R7.)
+        if dict(self.fact.attributes or {}) != dict(self.intent.attributes or {}):
+            raise ValueError("retrieval fact attributes mutated since eligibility")
+        if (self.intent.fact_digest
+                and fact_snapshot_digest(self.fact) != self.intent.fact_digest):
+            raise ValueError("retrieval fact snapshot digest mismatch since eligibility")
 
 
 def _intent_id(encounter_id: str, fact_id: str, action: str) -> str:
@@ -483,7 +518,8 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
             billing_entity_id=billing_id, source_span_ids=span_ids,
             state=state, decisions=decisions,
             service_episode_id=_ep_map.get(f.fact_id),
-            distinctness_facts=_distinctness_facts(f, relations)))
+            distinctness_facts=_distinctness_facts(f, relations),
+            fact_digest=fact_snapshot_digest(f)))
     _separate_pairs = {frozenset((r.subject_event_id, r.object_event_id))
                        for r in relations
                        if r.predicate is RelationPredicate.SEPARATE_FROM

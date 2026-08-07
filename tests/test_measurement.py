@@ -12,7 +12,8 @@ from claude_coder.models import ResolutionMethod
 
 def _request(fact):
     from claude_coder.eligibility import (ClaimComponent, ClaimLineIntent,
-                                          EligibilityState, RetrievalRequest)
+                                          EligibilityState, RetrievalRequest,
+                                          fact_snapshot_digest)
     if not fact.fact_id:
         fact.fact_id = "fact"
     intent = ClaimLineIntent(
@@ -21,7 +22,8 @@ def _request(fact):
         fact_kind=fact.kind.value, clinical_action=fact.description,
         attributes=dict(fact.attributes), date_of_service=None,
         billing_entity_id=None, source_span_ids=[],
-        state=EligibilityState.ELIGIBLE_FOR_RETRIEVAL)
+        state=EligibilityState.ELIGIBLE_FOR_RETRIEVAL,
+        fact_digest=fact_snapshot_digest(fact))
     return RetrievalRequest(intent, fact)
 
 
@@ -292,3 +294,34 @@ def test_supported_area_vocabulary_measurement_resolves_end_to_end():
                         evidence=[EvidenceSpan("excision performed")], confidence=0.99)
     line = resolve(_request(fact), src)
     assert line.chosen is not None and line.chosen.code == "AREA_C"
+
+
+# ---- Codex F6-R6: sub-axis vocabulary is shared; height is a specific length sub-axis ----
+def test_height_is_a_specific_length_subaxis_not_generic():
+    """A width must NOT satisfy a height-constrained descriptor (both are lengths but
+    different axes). Regression: height was recognized by the descriptor grammar but absent
+    from _DIM_WORDS, so it was treated as dimension-level generic and any length matched."""
+    assert meas.measurement_for_constraint({"width_cm": 3}, "length", "height") is None
+    assert meas.measurement_for_constraint({"height_cm": 3}, "length", "height").value == 3
+
+
+def test_every_specific_subaxis_is_cross_axis_safe():
+    """For every specific sub-axis role, a DIFFERENT sub-axis measurement of the same
+    dimension does not satisfy it; the same axis does."""
+    subaxes = [r for r in meas.RECOGNIZED_ROLES
+               if r in meas._DIM_WORDS and meas._DIM_WORDS[r] != r]
+    assert set(subaxes) >= {"depth", "width", "diameter", "thickness", "height"}
+    for role in subaxes:
+        other = next(a for a in subaxes if a != role)
+        dim = meas._DIM_WORDS[role]
+        assert meas.measurement_for_constraint({f"{other}_mm": 5}, dim, role) is None, role
+        assert meas.measurement_for_constraint({f"{role}_mm": 5}, dim, role).value == 5, role
+
+
+def test_ontology_and_measurement_share_role_vocabulary():
+    """Every role the measurement layer recognizes is parsed as a semantic_role by the
+    descriptor grammar -- the two lists are derived from one source and cannot diverge."""
+    from claude_coder.ontology import parse_descriptor
+    for role in meas.RECOGNIZED_ROLES:
+        feats = parse_descriptor(f"{role} 10 mm or less")
+        assert feats.interval is not None and feats.interval.semantic_role == role, role

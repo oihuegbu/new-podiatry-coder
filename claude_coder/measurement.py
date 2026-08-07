@@ -26,9 +26,21 @@ _MASS = {"mcg": 0.001, "microgram": 0.001, "mg": 1.0, "milligram": 1.0,
          "g": 1000.0, "gram": 1000.0, "grams": 1000.0, "kg": 1_000_000.0}
 _DIM: dict[str, dict[str, float]] = {"area": _AREA, "length": _LENGTH, "mass": _MASS}
 
-# dimension WORDS in an attribute key when no explicit unit token is present.
+# The single source of truth for descriptor/measurement ROLE vocabulary. Each role word
+# maps to its physical dimension; a role whose value differs from the word itself is a
+# SPECIFIC sub-axis of that dimension (depth/width/diameter/thickness/height are sub-axes
+# of length), while a role equal to its dimension (area, length) is dimension-level.
+# ontology.parse_descriptor derives its recognized-role grammar from RECOGNIZED_ROLES, so
+# the two modules can never diverge (Codex F6-R6: height was recognized by the grammar but
+# absent here, letting a width satisfy a height-constrained descriptor).
 _DIM_WORDS = {"area": "area", "depth": "length", "length": "length",
-              "thickness": "length", "diameter": "length", "width": "length"}
+              "thickness": "length", "diameter": "length", "width": "length",
+              "height": "length"}
+# Generic magnitude words that name no specific sub-axis (their dimension follows from the
+# unit, not the word); dimension-level, never a distinguishing sub-axis.
+_GENERIC_ROLES = ("size",)
+# Every role word the descriptor grammar and the measurement selector both recognize.
+RECOGNIZED_ROLES = tuple(_DIM_WORDS) + _GENERIC_ROLES
 
 
 def _norm_unit(text: str) -> str:
@@ -195,7 +207,7 @@ def measurement_for_constraint(attributes: dict, dimension: str,
             source = str(m.source_attribute or m.semantic_role or "").lower()
             words = re.findall(r"[a-z]+", source)
             fact_role = next(
-                (w for w in words if w in _DIM_WORDS or w in ("size", "height")), None)
+                (w for w in words if w in _DIM_WORDS or w in _GENERIC_ROLES), None)
             if fact_role != role:
                 continue
         matches.append(m)

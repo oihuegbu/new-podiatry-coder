@@ -308,3 +308,30 @@ def test_unlinked_diagnosis_stays_eligible_linkage_unknown():
     link = next(d for d in di.decisions if d.gate == "diagnosis_linkage")
     assert link.outcome is Outcome.UNKNOWN                              # recorded, not blocking
     assert di.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL
+
+
+# ---- Codex F6-R7: the eligible fact snapshot is bound; post-eligibility mutation rejected -
+def test_retrieval_request_rejects_post_eligibility_attribute_mutation():
+    import pytest
+    from claude_coder.eligibility import evaluate, RetrievalRequest, EligibilityState
+    fact = _fact(attrs={"performer_id": "p1", "billing_entity_id": "p1", "depth_mm": 2})
+    intent = next(i for i in evaluate([fact], [], "enc", "2026-08-01")
+                  if i.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL)
+    RetrievalRequest(intent, fact)                       # unchanged fact is accepted
+    fact.attributes["depth_mm"] = 99                     # mutate a measurement after eligibility
+    with pytest.raises(ValueError):
+        RetrievalRequest(intent, fact)                   # rejected -> zero retrieval
+
+
+def test_retrieval_request_rejects_evidence_span_mutation():
+    import pytest
+    from claude_coder.models import EvidenceSpan
+    from claude_coder.eligibility import evaluate, RetrievalRequest, EligibilityState
+    fact = _fact(attrs={"performer_id": "p1", "billing_entity_id": "p1"})
+    intent = next(i for i in evaluate([fact], [], "enc", "2026-08-01")
+                  if i.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL)
+    RetrievalRequest(intent, fact)
+    fact.evidence = [EvidenceSpan(text="a different span", anchored=True,
+                                  text_sha256="hX", span_id="sX")]   # swap the evidence
+    with pytest.raises(ValueError):
+        RetrievalRequest(intent, fact)

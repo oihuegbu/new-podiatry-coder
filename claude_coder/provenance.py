@@ -271,8 +271,11 @@ class SqliteAuditRepository(AuditRepository):
         import sqlite3
         if self.db_path.parent and str(self.db_path.parent):
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        # isolation_level=None -> manual transaction control, so append() can take the
+        # write lock with BEGIN IMMEDIATE before reading the previous hash (Codex F6-R4).
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0, isolation_level=None)
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA synchronous=FULL")
         for stmt in self._DDL:
             conn.execute(stmt)
@@ -282,6 +285,11 @@ class SqliteAuditRepository(AuditRepository):
         try:
             conn = self._connect()
             try:
+                # Serialize the read-previous + append so two concurrent writers cannot both
+                # observe the same predecessor and fork the per-encounter hash chain. The
+                # RESERVED lock is taken at BEGIN IMMEDIATE (before the SELECT), and other
+                # writers block up to busy_timeout instead of racing. (Codex F6-R4.)
+                conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
                     "SELECT record_sha256 FROM audit_log WHERE encounter_id=?"
                     " ORDER BY seq DESC LIMIT 1", (str(encounter_id),)).fetchone()
@@ -304,6 +312,12 @@ class SqliteAuditRepository(AuditRepository):
                      entry["record_sha256"]))
                 conn.commit()
                 return entry["record_sha256"]
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
             finally:
                 conn.close()
         except Exception:
@@ -328,6 +342,42 @@ class SqliteAuditRepository(AuditRepository):
                     for r in conn.execute(q, args).fetchall()]
         finally:
             conn.close()
+
+
+    def verify_chain(self, encounter_id: str | None = None) -> list[str]:
+        """Return a list of integrity problems (empty => intact). Detects hash tampering (a
+        stored record_sha256 that does not equal the recomputed hash of its fields), broken
+        or forked links (previous_record_sha256 != the prior record\'s hash within an
+        encounter), and reordering/gaps (seq not strictly increasing). (Codex F6-R4.)"""
+        conn = self._connect()
+        try:
+            q = ("SELECT seq, encounter_id, kind, recorded_at, control_mode,"
+                 " previous_record_sha256, record_json, record_sha256 FROM audit_log")
+            args: tuple = ()
+            if encounter_id is not None:
+                q += " WHERE encounter_id=?"
+                args = (str(encounter_id),)
+            q += " ORDER BY seq"
+            rows = conn.execute(q, args).fetchall()
+        finally:
+            conn.close()
+        problems: list[str] = []
+        last_sha: dict[str, str] = {}
+        last_seq = -1
+        for (seq, enc, kind, at, mode, prev, rj, sha) in rows:
+            if seq <= last_seq:
+                problems.append(f"seq {seq}: not strictly increasing")
+            last_seq = seq
+            entry = {"encounter_id": enc, "kind": kind, "recorded_at": at,
+                     "control_mode": mode, "previous_record_sha256": prev,
+                     "record": json.loads(rj)}
+            if _sha(json.dumps(entry, sort_keys=True, default=str)) != sha:
+                problems.append(f"seq {seq} enc {enc}: record hash mismatch (tampered)")
+            expected_prev = last_sha.get(enc, "")
+            if prev != expected_prev:
+                problems.append(f"seq {seq} enc {enc}: broken/forked chain link")
+            last_sha[enc] = sha
+        return problems
 
 
 class JsonlAuditRepository(AuditRepository):

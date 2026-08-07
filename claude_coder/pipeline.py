@@ -243,10 +243,48 @@ def code_encounter(
     # solution to the routing entry (joined by stable fact_id) so a PROVIDER_QUERY
     # carries the exact question to send — no fragile description-based join needed.
     _attach_recommendations(result)
+    # ---- Fail-closed, order-safe release attestation (Codex F6-R5) --------------------
+    # Invariant: the RETURNED verdict, the CERTIFICATE, the data fingerprint, and the LAST
+    # durable audit decision can never disagree. Achieved by (a) treating a missing data
+    # fingerprint as an integrity hold that prevents certification, (b) building the
+    # certificate in memory BEFORE any terminal persistence, and (c) persisting the terminal
+    # release decision LAST -- reflecting the final (possibly downgraded) verdict and binding
+    # the certificate hash -- so AUTO_READY is never persisted before it is real, and a
+    # certificate never exists without its durable record.
+    terminal_extra: dict = {}
     try:
         fingerprint = source.data_fingerprint()
     except Exception:
-        fingerprint = {}
+        fingerprint = None
+    if fingerprint is None:
+        # Without a fingerprint we cannot attest WHICH authoritative data produced the
+        # claim -> the claim is not certifiable. Retryable hold, no certificate.
+        result.gates.append(GateResult(
+            "data_fingerprint", Outcome.UNKNOWN,
+            "authoritative-data fingerprint unavailable; provenance cannot be attested",
+            "audit/certificate integrity", retryable=True))
+        decide(result, source=source)
+        result.certificate = None
+    else:
+        try:
+            cert = certificate.build_certificate(
+                result, note_text,
+                source_identity={"source": type(source).__name__, "data": fingerprint,
+                                 "models": profiles,
+                                 "extraction_schema": extracted.schema_version})
+        except Exception as exc:
+            result.gates.append(GateResult(
+                "release_evidence_persistence", Outcome.UNKNOWN,
+                f"certificate could not be built: {type(exc).__name__}",
+                "audit/certificate integrity", retryable=True))
+            decide(result, source=source)
+            result.certificate = None
+        else:
+            result.certificate = cert
+            terminal_extra = {"certificate_sha256": cert.get("certificate_sha256")}
+    # Terminal release decision is persisted LAST, carrying the FINAL verdict. If this
+    # durable write fails, the release is not attestable: drop the certificate and downgrade
+    # so a returned AUTO_READY can never exist without a matching durable record.
     try:
         result.audit_record_hashes.append(audit_repository.append(
             encounter_id, "release_decision", {
@@ -255,19 +293,15 @@ def code_encounter(
                 "billable_event_ids": [ln.fact.fact_id for ln in result.billable_lines],
                 "gate_outcomes": [{"name": g.name, "outcome": g.outcome.value}
                                   for g in result.gates],
+                **terminal_extra,
             }))
-        result.certificate = certificate.build_certificate(
-            result, note_text,
-            source_identity={"source": type(source).__name__, "data": fingerprint,
-                             "models": profiles,
-                             "extraction_schema": extracted.schema_version})
     except Exception as exc:
+        result.certificate = None
         result.gates.append(GateResult(
             "release_evidence_persistence", Outcome.UNKNOWN,
-            f"release evidence could not be persisted: {type(exc).__name__}",
+            f"terminal release decision could not be persisted: {type(exc).__name__}",
             "audit/certificate integrity", retryable=True))
         decide(result, source=source)
-        result.certificate = None
     return result
 
 

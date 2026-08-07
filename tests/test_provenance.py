@@ -160,3 +160,53 @@ def test_sqlite_audit_record_hash_verifies(tmp_path):
              "recorded_at": rec["recorded_at"], "control_mode": rec["control_mode"],
              "previous_record_sha256": rec["previous_record_sha256"], "record": rec["record"]}
     assert _sha(json.dumps(entry, sort_keys=True, default=str)) == rec["record_sha256"]
+
+
+# ---- Codex F6-R4: concurrent writers must not fork the per-encounter hash chain ----------
+def test_sqlite_audit_concurrent_writers_do_not_fork_chain(tmp_path):
+    import threading
+    from claude_coder.provenance import SqliteAuditRepository
+    dbp = tmp_path / "prov.db"
+    SqliteAuditRepository(dbp).append("enc", "seed", {"n": 0})   # a shared predecessor
+    barrier = threading.Barrier(2)
+    results: dict[int, str] = {}
+
+    def worker(i):
+        repo = SqliteAuditRepository(dbp)
+        barrier.wait()                                            # force interleaving
+        results[i] = repo.append("enc", f"k{i}", {"n": i})
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in (1, 2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    repo = SqliteAuditRepository(dbp)
+    recs = repo.records("enc")
+    assert len(recs) == 3
+    assert results[1] and results[2] and results[1] != results[2]
+    assert repo.verify_chain("enc") == []                        # no fork
+    # serialized (not forked): the two appends reference DIFFERENT predecessors
+    prevs = [r["previous_record_sha256"] for r in recs[1:]]
+    assert prevs[0] != prevs[1]
+
+
+def test_sqlite_audit_verify_chain_detects_tampering(tmp_path):
+    import sqlite3
+    from claude_coder.provenance import SqliteAuditRepository
+    dbp = tmp_path / "prov.db"
+    repo = SqliteAuditRepository(dbp)
+    repo.append("enc", "a", {"x": 1})
+    assert repo.verify_chain() == []
+    # INSERT (allowed by the append-only triggers) a forged row with a wrong hash
+    conn = sqlite3.connect(str(dbp))
+    conn.execute(
+        "INSERT INTO audit_log(encounter_id, kind, recorded_at, control_mode,"
+        " previous_record_sha256, record_json, record_sha256) VALUES (?,?,?,?,?,?,?)",
+        ("enc", "forged", "2026-01-01T00:00:00+00:00", "ENFORCED_FAIL_CLOSED",
+         "deadbeef", "{}", "not-the-real-hash"))
+    conn.commit()
+    conn.close()
+    problems = repo.verify_chain("enc")
+    assert any("hash mismatch" in p for p in problems)
+    assert any("broken/forked" in p for p in problems)

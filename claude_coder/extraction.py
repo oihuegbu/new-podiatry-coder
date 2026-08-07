@@ -194,20 +194,69 @@ def _relation(value: Any) -> RelationAssertion | None:
                              confidence=_confidence(value.get("confidence")))
 
 
+class ExtractionSchemaError(ValueError):
+    """The extractor returned output that is not a valid claim graph: invalid JSON, a
+    malformed fact/relation object, a blank or duplicate fact id. Raised so the pipeline
+    fails closed to a retryable SYSTEM_HOLD with ZERO retrieval, instead of silently
+    discarding a claim-affecting assertion (a dropped PART_OF leaves an integral component
+    billable; an unparseable graph must not read as 'no findings'). (Codex F6-R1.)"""
+
+
+def _strict_extract_json(text: str) -> dict:
+    """Parse the extractor's JSON, failing closed on anything unparseable."""
+    text = (text or "").strip()
+    if not text.startswith("{"):
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
+            raise ExtractionSchemaError("extractor output contains no JSON object")
+        text = m.group(0)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ExtractionSchemaError(f"extractor output is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ExtractionSchemaError("extractor output is not a JSON object")
+    return data
+
+
+def _known_actor_ids(billing_context: dict[str, Any] | None) -> set[str]:
+    """Authoritative participant/entity ids from the STRUCTURED encounter context. Actor
+    identity is resolved against these; a model-supplied id absent here is not trusted.
+    (Codex F6-R2.)"""
+    ctx = billing_context or {}
+    ids: set[str] = set()
+    for key in ("billing_entity_id", "performer_id", "organization_id"):
+        v = ctx.get(key)
+        if v is not None and str(v).strip():
+            ids.add(str(v).strip())
+    for p in (ctx.get("participants") or []):
+        if isinstance(p, dict):
+            for key in ("performer_id", "organization_id", "id"):
+                v = p.get(key)
+                if v is not None and str(v).strip():
+                    ids.add(str(v).strip())
+    return ids
+
+
 def extract_note(note_text: str, llm: LLMFn | None = None,
                  billing_context: dict[str, Any] | None = None) -> ExtractionResult:
     llm = llm or _default_llm
     user = json.dumps({"encounter_context": billing_context or {}, "note": note_text},
                       sort_keys=True)
-    raw = _extract_json(llm(_SYSTEM, user))
+    raw = _strict_extract_json(llm(_SYSTEM, user))
+    known_ids = _known_actor_ids(billing_context)
+    seen_ids: set[str] = set()
     facts: list[ClinicalFact] = []
     for i, item in enumerate(raw.get("facts", []) or []):
         if not isinstance(item, dict):
-            continue
+            raise ExtractionSchemaError(f"fact #{i} is not a JSON object")
         kind = _coerce_kind(item.get("kind", ""))
         desc = str(item.get("description", "")).strip()
-        if kind is None or not desc:
-            continue
+        if kind is None:
+            raise ExtractionSchemaError(
+                f"fact #{i} has an unrecognized kind: {item.get('kind')!r}")
+        if not desc:
+            raise ExtractionSchemaError(f"fact #{i} has no description")
         # A negated finding, or one the note RULES OUT, is documentation of ABSENCE
         # — never billed. An OMITTED certainty defaults to confirmed (a plainly
         # documented condition, per the prompt); an explicit value is taken as-is.
@@ -228,25 +277,39 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
         supplied_axes = supplied_axes if isinstance(supplied_axes, dict) else {}
         axes = {axis: _confidence(supplied_axes.get(axis)) for axis in _REQUIRED_AXES[kind]}
         attributes = dict(item.get("attributes") or {})
-        # Encounter context is authoritative for billing identity. The model may select
-        # a supplied participant id, but may not override the billing entity itself.
+        # R2: actor identity is resolved EXCLUSIVELY from the structured encounter context.
+        # A model-supplied performer/organization id absent from the authoritative roster is
+        # invented/unauthorized and is discarded (ownership then resolves to UNKNOWN and
+        # HOLDs before retrieval); an unproven function drops with its performer. The billing
+        # entity is always the context's. (Codex F6-R2.)
+        for akey in ("performer_id", "organization_id"):
+            av = attributes.get(akey)
+            if av is not None and str(av).strip() not in known_ids:
+                attributes.pop(akey, None)
+        if "performer_id" not in attributes:
+            attributes.pop("performer_function", None)
         if billing_context and billing_context.get("billing_entity_id"):
             attributes["billing_entity_id"] = billing_context["billing_entity_id"]
+        fid = str(item.get("fact_id") or f"F{i+1}").strip()
+        if not fid:
+            raise ExtractionSchemaError(f"fact #{i} has a blank fact_id")
+        if fid in seen_ids:
+            raise ExtractionSchemaError(f"duplicate fact_id: {fid}")
+        seen_ids.add(fid)
         facts.append(ClinicalFact(
-            kind=kind,
-            description=desc,
-            attributes=attributes,
+            kind=kind, description=desc, attributes=attributes,
             disposition=_coerce_disposition(item.get("disposition")),
-            certain=certain,
-            experiencer=experiencer,
-            evidence=spans,
-            confidence=scalar,
-            axis_confidence=axes,
-            fact_id=str(item.get("fact_id") or f"F{i+1}").strip(),
+            certain=certain, experiencer=experiencer, evidence=spans,
+            confidence=scalar, axis_confidence=axes, fact_id=fid,
         ))
-    return ExtractionResult(facts=facts,
-                            relations=[r for r in (_relation(x) for x in
-                                       (raw.get("relations") or [])) if r])
+    relations: list[RelationAssertion] = []
+    for j, x in enumerate(raw.get("relations") or []):
+        rel = _relation(x)
+        if rel is None:
+            raise ExtractionSchemaError(
+                f"relation #{j} is malformed and cannot be safely dropped: {x!r}")
+        relations.append(rel)
+    return ExtractionResult(facts=facts, relations=relations)
 
 
 def extract_facts(note_text: str, llm: LLMFn | None = None) -> list[ClinicalFact]:

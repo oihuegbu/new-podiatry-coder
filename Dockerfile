@@ -50,4 +50,10 @@ CMD ["python", "run.py"]
 # so this stage never reaches production even though it is the last stage here.
 FROM app AS test
 RUN pip install --no-cache-dir --timeout 120 --retries 5 -r requirements-dev.txt
+# Deterministically build the REQUIRED authoritative NCCI PTP snapshot from CMS (the exact
+# command CI runs), instead of inheriting an untracked host copy through the build context
+# (which .dockerignore now excludes). This makes the "clean reproducible test" claim true:
+# the suite and the rule-coverage guard run against source-built data, not host state.
+# (Codex F6-R8.)
+RUN PYTHONPATH=/app python tools/refresh_authoritative_data.py ncci_ptp --no-integrate
 CMD ["python", "-m", "pytest", "-q"]

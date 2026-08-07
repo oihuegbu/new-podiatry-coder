@@ -97,8 +97,11 @@ def _parse_interval(text: str) -> Interval | None:
     unit_m = _UNIT.search(t)
     first_number = re.search(_NUM, t)
     prefix = t[:first_number.start()] if first_number else t
-    roles = re.findall(r"\b(area|size|depth|length|thickness|diameter|width|height)\b",
-                       prefix)
+    # Recognized-role grammar derived from the SINGLE shared vocabulary in measurement,
+    # so descriptor roles and measurement sub-axes can never diverge (Codex F6-R6).
+    from . import measurement as _meas
+    _role_alt = "|".join(sorted(_meas.RECOGNIZED_ROLES, key=len, reverse=True))
+    roles = re.findall(rf"\b({_role_alt})\b", prefix)
     return Interval(low=low, high=high, low_inc=low_inc, high_inc=high_inc,
                     unit=(unit_m.group(1) if unit_m else None),
                     semantic_role=(roles[-1] if roles else None))

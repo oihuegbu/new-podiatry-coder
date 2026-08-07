@@ -14,7 +14,8 @@ from __future__ import annotations
 import re
 
 from .data_access import AUTHORITY_UNAVAILABLE, CodeSource
-from .models import CodingResult, FactKind, GateResult, Outcome, ResolvedLine
+from .models import (CodingResult, FactKind, GateResult, Outcome, RelationPredicate,
+                     RelationState, ResolvedLine)
 
 
 def _norm(s: str) -> str:
@@ -140,22 +141,43 @@ def mue_gate(result: CodingResult, source: CodeSource) -> GateResult:
 
 
 def medical_necessity_gate(result: CodingResult) -> GateResult:
-    """Every performed procedure needs a documented diagnosis to justify it.
-    This is the structural floor of medical necessity; full LCD/NCD dx->procedure
-    coverage linkage would query the policy data here (a documented gap), but a
-    procedure with NO supporting diagnosis is never defensible and is blocked."""
+    """Every released procedure needs a documented diagnosis that JUSTIFIES IT -- not merely
+    the co-presence of some diagnosis on the encounter. Necessity is evaluated PER released
+    service: a procedure is supported when at least one RELEASED diagnosis is explicitly
+    linked to it by an asserted REASON_FOR relation (diagnosis --REASON_FOR--> service). A
+    procedure with no such supporting diagnosis is not defensible and holds for review
+    (UNKNOWN). (Codex F6-R3: all-to-all encounter presence was insufficient. Full LCD/NCD
+    dx->procedure coverage would refine this with policy data -- a documented gap.)"""
     procs = result.procedure_lines
     if not procs:
         return GateResult("medical_necessity", Outcome.NOT_APPLICABLE,
                           "no procedures to justify", "necessity")
-    if not result.diagnosis_lines:
+    dx_lines = result.diagnosis_lines
+    if not dx_lines:
         return GateResult("medical_necessity", Outcome.BLOCKED,
                           "performed procedure(s) with no documented diagnosis",
                           "necessity (structural)")
+    released_dx = {ln.fact.fact_id for ln in dx_lines
+                   if ln.fact is not None and ln.fact.fact_id}
+    reason_for = [r for r in (result.relations or [])
+                  if r.predicate is RelationPredicate.REASON_FOR
+                  and r.state is RelationState.ASSERTED]
+    unsupported: list[str] = []
+    for ln in procs:
+        pid = ln.fact.fact_id if ln.fact is not None else None
+        supported = any(r.object_event_id == pid and r.subject_event_id in released_dx
+                        for r in reason_for)
+        if not supported:
+            unsupported.append((ln.chosen.code if ln.chosen else None)
+                               or (ln.fact.description if ln.fact else "procedure"))
+    if unsupported:
+        return GateResult("medical_necessity", Outcome.UNKNOWN,
+                          "procedure(s) without a documented supporting diagnosis "
+                          f"(REASON_FOR): {', '.join(unsupported)}",
+                          "necessity (structural)")
     return GateResult("medical_necessity", Outcome.PASS,
-                      f"{len(procs)} procedure(s) supported by "
-                      f"{len(result.diagnosis_lines)} diagnosis line(s)",
-                      "necessity (structural)")
+                      f"{len(procs)} procedure(s) each linked to a supporting diagnosis "
+                      "(REASON_FOR)", "necessity (structural)")
 
 
 def icd_excludes_gate(result: CodingResult, source: CodeSource) -> GateResult:

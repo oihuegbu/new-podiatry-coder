@@ -16,7 +16,8 @@ from claude_coder.pipeline import code_encounter
 
 def _request(fact):
     from claude_coder.eligibility import (ClaimComponent, ClaimLineIntent,
-                                          EligibilityState, RetrievalRequest)
+                                          EligibilityState, RetrievalRequest,
+                                          fact_snapshot_digest)
     from claude_coder.models import FactKind
     if not fact.fact_id:
         fact.fact_id = "fact"
@@ -27,7 +28,8 @@ def _request(fact):
         clinical_event_ids=[fact.fact_id], fact_kind=fact.kind.value,
         clinical_action=fact.description, attributes=dict(fact.attributes),
         date_of_service=None, billing_entity_id=None, source_span_ids=[],
-        state=EligibilityState.ELIGIBLE_FOR_RETRIEVAL)
+        state=EligibilityState.ELIGIBLE_FOR_RETRIEVAL,
+        fact_digest=fact_snapshot_digest(fact))
     return RetrievalRequest(intent, fact)
 
 # A note whose text contains, verbatim, every evidence span the extractor emits.
@@ -58,6 +60,9 @@ FACTS_JSON = """{"facts":[
  {"kind":"diagnosis","description":"finding gamma","attributes":{},
   "disposition":"performed_today","negated":true,
   "evidence":["denies finding gamma"],"confidence":0.9}
+],
+ "relations":[
+ {"subject_event_id":"F2","object_event_id":"F1","predicate":"reason_for","state":"asserted","evidence_fact_ids":["F1","F2"],"confidence":0.99}
 ]}"""
 
 # Synthetic (non-code) identifiers — no real medical code anywhere in this test.
@@ -89,7 +94,8 @@ class AutonomousCoderTest(unittest.TestCase):
         from claude_coder.provenance import NullAuditRepository
         return code_encounter("enc-1", note, dos, source=_source(),
                               extract_llm=_extract_stub, arbitrate_llm=_arbitrate_stub,
-                              audit_repository=NullAuditRepository())
+                              audit_repository=NullAuditRepository(),
+                              billing_context={"billing_entity_id": "actor-1", "performer_id": "actor-1"})
 
     def test_happy_path_auto_ready(self):
         r = self._run()
