@@ -95,7 +95,7 @@ class AutonomousCoderTest(unittest.TestCase):
         return code_encounter("enc-1", note, dos, source=_source(),
                               extract_llm=_extract_stub, arbitrate_llm=_arbitrate_stub,
                               audit_repository=NullAuditRepository(),
-                              billing_context={"billing_entity_id": "actor-1", "performer_id": "actor-1"})
+                              billing_context={"billing_entity_id": "actor-1", "participants": [{"id": "actor-1", "type": "person", "roles": ["performer"]}]})
 
     def test_happy_path_auto_ready(self):
         r = self._run()

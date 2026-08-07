@@ -140,14 +140,25 @@ def mue_gate(result: CodingResult, source: CodeSource) -> GateResult:
                       "units within MUE" if not detail else "; ".join(detail), "MUE (data)")
 
 
-def medical_necessity_gate(result: CodingResult) -> GateResult:
-    """Every released procedure needs a documented diagnosis that JUSTIFIES IT -- not merely
-    the co-presence of some diagnosis on the encounter. Necessity is evaluated PER released
-    service: a procedure is supported when at least one RELEASED diagnosis is explicitly
-    linked to it by an asserted REASON_FOR relation (diagnosis --REASON_FOR--> service). A
-    procedure with no such supporting diagnosis is not defensible and holds for review
-    (UNKNOWN). (Codex F6-R3: all-to-all encounter presence was insufficient. Full LCD/NCD
-    dx->procedure coverage would refine this with policy data -- a documented gap.)"""
+# Necessity relation control floor: a model-authored REASON_FOR edge below this confidence
+# does not, by itself, certify medical necessity (a 0.0-confidence edge must not). A control
+# threshold, not a medical code.
+_MIN_NECESSITY_RELATION_CONFIDENCE = 0.5
+
+
+def medical_necessity_gate(result: CodingResult,
+                           source: "CodeSource | None" = None) -> GateResult:
+    """Every released procedure needs a diagnosis that JUSTIFIES IT, evaluated PER released
+    service and against AUTHORITATIVE coverage policy:
+
+    - the support relation (diagnosis --REASON_FOR--> service) must be asserted AND clear the
+      necessity relation confidence floor -- a low/zero-confidence model edge cannot certify;
+    - when the procedure is governed by an authoritative CMS coverage policy
+      (source.qualifying_dx_for), at least one linked RELEASED diagnosis must qualify under
+      it, else it is a coverage contradiction and HOLDs;
+    - an unavailable required coverage evaluation is UNKNOWN/HOLD.
+
+    (Codex F6-R3: an all-to-all count, and even a bare/zero-confidence edge, were insufficient.)"""
     procs = result.procedure_lines
     if not procs:
         return GateResult("medical_necessity", Outcome.NOT_APPLICABLE,
@@ -157,27 +168,43 @@ def medical_necessity_gate(result: CodingResult) -> GateResult:
         return GateResult("medical_necessity", Outcome.BLOCKED,
                           "performed procedure(s) with no documented diagnosis",
                           "necessity (structural)")
-    released_dx = {ln.fact.fact_id for ln in dx_lines
+    released_dx = {ln.fact.fact_id: ln for ln in dx_lines
                    if ln.fact is not None and ln.fact.fact_id}
     reason_for = [r for r in (result.relations or [])
                   if r.predicate is RelationPredicate.REASON_FOR
-                  and r.state is RelationState.ASSERTED]
-    unsupported: list[str] = []
+                  and r.state is RelationState.ASSERTED
+                  and float(getattr(r, "confidence", 0.0) or 0.0)
+                  >= _MIN_NECESSITY_RELATION_CONFIDENCE]
+    holds: list[str] = []
     for ln in procs:
         pid = ln.fact.fact_id if ln.fact is not None else None
-        supported = any(r.object_event_id == pid and r.subject_event_id in released_dx
-                        for r in reason_for)
-        if not supported:
-            unsupported.append((ln.chosen.code if ln.chosen else None)
-                               or (ln.fact.description if ln.fact else "procedure"))
-    if unsupported:
-        return GateResult("medical_necessity", Outcome.UNKNOWN,
-                          "procedure(s) without a documented supporting diagnosis "
-                          f"(REASON_FOR): {', '.join(unsupported)}",
-                          "necessity (structural)")
+        label = (ln.chosen.code if ln.chosen else None) or (
+            ln.fact.description if ln.fact else "procedure")
+        support_events = {r.subject_event_id for r in reason_for
+                          if r.object_event_id == pid and r.subject_event_id in released_dx}
+        if not support_events:
+            holds.append(f"{label}: no confident REASON_FOR link to a released diagnosis")
+            continue
+        if source is not None and ln.chosen is not None:
+            try:
+                qualifying = source.qualifying_dx_for(ln.chosen.code, ln.chosen.system)
+            except Exception:
+                holds.append(f"{label}: coverage-policy evaluation unavailable")
+                continue
+            if qualifying is not None:                       # governed by a coverage policy
+                want = {str(q).replace(".", "").upper() for q in qualifying}
+                got = {released_dx[e].chosen.code.replace(".", "").upper()
+                       for e in support_events if released_dx[e].chosen}
+                if not (got & want):
+                    holds.append(
+                        f"{label}: linked diagnosis does not qualify under CMS coverage policy")
+                    continue
+    if holds:
+        return GateResult("medical_necessity", Outcome.UNKNOWN, "; ".join(holds),
+                          "necessity (structural + coverage)")
     return GateResult("medical_necessity", Outcome.PASS,
-                      f"{len(procs)} procedure(s) each linked to a supporting diagnosis "
-                      "(REASON_FOR)", "necessity (structural)")
+                      f"{len(procs)} procedure(s) each supported by a confident, "
+                      "policy-qualifying released diagnosis", "necessity (structural + coverage)")
 
 
 def icd_excludes_gate(result: CodingResult, source: CodeSource) -> GateResult:
@@ -281,7 +308,7 @@ def run_gates(result: CodingResult, note_text: str, source: CodeSource) -> list[
             dos_gate(result),
             evidence_gate(result, note_text),
             code_active_gate(result, source),
-            medical_necessity_gate(result),
+            medical_necessity_gate(result, source),
             ncci_gate(result, source),
             mue_gate(result, source),
             icd_excludes_gate(result, source),

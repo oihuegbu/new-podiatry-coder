@@ -721,8 +721,51 @@ def test_necessity_requires_per_service_diagnosis_linkage():
     # the diagnosis explicitly justifies the procedure (REASON_FOR) -> PASS
     linked = CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[
         RelationAssertion(subject_event_id="df", predicate=RelationPredicate.REASON_FOR,
-                          object_event_id="pf", state=RelationState.ASSERTED)])
+                          object_event_id="pf", state=RelationState.ASSERTED,
+                          confidence=0.99)])
     assert medical_necessity_gate(linked).outcome is Outcome.PASS
     # no diagnosis at all -> BLOCKED
     none_dx = CodingResult("e", "2026-08-01", lines=[proc])
     assert medical_necessity_gate(none_dx).outcome is Outcome.BLOCKED
+
+
+# ---- Codex F6-R3 (round 2): confidence floor + authoritative coverage policy --------------
+def _nec_lines():
+    from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                      ResolutionMethod, ResolvedLine, CandidateCode)
+
+    def _line(code, kind, fid):
+        f = ClinicalFact(kind=kind, description="x", attributes={}, fact_id=fid,
+                         evidence=[EvidenceSpan("x")])
+        sysname = "cpt" if kind is FactKind.PROCEDURE else "icd10"
+        return ResolvedLine(fact=f, chosen=CandidateCode(code, sysname, "d", 0.9),
+                            method=ResolutionMethod.DETERMINISTIC)
+    return _line("P1", FactKind.PROCEDURE, "pf"), _line("D1", FactKind.DIAGNOSIS, "df")
+
+
+def _reason(conf):
+    from claude_coder.models import RelationAssertion, RelationPredicate, RelationState
+    return RelationAssertion(subject_event_id="df", predicate=RelationPredicate.REASON_FOR,
+                             object_event_id="pf", state=RelationState.ASSERTED, confidence=conf)
+
+
+def test_necessity_rejects_zero_confidence_relation():
+    from claude_coder.models import CodingResult, Outcome
+    from claude_coder.gates import medical_necessity_gate
+    proc, dx = _nec_lines()
+    r = CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[_reason(0.0)])
+    assert medical_necessity_gate(r).outcome is Outcome.UNKNOWN            # low-confidence edge
+    r2 = CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[_reason(0.99)])
+    assert medical_necessity_gate(r2).outcome is Outcome.PASS              # confident, ungoverned
+
+
+def test_necessity_requires_coverage_policy_qualification():
+    from claude_coder.models import CodingResult, Outcome
+    from claude_coder.gates import medical_necessity_gate
+    from claude_coder.data_access import MockSource
+    proc, dx = _nec_lines()                                                # proc P1, dx D1
+    r = CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[_reason(0.99)])
+    gov_nonqualify = MockSource(); gov_nonqualify._coverage = {"P1": {"OTHERDX"}}
+    assert medical_necessity_gate(r, gov_nonqualify).outcome is Outcome.UNKNOWN   # contradiction
+    gov_qualify = MockSource(); gov_qualify._coverage = {"P1": {"D1"}}
+    assert medical_necessity_gate(r, gov_qualify).outcome is Outcome.PASS         # dx qualifies

@@ -34,7 +34,7 @@ def test_eligible_service_reaches_retrieval_and_resolves():
     r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
                        extract_llm=lambda s, u: _FACTS, verify_llm=_sel,
                        corroborate_llm=_sel, audit_repository=_audit(),
-                       billing_context={"billing_entity_id": "actor-1", "performer_id": "actor-1"})
+                       billing_context={"billing_entity_id": "actor-1", "participants": [{"id": "actor-1", "type": "person", "roles": ["performer"]}]})
     assert any(ln.chosen and ln.chosen.code == "PROC_X" for ln in r.lines)
 
 

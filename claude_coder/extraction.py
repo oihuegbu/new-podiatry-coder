@@ -187,8 +187,10 @@ def _relation(value: Any) -> RelationAssertion | None:
     obj = str(value.get("object_event_id", "")).strip()
     if not subject or not obj:
         return None
-    refs = [f"event:{str(x).strip()}" for x in (value.get("evidence_fact_ids") or [])
-            if str(x).strip()]
+    efi = value.get("evidence_fact_ids")
+    if efi is not None and not isinstance(efi, list):
+        return None                                  # malformed -> extract_note raises (R1)
+    refs = [f"event:{str(x).strip()}" for x in (efi or []) if str(x).strip()]
     return RelationAssertion(subject, pred, obj, state=state, evidence_span_ids=refs,
                              extraction_source="clinical-graph-v1",
                              confidence=_confidence(value.get("confidence")))
@@ -219,23 +221,26 @@ def _strict_extract_json(text: str) -> dict:
     return data
 
 
-def _known_actor_ids(billing_context: dict[str, Any] | None) -> set[str]:
-    """Authoritative participant/entity ids from the STRUCTURED encounter context. Actor
-    identity is resolved against these; a model-supplied id absent here is not trusted.
-    (Codex F6-R2.)"""
-    ctx = billing_context or {}
-    ids: set[str] = set()
-    for key in ("billing_entity_id", "performer_id", "organization_id"):
-        v = ctx.get(key)
-        if v is not None and str(v).strip():
-            ids.add(str(v).strip())
-    for p in (ctx.get("participants") or []):
-        if isinstance(p, dict):
-            for key in ("performer_id", "organization_id", "id"):
-                v = p.get(key)
-                if v is not None and str(v).strip():
-                    ids.add(str(v).strip())
-    return ids
+def _participant_index(billing_context: dict[str, Any] | None) -> dict[str, dict]:
+    """Typed participant graph from the STRUCTURED encounter context: id -> record carrying
+    type (person/organization), roles, function, and organization affiliations. Actor
+    identity is resolved against THIS graph -- the model may SELECT a participant but cannot
+    invent identity, its type, its affiliation, or its function. (Codex F6-R2.)"""
+    idx: dict[str, dict] = {}
+    for p in (billing_context or {}).get("participants") or []:
+        if not isinstance(p, dict):
+            continue
+        pid = str(p.get("id", "")).strip()
+        if not pid:
+            continue
+        idx[pid] = {
+            "type": str(p.get("type", "")).strip().lower(),
+            "roles": {str(r).strip().lower() for r in (p.get("roles") or [])},
+            "function": (str(p.get("function")).strip() if p.get("function") else None),
+            "affiliations": {str(a).strip() for a in (p.get("affiliations") or [])
+                             if str(a).strip()},
+        }
+    return idx
 
 
 def extract_note(note_text: str, llm: LLMFn | None = None,
@@ -244,10 +249,20 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
     user = json.dumps({"encounter_context": billing_context or {}, "note": note_text},
                       sort_keys=True)
     raw = _strict_extract_json(llm(_SYSTEM, user))
-    known_ids = _known_actor_ids(billing_context)
+    participants = _participant_index(billing_context)
     seen_ids: set[str] = set()
+    # R1: strict top-level schema -- 'facts' must be a present array (missing/null/wrong-type
+    # is a malformed graph, NOT an empty note); 'relations' must be an array when present.
+    facts_in = raw.get("facts")
+    if not isinstance(facts_in, list):
+        raise ExtractionSchemaError("extractor output is missing a 'facts' array")
+    relations_in = raw.get("relations")
+    if relations_in is None:
+        relations_in = []
+    if not isinstance(relations_in, list):
+        raise ExtractionSchemaError("'relations' must be an array when present")
     facts: list[ClinicalFact] = []
-    for i, item in enumerate(raw.get("facts", []) or []):
+    for i, item in enumerate(facts_in):
         if not isinstance(item, dict):
             raise ExtractionSchemaError(f"fact #{i} is not a JSON object")
         kind = _coerce_kind(item.get("kind", ""))
@@ -271,23 +286,62 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
         # unrecognized experiencer, is not the patient's coded condition.
         certain = certainty == "confirmed"
         experiencer = str(item.get("experiencer", "patient")).strip().lower() or "patient"
-        spans = [s for s in (_evidence_span(q) for q in (item.get("evidence") or [])) if s]
-        scalar = _confidence(item.get("confidence"))
-        supplied_axes = item.get("axis_confidence") or {}
-        supplied_axes = supplied_axes if isinstance(supplied_axes, dict) else {}
+        # R1: typed nested shapes. `evidence` must be a LIST of non-empty quotes/spans -- a
+        # bare string must never be iterated character-by-character into fake spans;
+        # `confidence` must be numeric; `axis_confidence` must be an object.
+        ev_in = item.get("evidence")
+        ev_in = [] if ev_in is None else ev_in
+        if not isinstance(ev_in, list):
+            raise ExtractionSchemaError(f"fact #{i} 'evidence' must be a list of quotes/spans")
+        spans = []
+        for q in ev_in:
+            sp = _evidence_span(q)
+            if sp is None:
+                raise ExtractionSchemaError(
+                    f"fact #{i} has an empty/malformed evidence element")
+            spans.append(sp)
+        raw_conf = item.get("confidence")
+        if raw_conf is not None and not isinstance(raw_conf, (int, float)):
+            raise ExtractionSchemaError(f"fact #{i} 'confidence' must be numeric")
+        scalar = _confidence(raw_conf)
+        supplied_axes = item.get("axis_confidence")
+        if supplied_axes is not None and not isinstance(supplied_axes, dict):
+            raise ExtractionSchemaError(f"fact #{i} 'axis_confidence' must be an object")
+        supplied_axes = supplied_axes or {}
         axes = {axis: _confidence(supplied_axes.get(axis)) for axis in _REQUIRED_AXES[kind]}
-        attributes = dict(item.get("attributes") or {})
+        attrs_in = item.get("attributes")
+        if attrs_in is not None and not isinstance(attrs_in, dict):
+            raise ExtractionSchemaError(f"fact #{i} 'attributes' must be an object")
+        attributes = dict(attrs_in or {})
         # R2: actor identity is resolved EXCLUSIVELY from the structured encounter context.
         # A model-supplied performer/organization id absent from the authoritative roster is
         # invented/unauthorized and is discarded (ownership then resolves to UNKNOWN and
         # HOLDs before retrieval); an unproven function drops with its performer. The billing
         # entity is always the context's. (Codex F6-R2.)
-        for akey in ("performer_id", "organization_id"):
-            av = attributes.get(akey)
-            if av is not None and str(av).strip() not in known_ids:
-                attributes.pop(akey, None)
-        if "performer_id" not in attributes:
-            attributes.pop("performer_function", None)
+        # Resolve actor identity ONLY from the typed participant graph. The model may
+        # SELECT a participant id, but its type, affiliation, and function come from the
+        # context -- never the model. A performer id that is unknown, is an ORGANIZATION
+        # (not a person), or is not context-designated as a performer is rejected; an
+        # organization id is kept only when the context AFFILIATES this performer to it; a
+        # model-authored function is discarded and replaced only by the context's function.
+        # Anything unresolved leaves ownership UNKNOWN so the service HOLDS before retrieval.
+        perf = str(attributes.get("performer_id", "")).strip()
+        prec = participants.get(perf)
+        attributes.pop("performer_function", None)         # never trust a model-authored function
+        if perf and prec and prec["type"] == "person" and (
+                "performer" in prec["roles"] or not prec["roles"]):
+            attributes["performer_id"] = perf
+            if prec["function"]:
+                attributes["performer_function"] = prec["function"]
+            org = str(attributes.get("organization_id", "")).strip()
+            if (org and org in prec["affiliations"]
+                    and participants.get(org, {}).get("type") == "organization"):
+                attributes["organization_id"] = org
+            else:
+                attributes.pop("organization_id", None)
+        else:
+            attributes.pop("performer_id", None)
+            attributes.pop("organization_id", None)
         if billing_context and billing_context.get("billing_entity_id"):
             attributes["billing_entity_id"] = billing_context["billing_entity_id"]
         fid = str(item.get("fact_id") or f"F{i+1}").strip()
@@ -303,7 +357,7 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
             confidence=scalar, axis_confidence=axes, fact_id=fid,
         ))
     relations: list[RelationAssertion] = []
-    for j, x in enumerate(raw.get("relations") or []):
+    for j, x in enumerate(relations_in):
         rel = _relation(x)
         if rel is None:
             raise ExtractionSchemaError(

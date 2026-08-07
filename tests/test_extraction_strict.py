@@ -62,26 +62,65 @@ def test_malformed_relation_raises_not_silently_dropped():
 
 
 # ---------------------------------------------------------------- F6-R2 actor from context
+def _person_ctx():
+    # actor-1 is a person, context-designated performer, affiliated to org-1 (an organization)
+    return {"billing_entity_id": "org-1", "participants": [
+        {"id": "actor-1", "type": "person", "roles": ["performer"],
+         "function": "operating surgeon", "affiliations": ["org-1"]},
+        {"id": "org-1", "type": "organization"}]}
+
+
+def _attrs(payload_attrs, ctx):
+    res = extract_note("note", _stub({"facts": [_fact(attributes=payload_attrs)]}),
+                       billing_context=ctx)
+    return res.facts[0].attributes
+
+
 def test_invented_actor_id_is_discarded():
-    # context authorizes only real-actor; the model invents another -> stripped
-    payload = {"facts": [_fact(attributes={"performer_id": "invented",
-                                            "billing_entity_id": "invented"})]}
-    ctx = {"billing_entity_id": "real-actor", "performer_id": "real-actor"}
-    res = extract_note("note", _stub(payload), billing_context=ctx)
-    attrs = res.facts[0].attributes
-    assert "performer_id" not in attrs                       # invented id discarded
-    assert attrs["billing_entity_id"] == "real-actor"        # entity always from context
+    a = _attrs({"performer_id": "invented", "billing_entity_id": "x"}, _person_ctx())
+    assert "performer_id" not in a and a["billing_entity_id"] == "org-1"
 
 
-def test_authorized_actor_id_is_kept():
-    payload = {"facts": [_fact(attributes={"performer_id": "real-actor"})]}
-    ctx = {"billing_entity_id": "real-actor", "performer_id": "real-actor"}
-    res = extract_note("note", _stub(payload), billing_context=ctx)
-    assert res.facts[0].attributes["performer_id"] == "real-actor"
+def test_authorized_person_performer_is_kept_with_context_function():
+    a = _attrs({"performer_id": "actor-1", "performer_function": "janitor"}, _person_ctx())
+    assert a["performer_id"] == "actor-1"
+    assert a["performer_function"] == "operating surgeon"     # function from context, not model
+
+
+def test_organization_id_cannot_be_used_as_performer():
+    # the model relabels the billing organization as the performer -> rejected (type=org)
+    a = _attrs({"performer_id": "org-1"}, _person_ctx())
+    assert "performer_id" not in a
+
+
+def test_unaffiliated_or_invented_organization_is_dropped():
+    ctx = {"billing_entity_id": "org-1", "participants": [
+        {"id": "actor-1", "type": "person", "roles": ["performer"], "affiliations": ["org-1"]},
+        {"id": "org-1", "type": "organization"}, {"id": "org-2", "type": "organization"}]}
+    a = _attrs({"performer_id": "actor-1", "organization_id": "org-2"}, ctx)  # not affiliated
+    assert a["performer_id"] == "actor-1" and "organization_id" not in a
+
+
+def test_invented_function_is_discarded_when_context_gives_none():
+    ctx = {"billing_entity_id": "actor-1", "participants": [
+        {"id": "actor-1", "type": "person", "roles": ["performer"]}]}
+    a = _attrs({"performer_id": "actor-1", "performer_function": "chief surgeon"}, ctx)
+    assert a["performer_id"] == "actor-1" and "performer_function" not in a
 
 
 def test_missing_context_leaves_actor_unresolved():
-    payload = {"facts": [_fact(attributes={"performer_id": "actor-1",
-                                           "billing_entity_id": "actor-1"})]}
-    res = extract_note("note", _stub(payload))               # no billing_context
-    assert "performer_id" not in res.facts[0].attributes     # cannot verify -> dropped
+    a = _attrs({"performer_id": "actor-1", "billing_entity_id": "actor-1"}, None)
+    assert "performer_id" not in a
+
+
+def test_organization_as_performer_holds_through_eligibility():
+    # end-to-end through eligibility: an org-as-performer fact must NOT become eligible
+    from claude_coder.eligibility import evaluate, EligibilityState
+    from claude_coder.models import Disposition, EvidenceSpan, FactKind
+    res = extract_note("note", _stub({"facts": [_fact(
+        attributes={"performer_id": "org-1"})]}), billing_context=_person_ctx())
+    f = res.facts[0]
+    f.disposition = Disposition.PERFORMED
+    f.evidence = [EvidenceSpan("svc performed", anchored=True, text_sha256="h", span_id="s")]
+    intents = evaluate([f], [], "enc", "2026-08-01")
+    assert all(i.state is not EligibilityState.ELIGIBLE_FOR_RETRIEVAL for i in intents)

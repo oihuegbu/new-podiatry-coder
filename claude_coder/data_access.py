@@ -568,25 +568,25 @@ class AuthoritativeSource:
         release certificate binds the exact data the claim was coded against — a
         changed code set / descriptor edition changes the fingerprint. Uses the
         deployment's codes checksum when present, else per-system code counts."""
+        # REQUIRED components fail loudly: a release must never be certified against unknown
+        # authoritative data. A swallowed failure that returned {} or partial counts is a
+        # silent-fallback certification hole. (Codex F6-R5.)
         fp: dict[str, Any] = {}
-        try:
-            db = self._reference()
-            fp["counts"] = {s: len(getattr(db, s, {}) or {})
-                            for s in ("icd10", "cpt", "hcpcs")}
-        except Exception:
-            fp["counts"] = {}
+        db = self._reference()                       # load failure raises -> pipeline holds
+        fp["counts"] = {s: len(getattr(db, s, {}) or {})
+                        for s in ("icd10", "cpt", "hcpcs")}
+        if not all(fp["counts"].get(s) for s in ("icd10", "cpt", "hcpcs")):
+            raise RuntimeError(
+                "authoritative code counts unavailable/empty; cannot fingerprint release")
         try:
             from app.core.config import DATA_DIR
             chk = DATA_DIR / "qdrant_store" / "codes_checksum.txt"
             if chk.exists():
                 fp["codes_checksum"] = chk.read_text().strip()[:64]
         except Exception:
-            pass
-        try:
-            from .capability import build_manifest
-            fp["source_manifest"] = build_manifest()
-        except Exception:
-            pass
+            pass                                     # codes_checksum is optional provenance
+        from .capability import build_manifest       # required: raises if unavailable
+        fp["source_manifest"] = build_manifest()
         return fp
 
     def _excludes1_map(self) -> dict[str, set[str]]:
@@ -791,7 +791,9 @@ class MockSource:
         return True
 
     def data_fingerprint(self):
-        return {"source": "mock"}
+        return {"source": "mock",
+                "counts": {"icd10": 1, "cpt": 1, "hcpcs": 1},
+                "source_manifest": {"status": "OK", "missing_required": []}}
 
     def qualifying_dx_for(self, code, system="cpt"):
         c = str(code).replace(".", "").upper()

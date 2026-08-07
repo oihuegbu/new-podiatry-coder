@@ -1,0 +1,8 @@
+{
+  "source": "CMS NCCI practitioner PTP edits",
+  "builder": "tools/build_ncci_ptp.py",
+  "effective_from": "2026-07-01",
+  "pairs": 2633128,
+  "output_sha256": "6ee13ae77a858f683179d9ad7c2f6e2b9df17ef7d7e3fa7c94f96318ca7d77b4",
+  "note": "Pinned, reproducible NCCI PTP release. tools/prepare_ncci.py rebuilds ncci_data.json from CMS and verifies this checksum; a mismatch means the CMS release drifted -- review provenance and update this lock deliberately. The builder is byte-deterministic for a given CMS release (verified)."
+}

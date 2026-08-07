@@ -68,20 +68,30 @@ class ClaimLineIntent:
     fact_digest: str = ""
 
 
+_SNAPSHOT_DIGEST_VERSION = "fsd-v2"
+
+
 def fact_snapshot_digest(fact) -> str:
-    """Canonical digest of every retrieval/release-relevant field of a fact, captured at
-    eligibility time and re-verified before retrieval so no field can change afterward:
-    kind, clinical action, disposition, ALL attributes (measurements + actor ids live here),
-    and anchored evidence-span identity. (Codex F6-R7.)"""
-    evidence = sorted(
+    """Canonical, versioned digest of EVERY retrieval/release-relevant field of a fact,
+    captured at eligibility and re-verified before retrieval so nothing can change afterward:
+    kind, clinical action, disposition, assertion certainty and experiencer, scalar and
+    per-axis confidences (they set the post-retrieval autonomy floor), ALL attributes
+    (measurements + actor ids live here), and ORDERED anchored evidence-span identity
+    (order preserved so a reorder is detected). (Codex F6-R7.)"""
+    evidence = [
         (str(getattr(sp, "span_id", "") or ""),
          str(getattr(sp, "text_sha256", "") or
              hashlib.sha256(str(getattr(sp, "text", "")).encode()).hexdigest()))
-        for sp in (getattr(fact, "evidence", None) or []))
+        for sp in (getattr(fact, "evidence", None) or [])]     # ORDER preserved
     payload = {
+        "v": _SNAPSHOT_DIGEST_VERSION,
         "kind": fact.kind.value,
         "description": fact.description,
         "disposition": getattr(getattr(fact, "disposition", None), "value", None),
+        "certain": bool(getattr(fact, "certain", True)),
+        "experiencer": getattr(fact, "experiencer", None),
+        "confidence": getattr(fact, "confidence", None),
+        "axis_confidence": dict(getattr(fact, "axis_confidence", None) or {}),
         "attributes": fact.attributes or {},
         "evidence": evidence,
     }
@@ -108,16 +118,17 @@ class RetrievalRequest:
             raise ValueError("retrieval fact kind differs from the eligible intent")
         if self.fact.description != self.intent.clinical_action:
             raise ValueError("retrieval action differs from the eligible intent")
-        # R7: the fact must be byte-identical to what eligibility approved. Attributes
-        # (measurements + actor ids) are re-checked against the eligibility-time snapshot
-        # (always, so directly-built intents cannot bypass it); the canonical digest
-        # additionally binds disposition and anchored evidence-span identity. Any change
-        # rejects the request and yields zero retrieval. (Codex F6-R7.)
-        if dict(self.fact.attributes or {}) != dict(self.intent.attributes or {}):
-            raise ValueError("retrieval fact attributes mutated since eligibility")
-        if (self.intent.fact_digest
-                and fact_snapshot_digest(self.fact) != self.intent.fact_digest):
-            raise ValueError("retrieval fact snapshot digest mismatch since eligibility")
+        # R7: a retrieval-eligible intent MUST carry a non-empty canonical fact-snapshot
+        # digest; a request built without one is rejected (no bypass via an empty digest).
+        # The fact is then re-hashed and must match byte-for-byte -- any change to attributes,
+        # measurements, actor ids, confidences, assertion/experiencer, disposition, or ordered
+        # evidence identity rejects the request and yields zero retrieval. (Codex F6-R7.)
+        if not self.intent.fact_digest:
+            raise ValueError(
+                "retrieval intent is missing its eligibility fact-snapshot digest")
+        if fact_snapshot_digest(self.fact) != self.intent.fact_digest:
+            raise ValueError(
+                "retrieval fact mutated since eligibility (snapshot digest mismatch)")
 
 
 def _intent_id(encounter_id: str, fact_id: str, action: str) -> str:

@@ -335,3 +335,40 @@ def test_retrieval_request_rejects_evidence_span_mutation():
                                   text_sha256="hX", span_id="sX")]   # swap the evidence
     with pytest.raises(ValueError):
         RetrievalRequest(intent, fact)
+
+
+# ---- Codex F6-R7 (round 2): digest is mandatory and binds confidence/assertion fields -----
+def _eligible_intent(fact):
+    from claude_coder.eligibility import evaluate, EligibilityState
+    return next(i for i in evaluate([fact], [], "enc", "2026-08-01")
+               if i.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL)
+
+
+def test_retrieval_request_requires_nonempty_digest():
+    import pytest
+    from dataclasses import replace
+    from claude_coder.eligibility import RetrievalRequest
+    fact = _fact(attrs={"performer_id": "p1", "billing_entity_id": "p1"})
+    intent = _eligible_intent(fact)
+    RetrievalRequest(intent, fact)                                   # has a digest -> ok
+    with pytest.raises(ValueError):
+        RetrievalRequest(replace(intent, fact_digest=""), fact)      # empty digest -> reject
+
+
+def test_retrieval_request_rejects_confidence_and_assertion_mutation():
+    import pytest
+    from claude_coder.eligibility import RetrievalRequest
+    for mutate in (
+        lambda f: setattr(f, "confidence", 0.01),
+        lambda f: f.axis_confidence.__setitem__(next(iter(f.axis_confidence), "occurrence"), 0.0),
+        lambda f: setattr(f, "certain", not f.certain),
+        lambda f: setattr(f, "experiencer", "family"),
+    ):
+        fact = _fact(attrs={"performer_id": "p1", "billing_entity_id": "p1"})
+        if not fact.axis_confidence:
+            fact.axis_confidence = {"occurrence": 0.9}
+        intent = _eligible_intent(fact)
+        RetrievalRequest(intent, fact)                               # unchanged -> ok
+        mutate(fact)
+        with pytest.raises(ValueError):
+            RetrievalRequest(intent, fact)                           # release-relevant change -> reject

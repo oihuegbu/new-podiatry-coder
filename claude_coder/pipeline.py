@@ -20,6 +20,22 @@ from .data_access import AuthoritativeSource, CodeSource
 from .models import CodingResult, ResolutionMethod, ResolvedLine
 
 
+def _fingerprint_certifiable(fp) -> bool:
+    """A release may be certified only against a fingerprint that actually identifies the
+    authoritative data: non-empty per-system code counts and an OK source manifest. Empty,
+    partial, or blocked fingerprints (incl. a source that swallowed its own failure and
+    returned {}) are not certifiable. (Codex F6-R5.)"""
+    if not isinstance(fp, dict) or not fp:
+        return False
+    counts = fp.get("counts")
+    if not isinstance(counts, dict) or not all(counts.get(s) for s in ("icd10", "cpt", "hcpcs")):
+        return False
+    manifest = fp.get("source_manifest")
+    if not isinstance(manifest, dict) or manifest.get("status") != "OK":
+        return False
+    return True
+
+
 def code_encounter(
     encounter_id: str,
     note_text: str,
@@ -256,12 +272,13 @@ def code_encounter(
         fingerprint = source.data_fingerprint()
     except Exception:
         fingerprint = None
-    if fingerprint is None:
-        # Without a fingerprint we cannot attest WHICH authoritative data produced the
-        # claim -> the claim is not certifiable. Retryable hold, no certificate.
+    if not _fingerprint_certifiable(fingerprint):
+        # Without a fingerprint that identifies the authoritative data (non-empty counts +
+        # OK manifest) the claim is not certifiable -- a swallowed/partial/empty fingerprint
+        # must not certify. Retryable hold, no certificate.
         result.gates.append(GateResult(
             "data_fingerprint", Outcome.UNKNOWN,
-            "authoritative-data fingerprint unavailable; provenance cannot be attested",
+            "authoritative-data fingerprint unavailable or incomplete; provenance cannot be attested",
             "audit/certificate integrity", retryable=True))
         decide(result, source=source)
         result.certificate = None

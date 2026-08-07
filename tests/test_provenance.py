@@ -210,3 +210,23 @@ def test_sqlite_audit_verify_chain_detects_tampering(tmp_path):
     problems = repo.verify_chain("enc")
     assert any("hash mismatch" in p for p in problems)
     assert any("broken/forked" in p for p in problems)
+
+
+# ---- Codex F6-R4-A: external witness detects tail truncation / missing terminal record -----
+def test_verify_chain_detects_tail_truncation(tmp_path):
+    import sqlite3
+    from claude_coder.provenance import SqliteAuditRepository
+    dbp = tmp_path / "prov.db"
+    repo = SqliteAuditRepository(dbp)
+    repo.append("enc", "a", {"x": 1})
+    repo.append("enc", "b", {"x": 2})               # terminal record
+    assert repo.verify_chain("enc") == []
+    # an attacker drops the append-only delete guard and removes the FINAL row; the remaining
+    # prefix still self-verifies, but the EXTERNAL witness still records 2 heads.
+    conn = sqlite3.connect(str(dbp))
+    conn.execute("DROP TRIGGER audit_no_delete")
+    conn.execute("DELETE FROM audit_log WHERE seq=(SELECT MAX(seq) FROM audit_log)")
+    conn.commit()
+    conn.close()
+    problems = repo.verify_chain("enc")
+    assert any("truncation" in p or "terminal" in p for p in problems)

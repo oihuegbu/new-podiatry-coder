@@ -20,7 +20,7 @@ _FACTS = ('{"facts":[{"kind":"procedure","description":"excision of lesion",'
           '"disposition":"performed_today","negated":false,'
           '"evidence":["excision of lesion performed"],"confidence":0.99}]}')
 _NOTE = "excision of lesion performed today"
-_CTX = {"billing_entity_id": "actor-1", "performer_id": "actor-1"}
+_CTX = {"billing_entity_id": "actor-1", "participants": [{"id": "actor-1", "type": "person", "roles": ["performer"]}]}
 
 
 def _sel(system, user):
@@ -106,3 +106,27 @@ def test_terminal_audit_write_failure_drops_certificate():
     assert r.verdict is not Verdict.AUTO_READY                            # downgraded
     assert audit.last_release() is None                                  # nothing durably persisted
     assert _has_gate(r, "release_evidence_persistence")
+
+
+def test_empty_or_partial_fingerprint_prevents_certification():
+    """A source that swallows its own failure and returns {} / partial counts / a manifest
+    that is not OK must NOT certify -- the outer 'is not None' check was insufficient."""
+    import claude_coder.pipeline as pl
+    assert pl._fingerprint_certifiable({}) is False
+    assert pl._fingerprint_certifiable({"counts": {}}) is False
+    assert pl._fingerprint_certifiable({"counts": {"icd10": 1, "cpt": 1, "hcpcs": 0}}) is False
+    assert pl._fingerprint_certifiable(
+        {"counts": {"icd10": 1, "cpt": 1, "hcpcs": 1}}) is False            # no manifest
+    assert pl._fingerprint_certifiable(
+        {"counts": {"icd10": 1, "cpt": 1, "hcpcs": 1},
+         "source_manifest": {"status": "OK"}}) is True
+
+    for bad in ({}, {"counts": {}}):
+        src = _src()
+        src.data_fingerprint = lambda b=bad: b
+        r = code_encounter("e", _NOTE, "2026-03-14", source=src,
+                           extract_llm=lambda s, u: _FACTS, verify_llm=_sel,
+                           corroborate_llm=_sel, audit_repository=_CapturingAudit(),
+                           billing_context=_CTX)
+        assert r.certificate is None                                       # not certified
+        assert _has_gate(r, "data_fingerprint")

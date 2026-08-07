@@ -303,7 +303,7 @@ class SqliteAuditRepository(AuditRepository):
                     "record": record,
                 }
                 entry["record_sha256"] = _sha(json.dumps(entry, sort_keys=True, default=str))
-                conn.execute(
+                cur = conn.execute(
                     "INSERT INTO audit_log(encounter_id, kind, recorded_at, control_mode,"
                     " previous_record_sha256, record_json, record_sha256)"
                     " VALUES (?,?,?,?,?,?,?)",
@@ -311,6 +311,7 @@ class SqliteAuditRepository(AuditRepository):
                      previous, json.dumps(record, sort_keys=True, default=str),
                      entry["record_sha256"]))
                 conn.commit()
+                self._append_head_witness(encounter_id, cur.lastrowid, entry["record_sha256"])
                 return entry["record_sha256"]
             except Exception:
                 try:
@@ -344,6 +345,44 @@ class SqliteAuditRepository(AuditRepository):
             conn.close()
 
 
+    def _witness_path(self):
+        from pathlib import Path
+        return Path(str(self.db_path) + ".heads")
+
+    def _append_head_witness(self, encounter_id: str, seq: int, record_sha256: str) -> None:
+        """Record the new terminal chain head in an EXTERNAL append-only witness, separate
+        from the mutable audit_log. Because the witness lives outside the log, deleting the
+        log's tail -- even by dropping the log's own triggers -- is detectable: the witness
+        still records the expected head and count. (Codex F6-R4-A.)"""
+        try:
+            with open(self._witness_path(), "a") as fh:
+                fh.write(json.dumps({"encounter_id": str(encounter_id), "seq": int(seq),
+                                     "record_sha256": record_sha256}, sort_keys=True) + "\n")
+        except Exception:
+            if self.strict:
+                raise
+
+    def _witness_heads(self, encounter_id: str | None):
+        """{encounter_id: (count, terminal_seq, terminal_sha)} from the external witness."""
+        heads: dict[str, list] = {}
+        wp = self._witness_path()
+        if not wp.exists():
+            return {}
+        for line in wp.read_text().splitlines():
+            try:
+                w = json.loads(line)
+            except Exception:
+                continue
+            enc = str(w.get("encounter_id"))
+            if encounter_id is not None and enc != str(encounter_id):
+                continue
+            heads.setdefault(enc, []).append((int(w.get("seq", -1)), str(w.get("record_sha256"))))
+        out = {}
+        for enc, items in heads.items():
+            items.sort()
+            out[enc] = (len(items), items[-1][0], items[-1][1])
+        return out
+
     def verify_chain(self, encounter_id: str | None = None) -> list[str]:
         """Return a list of integrity problems (empty => intact). Detects hash tampering (a
         stored record_sha256 that does not equal the recomputed hash of its fields), broken
@@ -363,6 +402,7 @@ class SqliteAuditRepository(AuditRepository):
             conn.close()
         problems: list[str] = []
         last_sha: dict[str, str] = {}
+        present: dict[str, list] = {}
         last_seq = -1
         for (seq, enc, kind, at, mode, prev, rj, sha) in rows:
             if seq <= last_seq:
@@ -377,6 +417,19 @@ class SqliteAuditRepository(AuditRepository):
             if prev != expected_prev:
                 problems.append(f"seq {seq} enc {enc}: broken/forked chain link")
             last_sha[enc] = sha
+            present.setdefault(enc, []).append((seq, sha))
+        # External-witness cross-check: the durable rows must not fall short of the witnessed
+        # head/count, otherwise the terminal record was truncated/removed. (Codex F6-R4-A.)
+        for enc, (wcount, wseq, wsha) in self._witness_heads(encounter_id).items():
+            rows_enc = sorted(present.get(enc, []))
+            if len(rows_enc) < wcount:
+                problems.append(
+                    f"enc {enc}: {wcount - len(rows_enc)} audit record(s) missing vs external "
+                    f"witness (tail truncation)")
+            elif not rows_enc or rows_enc[-1] != (wseq, wsha):
+                problems.append(
+                    f"enc {enc}: terminal record does not match external head witness "
+                    f"(truncated/tampered terminal)")
         return problems
 
 

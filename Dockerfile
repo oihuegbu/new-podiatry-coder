@@ -32,6 +32,14 @@ COPY . .
 # Output and log dirs will typically be bind-mounted from the host
 RUN mkdir -p output/results logs data/result_cache
 
+# Prepare the pinned, checksum-verified authoritative NCCI PTP snapshot from CMS. This runs
+# in the PRODUCTION app stage (and is inherited by the test stage) so a clean-checkout build
+# of --target app -- and a fresh app_data volume seeded from it -- carries the REQUIRED
+# source and passes the source-manifest gate, instead of silently depending on an untracked
+# host copy. The checksum lock makes the artifact reproducible/provenance-verified.
+# (Codex F6-R8.)
+RUN PYTHONPATH=/app python tools/prepare_ncci.py
+
 ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "run.py"]
@@ -50,10 +58,6 @@ CMD ["python", "run.py"]
 # so this stage never reaches production even though it is the last stage here.
 FROM app AS test
 RUN pip install --no-cache-dir --timeout 120 --retries 5 -r requirements-dev.txt
-# Deterministically build the REQUIRED authoritative NCCI PTP snapshot from CMS (the exact
-# command CI runs), instead of inheriting an untracked host copy through the build context
-# (which .dockerignore now excludes). This makes the "clean reproducible test" claim true:
-# the suite and the rule-coverage guard run against source-built data, not host state.
-# (Codex F6-R8.)
-RUN PYTHONPATH=/app python tools/refresh_authoritative_data.py ncci_ptp --no-integrate
+# The authoritative NCCI snapshot is already prepared+verified in the app stage above and
+# inherited here, so the test suite runs against the SAME reproducible source as production.
 CMD ["python", "-m", "pytest", "-q"]
