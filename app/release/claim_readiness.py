@@ -225,12 +225,24 @@ def _source_control(result: dict) -> ControlResult:
         return _control("authoritative_sources", ControlOutcome.BLOCKED,
                         "authoritative sources changed or are not the live snapshot")
     present = {str(r.get("source_id")) for r in records}
-    mandatory = {"icd10_codes", "cpt_codes", "hcpcs_codes", "ncci_edits",
-                 "mue_limits", "coverage_policy", "validator_rules",
+    # Runtime/implementation identities this gate additionally binds (they are not
+    # release-bearing DATA, so they are not part of the required-source declaration).
+    mandatory = {"coverage_policy", "validator_rules",
                  "compliance_database", "validator_implementation",
                  "scrubber_implementation", "release_gate_implementation",
                  "submission_configuration", "terminology_registry",
                  "terminology_implementation"}
+    # The claim-affecting DATA identities come from the SAME versioned declaration the
+    # coder's release fingerprint validates against, so a newly required source cannot
+    # be enforced in one release path and silently absent from the other. A declaration
+    # that cannot be resolved is an ERROR, never an empty (vacuously satisfied) set.
+    # (Codex F6-R5, post-fix review: adjacent instance of the parallel-list drift class.)
+    try:
+        from app.release.source_manifest import required_release_sources
+        mandatory |= set(required_release_sources())
+    except Exception as exc:
+        return _control("authoritative_sources", ControlOutcome.ERROR,
+                        f"required-source declaration is unavailable ({exc})")
     missing = sorted(mandatory - present)
     if missing:
         return _control("authoritative_sources", ControlOutcome.NOT_CHECKED,

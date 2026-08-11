@@ -593,12 +593,10 @@ class AuthoritativeSource:
                 fp["codes_checksum"] = chk.read_text().strip()[:64]
         except Exception:
             pass                                     # codes_checksum is corroborating only
-        from .capability import build_manifest, manifest_digest   # raises if unavailable
+        from .capability import build_manifest, fingerprint_digest  # raises if unavailable
         manifest = build_manifest()
         fp["source_manifest"] = manifest
-        fp["fingerprint_sha256"] = manifest_digest(
-            [{"counts": fp["counts"], "manifest": manifest.get("manifest_sha256")}]
-            + list(manifest.get("sources") or []))
+        fp["fingerprint_sha256"] = fingerprint_digest(fp["counts"], manifest)
         return fp
 
     def _excludes1_map(self) -> dict[str, set[str]]:
@@ -805,24 +803,38 @@ class MockSource:
     def data_fingerprint(self):
         """A schema-COMPLETE synthetic fingerprint: the mock must satisfy exactly the same
         content-addressed contract as the real source, so tests cannot pass against a shape
-        production would reject. (Codex F6-R5.)"""
-        from .capability import MANIFEST_VERSION, manifest_digest
-        sources = [{"source": f"mock_{name}", "source_id": f"mock_{name}", "required": True,
-                    "present": True, "status": "loaded", "role": "synthetic test source",
-                    "path": f"/mock/{name}.json", "bytes": 1,
-                    "sha256": "sha256:" + hashlib.sha256(name.encode()).hexdigest(),
-                    "release": {"effective_from": "2026-01-01", "effective_to": "",
-                                "version": "mock"}}
-                   for name in ("icd10", "cpt", "hcpcs")]
+        production would reject. (Codex F6-R5.)
+
+        "Complete" now means the COMPLETE required-source set: the identities, roles and
+        release-metadata expectations are read from the same versioned registry
+        declaration the real manifest is built from, so a mock can never satisfy the
+        validator with a set of synthetic sources production would reject -- and a change
+        to the required set fails the mock too, instead of leaving tests green against a
+        set that no longer exists."""
+        from app.release.source_manifest import (
+            REQUIRED_SOURCE_SCHEMA_VERSION, required_release_sources)
+        from .capability import MANIFEST_VERSION, fingerprint_digest, manifest_digest
+        sources = []
+        for source_id, spec in required_release_sources().items():
+            release = ({"effective_from": "2026-01-01", "effective_to": "9999-12-31",
+                        "version": "mock"}
+                       if spec["release_metadata_required"]
+                       else {"effective_from": "", "effective_to": "", "version": ""})
+            sources.append({
+                "source": source_id, "source_id": source_id, "required": True,
+                "present": True, "status": "loaded", "role": spec["role"],
+                "path": f"/mock/{source_id}.json", "bytes": 1,
+                "sha256": "sha256:" + hashlib.sha256(source_id.encode()).hexdigest(),
+                "release": release})
         manifest = {"manifest_version": MANIFEST_VERSION,
+                    "required_sources_schema": REQUIRED_SOURCE_SCHEMA_VERSION,
                     "sources": sources, "missing_required": [], "degraded_optional": [],
                     "integrity_errors": [], "status": "OK",
                     "manifest_sha256": manifest_digest(sources)}
         counts = {"icd10": 1, "cpt": 1, "hcpcs": 1}
         return {"source": "mock", "fingerprint_version": "release-data-fingerprint-v2",
                 "counts": counts, "source_manifest": manifest,
-                "fingerprint_sha256": manifest_digest(
-                    [{"counts": counts, "manifest": manifest["manifest_sha256"]}] + sources)}
+                "fingerprint_sha256": fingerprint_digest(counts, manifest)}
 
     def qualifying_dx_for(self, code, system="cpt"):
         c = str(code).replace(".", "").upper()

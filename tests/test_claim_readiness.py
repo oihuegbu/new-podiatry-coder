@@ -274,3 +274,48 @@ class ClaimReadinessTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---- Codex F6-R5, post-fix review: the same parallel-list drift class, in this gate ----
+
+
+def test_release_gate_binds_the_declared_required_source_set(monkeypatch):
+    """The app-side release gate used a parallel hardcoded source-id list, so a newly
+    required release source would be enforced by the coder's fingerprint validator and
+    silently unenforced here. It now derives the claim-affecting identities from the same
+    versioned declaration -- omitting any one of them can no longer PASS.
+
+    The live-snapshot comparison is held equal deliberately, so the assertion isolates the
+    mandatory-identity check instead of tripping the earlier fingerprint comparison."""
+    from app.release import source_manifest as sm
+    from app.release.certificate_models import ControlOutcome
+    from app.release.claim_readiness import _source_control
+    expected = sm.required_release_sources()
+    assert expected
+    manifest = sm.build_source_manifest()
+    recorded = {str(r.get("source_id")) for r in manifest["records"]}
+    assert set(expected) <= recorded            # the manifest actually emits them
+
+    for source_id in expected:
+        partial = {"records": [r for r in manifest["records"]
+                               if r.get("source_id") != source_id],
+                   "errors": []}
+        partial["fingerprint"] = sm.manifest_fingerprint(partial)
+        monkeypatch.setattr(sm, "build_source_manifest", lambda p=partial: p)
+        control = _source_control({"authoritative_source_manifest": partial})
+        assert control.outcome is ControlOutcome.NOT_CHECKED, source_id
+        assert source_id in control.reason, source_id
+
+
+def test_release_gate_errors_when_the_required_declaration_is_unresolvable(monkeypatch):
+    """Failure path: an unresolvable declaration must ERROR, not degrade to an empty
+    mandatory set that every manifest vacuously satisfies."""
+    from app.release import source_manifest as sm
+    from app.release.certificate_models import ControlOutcome
+    from app.release.claim_readiness import _source_control
+    manifest = sm.build_source_manifest()
+    monkeypatch.setattr(sm, "_REQUIRED_RELEASE_SOURCES",
+                        {"a_source_that_is_not_registered": {"role": "r"}})
+    control = _source_control({"authoritative_source_manifest": manifest})
+    assert control.outcome is ControlOutcome.ERROR
+    assert "required-source declaration" in control.reason

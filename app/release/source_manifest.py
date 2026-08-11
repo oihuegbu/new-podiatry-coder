@@ -21,6 +21,11 @@ _AUTHORITATIVE = {
     "ncci_edits": config.NCCI_FILE,
     "mue_limits": config.MUE_FILE,
     "coverage_policy": config.LCD_FILE,
+    # Global-period / fee-schedule policy decides post-operative bundling, so it is
+    # release-bearing and must be registered here (not only in the coder's capability
+    # probe) -- the required-source declaration below resolves its path from THIS
+    # registry, so the two can never drift apart.  (Codex F6-R5.)
+    "global_periods": config.GLOBAL_PERIODS_FILE,
     "validator_rules": config.DATA_DIR / "rules" / "validator_rules.json",
     # Governed terminology is not code authority, but it is a release-bearing
     # interpretation source and must be bound into the same immutable manifest.
@@ -64,6 +69,101 @@ def authoritative_paths() -> dict[str, Path]:
 def release_metadata(source_id: str) -> dict:
     """Public view of a source's release/edition/effective window."""
     return _release_metadata(source_id)
+
+
+# The sources for which this module can report a REAL upstream release/edition/effective
+# window (they are ingested into versioned tables that carry one).  This set is the
+# authority on "does the authority publish release metadata for this source?" -- the
+# required-source declaration below consults it rather than restating it.
+RELEASE_METADATA_SOURCES = frozenset({
+    "ncci_edits", "mue_limits", "coverage_policy",
+    "icd10_codes", "cpt_codes", "hcpcs_codes",
+})
+
+# Version of the required-source SCHEMA below.  A release attestation records it, so a
+# certificate built against an older/other required-source definition is identifiable
+# rather than silently comparable.  Bump it whenever the required set or a role changes.
+REQUIRED_SOURCE_SCHEMA_VERSION = "release-required-sources-v1"
+
+# The COMPLETE set of release-bearing source identities a certifiable release must
+# account for, each with the ROLE it plays.  Absence of any one of these means a claim
+# was coded without an input that can change the claim, so a manifest that simply omits
+# one (with `missing_required == []` and a self-consistent digest) must NOT certify.
+#
+# Identities are the registry keys of `_AUTHORITATIVE` above -- resolved through it, so
+# this is a declaration of WHICH registered sources are required, never a second,
+# parallel list of paths that can drift.  No medical code, code family, or descriptor
+# appears here.  (Codex F6-R5.)
+_REQUIRED_RELEASE_SOURCES: dict[str, dict[str, str]] = {
+    "icd10_codes": {"role": "diagnosis code table"},
+    "cpt_codes": {"role": "procedure code table"},
+    "hcpcs_codes": {"role": "supply/device code table"},
+    "ncci_edits": {"role": "procedure-pair edit policy"},
+    "mue_limits": {"role": "unit-limit policy"},
+    "global_periods": {
+        "role": "global-period / fee-schedule policy",
+        # REVIEWED EXCEPTION, stated explicitly rather than inferred from a blank field:
+        # the global-period extract is not ingested into a versioned effective-window /
+        # data_source_version table, so no upstream release window exists to require.
+        # Its identity therefore rests entirely on the content digest, which IS required.
+        "release_metadata_exemption":
+            "not ingested into a versioned effective-window table; no upstream release "
+            "window is published for this extract, so identity rests on the content "
+            "digest alone",
+    },
+}
+
+
+def required_release_sources() -> dict[str, dict]:
+    """{source_id -> {source_id, role, path, release_metadata_required,
+    release_metadata_exemption}} for every source a certifiable release must account for.
+
+    Fails LOUDLY (raises) rather than degrading to a partial set when the declaration and
+    the authority disagree:
+      - a required identity that is not registered in `_AUTHORITATIVE`;
+      - a source the authority publishes release metadata for that nonetheless carries a
+        (now stale) reviewed exemption;
+      - a source the authority publishes NO release metadata for that carries no reviewed
+        exemption -- silence is not an exemption.
+    Callers treat a raise as "not certifiable" / manifest unavailable, never as "empty".
+    """
+    spec: dict[str, dict] = {}
+    for source_id, declared in _REQUIRED_RELEASE_SOURCES.items():
+        path = _AUTHORITATIVE.get(source_id)
+        if path is None:
+            raise RuntimeError(
+                f"required release source {source_id!r} is not registered in the "
+                f"authoritative-source registry")
+        exemption = str(declared.get("release_metadata_exemption") or "").strip()
+        provides = source_id in RELEASE_METADATA_SOURCES
+        if provides and exemption:
+            raise RuntimeError(
+                f"required release source {source_id!r} carries a release-metadata "
+                f"exemption but the authority publishes release metadata for it")
+        if not provides and not exemption:
+            raise RuntimeError(
+                f"required release source {source_id!r} has no published release "
+                f"metadata and no reviewed exemption recorded")
+        spec[source_id] = {"source_id": source_id,
+                           "role": str(declared["role"]),
+                           "path": path,
+                           "release_metadata_required": provides,
+                           "release_metadata_exemption": exemption}
+    return spec
+
+
+def release_window_populated(release) -> bool:
+    """True when a manifest record carries a REAL upstream effective/edition window.
+
+    An ingest timestamp (`version`) is not an authority edition, so it does not satisfy
+    this on its own: the window is what makes a claim date checkable against the loaded
+    release.  A blank/absent release block on a source the authority publishes metadata
+    for means the manifest lost provenance it was supposed to carry.
+    """
+    if not isinstance(release, dict):
+        return False
+    return any(str(release.get(key) or "").strip()
+               for key in ("effective_from", "release_effective_from"))
 
 
 def sha256_file(path: Path) -> str:
@@ -196,9 +296,7 @@ def _release_metadata(source_id: str) -> dict:
     date window/version those bytes represent without loading very large JSON
     sources into memory a second time.
     """
-    metadata_sources = {"ncci_edits", "mue_limits", "coverage_policy",
-                        "icd10_codes", "cpt_codes", "hcpcs_codes"}
-    if source_id not in metadata_sources:
+    if source_id not in RELEASE_METADATA_SOURCES:
         return {"effective_from": "", "effective_to": "", "version": ""}
     db_path = config.DATA_DIR / "compliance.db"
     if not db_path.exists():

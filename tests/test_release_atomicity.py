@@ -75,6 +75,12 @@ def _has_gate(r, name):
     return any(g.name == name for g in r.gates)
 
 
+# A valid fingerprint captured at IMPORT time, before any test monkeypatches the required-
+# source declaration -- used to prove the validator resolves a broken declaration to
+# "not certifiable" instead of raising out of `code_encounter`.
+_UNSEALED_VALID = MockSource().data_fingerprint()
+
+
 def test_normal_release_all_four_agree():
     r, audit = _run()
     rel = audit.last_release()
@@ -140,40 +146,46 @@ def _valid_fp():
     return copy.deepcopy(MockSource().data_fingerprint())
 
 
+def _reseal(fp):
+    """Recompute BOTH digests so a mutated fingerprint is fully SELF-CONSISTENT.
+
+    Without this, every rejection below would only prove that the digest check fired --
+    not that the required-source-set / role / release-metadata checks did. The reviewed
+    counterexamples were all self-consistent objects. (Codex F6-R5.)"""
+    import claude_coder.capability as cap
+    man = fp["source_manifest"]
+    man["manifest_sha256"] = cap.manifest_digest(man["sources"])
+    fp["fingerprint_sha256"] = cap.fingerprint_digest(fp["counts"], man)
+    return fp
+
+
 def test_same_count_byte_change_invalidates_the_release_fingerprint(tmp_path):
     """The core defect: two materially different authoritative files with IDENTICAL row
     counts must not share a certifiable identity. Mutating the bytes of a required source
     while holding every count constant must change the fingerprint."""
     import json
-    import claude_coder.capability as cap
     import claude_coder.pipeline as pl
+    from app.release.source_manifest import sha256_file
 
     src_file = tmp_path / "authoritative.json"
-    src_file.write_text(json.dumps([{"code": "AAA", "description": "first edition"}]))
 
-    def _manifest():
-        # one required source, content-addressed exactly as production records it
-        from app.release.source_manifest import sha256_file
+    def _fingerprint():
+        # the COMPLETE required-source set, with one required source content-addressed
+        # against real bytes exactly as production records it; counts held CONSTANT
+        fp = _valid_fp()
         stat = src_file.stat()
-        sources = [{"source": "authoritative", "source_id": "authoritative", "required": True,
-                    "present": True, "status": "loaded", "role": "test", "path": str(src_file),
-                    "bytes": stat.st_size, "sha256": sha256_file(src_file),
-                    "release": {"effective_from": "2026-01-01", "version": "v1"}}]
-        man = {"manifest_version": cap.MANIFEST_VERSION, "generated_at": "x",
-               "sources": sources, "missing_required": [], "degraded_optional": [],
-               "integrity_errors": [], "status": "OK",
-               "manifest_sha256": cap.manifest_digest(sources)}
-        counts = {"icd10": 7, "cpt": 7, "hcpcs": 7}          # counts held CONSTANT
-        return {"counts": counts, "source_manifest": man,
-                "fingerprint_version": "release-data-fingerprint-v2",
-                "fingerprint_sha256": cap.manifest_digest(
-                    [{"counts": counts, "manifest": man["manifest_sha256"]}] + sources)}
+        target = fp["source_manifest"]["sources"][0]
+        target["path"] = str(src_file)
+        target["bytes"] = stat.st_size
+        target["sha256"] = sha256_file(src_file)
+        return _reseal(fp)
 
-    first = _manifest()
+    src_file.write_text(json.dumps([{"code": "AAA", "description": "first edition"}]))
+    first = _fingerprint()
     assert pl._fingerprint_certifiable(first) is True
     # SAME number of rows, DIFFERENT bytes
     src_file.write_text(json.dumps([{"code": "AAA", "description": "SECOND edition"}]))
-    second = _manifest()
+    second = _fingerprint()
     assert pl._fingerprint_certifiable(second) is True
     assert first["counts"] == second["counts"]                             # cardinality equal
     assert first["fingerprint_sha256"] != second["fingerprint_sha256"]     # identity changed
@@ -273,3 +285,236 @@ def test_source_drift_from_a_reviewed_lock_is_an_integrity_error(monkeypatch, tm
         "missing_required": [], "integrity_errors": errors, "degraded_optional": []})
     g = source_manifest_gate(CodingResult("e", "2026-03-14", lines=[]))
     assert g.outcome is Outcome.BLOCKED
+
+
+# ---- Codex F6-R5 (round 4): a PARTIAL required-source set and an unverified aggregate ----
+# digest were both certifiable. The validator now compares the manifest against the COMPLETE
+# declared required set (identities + roles + release-metadata expectation) and RECOMPUTES
+# the aggregate fingerprint. Every case below is fully self-consistent (`_reseal`) so it
+# isolates the check under test rather than tripping the digest comparison.
+
+
+def test_required_release_source_declaration_agrees_with_the_authority():
+    """The declaration is a statement ABOUT the registry, so it may not invent identities,
+    and 'no release metadata' must be a REVIEWED exception with a stated reason -- never a
+    blank field nobody looked at."""
+    from app.release import source_manifest as sm
+    spec = sm.required_release_sources()
+    assert spec
+    registered = sm.authoritative_paths()
+    for source_id, entry in spec.items():
+        assert source_id in registered, source_id            # registered, not invented
+        assert str(entry["role"]).strip()
+        provides = source_id in sm.RELEASE_METADATA_SOURCES
+        assert entry["release_metadata_required"] is provides
+        # silence is not an exemption: a source with no published window states why
+        assert bool(str(entry["release_metadata_exemption"]).strip()) is not provides
+
+
+def test_a_declaration_that_disagrees_with_the_authority_fails_loudly(monkeypatch):
+    """Failure path of the declaration itself: it must raise, not silently return a
+    partial set (which is exactly the defect this whole check exists to prevent)."""
+    from app.release import source_manifest as sm
+    metadata_bearing = sorted(sm.RELEASE_METADATA_SOURCES & set(sm.authoritative_paths()))
+    assert metadata_bearing
+    broken = [
+        {"a_source_that_is_not_registered": {"role": "r"}},              # not registered
+        {metadata_bearing[0]: {"role": "r",
+                               "release_metadata_exemption": "stale"}},  # stale exemption
+        {"validator_rules": {"role": "r"}},                              # no window, no reason
+    ]
+    for declaration in broken:
+        monkeypatch.setattr(sm, "_REQUIRED_RELEASE_SOURCES", declaration)
+        with pytest.raises(RuntimeError):
+            sm.required_release_sources()
+
+
+def test_a_broken_declaration_holds_the_release_instead_of_certifying(monkeypatch):
+    """Boundary: the declaration raising must surface as a fail-closed HOLD everywhere it
+    is consumed -- the capability gate, the fingerprint producer, and the pipeline -- never
+    as an empty required set that certifies."""
+    from app.release import source_manifest as sm
+    from claude_coder.gates import source_manifest_gate
+    from claude_coder.models import CodingResult, Outcome
+    import claude_coder.pipeline as pl
+    monkeypatch.setattr(sm, "_REQUIRED_RELEASE_SOURCES",
+                        {"a_source_that_is_not_registered": {"role": "r"}})
+    g = source_manifest_gate(CodingResult("e", "2026-03-14", lines=[]))
+    assert g.outcome is Outcome.ERROR and g.retryable
+    with pytest.raises(RuntimeError):
+        MockSource().data_fingerprint()
+    assert pl._fingerprint_certifiable(_UNSEALED_VALID) is False   # validator stays total
+    r, _audit = _run()
+    assert r.certificate is None and _has_gate(r, "data_fingerprint")
+
+
+def test_omitting_any_required_source_is_not_certifiable():
+    """The reviewed counterexample: a self-consistent manifest with `missing_required=[]`,
+    nonzero counts and a valid digest, but a real claim-affecting source simply absent."""
+    import claude_coder.pipeline as pl
+    from app.release.source_manifest import required_release_sources
+    expected = required_release_sources()
+    assert len(expected) > 1
+    for source_id in expected:
+        fp = _valid_fp()
+        fp["source_manifest"]["sources"] = [
+            s for s in fp["source_manifest"]["sources"] if s["source_id"] != source_id]
+        assert fp["source_manifest"]["missing_required"] == []
+        assert pl._fingerprint_certifiable(_reseal(fp)) is False, source_id
+    # ...and the exact reported shape: ONE synthetic required source, every real
+    # claim-affecting source omitted.
+    fp = _valid_fp()
+    fp["source_manifest"]["sources"] = [dict(fp["source_manifest"]["sources"][0],
+                                             source="synthetic", source_id="synthetic",
+                                             role="synthetic test source")]
+    assert pl._fingerprint_certifiable(_reseal(fp)) is False
+
+
+def test_duplicate_required_source_identity_is_not_certifiable():
+    """Two records claiming one identity makes 'which bytes' ambiguous; last-one-wins would
+    let a second record silently override the first."""
+    import claude_coder.pipeline as pl
+    fp = _valid_fp()
+    sources = fp["source_manifest"]["sources"]
+    sources.append(dict(sources[0], bytes=sources[0]["bytes"] + 1,
+                        sha256="sha256:" + "b" * 64))
+    assert pl._fingerprint_certifiable(_reseal(fp)) is False
+
+
+def test_an_unregistered_required_source_is_not_certifiable():
+    """An extra source asserting `required` is not in the declaration and must not pass;
+    an extra OPTIONAL source is recorded detail and stays certifiable."""
+    import claude_coder.pipeline as pl
+    fp = _valid_fp()
+    sources = fp["source_manifest"]["sources"]
+    sources.append(dict(sources[0], source="rogue", source_id="rogue_source",
+                        role="unreviewed source"))
+    assert pl._fingerprint_certifiable(_reseal(fp)) is False
+
+    ok = _valid_fp()
+    ok_sources = ok["source_manifest"]["sources"]
+    ok_sources.append(dict(ok_sources[0], source="aid", source_id="optional_aid",
+                           required=False, role="recall aid"))
+    assert pl._fingerprint_certifiable(_reseal(ok)) is True
+
+
+def test_a_required_source_whose_role_disagrees_is_not_certifiable():
+    """Identity alone is not enough: the manifest must agree about what each required
+    source IS, so one source cannot be substituted for another's role."""
+    import claude_coder.pipeline as pl
+    from app.release.source_manifest import required_release_sources
+    for source_id in required_release_sources():
+        for bad_role in ("", "some other role"):
+            fp = _valid_fp()
+            for s in fp["source_manifest"]["sources"]:
+                if s["source_id"] == source_id:
+                    s["role"] = bad_role
+            assert pl._fingerprint_certifiable(_reseal(fp)) is False, (source_id, bad_role)
+
+
+def test_blank_release_metadata_where_the_authority_publishes_it_is_not_certifiable():
+    """Where the authority publishes an effective/edition window it must be present. An
+    ingest timestamp is not an edition, so `version` alone does not satisfy it. Where the
+    authority publishes none, the exemption is explicit in the declaration."""
+    import claude_coder.pipeline as pl
+    from app.release.source_manifest import required_release_sources
+    expected = required_release_sources()
+    bearing = [sid for sid, s in expected.items() if s["release_metadata_required"]]
+    exempt = [sid for sid, s in expected.items() if not s["release_metadata_required"]]
+    assert bearing
+    for source_id in bearing:
+        for blank in ({}, None, "2026-01-01",
+                      {"effective_from": "", "release_effective_from": "",
+                       "version": "2026-08-05/2026-08-05T07:08:45"}):
+            fp = _valid_fp()
+            for s in fp["source_manifest"]["sources"]:
+                if s["source_id"] == source_id:
+                    s["release"] = blank
+            assert pl._fingerprint_certifiable(_reseal(fp)) is False, (source_id, blank)
+    for source_id in exempt:
+        assert str(expected[source_id]["release_metadata_exemption"]).strip()
+        fp = _valid_fp()
+        for s in fp["source_manifest"]["sources"]:
+            if s["source_id"] == source_id:
+                s["release"] = {}
+        assert pl._fingerprint_certifiable(_reseal(fp)) is True, source_id
+
+
+def test_an_arbitrary_aggregate_fingerprint_is_not_certifiable():
+    """The declared aggregate digest must BE the digest of the counts + manifest it claims
+    to identify. Shape-matching accepted all-zero, all-`f`, and merely plausible hex."""
+    import hashlib as _h
+    import claude_coder.pipeline as pl
+    good = _valid_fp()
+    assert pl._fingerprint_certifiable(good) is True
+    real_hex = good["fingerprint_sha256"].split(":", 1)[1]
+    for bogus in ("sha256:" + "0" * 64,
+                  "sha256:" + "f" * 64,
+                  "sha256:" + _h.sha256(b"plausible but wrong").hexdigest(),
+                  "sha256:" + real_hex[::-1]):
+        fp = _valid_fp()
+        fp["fingerprint_sha256"] = bogus
+        assert pl._fingerprint_certifiable(fp) is False, bogus
+    # the aggregate must actually COVER the counts: change them, keep the digest
+    fp = _valid_fp()
+    fp["counts"] = dict(fp["counts"], cpt=fp["counts"]["cpt"] + 1)
+    assert pl._fingerprint_certifiable(fp) is False
+
+
+def test_a_reordered_or_partially_copied_manifest_is_not_certifiable():
+    import claude_coder.capability as cap
+    import claude_coder.pipeline as pl
+    # reordered, digests copied from the original -> the recorded digests no longer
+    # describe the recorded manifest
+    fp = _valid_fp()
+    fp["source_manifest"]["sources"].reverse()
+    assert pl._fingerprint_certifiable(fp) is False
+    # reordered with the manifest digest recomputed but the AGGREGATE copied over
+    fp = _valid_fp()
+    original = fp["fingerprint_sha256"]
+    fp["source_manifest"]["sources"].reverse()
+    fp["source_manifest"]["manifest_sha256"] = cap.manifest_digest(
+        fp["source_manifest"]["sources"])
+    fp["fingerprint_sha256"] = original
+    assert pl._fingerprint_certifiable(fp) is False
+    # a fully recomputed reorder is the SAME content and stays certifiable -- order is
+    # not the control; the digests and the complete required set are
+    assert pl._fingerprint_certifiable(_reseal(fp)) is True
+    # partially copied: a strict subset of the sources with both digests recomputed
+    fp = _valid_fp()
+    fp["source_manifest"]["sources"] = fp["source_manifest"]["sources"][:2]
+    assert pl._fingerprint_certifiable(_reseal(fp)) is False
+
+
+def test_a_manifest_built_against_another_required_definition_is_not_certifiable():
+    """The manifest records WHICH required-source definition it was built against, so a
+    certificate produced under a different (older/other) set is identifiable rather than
+    silently comparable."""
+    import claude_coder.pipeline as pl
+    for value in (None, "", "release-required-sources-v0", "capability-manifest-v2"):
+        fp = _valid_fp()
+        if value is None:
+            fp["source_manifest"].pop("required_sources_schema")
+        else:
+            fp["source_manifest"]["required_sources_schema"] = value
+        assert pl._fingerprint_certifiable(_reseal(fp)) is False, value
+
+
+def test_the_real_capability_manifest_declares_the_complete_required_set():
+    """The producer side of the same invariant: the manifest production actually EMITS the
+    declared required set with matching roles and a populated window where one is published
+    -- otherwise the validator would reject every legitimate release."""
+    from app.release.source_manifest import (
+        REQUIRED_SOURCE_SCHEMA_VERSION, release_window_populated,
+        required_release_sources)
+    from claude_coder.capability import build_manifest
+    man = build_manifest()
+    assert man["required_sources_schema"] == REQUIRED_SOURCE_SCHEMA_VERSION
+    expected = required_release_sources()
+    declared = {s["source_id"]: s for s in man["sources"] if s["required"]}
+    assert set(declared) == set(expected)
+    for source_id, spec in expected.items():
+        record = declared[source_id]
+        assert record["role"] == spec["role"]
+        if record["present"] and spec["release_metadata_required"]:
+            assert release_window_populated(record["release"]), source_id

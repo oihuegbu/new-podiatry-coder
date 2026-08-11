@@ -77,7 +77,8 @@ def _source_locks() -> dict[str, dict]:
 
 
 def _probe(path: Any, required: bool, role: str, registry: dict[str, str],
-           locks: dict[str, dict]) -> tuple[dict[str, Any], list[str]]:
+           locks: dict[str, dict],
+           source_id: str | None = None) -> tuple[dict[str, Any], list[str]]:
     """One source record plus any integrity errors it raised."""
     p = Path(path)
     errors: list[str] = []
@@ -90,7 +91,9 @@ def _probe(path: Any, required: bool, role: str, registry: dict[str, str],
         resolved = str(p.resolve())
     except OSError:
         resolved = str(p)
-    source_id = registry.get(resolved, p.stem)
+    # A REQUIRED source carries the identity the release registry declared for it; an
+    # optional aid is identified by the registry path map, falling back to its stem.
+    source_id = source_id or registry.get(resolved, p.stem)
     record: dict[str, Any] = {
         "source": p.stem,
         "source_id": source_id,
@@ -137,6 +140,19 @@ def manifest_digest(sources: list[dict[str, Any]]) -> str:
     return _SHA256_PREFIX + hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
+def fingerprint_digest(counts: dict[str, Any], manifest: dict[str, Any]) -> str:
+    """The single canonical aggregate release fingerprint: the code counts bound to the
+    manifest's own digest and to every source record.
+
+    Defined ONCE here so the producer (`data_fingerprint`) and the release validator
+    (`pipeline._fingerprint_schema_ok`) compute it the same way -- a validator that only
+    pattern-matched the digest's SHAPE accepted an arbitrary all-zero / all-`f` / merely
+    plausible hex string as the identity of the data. (Codex F6-R5.)"""
+    return manifest_digest(
+        [{"counts": counts, "manifest": manifest.get("manifest_sha256")}]
+        + list(manifest.get("sources") or []))
+
+
 def build_manifest() -> dict[str, Any]:
     """Probe every authoritative source the coder depends on. Required sources gate
     release (fail closed); optional sources are recorded so their absence is visible
@@ -144,36 +160,46 @@ def build_manifest() -> dict[str, Any]:
     and version-aware so the release certificate identifies the exact bytes used."""
     from app.core import config
 
+    from app.release.source_manifest import (
+        REQUIRED_SOURCE_SCHEMA_VERSION, required_release_sources)
+
     codes = config.CODES_DIR
-    # (path, required, role). Required = a source whose absence makes the claim
-    # unsafe/underspecified; optional = a recall/precision aid that degrades quality
-    # but not correctness. Paths come from config or the configured codes directory.
-    checks: list[tuple[Any, bool, str]] = [
-        (config.ICD10_FILE, True, "diagnosis code table"),
-        (config.CPT_FILE, True, "procedure code table"),
-        (config.HCPCS_FILE, True, "supply/device code table"),
-        (config.NCCI_FILE, True, "procedure-pair edit policy"),
-        (config.MUE_FILE, True, "unit-limit policy"),
-        (config.GLOBAL_PERIODS_FILE, True, "global-period / fee-schedule policy"),
-        (config.LCD_FILE, False, "local coverage policy"),
-        (codes / "icd10cm_index_terms.json", False, "official alphabetic index terms"),
-        (codes / "icd10cm_instructional_notes.json", False, "tabular exclusion notes"),
-        (codes / "cpt_synonyms.json", False, "synonym recall aid"),
-        (codes / "hcpcs_synonyms.json", False, "synonym recall aid"),
-        (codes / "icd10_synonyms.json", False, "synonym recall aid"),
-        (codes / "snomed_icd10_map.json", False, "concept crosswalk"),
-        (codes / "cpt_index_terms.json", False, "procedure descriptor index"),
-        (codes / "learned_cpt_index.json", False, "learned resolution index"),
-        (codes / "hcpcs_drug_table.json", False, "drug dosing table"),
+    # REQUIRED sources are NOT enumerated here. They are the versioned release-source
+    # declaration (identity + role + release-metadata expectation) in
+    # `app.release.source_manifest`, resolved to that registry's own paths, so the
+    # capability manifest and the release-fingerprint validator compare against the SAME
+    # complete set and cannot drift apart. A declaration that disagrees with the registry
+    # raises: `build_manifest` fails loudly and the source-manifest gate holds, rather
+    # than a manifest quietly omitting a claim-affecting input. (Codex F6-R5.)
+    required_spec = required_release_sources()
+    checks: list[tuple[Any, bool, str, str | None]] = [
+        (spec["path"], True, spec["role"], source_id)
+        for source_id, spec in required_spec.items()
     ]
+    # OPTIONAL recall/precision aids: their absence degrades quality, not correctness,
+    # so they are recorded (visible) but never gate release. Identity comes from the
+    # registry path map, falling back to the filename stem.
+    optional: list[tuple[Any, str]] = [
+        (config.LCD_FILE, "local coverage policy"),
+        (codes / "icd10cm_index_terms.json", "official alphabetic index terms"),
+        (codes / "icd10cm_instructional_notes.json", "tabular exclusion notes"),
+        (codes / "cpt_synonyms.json", "synonym recall aid"),
+        (codes / "hcpcs_synonyms.json", "synonym recall aid"),
+        (codes / "icd10_synonyms.json", "synonym recall aid"),
+        (codes / "snomed_icd10_map.json", "concept crosswalk"),
+        (codes / "cpt_index_terms.json", "procedure descriptor index"),
+        (codes / "learned_cpt_index.json", "learned resolution index"),
+        (codes / "hcpcs_drug_table.json", "drug dosing table"),
+    ]
+    checks += [(path, False, role, None) for path, role in optional]
 
     registry = _registry()
     locks = _source_locks()
     integrity_errors = [f"source lock {name.split(':', 1)[1]} is unreadable"
                         for name in locks if name.startswith("unreadable:")]
     sources: list[dict[str, Any]] = []
-    for p, req, role in checks:
-        record, errors = _probe(p, req, role, registry, locks)
+    for p, req, role, sid in checks:
+        record, errors = _probe(p, req, role, registry, locks, sid)
         sources.append(record)
         integrity_errors.extend(errors)
     missing_required = [s["source"] for s in sources if s["required"] and not s["present"]]
@@ -185,6 +211,10 @@ def build_manifest() -> dict[str, Any]:
     # irreproducible (the certificate carries no other clock).
     manifest = {
         "manifest_version": MANIFEST_VERSION,
+        # Which required-source DEFINITION this manifest was built against, so a
+        # certificate produced under a different required set is identifiable instead
+        # of silently comparable.
+        "required_sources_schema": REQUIRED_SOURCE_SCHEMA_VERSION,
         "sources": sources,
         "missing_required": missing_required,
         "degraded_optional": degraded_optional,

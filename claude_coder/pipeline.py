@@ -30,13 +30,26 @@ def _fingerprint_certifiable(fp) -> bool:
     authoritative data — not merely asserts that some data was there.
 
     The COMPLETE schema is validated (Codex F6-R5):
-      - non-empty per-system code counts, and a fingerprint digest over the whole manifest;
+      - non-empty per-system code counts;
       - a versioned source manifest whose status is OK, with `missing_required == []` and
         `integrity_errors == []` (both explicitly present as lists, not merely falsy);
-      - EVERY required source present, non-empty, and carrying a `sha256:<64 hex>` content
+      - the manifest accounts for EXACTLY the required source identities and roles declared
+        by the versioned registry (`app.release.source_manifest.required_release_sources`) —
+        no omitted required source, no duplicate identity, no unregistered required source,
+        no role that disagrees with the declaration.  Requiring merely that SOME source
+        marks itself `required` let one synthetic source certify a release while every real
+        claim-affecting source (edit policy, unit limits, code sets, global periods) was
+        absent from a self-consistent manifest;
+      - every required source present, non-empty, and carrying a `sha256:<64 hex>` content
         digest — so two different files with equal row counts cannot share an identity;
-      - a `manifest_sha256` that still matches the recorded sources, so a hand-edited or
-        partially-copied manifest fails rather than certifying.
+      - a non-empty upstream effective/edition window on every required source the authority
+        publishes one for; sources it publishes none for are reviewed exemptions recorded in
+        the declaration, not blanks silently accepted;
+      - a `manifest_sha256` that still matches the recorded sources, and a top-level
+        `fingerprint_sha256` RECOMPUTED from the canonical counts + manifest and compared —
+        pattern-matching its shape accepted an arbitrary all-zero / all-`f` / plausible-but-
+        wrong digest as the identity of the data, and accepted a reordered or partially
+        copied manifest.
     A status-only manifest (`{"status": "OK"}`) is therefore NOT certifiable.
 
     TOTAL by construction: this validator is called outside the fingerprint try/except, so it
@@ -51,17 +64,23 @@ def _fingerprint_certifiable(fp) -> bool:
 
 
 def _fingerprint_schema_ok(fp) -> bool:
+    from app.release.source_manifest import (
+        REQUIRED_SOURCE_SCHEMA_VERSION, release_window_populated,
+        required_release_sources)
+
     if not isinstance(fp, dict) or not fp:
         return False
     counts = fp.get("counts")
     if not isinstance(counts, dict) or not all(counts.get(s) for s in ("icd10", "cpt", "hcpcs")):
         return False
-    if not _SHA256_RE.fullmatch(str(fp.get("fingerprint_sha256") or "")):
-        return False
     manifest = fp.get("source_manifest")
     if not isinstance(manifest, dict) or manifest.get("status") != "OK":
         return False
     if not str(manifest.get("manifest_version") or "").strip():
+        return False
+    # Which required-source DEFINITION the manifest was built against. A manifest that
+    # does not name one, or names another, is not comparable to the current declaration.
+    if manifest.get("required_sources_schema") != REQUIRED_SOURCE_SCHEMA_VERSION:
         return False
     for key in ("missing_required", "integrity_errors"):
         value = manifest.get(key)
@@ -70,16 +89,43 @@ def _fingerprint_schema_ok(fp) -> bool:
     sources = manifest.get("sources")
     if not isinstance(sources, list) or not sources:
         return False
-    required = [s for s in sources if isinstance(s, dict) and s.get("required")]
-    if not required:
+
+    # Identity index: a duplicated source_id makes "which bytes" ambiguous, so it is
+    # rejected before any per-source check rather than silently last-one-wins.
+    declared: dict[str, dict] = {}
+    for s in sources:
+        if not isinstance(s, dict):
+            return False
+        source_id = str(s.get("source_id") or "").strip()
+        if not source_id or source_id in declared:
+            return False
+        declared[source_id] = s
+
+    # The manifest must account for EXACTLY the declared required set -- neither an
+    # omitted required source (a partial/failed manifest certifying anyway) nor an
+    # unregistered one asserting itself required (a synthetic source standing in for
+    # the real claim-affecting inputs).
+    expected = required_release_sources()
+    if {sid for sid, s in declared.items() if s.get("required")} != set(expected):
         return False
-    for s in required:
+    for source_id, spec in expected.items():
+        s = declared[source_id]
+        if str(s.get("role") or "") != spec["role"]:
+            return False
         if not s.get("present") or not isinstance(s.get("bytes"), int) or s["bytes"] <= 0:
             return False
         if not _SHA256_RE.fullmatch(str(s.get("sha256") or "")):
             return False
-    from .capability import manifest_digest
+        if (spec["release_metadata_required"]
+                and not release_window_populated(s.get("release"))):
+            return False
+
+    from .capability import fingerprint_digest, manifest_digest
     if manifest.get("manifest_sha256") != manifest_digest(sources):
+        return False
+    # Recompute the aggregate identity: the declared fingerprint must BE the digest of
+    # the counts + manifest it claims to identify, not merely digest-shaped.
+    if str(fp.get("fingerprint_sha256") or "") != fingerprint_digest(counts, manifest):
         return False
     return True
 
