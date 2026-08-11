@@ -89,6 +89,11 @@ def build_certificate(result: CodingResult, note_text: str,
         "extraction_source": r.extraction_source,
         "confidence": r.confidence,
         "reconciliation_status": r.reconciliation_status,
+        # WHICH source text established that status, and from HOW MANY DISTINCT assertion
+        # origins the edge arrived — so a reader can tell corroboration from repetition.
+        "reconciliation_evidence": list(getattr(r, "reconciliation_evidence", []) or []),
+        "assertion_origins": sorted(str(o) for o in (r.assertion_origins or [])),
+        "independent_support": r.independent_support,
         "support": r.support,
     } for r in result.relations]
 
@@ -99,6 +104,11 @@ def build_certificate(result: CodingResult, note_text: str,
         "lines": lines,
         "claim_line_intents": intents,
         "relations": relations,
+        # WHY each released service was medically necessary: the claim-line diagnosis pointer
+        # and the accepted relation's provenance, as the necessity gate resolved it. Bound
+        # here so the justification is answerable FROM THE CERTIFICATE, not only internally
+        # consistent inside the run. (Codex F6-R3.)
+        "necessity_support": list(result.necessity_support or []),
         "audit_record_hashes": list(result.audit_record_hashes),
         "control_mode": result.control_mode,
         "gates": [{"name": g.name, "outcome": g.outcome.value, "detail": g.detail}

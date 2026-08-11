@@ -4,6 +4,8 @@ Failure-path first: the point of anchoring is to REJECT a plausible-but-non-verb
 quotation, and the point of the relation kernel is that a re-asserted edge accumulates
 support (never duplicates) while any state disagreement collapses to UNCERTAIN.
 Agnostic — synthetic text and synthetic event ids, no medical code."""
+import json
+
 from claude_coder import provenance as prov
 from claude_coder.models import (EvidenceSpan, RelationAssertion, RelationPredicate,
                                  RelationState, ClinicalFact, FactKind)
@@ -51,9 +53,10 @@ def test_anchor_facts_and_report_coverage():
 
 
 # ------------------------------------------------------------------ relation kernel
-def _rel(subj, pred, obj, state=RelationState.ASSERTED, ev=None, conf=0.5):
+def _rel(subj, pred, obj, state=RelationState.ASSERTED, ev=None, conf=0.5, origins=None):
     return RelationAssertion(subject_event_id=subj, predicate=pred, object_event_id=obj,
-                             state=state, evidence_span_ids=list(ev or []), confidence=conf)
+                             state=state, evidence_span_ids=list(ev or []), confidence=conf,
+                             assertion_origins=list(origins or []))
 
 
 def test_relation_identity_is_content_addressed():
@@ -77,6 +80,57 @@ def test_reassertion_accumulates_support_not_duplicates():
     assert m.state is RelationState.ASSERTED
     # inputs not mutated
     assert rels[0].support == 1 and rels[0].evidence_span_ids == ["s1"]
+
+
+def test_support_counts_assertions_but_independence_counts_origins():
+    """Codex F6-R3: raw `support` is repetition; `independent_support` is SOURCES. One origin
+    that repeats itself can never look like two sources agreeing, and an edge with no recorded
+    origin scores zero rather than being trusted."""
+    same = [_rel("E1", RelationPredicate.PART_OF, "E2", ev=["s1"], origins=["origin-a"]),
+            _rel("E1", RelationPredicate.PART_OF, "E2", ev=["s2"], origins=["origin-a"])]
+    (merged,) = prov.merge_relations(same)
+    assert merged.support == 2 and merged.independent_support == 1
+    assert merged.assertion_origins == ["origin-a"]
+
+    two = [_rel("E1", RelationPredicate.PART_OF, "E2", ev=["s1"], origins=["origin-a"]),
+           _rel("E1", RelationPredicate.PART_OF, "E2", ev=["s2"], origins=["origin-b"])]
+    (both,) = prov.merge_relations(two)
+    assert both.support == 2 and both.independent_support == 2
+    assert both.assertion_origins == ["origin-a", "origin-b"]
+    # inputs not mutated
+    assert two[0].assertion_origins == ["origin-a"]
+
+    blank = _rel("E1", RelationPredicate.PART_OF, "E2", origins=["", "  "])
+    assert blank.independent_support == 0
+    assert _rel("E1", RelationPredicate.PART_OF, "E2").independent_support == 0
+
+
+def test_extraction_stamps_one_origin_per_call_and_it_is_reproducible():
+    """The origin is the extraction CALL's recorded identity: reproducible for the same call
+    (so certificates stay stable), different when the provider/profile differs, and different
+    when the caller runs a genuinely separate pass."""
+    from claude_coder import extraction
+    note = "Service beta was performed for condition alpha."
+    axes = {a: 0.9 for a in ("occurrence", "action", "evidence", "temporal",
+                             "assertion", "experiencer")}
+    payload = json.dumps({
+        "facts": [{"fact_id": "D", "kind": "diagnosis", "description": "condition alpha",
+                   "attributes": {}, "disposition": "performed_today",
+                   "evidence": ["condition alpha"], "confidence": 0.9,
+                   "axis_confidence": axes}],
+        "relations": []})
+    profile = {"provider": "provider-one", "model": "profile-one"}
+    a = extraction.extract_note(note, lambda _s, _u: payload, model_profile=profile).origin
+    b = extraction.extract_note(note, lambda _s, _u: payload, model_profile=profile).origin
+    assert a.origin_id == b.origin_id                      # same call -> same origin
+    other = extraction.extract_note(note, lambda _s, _u: payload,
+                                    model_profile={"provider": "provider-two"}).origin
+    assert other.origin_id != a.origin_id                  # different provider -> independent
+    run2 = extraction.extract_note(note, lambda _s, _u: payload, run_id="pass-2",
+                                   model_profile=profile).origin
+    assert run2.origin_id != a.origin_id                   # separate run -> independent
+    assert a.as_record()["prompt_sha256"] and a.as_record()["schema_version"]
+    assert "secret" not in json.dumps(a.as_record()).lower()
 
 
 def test_conflicting_states_collapse_to_uncertain():

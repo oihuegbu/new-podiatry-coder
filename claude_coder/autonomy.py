@@ -26,16 +26,22 @@ from .models import (
 
 
 def _necessity_authoritatively_met(result: CodingResult, source) -> bool:
-    """Is the claim's medical necessity CONFIRMED by resolved diagnoses per
-    authoritative coverage — so an unresolved diagnosis adds nothing the necessity
-    requires (non-material)? True ONLY when every billed procedure/service is
-    governed by a CMS LCD/Article AND a RESOLVED diagnosis on the claim is one of its
-    qualifying (covered) indications. If the source is absent, there is no billed
-    procedure, a billed procedure is governed by NO policy (necessity unconfirmable),
-    or a governed procedure has no resolved qualifying diagnosis, this is False and an
-    unresolved diagnosis BLOCKS (fail-closed). This replaces the earlier
-    'another dx resolved -> secondary' PROXY with a data-driven necessity-linkage
-    query — it cannot mistake a procedure's principal indication for a redundant one."""
+    """Is the claim's medical necessity ALREADY CONFIRMED for every billed procedure — so an
+    unresolved diagnosis adds nothing the necessity requires (non-material)?
+
+    This reads the necessity gate's OWN resolved binding (`result.necessity_support`), which
+    records, per procedure, the claim-line diagnosis that justified it: an encounter-specific
+    reconciled REASON_FOR linkage AND, where an authoritative CMS LCD/Article governs the
+    service, that same diagnosis qualifying under the policy. It deliberately does not
+    re-derive necessity from coverage membership: 'a covered diagnosis is somewhere on this
+    claim' proves the pair CAN qualify, never that it justified THIS service — the same
+    substitution the necessity gate itself no longer makes. (Codex F6-R3, adjacent instance.)
+
+    False — and an unresolved diagnosis BLOCKS (fail-closed) — when the source is absent,
+    there is no billed procedure, any billed procedure is governed by NO policy (necessity
+    unconfirmable from published policy), or any billed procedure lacks a policy-qualifying
+    linked diagnosis in the gate's binding.
+    """
     if source is None:
         return False
     procs = [ln for ln in result.billable_lines
@@ -43,14 +49,13 @@ def _necessity_authoritatively_met(result: CodingResult, source) -> bool:
              and ln.fact.kind is not FactKind.EM]
     if not procs:
         return False
-    dx = {str(ln.chosen.code).replace(".", "").upper() for ln in result.diagnosis_lines}
+    bound = {b.get("procedure_event_id"): b for b in (result.necessity_support or [])}
     for p in procs:
-        try:
-            qd = source.qualifying_dx_for(p.chosen.code, p.chosen.system)
-        except Exception:
-            return False
-        if not qd or not (dx & qd):      # ungoverned, or no resolved covered indication
-            return False
+        binding = bound.get(p.fact.fact_id if p.fact is not None else None)
+        if binding is None or not binding.get("policy_governed"):
+            return False                 # never justified here, or governed by no policy
+        if not any(s.get("policy_qualifying") for s in (binding.get("supports") or [])):
+            return False                 # linked, but not by a policy-qualifying diagnosis
     return True
 
 # Which destination wins when several apply: a hard stop first, then an operational

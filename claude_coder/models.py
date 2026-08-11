@@ -249,6 +249,12 @@ class CodingResult:
     relations: list["RelationAssertion"] = field(default_factory=list)
     audit_record_hashes: list[str] = field(default_factory=list)
     control_mode: str = "ENFORCED_FAIL_CLOSED"
+    # WHY each released service was medically necessary, written by the necessity gate:
+    # the claim-line diagnosis pointer plus the accepted relation's provenance (relation id,
+    # reconciliation status, distinct assertion origins) and the coverage-policy disposition.
+    # The certificate binds this, so the justification is auditable from the artifact rather
+    # than only internally consistent. (Codex F6-R3.)
+    necessity_support: list[dict] = field(default_factory=list)
 
     @property
     def billable_lines(self) -> list[ResolvedLine]:
@@ -299,7 +305,27 @@ class RelationAssertion:
     extraction_source: str = ""
     confidence: float = 0.0
     reconciliation_status: str = "unreconciled"
+    # The verified span ids that ESTABLISHED `reconciliation_status` (the two endpoint
+    # mentions for a directional proof, the shared passage for a co-location observation).
+    # Written by the deterministic provenance layer so a certificate can show WHICH source
+    # text proved the relationship, not merely that something did.
+    reconciliation_evidence: list[str] = field(default_factory=list)
+    # RAW number of times this edge was asserted, across every origin. Observability only:
+    # it says nothing about INDEPENDENCE, because one model can emit the same edge twice in
+    # one response. Corroboration reads `independent_support`. (Codex F6-R3.)
     support: int = 1
+    # The DISTINCT recorded assertion origins that asserted this edge -- one opaque id per
+    # (run, provider/profile, prompt, schema) extraction call, stamped by
+    # `extraction.extract_note` from the call's own recorded metadata. Two duplicate edges
+    # from ONE response share one origin id and therefore corroborate nothing; the same edge
+    # from two separate runs carries two ids and legitimately does.
+    assertion_origins: list[str] = field(default_factory=list)
+
+    @property
+    def independent_support(self) -> int:
+        """How many DISTINCT assertion origins asserted this edge. An edge with no recorded
+        origin scores 0 -- unknown provenance can never be counted as independent support."""
+        return len({str(o).strip() for o in (self.assertion_origins or []) if str(o).strip()})
 
     @property
     def relation_id(self) -> str:

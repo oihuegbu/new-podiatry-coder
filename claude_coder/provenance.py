@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -148,24 +149,152 @@ def relation_key(subject_event_id: str, predicate: str, object_event_id: str) ->
 
 
 def merge_relations(relations: list[RelationAssertion]) -> list[RelationAssertion]:
-    """Deduplicate edges by content identity. Re-assertions union their evidence and
-    raise support; ANY state disagreement collapses to UNCERTAIN so a conflicting or
-    weakly-asserted relationship never survives as a confident edge. Inputs are not
-    mutated."""
+    """Deduplicate edges by content identity. Re-assertions union their evidence, their
+    ASSERTION ORIGINS and their raw support; ANY state disagreement collapses to UNCERTAIN
+    so a conflicting or weakly-asserted relationship never survives as a confident edge.
+    Inputs are not mutated.
+
+    `support` counts assertions; `assertion_origins` counts SOURCES. They are deliberately
+    separate: one extraction response that emits the identical edge twice raises support to
+    2 while contributing exactly ONE origin, so nothing downstream can read that repetition
+    as two sources agreeing. Independence is a property of where an assertion came from,
+    never of how many times it was written down. (Codex F6-R3.)"""
     by_id: dict[str, RelationAssertion] = {}
     for r in relations:
         rid = r.relation_id
         if rid not in by_id:
-            by_id[rid] = replace(r, evidence_span_ids=list(r.evidence_span_ids))
+            by_id[rid] = replace(r, evidence_span_ids=list(r.evidence_span_ids),
+                                 assertion_origins=list(r.assertion_origins or []),
+                                 reconciliation_evidence=list(r.reconciliation_evidence or []))
             continue
         m = by_id[rid]
         m.evidence_span_ids = list(dict.fromkeys(
             list(m.evidence_span_ids) + list(r.evidence_span_ids)))
+        m.assertion_origins = list(dict.fromkeys(
+            [str(o).strip() for o in (m.assertion_origins or []) if str(o).strip()]
+            + [str(o).strip() for o in (r.assertion_origins or []) if str(o).strip()]))
         m.support += r.support
         m.confidence = max(m.confidence, r.confidence)
         if m.state is not r.state:
             m.state = RelationState.UNCERTAIN
     return list(by_id.values())
+
+
+# ------------------------------------------- directional relation-evidence grammar (config)
+_RELATION_GRAMMAR_FILE = (Path(__file__).resolve().parent / "controls"
+                          / "relation_evidence_grammar.json")
+_RELATION_GRAMMAR_CACHE: dict | None = None
+# Compiled matchers, keyed by grammar version. Deliberately NOT stored inside the config
+# object: a config dict must stay JSON-serialisable, or any audit record that records it
+# would raise and turn a healthy encounter into a SYSTEM_HOLD.
+_RELATION_PATTERN_CACHE: dict[str, dict] = {}
+_REQUIRED_GRAMMAR_KEYS = ("version", "control_mode", "authority", "max_linking_chars",
+                          "clause_terminators", "negation_markers",
+                          "min_independent_assertions", "predicates")
+
+
+class RelationGrammarError(RuntimeError):
+    """The directional relation-evidence grammar is missing or malformed. Raised (never
+    defaulted) so reconciliation stops instead of silently reverting to bare co-location."""
+
+
+def load_relation_grammar() -> dict:
+    """The reviewed directional relation-evidence grammar, fully validated. Cached per
+    process. Fail-closed: a missing or malformed grammar raises rather than degrading to
+    'both facts appeared nearby', which is exactly the defect this control exists to fix."""
+    global _RELATION_GRAMMAR_CACHE
+    if _RELATION_GRAMMAR_CACHE is not None:
+        return _RELATION_GRAMMAR_CACHE
+    try:
+        cfg = json.loads(_RELATION_GRAMMAR_FILE.read_text())
+    except Exception as exc:
+        raise RelationGrammarError(
+            f"relation evidence grammar unreadable at {_RELATION_GRAMMAR_FILE}: {exc}") from exc
+    if not isinstance(cfg, dict):
+        raise RelationGrammarError("relation evidence grammar must be a JSON object")
+    missing = [k for k in _REQUIRED_GRAMMAR_KEYS if k not in cfg]
+    if missing:
+        raise RelationGrammarError(
+            f"relation evidence grammar is missing required key(s): {missing}")
+    if not cfg.get("authority"):
+        raise RelationGrammarError("a control must cite its authority")
+    window = cfg["max_linking_chars"]
+    if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+        raise RelationGrammarError("max_linking_chars must be a positive integer")
+    threshold = cfg["min_independent_assertions"]
+    if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 2:
+        raise RelationGrammarError(
+            "min_independent_assertions must be an integer >= 2 (one origin is not agreement)")
+    for key in ("clause_terminators", "negation_markers"):
+        if not isinstance(cfg[key], list) or not cfg[key] or \
+                not all(isinstance(x, str) and x for x in cfg[key]):
+            raise RelationGrammarError(f"{key} must be a non-empty array of strings")
+    preds = cfg["predicates"]
+    if not isinstance(preds, dict) or not preds:
+        raise RelationGrammarError("predicates must be a non-empty object")
+    for name, entry in preds.items():
+        if not isinstance(entry, dict):
+            raise RelationGrammarError(f"predicate {name!r} must be an object")
+        cues = [c for key in ("subject_first_cues", "object_first_cues")
+                for c in (entry.get(key) or [])]
+        for key in ("subject_first_cues", "object_first_cues"):
+            value = entry.get(key)
+            if value is not None and (not isinstance(value, list)
+                                      or not all(isinstance(c, str) and c.strip() for c in value)):
+                raise RelationGrammarError(
+                    f"predicate {name!r} {key} must be an array of non-empty strings")
+        if not cues:
+            raise RelationGrammarError(f"predicate {name!r} declares no directional cue")
+    _RELATION_GRAMMAR_CACHE = cfg
+    return cfg
+
+
+def _cue_pattern(cues: list) -> "re.Pattern | None":
+    """Whole-word, case-insensitive alternation over the configured phrases. Phrases may be
+    multi-word; whitespace inside a phrase matches any run of whitespace."""
+    parts = [r"\s+".join(re.escape(tok) for tok in str(c).split())
+             for c in (cues or []) if str(c).strip()]
+    if not parts:
+        return None
+    return re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(parts) + r")(?![A-Za-z0-9])",
+                      re.IGNORECASE)
+
+
+def _grammar_patterns(grammar: dict) -> dict:
+    """Compiled matchers for one loaded grammar, memoised by version beside the config."""
+    key = str(grammar.get("version") or "")
+    cached = _RELATION_PATTERN_CACHE.get(key)
+    if cached is not None:
+        return cached
+    compiled = {
+        "negation": _cue_pattern(grammar.get("negation_markers")),
+        "terminators": tuple(grammar.get("clause_terminators") or ()),
+        "window": int(grammar.get("max_linking_chars") or 0),
+        "predicates": {
+            str(name).strip().lower(): {
+                "subject_first": _cue_pattern(entry.get("subject_first_cues")),
+                "object_first": _cue_pattern(entry.get("object_first_cues")),
+            } for name, entry in (grammar.get("predicates") or {}).items()
+        },
+    }
+    _RELATION_PATTERN_CACHE[key] = compiled
+    return compiled
+
+
+def _links_directionally(linking_text: str, cue: "re.Pattern | None", compiled: dict) -> bool:
+    """Does `linking_text` — the source text BETWEEN the two endpoint mentions — actually
+    state the relationship? It must stay inside one clause, inside the configured window,
+    carry no negation/enumeration marker, and contain a cue for the required orientation."""
+    if cue is None or linking_text is None:
+        return False
+    if len(linking_text) > compiled["window"]:
+        return False
+    if any(t in linking_text for t in compiled["terminators"]):
+        return False
+    negation = compiled["negation"]
+    if negation is not None and negation.search(linking_text):
+        return False
+    return bool(cue.search(linking_text))
 
 
 class RelationIntegrityError(ValueError):
@@ -196,47 +325,137 @@ def bind_relation_evidence(relations: list[RelationAssertion], facts: list) -> l
 # whole point is that an edge asserted by the same model that authored the events is not
 # independent support for that edge. (Codex F6-R3.)
 UNRECONCILED = "unreconciled"
-CORROBORATED = "corroborated"            # independently re-asserted (support >= threshold)
-SOURCE_COLOCATED = "source_colocated"    # one verified verbatim span documents BOTH endpoints
+# The same edge came from at least `min_independent_assertions` DISTINCT recorded assertion
+# origins (run + provider/profile + prompt + schema). Repetition inside one response is one
+# origin and therefore does not corroborate anything.
+CORROBORATED = "corroborated"
+# One clause of the source document STATES the directional relationship: the two endpoints'
+# own verified verbatim mentions sit either side of a linking phrase from the reviewed
+# grammar, in the orientation that phrase declares.
+SOURCE_DIRECTIONAL = "source_directional"
+# OBSERVATIONAL ONLY -- both endpoints are documented in one verified passage, but nothing in
+# that passage states the DIRECTIONAL claim. Co-occurrence is not a clinical proposition, so
+# this status exists to record what was seen, not to satisfy a release control.
+SOURCE_COLOCATED = "source_colocated"
 
 
-def reconcile_relations(relations: list[RelationAssertion], facts: list,
-                        *, min_independent_assertions: int = 2) -> list[RelationAssertion]:
+def _usable_span(span, note_text: str, doc_sha: str):
+    """A span may localise an endpoint only when it is anchored to THIS document at exact
+    offsets and its slice still re-verifies. Anything else contributes no position."""
+    if not getattr(span, "anchored", False) or not getattr(span, "span_id", None):
+        return False
+    start, end = getattr(span, "start", None), getattr(span, "end", None)
+    if not isinstance(start, int) or not isinstance(end, int) or isinstance(start, bool):
+        return False
+    if start < 0 or end > len(note_text) or start >= end:
+        return False
+    if getattr(span, "document_sha256", None) not in (None, "", doc_sha):
+        return False
+    return note_text[start:end] == span.text
+
+
+def _directional_proof(rel, subject_spans: list, object_spans: list, note_text: str,
+                       compiled: dict) -> list[str] | None:
+    """The span ids that prove `rel`'s DIRECTION, or None when the document does not state it.
+
+    The two endpoints must have DISJOINT verified mentions: one identical passage quoted for
+    both endpoints localises neither, so it can never establish which of them is the reason
+    and which is the service. The text between the two mentions must then link them in the
+    orientation the grammar declares for this predicate.
+    """
+    pred = rel.predicate.value if hasattr(rel.predicate, "value") else str(rel.predicate)
+    cues = compiled["predicates"].get(str(pred).strip().lower())
+    if not cues:
+        return None
+    cited = set(rel.evidence_span_ids or [])
+    subj = sorted((s for s in subject_spans if s.span_id in cited),
+                  key=lambda s: (s.start, s.end, s.span_id))
+    objs = sorted((s for s in object_spans if s.span_id in cited),
+                  key=lambda s: (s.start, s.end, s.span_id))
+    for a in subj:
+        for b in objs:
+            if a.span_id == b.span_id:
+                continue
+            if a.end <= b.start:                       # subject ... link ... object
+                orientation, linking = "subject_first", note_text[a.end:b.start]
+            elif b.end <= a.start:                     # object ... link ... subject
+                orientation, linking = "object_first", note_text[b.end:a.start]
+            else:
+                continue                               # overlapping: no separable link text
+            if _links_directionally(linking, cues[orientation], compiled):
+                return [a.span_id, b.span_id]
+    return None
+
+
+def reconcile_relations(relations: list[RelationAssertion], facts: list, note_text: str,
+                        *, min_independent_assertions: int | None = None
+                        ) -> list[RelationAssertion]:
     """Stamp each edge with how -- if at all -- it was independently reconciled.
 
-    Two deterministic, re-checkable criteria, in priority order:
+    Deterministic, re-checkable criteria, in priority order:
 
-      1. CORROBORATED -- the identical (subject, predicate, object) edge was asserted at least
-         `min_independent_assertions` times and merged, i.e. more than one pass agreed.
-      2. SOURCE_COLOCATED -- at least one ANCHORED evidence span is shared by BOTH endpoint
-         events, i.e. a single verbatim passage of the source document states the two events
-         together. That is a property of the document, not of the model's self-confidence.
+      1. CORROBORATED -- the identical (subject, predicate, object) edge arrived from at least
+         `min_independent_assertions` (default: the reviewed grammar's, so the threshold is
+         configuration that is actually READ) DISTINCT recorded assertion origins. An origin is one
+         extraction call (run + provider/profile + prompt + schema), so the same edge emitted
+         twice in one response is ONE origin and corroborates nothing, while the same edge
+         from two separate runs of the same provider legitimately does.
+      2. SOURCE_DIRECTIONAL -- the source document itself STATES the directional relationship:
+         each endpoint has its own verified verbatim mention, the two mentions are disjoint,
+         and the text between them links them, within one clause, by a phrase the reviewed
+         relation-evidence grammar declares for this predicate in that orientation.
+      3. SOURCE_COLOCATED -- observational only: one verified passage documents both endpoints
+         but states no directional claim. Recorded so the audit shows what WAS seen; it is not
+         an accepted justification.
 
     Anything else stays UNRECONCILED. This never raises confidence and never changes state; it
     only records a verifiable provenance fact that release controls may then require.
     """
-    spans_by_event = {f.fact_id: {s.span_id for s in (f.evidence or [])
+    grammar = load_relation_grammar()
+    compiled = _grammar_patterns(grammar)
+    threshold = int(grammar["min_independent_assertions"]
+                    if min_independent_assertions is None else min_independent_assertions)
+    doc_sha = _sha(note_text or "")
+    span_ids_by_event: dict[str, set] = {}
+    located_by_event: dict[str, list] = {}
+    for f in facts:
+        fid = getattr(f, "fact_id", None)
+        if not fid:
+            continue
+        span_ids_by_event[fid] = {s.span_id for s in (f.evidence or [])
                                   if getattr(s, "anchored", False) and s.span_id}
-                      for f in facts if getattr(f, "fact_id", None)}
+        located_by_event[fid] = [s for s in (f.evidence or [])
+                                 if _usable_span(s, note_text or "", doc_sha)]
     out: list[RelationAssertion] = []
     for rel in relations or []:
-        status = UNRECONCILED
-        subject_spans = spans_by_event.get(rel.subject_event_id, set())
-        object_spans = spans_by_event.get(rel.object_event_id, set())
-        shared = subject_spans & object_spans & set(rel.evidence_span_ids or [])
-        if int(getattr(rel, "support", 1) or 1) >= int(min_independent_assertions):
-            status = CORROBORATED
+        status, proof = UNRECONCILED, []
+        cited = set(rel.evidence_span_ids or [])
+        shared = (span_ids_by_event.get(rel.subject_event_id, set())
+                  & span_ids_by_event.get(rel.object_event_id, set()) & cited)
+        directional = _directional_proof(
+            rel, located_by_event.get(rel.subject_event_id, []),
+            located_by_event.get(rel.object_event_id, []), note_text or "", compiled)
+        if int(getattr(rel, "independent_support", 0) or 0) >= threshold:
+            status, proof = CORROBORATED, sorted(directional or shared)
+        elif directional:
+            status, proof = SOURCE_DIRECTIONAL, list(directional)
         elif shared:
-            status = SOURCE_COLOCATED
-        out.append(replace(rel, reconciliation_status=status))
+            status, proof = SOURCE_COLOCATED, sorted(shared)
+        out.append(replace(rel, reconciliation_status=status,
+                           reconciliation_evidence=list(proof)))
     return out
 
 
-def validate_relations(relations: list[RelationAssertion], facts: list) -> list[RelationAssertion]:
+def validate_relations(relations: list[RelationAssertion], facts: list,
+                       note_text: str) -> list[RelationAssertion]:
     """Validate graph identity before a relation can suppress or separate an event.
 
     Invalid input fails closed rather than being silently dropped, because dropping a
     malformed edge can turn an unknown relationship into an apparently eligible line.
+
+    `note_text` is the anchoring document: directional reconciliation re-reads the source
+    between the endpoints' verified offsets, so the same text the spans were anchored to must
+    be supplied. Spans that do not re-verify against it simply cannot localise an endpoint.
     """
     event_ids = {f.fact_id for f in facts if f.fact_id}
     span_ids = {s.span_id for f in facts for s in (f.evidence or []) if s.span_id}
@@ -264,7 +483,7 @@ def validate_relations(relations: list[RelationAssertion], facts: list) -> list[
     # UNCERTAIN), THEN record how each surviving edge was reconciled. A release control that
     # requires reconciliation therefore reads a value this deterministic layer wrote, never
     # one the extraction model supplied. (Codex F6-R3.)
-    return reconcile_relations(merge_relations(normalized), facts)
+    return reconcile_relations(merge_relations(normalized), facts, note_text)
 
 
 # ---------------------------------------------------- append-only repository seam

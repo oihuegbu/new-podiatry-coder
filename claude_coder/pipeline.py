@@ -170,11 +170,15 @@ def code_encounter(
     try:
         from . import provenance as _prov
         from . import eligibility as _elig
-        extracted = extraction.extract_note(note_text, extract_llm, billing_context)
+        # The extraction call's own recorded identity travels WITH the graph it produced:
+        # every relation is stamped with this call's assertion origin, so corroboration
+        # downstream counts distinct sources rather than repetitions. (Codex F6-R3.)
+        extracted = extraction.extract_note(note_text, extract_llm, billing_context,
+                                            model_profile=profiles.get("extraction"))
         facts = extracted.facts
         _prov.anchor_facts(note_text, facts, document_version=document_version)
         relations = _prov.bind_relation_evidence(extracted.relations, facts)
-        relations = _prov.validate_relations(relations, facts)
+        relations = _prov.validate_relations(relations, facts, note_text)
         if audit_repository is None:
             from app.core.config import PROVENANCE_DB
             audit_repository = _prov.SqliteAuditRepository(PROVENANCE_DB, strict=True)
@@ -182,6 +186,9 @@ def code_encounter(
             encounter_id, "evidence_anchoring", _prov.anchoring_report(facts))]
         audit_hashes.append(audit_repository.append(encounter_id, "relation_graph", {
             "schema_version": extracted.schema_version,
+            # the extraction call this graph came from -- the unit of assertion independence
+            "assertion_origin": (extracted.origin.as_record() if extracted.origin else None),
+            "relation_grammar_version": _prov.load_relation_grammar()["version"],
             "relations": [{"relation_id": r.relation_id,
                            "subject_event_id": r.subject_event_id,
                            "predicate": r.predicate.value,
@@ -192,6 +199,9 @@ def code_encounter(
                            # how (if at all) the edge was independently reconciled -- the
                            # necessity control reads this, so it must be auditable (F6-R3)
                            "reconciliation_status": r.reconciliation_status,
+                           "reconciliation_evidence": list(r.reconciliation_evidence or []),
+                           "assertion_origins": sorted(str(o) for o in (r.assertion_origins or [])),
+                           "independent_support": r.independent_support,
                            "support": r.support} for r in relations],
         }))
         intents = _elig.evaluate(facts, relations, encounter_id, date_of_service)

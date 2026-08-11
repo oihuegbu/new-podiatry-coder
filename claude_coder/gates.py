@@ -154,7 +154,7 @@ _NECESSITY_CONTROL_CACHE: dict | None = None
 _REQUIRED_CONTROL_KEYS = ("version", "control_mode", "authority", "min_relation_confidence",
                           "require_anchored_relation_evidence", "require_asserted_state",
                           "conflicting_edge_disqualifies_support",
-                          "accepted_reconciliation_statuses", "min_independent_assertions")
+                          "accepted_reconciliation_statuses")
 
 
 class NecessityControlError(RuntimeError):
@@ -201,7 +201,9 @@ def _necessity_support_relations(result: CodingResult, control: dict) -> tuple[l
       - EVIDENCE-ANCHORED -- it carries verified span references, so the asserted relationship
         is tied to the source document rather than existing only in the model's output;
       - at or above the configured confidence floor;
-      - stamped with a reconciliation status the deterministic provenance layer established.
+      - stamped with a reconciliation status the deterministic provenance layer established
+        from DISTINCT recorded assertion origins or from a clause of the source document that
+        states the relationship directionally -- never from repetition or co-occurrence.
     Any conflicting (non-asserted) edge between the same endpoints disqualifies that pair
     outright, so an uncertain/negated duplicate can never be out-voted by a confident one.
     """
@@ -229,26 +231,50 @@ def _necessity_support_relations(result: CodingResult, control: dict) -> tuple[l
     return usable, disqualified
 
 
+def _support_record(dx_line, relation, *, policy_qualifying: bool | None) -> dict:
+    """The auditable justification for ONE released service: which claim-line diagnosis, and
+    the full provenance of the relation that linked it. The certificate binds this."""
+    return {
+        "diagnosis_event_id": relation.subject_event_id,
+        "diagnosis_code": dx_line.chosen.code if dx_line.chosen else None,
+        "diagnosis_system": dx_line.chosen.system if dx_line.chosen else None,
+        "relation_id": relation.relation_id,
+        "reconciliation_status": relation.reconciliation_status,
+        "reconciliation_evidence": list(getattr(relation, "reconciliation_evidence", []) or []),
+        "assertion_origins": sorted(str(o) for o in (relation.assertion_origins or [])),
+        "independent_support": int(getattr(relation, "independent_support", 0) or 0),
+        "support": int(getattr(relation, "support", 0) or 0),
+        "confidence": float(getattr(relation, "confidence", 0.0) or 0.0),
+        "evidence_span_ids": list(relation.evidence_span_ids or []),
+        "policy_qualifying": policy_qualifying,
+    }
+
+
 def medical_necessity_gate(result: CodingResult,
                            source: "CodeSource | None" = None) -> GateResult:
-    """Every released procedure needs a diagnosis that JUSTIFIES IT, and that justification
-    must come from something other than the extraction model's own confidence in itself.
+    """Every released procedure needs a diagnosis that JUSTIFIES IT IN THIS ENCOUNTER, and
+    that justification must come from something other than the extraction model's own
+    confidence in itself.
 
-    A released procedure is justified by EITHER of two independent routes:
+    EVERY released procedure requires an ENCOUNTER-SPECIFIC RESOLVED LINKAGE: a diagnosis
+    --REASON_FOR--> service edge that is asserted, evidence-anchored, at/above the configured
+    confidence floor, and carries a reconciliation status established deterministically by
+    `provenance.reconcile_relations` -- distinct recorded assertion origins, or a clause of
+    the source document that states the relationship directionally.
 
-      A. DETERMINISTIC SOURCE-DERIVED LINKAGE -- an authoritative CMS coverage policy
-         (`source.qualifying_dx_for`) itself links a RELEASED diagnosis to this service. The
-         linkage is read from published policy; no model assertion is trusted.
-      B. A RECONCILED SUPPORT RELATION -- a diagnosis --REASON_FOR--> service edge that is
-         asserted, evidence-anchored, at/above the configured confidence floor, and carries a
-         reconciliation status established deterministically by `provenance.reconcile_relations`
-         (independent re-assertion, or a verified verbatim span documenting both endpoints).
+    Where an authoritative CMS coverage policy GOVERNS the service (`qualifying_dx_for`
+    returns a set), that is an ADDITIONAL requirement, not a substitute: the diagnosis linked
+    in this encounter must itself qualify under the policy. Coverage membership proves a code
+    pair CAN qualify; it never proves that this diagnosis justified this service in this note,
+    so an unrelated covered diagnosis on the encounter can no longer release a governed
+    service with no relation at all. (Codex F6-R3.)
 
     Everything else HOLDs: an unanchored or unreconciled edge, an edge below the floor, a
     conflicting/uncertain edge, a governed procedure whose linked diagnosis does not qualify,
-    and an unavailable coverage evaluation. A high-confidence but never-independently-verified
-    model edge can no longer manufacture medical necessity. (Codex F6-R3.)
+    a governed procedure whose qualifying diagnosis is not the linked one, and an unavailable
+    coverage evaluation.
     """
+    result.necessity_support = []
     procs = result.procedure_lines
     if not procs:
         return GateResult("medical_necessity", Outcome.NOT_APPLICABLE,
@@ -268,15 +294,25 @@ def medical_necessity_gate(result: CodingResult,
                    if ln.fact is not None and ln.fact.fact_id}
     reason_for, disqualified = _necessity_support_relations(result, control)
     holds: list[str] = []
+    bindings: list[dict] = []
     for ln in procs:
         pid = ln.fact.fact_id if ln.fact is not None else None
         label = (ln.chosen.code if ln.chosen else None) or (
             ln.fact.description if ln.fact else "procedure")
-        linked_events = {r.subject_event_id for r in reason_for
-                         if r.object_event_id == pid and r.subject_event_id in released_dx
-                         and (r.subject_event_id, pid) not in disqualified}
-        # Route A: does authoritative coverage policy itself link a released dx to this
-        # service? That linkage is deterministic and needs no model-authored edge.
+        # Encounter-specific linkage: which RELEASED diagnoses this note actually documents
+        # as the reason for THIS service, with the edge that says so (best edge per pair,
+        # chosen deterministically so the binding is reproducible).
+        linked: dict = {}
+        for r in reason_for:
+            if r.object_event_id != pid or r.subject_event_id not in released_dx:
+                continue
+            if (r.subject_event_id, pid) in disqualified:
+                continue
+            prev = linked.get(r.subject_event_id)
+            if prev is None or (r.confidence, r.relation_id) > (prev.confidence, prev.relation_id):
+                linked[r.subject_event_id] = r
+        # Authoritative coverage policy: does one govern this service, and which released
+        # diagnoses qualify under it?
         policy_linked: set = set()
         qualifying = None
         if source is not None and ln.chosen is not None:
@@ -289,23 +325,49 @@ def medical_necessity_gate(result: CodingResult,
                 want = {str(q).replace(".", "").upper() for q in qualifying}
                 policy_linked = {e for e, dln in released_dx.items() if dln.chosen
                                  and dln.chosen.code.replace(".", "").upper() in want}
+        no_link = (f"{label}: no independently reconciled, evidence-anchored REASON_FOR link "
+                   f"to a released diagnosis (model self-confidence is not clinical support)")
         if qualifying is not None:
-            # Governed by policy: a released diagnosis MUST qualify under it, whatever any
-            # model-authored edge claims -- a non-qualifying link is a coverage contradiction.
-            if not policy_linked:
-                holds.append(
-                    f"{label}: linked diagnosis does not qualify under CMS coverage policy")
-            continue
-        # Ungoverned: only a reconciled, anchored support relation can justify the service.
-        if not linked_events:
-            holds.append(
-                f"{label}: no independently reconciled, evidence-anchored REASON_FOR link to a "
-                f"released diagnosis (model self-confidence is not clinical support)")
+            # GOVERNED: encounter linkage AND policy compatibility, on the SAME diagnosis.
+            accepted = sorted(set(linked) & policy_linked)
+            if not accepted:
+                if not linked:
+                    holds.append(
+                        f"{no_link}; coverage-list membership alone does not establish that a "
+                        f"diagnosis justified this service in this encounter")
+                elif not policy_linked:
+                    holds.append(
+                        f"{label}: linked diagnosis does not qualify under CMS coverage policy")
+                else:
+                    holds.append(
+                        f"{label}: the diagnosis linked in this encounter is not the one that "
+                        f"qualifies under CMS coverage policy")
+                continue
+        else:
+            # UNGOVERNED: no policy exists for this service, so the encounter linkage is the
+            # whole justification and is strictly required.
+            accepted = sorted(linked)
+            if not accepted:
+                holds.append(no_link)
+                continue
+        bindings.append({
+            "procedure_event_id": pid,
+            "procedure_code": ln.chosen.code if ln.chosen else None,
+            "procedure_system": ln.chosen.system if ln.chosen else None,
+            "policy_governed": qualifying is not None,
+            "control_version": control["version"],
+            "supports": [_support_record(released_dx[e], linked[e],
+                                         policy_qualifying=(e in policy_linked)
+                                         if qualifying is not None else None)
+                         for e in accepted],
+        })
+    result.necessity_support = bindings
     if holds:
         return GateResult("medical_necessity", Outcome.UNKNOWN, "; ".join(holds), authority)
     return GateResult("medical_necessity", Outcome.PASS,
-                      f"{len(procs)} procedure(s) each justified by authoritative coverage "
-                      f"policy or an independently reconciled, anchored diagnosis link",
+                      f"{len(procs)} procedure(s) each justified by an independently "
+                      f"reconciled, anchored diagnosis link in this encounter, and by "
+                      f"authoritative coverage policy where one governs the service",
                       authority)
 
 

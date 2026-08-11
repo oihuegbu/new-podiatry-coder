@@ -7,6 +7,7 @@ synthetic identifiers). It asserts the safety properties, not just happy paths:
 planned work is not billed, negated findings are dropped, unsupported evidence
 blocks release, and autonomy is granted only when the chain closes.
 """
+import json
 import unittest
 
 from claude_coder.data_access import MockSource
@@ -35,44 +36,61 @@ def _request(fact):
 # A note whose text contains, verbatim, every evidence span the extractor emits.
 # Fully synthetic — the pipeline's disposition/negation logic turns on the
 # LINGUISTIC markers ('denies …', 'Plan … next visit'), not any clinical term.
+_LINK_SENTENCE = ("Excision of lesion alpha was performed for "
+                  "condition alpha of the right side")
 NOTE = (
     "Procedure: excision of lesion alpha, right site two. "
     "Assessment: condition alpha, right side. "
-    "Excision of lesion alpha was performed for condition alpha, right side. "
+    + _LINK_SENTENCE + ". "
     "Patient denies finding gamma. "
     "Plan procedure beta correction next visit."
 )
 
 # What the (stubbed) CLU extractor returns: one performed procedure, one current
 # diagnosis, one PLANNED procedure (must not bill), one NEGATED finding (drop).
-# The procedure and the diagnosis BOTH quote the one sentence that documents them
-# together, so `provenance.reconcile_relations` can reconcile their REASON_FOR edge from
-# the SOURCE (co-located verified span) rather than from the model's self-confidence —
-# which is what the necessity control now requires. (Codex F6-R3.)
-_LINK_QUOTE = "Excision of lesion alpha was performed for condition alpha, right side"
-FACTS_JSON = """{"facts":[
- {"kind":"procedure","description":"excision of lesion alpha",
-  "attributes":{"laterality":"right","anatomy":"site two","performer_id":"actor-1","billing_entity_id":"actor-1"},
-  "disposition":"performed_today","negated":false,
-  "evidence":["excision of lesion alpha, right site two",
-              "Excision of lesion alpha was performed for condition alpha, right side"],
-  "confidence":0.97,"axis_confidence":{"occurrence":0.99,"action":0.99,"evidence":0.99,"temporal":0.99,"performer":0.99,"relationship":0.99}},
- {"kind":"diagnosis","description":"condition alpha of the right side",
-  "attributes":{"laterality":"right"},"disposition":"performed_today","negated":false,
-  "evidence":["condition alpha, right side",
-              "Excision of lesion alpha was performed for condition alpha, right side"],
-  "confidence":0.98,
-  "axis_confidence":{"occurrence":0.99,"action":0.99,"evidence":0.99,"temporal":0.99,"assertion":0.99,"experiencer":0.99}},
- {"kind":"procedure","description":"procedure beta correction","attributes":{},
-  "disposition":"planned","negated":false,
-  "evidence":["Plan procedure beta correction next visit"],"confidence":0.9},
- {"kind":"diagnosis","description":"finding gamma","attributes":{},
-  "disposition":"performed_today","negated":true,
-  "evidence":["denies finding gamma"],"confidence":0.9}
-],
- "relations":[
- {"subject_event_id":"F2","object_event_id":"F1","predicate":"reason_for","state":"asserted","evidence_fact_ids":["F1","F2"],"confidence":0.99}
-]}"""
+# The procedure and the diagnosis each quote THEIR OWN phrase inside the one sentence that
+# states WHY the service was done, so `provenance.reconcile_relations` can establish the
+# REASON_FOR edge from the SOURCE — the document's own directional wording between the two
+# verified mentions — rather than from the model's self-confidence, from repeating the edge,
+# or from the two facts merely appearing near each other. (Codex F6-R3.)
+_PROC_MENTION = "Excision of lesion alpha"                 # capitalised only in that sentence
+_DX_MENTION = "condition alpha of the right side"
+
+
+def _facts_json(*, link_evidence=True):
+    """The extractor response. `link_evidence=False` drops every quote that lives in the
+    linking sentence, for the case where the note never documents WHY the service was done."""
+    proc_ev = ["excision of lesion alpha, right site two"]
+    dx_ev = ["condition alpha, right side"]
+    if link_evidence:
+        proc_ev.append(_PROC_MENTION)
+        dx_ev.append(_DX_MENTION)
+    return json.dumps({"facts": [
+        {"kind": "procedure", "description": "excision of lesion alpha",
+         "attributes": {"laterality": "right", "anatomy": "site two",
+                        "performer_id": "actor-1", "billing_entity_id": "actor-1"},
+         "disposition": "performed_today", "negated": False, "evidence": proc_ev,
+         "confidence": 0.97,
+         "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
+                             "temporal": 0.99, "performer": 0.99, "relationship": 0.99}},
+        {"kind": "diagnosis", "description": "condition alpha of the right side",
+         "attributes": {"laterality": "right"}, "disposition": "performed_today",
+         "negated": False, "evidence": dx_ev, "confidence": 0.98,
+         "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
+                             "temporal": 0.99, "assertion": 0.99, "experiencer": 0.99}},
+        {"kind": "procedure", "description": "procedure beta correction", "attributes": {},
+         "disposition": "planned", "negated": False,
+         "evidence": ["Plan procedure beta correction next visit"], "confidence": 0.9},
+        {"kind": "diagnosis", "description": "finding gamma", "attributes": {},
+         "disposition": "performed_today", "negated": True,
+         "evidence": ["denies finding gamma"], "confidence": 0.9},
+    ], "relations": [
+        {"subject_event_id": "F2", "object_event_id": "F1", "predicate": "reason_for",
+         "state": "asserted", "evidence_fact_ids": ["F1", "F2"], "confidence": 0.99},
+    ]})
+
+
+FACTS_JSON = _facts_json()
 
 # Synthetic (non-code) identifiers — no real medical code anywhere in this test.
 PROC = CandidateCode("PROC_ALPHA_EXC", "cpt",
@@ -112,13 +130,33 @@ class AutonomousCoderTest(unittest.TestCase):
         self.assertEqual(codes, {"PROC_ALPHA_EXC", "DX_ALPHA_RIGHT"})
         self.assertEqual(r.verdict, Verdict.AUTO_READY, r.notes)
 
+    def test_certificate_binds_necessity_provenance_and_stays_reproducible(self):
+        """F6-R3 end-to-end: the released claim's certificate answers WHY the service was
+        necessary — the claim-line diagnosis pointer plus the accepted relation's provenance
+        (status, the spans that proved it, the distinct assertion origins) — and, composing
+        with the phase-1 content-addressed manifest work, identical inputs still reproduce
+        the same certificate hash (the origin id is content-derived, not a per-call nonce)."""
+        a, b = self._run(), self._run()
+        self.assertEqual(a.verdict, Verdict.AUTO_READY, a.notes)
+        self.assertEqual(a.certificate["certificate_sha256"],
+                         b.certificate["certificate_sha256"])
+        (binding,) = a.certificate["necessity_support"]
+        (support,) = binding["supports"]
+        self.assertEqual(binding["procedure_code"], "PROC_ALPHA_EXC")
+        self.assertEqual(support["diagnosis_code"], "DX_ALPHA_RIGHT")
+        self.assertEqual(support["reconciliation_status"], "source_directional")
+        self.assertEqual(support["independent_support"], 1)   # one pass = one origin
+        self.assertTrue(all(support["assertion_origins"]))
+        self.assertTrue(set(support["reconciliation_evidence"])
+                        <= set(support["evidence_span_ids"]))
+
     def test_unreconciled_necessity_link_loses_autonomy(self):
         """F6-R3 end-to-end: strip the one sentence that documents the diagnosis and the
         service TOGETHER. The model still asserts a 0.99-confidence REASON_FOR edge and the
         edge still anchors, but nothing independently reconciles it — so the claim loses
         autonomy instead of being certified on the extraction model's own say-so."""
-        note = NOTE.replace(_LINK_QUOTE + ". ", "")
-        facts = FACTS_JSON.replace(',\n              "%s"' % _LINK_QUOTE, "")
+        note = NOTE.replace(_LINK_SENTENCE + ". ", "")
+        facts = _facts_json(link_evidence=False)
         from claude_coder.provenance import NullAuditRepository
         r = code_encounter("enc-1", note, "2026-03-14", source=_source(),
                            extract_llm=lambda s, u: facts,

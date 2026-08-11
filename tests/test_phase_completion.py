@@ -185,7 +185,8 @@ def test_production_extraction_populates_axes_actor_and_valid_relation():
         {"billing_entity_id": "org-1"})
     provenance.anchor_facts("first action; second action", graph.facts, "doc-v1")
     relations = provenance.validate_relations(
-        provenance.bind_relation_evidence(graph.relations, graph.facts), graph.facts)
+        provenance.bind_relation_evidence(graph.relations, graph.facts), graph.facts,
+        "first action; second action")
     assert all(f.axis_confidence.get("performer") == 0.9 for f in graph.facts)
     assert all(f.attributes["billing_entity_id"] == "org-1" for f in graph.facts)
     assert len(relations) == 1 and relations[0].evidence_span_ids

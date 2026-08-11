@@ -108,39 +108,61 @@ def test_failure_class_routing():
 
 
 def test_materiality_from_authoritative_coverage():
-    """Materiality of an unresolved diagnosis is decided by the AUTHORITATIVE
-    dx->procedure coverage linkage (LCD qualifying_dx), not a proxy:
+    """Materiality of an unresolved diagnosis follows the necessity gate's OWN RESOLVED
+    BINDING — the claim-line diagnosis that actually justified each service — not a second,
+    parallel re-derivation from coverage membership (Codex F6-R3, adjacent instance):
       (a) a procedure governed by NO policy (necessity unconfirmable) -> the
           unresolved dx BLOCKS — this is the exostectomy/Haglund case (28118 is
           ungoverned), where an unresolved principal indication must never release;
-      (b) a governed procedure whose necessity is met by a RESOLVED qualifying dx ->
-          an unresolved EXTRA dx is genuinely non-material -> AUTO_READY;
-      (c) a governed procedure with NO resolved qualifying dx -> BLOCKS."""
+      (b) a governed procedure whose necessity the gate RESOLVED (encounter linkage AND a
+          policy-qualifying diagnosis) -> an unresolved EXTRA dx is non-material -> AUTO_READY;
+      (c) a governed procedure with NO resolved qualifying dx -> BLOCKS;
+      (d) no source at all -> fail-closed;
+      (e) a governed procedure whose covered dx is merely PRESENT on the claim, with no
+          encounter linkage -> BLOCKS (coverage membership is not a justification)."""
     from claude_coder.models import GateResult, Verdict
     from claude_coder.autonomy import decide
-    def proc(code):
+    def proc(code, fid="P"):
         return ResolvedLine(fact=ClinicalFact(FactKind.PROCEDURE, "p", evidence=[EvidenceSpan("p")],
-                            disposition=Disposition.PERFORMED, confidence=0.99),
+                            disposition=Disposition.PERFORMED, confidence=0.99, fact_id=fid),
                             chosen=CandidateCode(code, "cpt", "d", 1.0), method=ResolutionMethod.VERIFIED)
-    def dx(code):
+    def dx(code, fid=None):
         return ResolvedLine(fact=ClinicalFact(FactKind.DIAGNOSIS, code or "unresolved dx",
-                            evidence=[EvidenceSpan("dx")], disposition=Disposition.PERFORMED, confidence=0.99),
+                            evidence=[EvidenceSpan("dx")], disposition=Disposition.PERFORMED,
+                            confidence=0.99, fact_id=fid or f"D{code or 'x'}"),
                             chosen=(CandidateCode(code, "icd10", "d", 1.0) if code else None),
                             method=(ResolutionMethod.VERIFIED if code else ResolutionMethod.ABSTAINED))
     gates_ok = [GateResult(n, Outcome.PASS, "", "") for n in
                 ("date_of_service", "verbatim_evidence", "code_active_on_dos",
-                 "medical_necessity", "ncci_ptp", "mue", "icd_excludes1")]
+                 "ncci_ptp", "mue", "icd_excludes1")]
     src = MockSource(coverage={"GG01": {"DQ01"}})   # governed procedure GG01, qualifying dx DQ01
-    def run(lines):
-        r = CodingResult("e", "2026-01-05", lines=lines, gates=list(gates_ok))
-        decide(r, source=src); return r.verdict
-    assert run([proc("UU01"), dx("DQ01"), dx(None)]) is Verdict.REVIEW_REQUIRED   # (a) ungoverned -> block
-    assert run([proc("GG01"), dx("DQ01"), dx(None)]) is Verdict.AUTO_READY        # (b) governed+met -> release
-    assert run([proc("GG01"), dx("ZZ99"), dx(None)]) is Verdict.REVIEW_REQUIRED   # (c) governed, unmet -> block
-    # (d) no source at all -> fail-closed
-    r = CodingResult("e", "2026-01-05", lines=[proc("GG01"), dx("DQ01"), dx(None)], gates=list(gates_ok))
-    decide(r)
-    assert r.verdict is Verdict.REVIEW_REQUIRED
+
+    def _link(dx_event):
+        """A reconciled, anchored REASON_FOR edge from `dx_event` to the procedure."""
+        from claude_coder.models import RelationAssertion, RelationPredicate, RelationState
+        return RelationAssertion(dx_event, RelationPredicate.REASON_FOR, "P",
+                                 state=RelationState.ASSERTED, confidence=0.99,
+                                 evidence_span_ids=["span-1"],
+                                 reconciliation_status="source_directional",
+                                 assertion_origins=["origin-a"])
+
+    def run(lines, relations=(), source=src):
+        # the REAL gate writes the binding autonomy then reads -- one authority, not two
+        r = CodingResult("e", "2026-01-05", lines=lines, gates=list(gates_ok),
+                         relations=list(relations))
+        if source is not None:
+            r.gates.append(gates.medical_necessity_gate(r, source))
+        decide(r, source=source)
+        return r.verdict
+    assert run([proc("UU01"), dx("DQ01"), dx(None)], [_link("DDQ01")]) \
+        is Verdict.REVIEW_REQUIRED                                               # (a)
+    assert run([proc("GG01"), dx("DQ01"), dx(None)], [_link("DDQ01")]) \
+        is Verdict.AUTO_READY                                                    # (b)
+    assert run([proc("GG01"), dx("ZZ99"), dx(None)], [_link("DZZ99")]) \
+        is Verdict.REVIEW_REQUIRED                                               # (c)
+    assert run([proc("GG01"), dx("DQ01"), dx(None)], [_link("DDQ01")], source=None) \
+        is Verdict.REVIEW_REQUIRED                                               # (d)
+    assert run([proc("GG01"), dx("DQ01"), dx(None)]) is Verdict.REVIEW_REQUIRED  # (e)
 
 
 def test_provider_query_is_self_contained():
@@ -195,13 +217,18 @@ def test_materiality_no_procedure_blocks():
 
 
 def test_materiality_coverage_error_blocks():
-    """Fail-closed: if the coverage lookup RAISES, an unresolved dx BLOCKS (kills the
-    except-return-True mutant)."""
+    """Fail-closed: if the coverage lookup RAISES, the necessity gate cannot confirm the
+    service and an unresolved dx BLOCKS (kills the except-return-True mutant)."""
     class Boom(MockSource):
         def qualifying_dx_for(self, code, system="cpt"):
             raise RuntimeError("coverage lookup failed")
-    r = CodingResult("e", "2026-01-05", lines=[_proc("GG01"), _dx("D001"), _dx(None)], gates=list(_GATES_OK))
-    decide(r, source=Boom(coverage={"GG01": {"D001"}}))
+    boom = Boom(coverage={"GG01": {"D001"}})
+    r = CodingResult("e", "2026-01-05", lines=[_proc("GG01"), _dx("D001"), _dx(None)],
+                     gates=[g for g in _GATES_OK if g.name != "medical_necessity"])
+    nec = gates.medical_necessity_gate(r, boom)
+    assert nec.outcome is Outcome.UNKNOWN and "unavailable" in nec.detail
+    r.gates.append(nec)
+    decide(r, source=boom)
     assert r.verdict is Verdict.REVIEW_REQUIRED
 
 
@@ -724,7 +751,7 @@ def test_necessity_requires_per_service_diagnosis_linkage():
         RelationAssertion(subject_event_id="df", predicate=RelationPredicate.REASON_FOR,
                           object_event_id="pf", state=RelationState.ASSERTED,
                           confidence=0.99, evidence_span_ids=["span-1"],
-                          reconciliation_status="source_colocated")])
+                          reconciliation_status="source_directional")])
     assert medical_necessity_gate(linked).outcome is Outcome.PASS
     # the SAME edge without independent reconciliation cannot certify (Codex F6-R3)
     unreconciled = CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[
@@ -751,7 +778,7 @@ def _nec_lines():
     return _line("P1", FactKind.PROCEDURE, "pf"), _line("D1", FactKind.DIAGNOSIS, "df")
 
 
-def _reason(conf, *, state=None, anchored=True, reconciled="source_colocated"):
+def _reason(conf, *, state=None, anchored=True, reconciled="source_directional"):
     """A REASON_FOR edge. Defaults to the ONLY shape that may satisfy necessity: asserted,
     evidence-anchored, and stamped reconciled by the deterministic provenance layer."""
     from claude_coder.models import RelationAssertion, RelationPredicate, RelationState
@@ -856,6 +883,7 @@ def test_reconciliation_status_is_written_only_by_the_deterministic_layer():
     from claude_coder import provenance
     from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind, RelationAssertion,
                                      RelationPredicate, RelationState)
+    note = "shared verbatim passage"
     span = EvidenceSpan("shared verbatim passage", anchored=True, text_sha256="h",
                         span_id="shared-1")
     dxf = ClinicalFact(FactKind.DIAGNOSIS, "dx", fact_id="df", evidence=[span])
@@ -864,9 +892,12 @@ def test_reconciliation_status_is_written_only_by_the_deterministic_layer():
                                state=RelationState.ASSERTED, confidence=0.99,
                                evidence_span_ids=["shared-1"],
                                reconciliation_status="externally_verified")
-    # co-located: ONE verified span documents both endpoints -> deterministic reconciliation
-    out = provenance.validate_relations([forged], [dxf, prf])
+    # co-located ONLY: one passage mentions both endpoints but states no directional claim,
+    # so the deterministic layer records the observation and the control does NOT accept it.
+    out = provenance.validate_relations([forged], [dxf, prf], note)
     assert out[0].reconciliation_status == provenance.SOURCE_COLOCATED
+    assert provenance.SOURCE_COLOCATED not in {
+        s.lower() for s in gates.load_necessity_control()["accepted_reconciliation_statuses"]}
 
     # no shared span and a single assertion -> unreconciled, whatever the model claimed
     other = EvidenceSpan("a different passage", anchored=True, text_sha256="h2",
@@ -876,5 +907,262 @@ def test_reconciliation_status_is_written_only_by_the_deterministic_layer():
                                 state=RelationState.ASSERTED, confidence=0.99,
                                 evidence_span_ids=["shared-1", "other-1"],
                                 reconciliation_status="externally_verified")
-    out2 = provenance.validate_relations([forged2], [dxf, prf2])
+    out2 = provenance.validate_relations([forged2], [dxf, prf2], note)
     assert out2[0].reconciliation_status == provenance.UNRECONCILED
+
+
+# ---- Codex F6-R3 (round 4): distinct assertion ORIGINS, directional proof, governed dual ---
+# The reviewer's three independent reproductions at 917e031, plus the cross-run and
+# conflicting-origin cases. All identifiers are synthetic; no medical code or term appears.
+
+_R4_PROFILE = {"provider": "provider-one", "model": "profile-one",
+               "callable": "tests.stub"}
+
+
+def _r4_response(note_quotes, relations):
+    """One extraction response: a diagnosis fact, a service fact, and whatever relations the
+    caller wants repeated. `note_quotes` maps fact -> its verbatim evidence list."""
+    axes_dx = {a: 0.9 for a in ("occurrence", "action", "evidence", "temporal",
+                                "assertion", "experiencer")}
+    axes_pr = {a: 0.9 for a in ("occurrence", "action", "evidence", "temporal",
+                                "performer", "relationship")}
+    return json.dumps({
+        "facts": [
+            {"fact_id": "D", "kind": "diagnosis", "description": "condition alpha",
+             "attributes": {}, "disposition": "performed_today", "certainty": "confirmed",
+             "experiencer": "patient", "evidence": note_quotes["D"], "confidence": 0.95,
+             "axis_confidence": axes_dx},
+            {"fact_id": "S", "kind": "procedure", "description": "service beta",
+             "attributes": {}, "disposition": "performed_today", "certainty": "confirmed",
+             "experiencer": "patient", "evidence": note_quotes["S"], "confidence": 0.95,
+             "axis_confidence": axes_pr},
+        ],
+        "relations": relations,
+    })
+
+
+_R4_EDGE = {"subject_event_id": "D", "object_event_id": "S", "predicate": "reason_for",
+            "state": "asserted", "evidence_fact_ids": ["D", "S"], "confidence": 0.99}
+
+# A note whose ONE clause states the direction: the service, a linking phrase, the reason.
+_R4_NOTE = "Service beta was performed for condition alpha. Nothing further."
+_R4_QUOTES = {"D": ["condition alpha"], "S": ["Service beta"]}
+
+
+def _r4_graph(note, response, *, extra_responses=()):
+    """Anchor + bind + validate exactly as the pipeline does, over one or more responses."""
+    from claude_coder import provenance
+    facts, relations = [], []
+    for i, raw in enumerate((response,) + tuple(extra_responses)):
+        out = extraction.extract_note(note, lambda _s, _u, _r=raw: _r,
+                                      run_id=f"pass-{i + 1}" if extra_responses else None,
+                                      model_profile=_R4_PROFILE)
+        if not facts:                       # the events are the FIRST pass's; later passes
+            facts = out.facts               # only contribute their assertion of the edge
+            provenance.anchor_facts(note, facts)
+        relations.extend(provenance.bind_relation_evidence(out.relations, facts))
+    return facts, provenance.validate_relations(relations, facts, note)
+
+
+def test_duplicate_edge_in_one_response_is_not_independent_corroboration():
+    """Reproduction 1: the SAME edge emitted twice in ONE response from ONE model. Raw support
+    rises to 2, but both assertions share one recorded origin, so independent support stays 1
+    and nothing is corroborated."""
+    from claude_coder import provenance
+    facts, rels = _r4_graph(_R4_NOTE, _r4_response(_R4_QUOTES, [_R4_EDGE, dict(_R4_EDGE)]))
+    (edge,) = rels
+    assert edge.support == 2                        # it WAS asserted twice ...
+    assert edge.independent_support == 1            # ... by exactly one origin
+    assert edge.reconciliation_status != provenance.CORROBORATED
+
+
+def test_cross_run_same_provider_is_legitimate_corroboration():
+    """Two separate runs of the same provider are two recorded origins, so the identical edge
+    IS independently corroborated -- the fix targets repetition, not re-running."""
+    from claude_coder import provenance
+    one = _r4_response(_R4_QUOTES, [_R4_EDGE])
+    facts, rels = _r4_graph(_R4_NOTE, one, extra_responses=(one,))
+    (edge,) = rels
+    assert edge.independent_support == 2
+    assert edge.reconciliation_status == provenance.CORROBORATED
+
+
+def test_conflicting_origins_collapse_and_cannot_support_necessity():
+    """Two origins that DISAGREE about the same edge collapse to UNCERTAIN, and an uncertain
+    edge disqualifies the pair outright -- two origins are not a vote."""
+    from claude_coder.models import CodingResult, Outcome, RelationState
+    from claude_coder.gates import medical_necessity_gate
+    negated = dict(_R4_EDGE, state="negated")
+    facts, rels = _r4_graph(_R4_NOTE, _r4_response(_R4_QUOTES, [_R4_EDGE]),
+                            extra_responses=(_r4_response(_R4_QUOTES, [negated]),))
+    (edge,) = rels
+    assert edge.independent_support == 2 and edge.state is RelationState.UNCERTAIN
+    from dataclasses import replace
+    proc, dx = _nec_lines()                       # re-point the edge at the claim's events
+    r = CodingResult("e", "2026-08-01", lines=[proc, dx],
+                     relations=[replace(edge, subject_event_id="df", object_event_id="pf")])
+    assert medical_necessity_gate(r).outcome is Outcome.UNKNOWN
+
+
+def test_shared_span_without_directional_wording_is_only_an_observation():
+    """Reproduction 2: one shared exact span naming a condition AND a service performed for an
+    unrelated reason. Both facts are genuinely co-located, but the passage states no
+    directional claim, so the edge is recorded as co-located and cannot certify necessity."""
+    from claude_coder import provenance
+    from claude_coder.models import CodingResult, Outcome
+    from claude_coder.gates import medical_necessity_gate
+    note = "Condition alpha is present, service beta was performed for reason delta."
+    sentence = note[:-1]
+    facts, rels = _r4_graph(note, _r4_response(
+        {"D": ["Condition alpha", sentence], "S": ["service beta", sentence]}, [_R4_EDGE]))
+    (edge,) = rels
+    assert edge.reconciliation_status == provenance.SOURCE_COLOCATED
+    from dataclasses import replace
+    proc, dx = _nec_lines()                       # re-point the edge at the claim's events
+    r = CodingResult("e", "2026-08-01", lines=[proc, dx],
+                     relations=[replace(edge, subject_event_id="df", object_event_id="pf")])
+    assert medical_necessity_gate(r).outcome is Outcome.UNKNOWN
+    assert not r.necessity_support
+
+
+def test_directional_clause_reconciles_and_records_the_proving_spans():
+    """The positive case: each endpoint has its own verified mention and the source text
+    between them links them in the declared orientation, so the DOCUMENT establishes the
+    predicate -- and the spans that proved it are recorded for the certificate."""
+    from claude_coder import provenance
+    facts, rels = _r4_graph(_R4_NOTE, _r4_response(_R4_QUOTES, [_R4_EDGE]))
+    (edge,) = rels
+    assert edge.reconciliation_status == provenance.SOURCE_DIRECTIONAL
+    assert len(edge.reconciliation_evidence) == 2
+    assert set(edge.reconciliation_evidence) <= set(edge.evidence_span_ids)
+
+
+def test_directional_proof_needs_the_endpoints_own_mentions():
+    """Quoting ONE identical long passage for both endpoints localises neither, so the same
+    documented sentence proves nothing about direction."""
+    from claude_coder import provenance
+    sentence = _R4_NOTE.split(".")[0]
+    facts, rels = _r4_graph(_R4_NOTE, _r4_response(
+        {"D": [sentence], "S": [sentence]}, [_R4_EDGE]))
+    assert rels[0].reconciliation_status == provenance.SOURCE_COLOCATED
+
+
+def test_directional_proof_is_voided_by_negation_and_by_a_clause_break():
+    """The linking text must stay inside one clause and carry no negation marker."""
+    from claude_coder import provenance
+    for note in ("Service beta was not performed for condition alpha. End.",
+                 "Service beta was performed. Later, for condition alpha, review. End."):
+        facts, rels = _r4_graph(note, _r4_response(
+            {"D": ["condition alpha"], "S": ["Service beta"]}, [_R4_EDGE]))
+        assert rels[0].reconciliation_status != provenance.SOURCE_DIRECTIONAL, note
+
+
+def test_governed_service_with_no_relation_at_all_holds():
+    """Reproduction 3: a claim whose released diagnosis merely HAPPENS to sit in the
+    procedure's coverage set, with no REASON_FOR relation anywhere. Coverage membership proves
+    the pair CAN qualify; it never proves this diagnosis justified this service here."""
+    from claude_coder.models import CodingResult, Outcome
+    from claude_coder.gates import medical_necessity_gate
+    proc, dx = _nec_lines()
+    governed = MockSource(); governed._coverage = {"P1": {"D1"}}
+    r = CodingResult("e", "2026-08-01", lines=[proc, dx])          # no relations at all
+    out = medical_necessity_gate(r, governed)
+    assert out.outcome is Outcome.UNKNOWN
+    assert not r.necessity_support
+    # with the encounter-specific link present as well, the same claim releases
+    linked = CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[_reason(0.99)])
+    assert medical_necessity_gate(linked, governed).outcome is Outcome.PASS
+
+
+def test_governed_service_needs_the_LINKED_diagnosis_to_be_the_qualifying_one():
+    """A reconciled link to diagnosis A plus coverage that qualifies only diagnosis B is not
+    two satisfied requirements -- they must meet on the SAME diagnosis."""
+    from claude_coder.models import (CandidateCode, ClinicalFact, CodingResult, EvidenceSpan,
+                                     FactKind, Outcome, ResolutionMethod, ResolvedLine)
+    from claude_coder.gates import medical_necessity_gate
+    proc, dx = _nec_lines()                       # linked dx event 'df' -> code D1
+    other = ResolvedLine(
+        fact=ClinicalFact(kind=FactKind.DIAGNOSIS, description="x", attributes={},
+                          fact_id="df2", evidence=[EvidenceSpan("x")]),
+        chosen=CandidateCode("D2", "icd10", "d", 0.9), method=ResolutionMethod.DETERMINISTIC)
+    governed = MockSource(); governed._coverage = {"P1": {"D2"}}   # only the UNLINKED dx
+    r = CodingResult("e", "2026-08-01", lines=[proc, dx, other], relations=[_reason(0.99)])
+    assert medical_necessity_gate(r, governed).outcome is Outcome.UNKNOWN
+
+
+def test_necessity_binding_is_recorded_and_bound_into_the_certificate():
+    """What justified the service must be answerable FROM the certificate: the claim-line
+    diagnosis pointer and the accepted relation's provenance."""
+    from claude_coder import certificate
+    from claude_coder.models import CodingResult, Outcome
+    from claude_coder.gates import medical_necessity_gate
+    proc, dx = _nec_lines()
+    edge = _reason(0.99)
+    edge.assertion_origins = ["origin-a", "origin-b"]
+    edge.reconciliation_evidence = ["span-1"]
+    r = CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[edge])
+    assert medical_necessity_gate(r).outcome is Outcome.PASS
+    (binding,) = r.necessity_support
+    (support,) = binding["supports"]
+    assert binding["procedure_event_id"] == "pf" and binding["procedure_code"] == "P1"
+    assert support["diagnosis_event_id"] == "df" and support["diagnosis_code"] == "D1"
+    assert support["relation_id"] == edge.relation_id
+    assert support["reconciliation_status"] == "source_directional"
+    assert support["assertion_origins"] == ["origin-a", "origin-b"]
+    assert support["independent_support"] == 2
+    cert = certificate.build_certificate(r, "note text")
+    assert cert["necessity_support"] == r.necessity_support
+    # the binding is part of the tamper-evident hash
+    r2 = CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[edge])
+    medical_necessity_gate(r2)
+    r2.necessity_support[0]["supports"][0]["diagnosis_code"] = "D9"
+    assert certificate.build_certificate(r2, "note text")["certificate_sha256"] \
+        != cert["certificate_sha256"]
+
+
+def test_corroboration_threshold_is_read_from_config_not_hardcoded():
+    """The threshold that decides CORROBORATED must be configuration the layer ACTUALLY
+    reads: raising it to three must stop two origins from corroborating. (A threshold
+    declared in a file nobody consumes is worse than no threshold — it reads as a control.)"""
+    from claude_coder import provenance
+    one = _r4_response(_R4_QUOTES, [_R4_EDGE])
+    grammar = provenance.load_relation_grammar()
+    assert grammar["min_independent_assertions"] == 2
+    facts, rels = _r4_graph(_R4_NOTE, one, extra_responses=(one,))
+    assert rels[0].reconciliation_status == provenance.CORROBORATED
+    saved = grammar["min_independent_assertions"]
+    try:
+        grammar["min_independent_assertions"] = 3
+        (edge,) = provenance.reconcile_relations(
+            provenance.merge_relations([rels[0]]), facts, _R4_NOTE)
+        assert edge.independent_support == 2
+        assert edge.reconciliation_status != provenance.CORROBORATED
+    finally:
+        grammar["min_independent_assertions"] = saved
+
+
+def test_relation_grammar_is_versioned_configuration_and_fails_closed():
+    """The directional grammar is reviewed config that cites its authority; an unreadable or
+    incomplete grammar stops reconciliation instead of silently reverting to co-location."""
+    import pytest
+    from claude_coder import provenance
+    from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind, RelationAssertion,
+                                     RelationPredicate)
+    cfg = provenance.load_relation_grammar()
+    assert cfg["control_mode"] == "ENFORCED_FAIL_CLOSED" and cfg["authority"]
+    assert cfg["predicates"]["reason_for"]["object_first_cues"]
+    saved_cache, saved_path = (provenance._RELATION_GRAMMAR_CACHE,
+                               provenance._RELATION_GRAMMAR_FILE)
+    span = EvidenceSpan("q", anchored=True, span_id="s1")
+    dxf = ClinicalFact(FactKind.DIAGNOSIS, "dx", fact_id="df", evidence=[span])
+    prf = ClinicalFact(FactKind.PROCEDURE, "pr", fact_id="pf", evidence=[span])
+    rel = RelationAssertion("df", RelationPredicate.REASON_FOR, "pf",
+                            confidence=0.9, evidence_span_ids=["s1"])
+    try:
+        provenance._RELATION_GRAMMAR_CACHE = None
+        provenance._RELATION_GRAMMAR_FILE = saved_path.parent / "does-not-exist.json"
+        with pytest.raises(provenance.RelationGrammarError):
+            provenance.validate_relations([rel], [dxf, prf], "q")
+    finally:
+        (provenance._RELATION_GRAMMAR_CACHE,
+         provenance._RELATION_GRAMMAR_FILE) = saved_cache, saved_path

@@ -1,0 +1,38 @@
+{
+  "control_id": "relation_directional_evidence",
+  "version": "relation-evidence-grammar-v1",
+  "control_mode": "ENFORCED_FAIL_CLOSED",
+  "description": "When may a passage of the source document be said to STATE a directional relation between two clinical events? Two events quoted in one passage are merely co-located: co-location proves both were documented near each other, never that the passage asserts 'subject is the reason for object'. Directional proof requires the two endpoints' own verified verbatim mentions to sit on either side of a linking phrase from this grammar, in the orientation that phrase declares, inside one clause. This is a LANGUAGE grammar -- generic English linking phrases keyed by relation predicate. It contains no medical code, code family, clinical term, or scenario, and nothing here names a diagnosis, a service, or a specialty.",
+  "authority": [
+    "CMS Program Integrity Manual (Pub. 100-08) Chapter 3, Section 3.3.2.1.1 -- the medical record itself must support the medical necessity of the service billed",
+    "ICD-10-CM Official Guidelines for Coding and Reporting, Section IV -- report the diagnosis the record documents as the reason for the encounter/service; a linkage the record does not state may not be inferred",
+    "CMS Medicare Claims Processing Manual (Pub. 100-04) Chapter 23 -- diagnosis-to-service linkage reported on the claim"
+  ],
+  "min_independent_assertions": 2,
+  "max_linking_chars": 80,
+  "clause_terminators": [".", ";", ":", "!", "?", "\n", "\r", "|", "•"],
+  "negation_markers": [
+    "not", "no", "never", "without", "denies", "denied", "unrelated",
+    "rather than", "instead of", "other than", "apart from", "aside from",
+    "as well as", "in addition to"
+  ],
+  "predicates": {
+    "reason_for": {
+      "description": "subject (the documented reason) --REASON_FOR--> object (the service performed).",
+      "subject_first_cues": [
+        "treated with", "treated by", "managed with", "managed by",
+        "addressed with", "addressed by", "requiring", "required",
+        "necessitating", "necessitated", "prompting", "prompted",
+        "leading to", "led to", "resulting in", "resulted in", "warranting"
+      ],
+      "object_first_cues": [
+        "for", "due to", "secondary to", "because of", "owing to",
+        "on account of", "to treat", "to address", "in treatment of",
+        "for treatment of", "for the treatment of", "in the setting of",
+        "attributable to", "arising from", "as a result of", "in response to",
+        "indicated for", "performed for", "given for"
+      ]
+    }
+  },
+  "notes": "min_independent_assertions lives HERE, with the layer that reads it, so the threshold cannot be edited in a file nothing consumes. Cue phrases, the clause window and the negation markers are reviewed configuration, not code, so tightening or extending the grammar is a config diff with authority attached. A predicate with no entry here can never be reconciled directionally -- it stays observational (co-located) or unreconciled, which is the fail-closed direction. Matching is case-insensitive on whole words, requires the linking text to stay inside one clause and within max_linking_chars, and is voided by any negation marker in that linking text."
+}

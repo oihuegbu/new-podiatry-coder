@@ -12,6 +12,7 @@ change, and the hardcoding guard has nothing to catch here.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -83,6 +84,12 @@ Do not infer integrality or distinctness from clinical convention; emit only wha
 note documents. PART_OF/USED_IN/REASON_FOR are directional; SEPARATE_FROM and
 SAME_EPISODE_AS are symmetric.
 
+Whenever you emit a DIRECTIONAL relation, give each of its two endpoint facts an
+ADDITIONAL evidence quote: the shortest verbatim phrase inside the linking sentence
+that names that endpoint. The direction is checked from where those two phrases sit in
+the note and from the wording between them, so two endpoints supported only by one
+identical long quote cannot be verified and the relation will be treated as unproven.
+
 Rules: quote evidence verbatim; separate a planned/ordered service from a
 performed one; capture negation; do not merge distinct events; do not invent
 facts the note does not support. For a DIAGNOSIS, the "description" must be the
@@ -93,11 +100,85 @@ them in attributes or omit). Return JSON only:
 {"facts": [ ... ], "relations": [ ... ]}."""
 
 
+_SCHEMA_VERSION = "clinical-graph-v1"
+
+
+@dataclass(frozen=True)
+class ExtractionOrigin:
+    """Identity of ONE extraction call — the unit of assertion independence.
+
+    Everything a single response emits shares this origin, so an extraction model that
+    repeats the same edge inside one response cannot make it look like two sources agreed.
+    Two origins differ only when something that could actually make them independent
+    differs: the run, the provider/profile that answered, the prompt, or the response
+    schema. This is derived from the call metadata the pipeline already records
+    (`_model_profile_identity`) — it is not a parallel id scheme. (Codex F6-R3.)
+    """
+    run_id: str
+    provider: str = ""
+    profile: str = ""
+    prompt_sha256: str = ""
+    schema_version: str = _SCHEMA_VERSION
+
+    @property
+    def origin_id(self) -> str:
+        raw = json.dumps({"run_id": self.run_id, "provider": self.provider,
+                          "profile": self.profile, "prompt_sha256": self.prompt_sha256,
+                          "schema_version": self.schema_version},
+                         sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    def as_record(self) -> dict[str, str]:
+        """Auditable, credential-free record of this origin."""
+        return {"origin_id": self.origin_id, "run_id": self.run_id,
+                "provider": self.provider, "profile": self.profile,
+                "prompt_sha256": self.prompt_sha256,
+                "schema_version": self.schema_version}
+
+
+def _profile_identity(model_profile: Any) -> tuple[str, str]:
+    """(provider, canonical profile identity) from the recorded call metadata. Never
+    includes a credential value — the pipeline's profile dict carries provider/model/
+    callable identity only."""
+    if not isinstance(model_profile, dict):
+        return "", ""
+    provider = str(model_profile.get("provider", "") or "")
+    canonical = json.dumps({str(k): (None if v is None else str(v))
+                            for k, v in model_profile.items()},
+                           sort_keys=True, separators=(",", ":"))
+    return provider, canonical
+
+
+def call_origin(note_text: str, raw_response: str, *, run_id: str | None = None,
+                model_profile: Any = None,
+                schema_version: str = _SCHEMA_VERSION) -> ExtractionOrigin:
+    """The origin identity for one extraction call.
+
+    `run_id` is supplied by a caller that genuinely runs more than one pass (each pass is
+    its own run, so two passes of the SAME provider legitimately corroborate). When it is
+    not supplied the run is identified by its own content — document, prompt, profile and
+    the exact response — so a single pass is reproducible (certificates stay stable) and a
+    response cannot be counted twice by being replayed into the same graph."""
+    prompt_sha = hashlib.sha256(_SYSTEM.encode("utf-8")).hexdigest()
+    provider, profile = _profile_identity(model_profile)
+    rid = str(run_id).strip() if run_id is not None and str(run_id).strip() else ""
+    if not rid:
+        seed = "|".join((hashlib.sha256((note_text or "").encode("utf-8")).hexdigest(),
+                         prompt_sha, profile, str(schema_version),
+                         hashlib.sha256((raw_response or "").encode("utf-8")).hexdigest()))
+        rid = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+    return ExtractionOrigin(run_id=rid, provider=provider, profile=profile,
+                            prompt_sha256=prompt_sha, schema_version=str(schema_version))
+
+
 @dataclass
 class ExtractionResult:
     facts: list[ClinicalFact] = field(default_factory=list)
     relations: list[RelationAssertion] = field(default_factory=list)
-    schema_version: str = "clinical-graph-v1"
+    schema_version: str = _SCHEMA_VERSION
+    # WHICH call produced this graph. Every relation above carries this origin's id, so a
+    # downstream corroboration count is a count of DISTINCT origins, never of repetitions.
+    origin: ExtractionOrigin | None = None
 
 
 _REQUIRED_AXES: dict[FactKind, tuple[str, ...]] = {
@@ -364,14 +445,17 @@ def _participant_index(billing_context: dict[str, Any] | None) -> dict[str, dict
 
 
 def extract_note(note_text: str, llm: LLMFn | None = None,
-                 billing_context: dict[str, Any] | None = None) -> ExtractionResult:
+                 billing_context: dict[str, Any] | None = None, *,
+                 run_id: str | None = None,
+                 model_profile: dict[str, Any] | None = None) -> ExtractionResult:
     llm = llm or _default_llm
     # Validate the authoritative encounter context BEFORE spending an extraction call: a
     # malformed roster can never produce trustworthy ownership, so it fails closed up front.
     participants = _participant_index(billing_context)
     user = json.dumps({"encounter_context": billing_context or {}, "note": note_text},
                       sort_keys=True)
-    raw = _strict_extract_json(llm(_SYSTEM, user))
+    raw_response = llm(_SYSTEM, user)
+    raw = _strict_extract_json(raw_response)
     seen_ids: set[str] = set()
     # R1: strict top-level schema -- 'facts' must be a present array (missing/null/wrong-type
     # is a malformed graph, NOT an empty note); 'relations' must be an array when present.
@@ -487,14 +571,18 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
             certain=certain, experiencer=experiencer, evidence=spans,
             confidence=scalar, axis_confidence=axes, fact_id=fid,
         ))
+    # ONE origin for this whole response: every edge below is stamped with it, so repeating
+    # an edge inside this response accumulates raw `support` but NOT independent support.
+    origin = call_origin(note_text, raw_response, run_id=run_id, model_profile=model_profile)
     relations: list[RelationAssertion] = []
     for j, x in enumerate(relations_in):
         rel = _relation(x, j)
         if rel is None:
             raise ExtractionSchemaError(
                 f"relation #{j} is malformed and cannot be safely dropped: {x!r}")
+        rel.assertion_origins = [origin.origin_id]
         relations.append(rel)
-    return ExtractionResult(facts=facts, relations=relations)
+    return ExtractionResult(facts=facts, relations=relations, origin=origin)
 
 
 def extract_facts(note_text: str, llm: LLMFn | None = None) -> list[ClinicalFact]:
