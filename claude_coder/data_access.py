@@ -20,6 +20,7 @@ how the tests avoid embedding any real medical code.
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Protocol, runtime_checkable
 
 from .models import CandidateCode, Outcome
@@ -564,14 +565,21 @@ class AuthoritativeSource:
             return False
 
     def data_fingerprint(self) -> dict[str, Any]:
-        """A content fingerprint of the loaded authoritative editions, so the
-        release certificate binds the exact data the claim was coded against — a
-        changed code set / descriptor edition changes the fingerprint. Uses the
-        deployment's codes checksum when present, else per-system code counts."""
-        # REQUIRED components fail loudly: a release must never be certified against unknown
-        # authoritative data. A swallowed failure that returned {} or partial counts is a
-        # silent-fallback certification hole. (Codex F6-R5.)
-        fp: dict[str, Any] = {}
+        """A CONTENT-ADDRESSED fingerprint of the loaded authoritative editions, so the
+        release certificate binds the exact BYTES the claim was coded against.
+
+        Row counts are not an identity: two materially different source files of the same
+        cardinality would fingerprint identically, leaving same-count source drift invisible
+        to the attestation. The identity is therefore the capability manifest's per-source
+        SHA-256 digests, sizes and release/effective windows, summarised into one
+        `fingerprint_sha256`; counts and the deployment's optional Qdrant checksum remain as
+        corroborating detail, never as the identity. (Codex F6-R5.)
+
+        REQUIRED components fail loudly: a release must never be certified against unknown
+        authoritative data. A swallowed failure that returned {} or partial counts is a
+        silent-fallback certification hole.
+        """
+        fp: dict[str, Any] = {"fingerprint_version": "release-data-fingerprint-v2"}
         db = self._reference()                       # load failure raises -> pipeline holds
         fp["counts"] = {s: len(getattr(db, s, {}) or {})
                         for s in ("icd10", "cpt", "hcpcs")}
@@ -584,9 +592,13 @@ class AuthoritativeSource:
             if chk.exists():
                 fp["codes_checksum"] = chk.read_text().strip()[:64]
         except Exception:
-            pass                                     # codes_checksum is optional provenance
-        from .capability import build_manifest       # required: raises if unavailable
-        fp["source_manifest"] = build_manifest()
+            pass                                     # codes_checksum is corroborating only
+        from .capability import build_manifest, manifest_digest   # raises if unavailable
+        manifest = build_manifest()
+        fp["source_manifest"] = manifest
+        fp["fingerprint_sha256"] = manifest_digest(
+            [{"counts": fp["counts"], "manifest": manifest.get("manifest_sha256")}]
+            + list(manifest.get("sources") or []))
         return fp
 
     def _excludes1_map(self) -> dict[str, set[str]]:
@@ -791,9 +803,26 @@ class MockSource:
         return True
 
     def data_fingerprint(self):
-        return {"source": "mock",
-                "counts": {"icd10": 1, "cpt": 1, "hcpcs": 1},
-                "source_manifest": {"status": "OK", "missing_required": []}}
+        """A schema-COMPLETE synthetic fingerprint: the mock must satisfy exactly the same
+        content-addressed contract as the real source, so tests cannot pass against a shape
+        production would reject. (Codex F6-R5.)"""
+        from .capability import MANIFEST_VERSION, manifest_digest
+        sources = [{"source": f"mock_{name}", "source_id": f"mock_{name}", "required": True,
+                    "present": True, "status": "loaded", "role": "synthetic test source",
+                    "path": f"/mock/{name}.json", "bytes": 1,
+                    "sha256": "sha256:" + hashlib.sha256(name.encode()).hexdigest(),
+                    "release": {"effective_from": "2026-01-01", "effective_to": "",
+                                "version": "mock"}}
+                   for name in ("icd10", "cpt", "hcpcs")]
+        manifest = {"manifest_version": MANIFEST_VERSION,
+                    "sources": sources, "missing_required": [], "degraded_optional": [],
+                    "integrity_errors": [], "status": "OK",
+                    "manifest_sha256": manifest_digest(sources)}
+        counts = {"icd10": 1, "cpt": 1, "hcpcs": 1}
+        return {"source": "mock", "fingerprint_version": "release-data-fingerprint-v2",
+                "counts": counts, "source_manifest": manifest,
+                "fingerprint_sha256": manifest_digest(
+                    [{"counts": counts, "manifest": manifest["manifest_sha256"]}] + sources)}
 
     def qualifying_dx_for(self, code, system="cpt"):
         c = str(code).replace(".", "").upper()

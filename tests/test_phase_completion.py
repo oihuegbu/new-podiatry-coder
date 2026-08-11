@@ -90,6 +90,51 @@ def test_invalid_relation_endpoint_holds_before_retrieval():
     assert result.destination is Destination.SYSTEM_HOLD
 
 
+@pytest.mark.parametrize("mutation", [
+    {"confidence": True},                                    # bool -> used to become 1.0
+    {"confidence": "0.99"},
+    {"confidence": float("inf")},
+    {"axis_confidence": {"occurrence": True, "action": 0.9, "evidence": 0.9,
+                         "temporal": 0.9, "performer": 0.9, "relationship": 0.9}},
+    {"axis_confidence": {"occurrence": float("nan"), "action": 0.9, "evidence": 0.9,
+                         "temporal": 0.9, "performer": 0.9, "relationship": 0.9}},
+])
+def test_malformed_confidence_holds_before_retrieval(mutation):
+    """F6-R1: a malformed confidence must produce a retryable SYSTEM_HOLD with ZERO retrieval,
+    never a coerced (frequently MAXIMUM) confidence that drives autonomy thresholds."""
+    payload = json.loads(_payload())
+    payload["facts"][0].update(mutation)
+    src = CountingSource()
+    result = _run(src, json.dumps(payload))
+    assert src.retrieval_calls == 0
+    assert result.destination is Destination.SYSTEM_HOLD
+    assert all(ln.chosen is None for ln in result.lines)
+
+
+def test_malformed_relation_confidence_holds_before_retrieval():
+    src = CountingSource()
+    rel = {"subject_event_id": "F1", "predicate": "reason_for", "object_event_id": "F1",
+           "state": "asserted", "evidence_fact_ids": ["F1"], "confidence": True}
+    result = _run(src, _payload(relations=[rel]))
+    assert src.retrieval_calls == 0
+    assert result.destination is Destination.SYSTEM_HOLD
+
+
+def test_malformed_billing_context_holds_before_retrieval():
+    """F6-R2: a malformed/duplicated participant roster fails closed before retrieval."""
+    src = CountingSource()
+    result = code_encounter(
+        "enc-phase", "service performed", "2026-08-01", source=src,
+        extract_llm=lambda _s, _u: _payload(),
+        arbitrate_llm=lambda _s, _u: '{"choice":0}',
+        audit_repository=provenance.NullAuditRepository(),
+        billing_context={"billing_entity_id": "actor-1", "participants": [
+            {"id": "actor-1", "type": "person", "roles": ["performer"]},
+            {"id": "actor-1", "type": "person", "roles": ["scribe"]}]})
+    assert src.retrieval_calls == 0
+    assert result.destination is Destination.SYSTEM_HOLD
+
+
 def test_audit_failure_holds_before_retrieval():
     class BrokenAudit:
         def append(self, *_a, **_k):

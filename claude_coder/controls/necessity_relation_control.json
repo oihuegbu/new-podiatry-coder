@@ -1,0 +1,22 @@
+{
+  "control_id": "necessity_relation_support",
+  "version": "necessity-relation-control-v1",
+  "control_mode": "ENFORCED_FAIL_CLOSED",
+  "description": "Which diagnosis --REASON_FOR--> service relations may satisfy medical necessity. A relation authored by the same extraction model that authored the events is not, by itself, independent clinical support: it must be evidence-anchored in the source document, clear the confidence floor, and carry a reconciliation status that was established DETERMINISTICALLY (independent re-assertion, or co-located verbatim source evidence) -- or necessity must instead be satisfied by an authoritative coverage policy that itself links the diagnosis to the service.",
+  "authority": [
+    "Social Security Act 1862(a)(1)(A) -- services must be reasonable and necessary for the diagnosis or treatment of illness or injury",
+    "CMS Program Integrity Manual (Pub. 100-08) Chapter 3, Section 3.3.2.1.1 -- the medical record must support the medical necessity of the service billed",
+    "CMS Medicare Claims Processing Manual (Pub. 100-04) Chapter 23 -- diagnosis-to-service linkage on the claim"
+  ],
+  "min_relation_confidence": 0.5,
+  "require_anchored_relation_evidence": true,
+  "require_asserted_state": true,
+  "conflicting_edge_disqualifies_support": true,
+  "accepted_reconciliation_statuses": [
+    "corroborated",
+    "source_colocated",
+    "externally_verified"
+  ],
+  "min_independent_assertions": 2,
+  "notes": "Thresholds and accepted statuses are configuration, not code, so a control change is a reviewed config diff. Nothing here is a medical code, code family, or descriptor proxy: it is a relation-evidence control. Loading is fail-closed -- a missing or malformed control file makes the necessity gate ERROR (autonomy stops) rather than falling back to a built-in default."
+}

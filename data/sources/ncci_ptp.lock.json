@@ -1,8 +1,68 @@
 {
   "source": "CMS NCCI practitioner PTP edits",
   "builder": "tools/build_ncci_ptp.py",
+  "output": "data/codes/ncci_data.json",
   "effective_from": "2026-07-01",
   "pairs": 2633128,
   "output_sha256": "6ee13ae77a858f683179d9ad7c2f6e2b9df17ef7d7e3fa7c94f96318ca7d77b4",
-  "note": "Pinned, reproducible NCCI PTP release. tools/prepare_ncci.py rebuilds ncci_data.json from CMS and verifies this checksum; a mismatch means the CMS release drifted -- review provenance and update this lock deliberately. The builder is byte-deterministic for a given CMS release (verified)."
+  "inputs": [
+    {
+      "name": "medicare-ncci-2026q2-practitioner-ptp-edits-ccipra-v321r0-f1.zip",
+      "url": "https://www.cms.gov/files/zip/medicare-ncci-2026q2-practitioner-ptp-edits-ccipra-v321r0-f1.zip",
+      "sha256": "8bc9313858b9035846781ccb7e554f092ae2399701d43e7d71a7caa13126030a",
+      "bytes": 20259330,
+      "effective_from": "2026-04-01"
+    },
+    {
+      "name": "medicare-ncci-2026q2-practitioner-ptp-edits-ccipra-v321r0-f2.zip",
+      "url": "https://www.cms.gov/files/zip/medicare-ncci-2026q2-practitioner-ptp-edits-ccipra-v321r0-f2.zip",
+      "sha256": "1154cb52d3382f5b950dc8f4c32bcb6e06846433fc4127319ca9223cde323848",
+      "bytes": 19396377,
+      "effective_from": "2026-04-01"
+    },
+    {
+      "name": "medicare-ncci-2026q2-practitioner-ptp-edits-ccipra-v321r0-f3.zip",
+      "url": "https://www.cms.gov/files/zip/medicare-ncci-2026q2-practitioner-ptp-edits-ccipra-v321r0-f3.zip",
+      "sha256": "0a10e993df3d0ebdcbeeb7dec889f825ad293b94c15333654106d6712b962a32",
+      "bytes": 19280368,
+      "effective_from": "2026-04-01"
+    },
+    {
+      "name": "medicare-ncci-2026q2-practitioner-ptp-edits-ccipra-v321r0-f4.zip",
+      "url": "https://www.cms.gov/files/zip/medicare-ncci-2026q2-practitioner-ptp-edits-ccipra-v321r0-f4.zip",
+      "sha256": "2521a2a3da2e16eb4e1e0eb0bb9f30fafdef3ef4cdfe846b7afd028509f07691",
+      "bytes": 17834204,
+      "effective_from": "2026-04-01"
+    },
+    {
+      "name": "medicare-ncci-2026q3-practitioner-ptp-edits-ccipra-v322r0-f1.zip",
+      "url": "https://www.cms.gov/files/zip/medicare-ncci-2026q3-practitioner-ptp-edits-ccipra-v322r0-f1.zip",
+      "sha256": "3c0444950b7ef48e72d8091e6475b8cc7f775a7032f77dbea451f0e73b1ff0d1",
+      "bytes": 20217524,
+      "effective_from": "2026-07-01"
+    },
+    {
+      "name": "medicare-ncci-2026q3-practitioner-ptp-edits-ccipra-v322r0-f2.zip",
+      "url": "https://www.cms.gov/files/zip/medicare-ncci-2026q3-practitioner-ptp-edits-ccipra-v322r0-f2.zip",
+      "sha256": "7f417ad242d87b838104aa8a5203e3158592613277c2f0c56ee6afee871a001a",
+      "bytes": 19392363,
+      "effective_from": "2026-07-01"
+    },
+    {
+      "name": "medicare-ncci-2026q3-practitioner-ptp-edits-ccipra-v322r0-f3.zip",
+      "url": "https://www.cms.gov/files/zip/medicare-ncci-2026q3-practitioner-ptp-edits-ccipra-v322r0-f3.zip",
+      "sha256": "af92ca33b6e05a63f3ec6d55e4793d314656b58371be833a330f6095ffc0b94f",
+      "bytes": 19712609,
+      "effective_from": "2026-07-01"
+    },
+    {
+      "name": "medicare-ncci-2026q3-practitioner-ptp-edits-ccipra-v322r0-f4.zip",
+      "url": "https://www.cms.gov/files/zip/medicare-ncci-2026q3-practitioner-ptp-edits-ccipra-v322r0-f4.zip",
+      "sha256": "0743892646c8422c5b5a433630cd35afa9a2e4023ff95ca7f11176c808eb4c57",
+      "bytes": 17614070,
+      "effective_from": "2026-07-01"
+    }
+  ],
+  "input_cache_env": "NCCI_INPUT_DIR",
+  "note": "Pinned, reproducible NCCI PTP release. Both ends of the build are pinned: `inputs` records each CMS release file's exact URL, byte size and SHA-256, and `output_sha256` records the bytes those inputs must produce. tools/build_ncci_ptp.py fetches EXACTLY these inputs (or the same files from a controlled immutable copy via NCCI_INPUT_DIR) and verifies every input checksum before parsing; tools/prepare_ncci.py then verifies the output checksum. A mismatch means the upstream release was rotated, replaced or corrupted -- do NOT rebuild silently: run `tools/build_ncci_ptp.py --refresh`, review data/sources/ncci_ptp.lock.proposed.json, and promote it in a reviewed commit. Pinning the inputs (not only the output) is what keeps a clean rebuild of this commit reproducible after CMS rotates a quarter, since CMS retains only the current and prior quarter. The builder is byte-deterministic for a given release (verified: a --refresh from these inputs reproduced output_sha256 exactly)."
 }

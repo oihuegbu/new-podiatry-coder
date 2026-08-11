@@ -38,21 +38,30 @@ def _request(fact):
 NOTE = (
     "Procedure: excision of lesion alpha, right site two. "
     "Assessment: condition alpha, right side. "
+    "Excision of lesion alpha was performed for condition alpha, right side. "
     "Patient denies finding gamma. "
     "Plan procedure beta correction next visit."
 )
 
 # What the (stubbed) CLU extractor returns: one performed procedure, one current
 # diagnosis, one PLANNED procedure (must not bill), one NEGATED finding (drop).
+# The procedure and the diagnosis BOTH quote the one sentence that documents them
+# together, so `provenance.reconcile_relations` can reconcile their REASON_FOR edge from
+# the SOURCE (co-located verified span) rather than from the model's self-confidence —
+# which is what the necessity control now requires. (Codex F6-R3.)
+_LINK_QUOTE = "Excision of lesion alpha was performed for condition alpha, right side"
 FACTS_JSON = """{"facts":[
  {"kind":"procedure","description":"excision of lesion alpha",
   "attributes":{"laterality":"right","anatomy":"site two","performer_id":"actor-1","billing_entity_id":"actor-1"},
   "disposition":"performed_today","negated":false,
-  "evidence":["excision of lesion alpha, right site two"],
+  "evidence":["excision of lesion alpha, right site two",
+              "Excision of lesion alpha was performed for condition alpha, right side"],
   "confidence":0.97,"axis_confidence":{"occurrence":0.99,"action":0.99,"evidence":0.99,"temporal":0.99,"performer":0.99,"relationship":0.99}},
  {"kind":"diagnosis","description":"condition alpha of the right side",
   "attributes":{"laterality":"right"},"disposition":"performed_today","negated":false,
-  "evidence":["condition alpha, right side"],"confidence":0.98,
+  "evidence":["condition alpha, right side",
+              "Excision of lesion alpha was performed for condition alpha, right side"],
+  "confidence":0.98,
   "axis_confidence":{"occurrence":0.99,"action":0.99,"evidence":0.99,"temporal":0.99,"assertion":0.99,"experiencer":0.99}},
  {"kind":"procedure","description":"procedure beta correction","attributes":{},
   "disposition":"planned","negated":false,
@@ -102,6 +111,24 @@ class AutonomousCoderTest(unittest.TestCase):
         codes = {ln.chosen.code for ln in r.billable_lines}
         self.assertEqual(codes, {"PROC_ALPHA_EXC", "DX_ALPHA_RIGHT"})
         self.assertEqual(r.verdict, Verdict.AUTO_READY, r.notes)
+
+    def test_unreconciled_necessity_link_loses_autonomy(self):
+        """F6-R3 end-to-end: strip the one sentence that documents the diagnosis and the
+        service TOGETHER. The model still asserts a 0.99-confidence REASON_FOR edge and the
+        edge still anchors, but nothing independently reconciles it — so the claim loses
+        autonomy instead of being certified on the extraction model's own say-so."""
+        note = NOTE.replace(_LINK_QUOTE + ". ", "")
+        facts = FACTS_JSON.replace(',\n              "%s"' % _LINK_QUOTE, "")
+        from claude_coder.provenance import NullAuditRepository
+        r = code_encounter("enc-1", note, "2026-03-14", source=_source(),
+                           extract_llm=lambda s, u: facts,
+                           arbitrate_llm=_arbitrate_stub,
+                           audit_repository=NullAuditRepository(),
+                           billing_context={"billing_entity_id": "actor-1", "participants": [
+                               {"id": "actor-1", "type": "person", "roles": ["performer"]}]})
+        nec = next(g for g in r.gates if g.name == "medical_necessity")
+        self.assertEqual(nec.outcome, Outcome.UNKNOWN, nec.detail)
+        self.assertNotEqual(r.verdict, Verdict.AUTO_READY)
 
     def test_planned_work_not_billed(self):
         r = self._run()

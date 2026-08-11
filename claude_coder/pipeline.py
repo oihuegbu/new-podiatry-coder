@@ -13,6 +13,8 @@ method -> authority) so any decision can be explained.
 """
 from __future__ import annotations
 
+import re
+
 from . import arbitration, certificate, em, extraction, gates, ontology, resolution
 from .arbitration import LLMFn
 from .autonomy import decide
@@ -20,18 +22,64 @@ from .data_access import AuthoritativeSource, CodeSource
 from .models import CodingResult, ResolutionMethod, ResolvedLine
 
 
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
 def _fingerprint_certifiable(fp) -> bool:
-    """A release may be certified only against a fingerprint that actually identifies the
-    authoritative data: non-empty per-system code counts and an OK source manifest. Empty,
-    partial, or blocked fingerprints (incl. a source that swallowed its own failure and
-    returned {}) are not certifiable. (Codex F6-R5.)"""
+    """A release may be certified only against a fingerprint that actually IDENTIFIES the
+    authoritative data — not merely asserts that some data was there.
+
+    The COMPLETE schema is validated (Codex F6-R5):
+      - non-empty per-system code counts, and a fingerprint digest over the whole manifest;
+      - a versioned source manifest whose status is OK, with `missing_required == []` and
+        `integrity_errors == []` (both explicitly present as lists, not merely falsy);
+      - EVERY required source present, non-empty, and carrying a `sha256:<64 hex>` content
+        digest — so two different files with equal row counts cannot share an identity;
+      - a `manifest_sha256` that still matches the recorded sources, so a hand-edited or
+        partially-copied manifest fails rather than certifying.
+    A status-only manifest (`{"status": "OK"}`) is therefore NOT certifiable.
+
+    TOTAL by construction: this validator is called outside the fingerprint try/except, so it
+    must never raise. An unexpected shape (or an unavailable digest helper) resolves to "not
+    certifiable", which routes the structured retryable hold below -- not an exception that
+    escapes `code_encounter` and loses the hold entirely.
+    """
+    try:
+        return _fingerprint_schema_ok(fp)
+    except Exception:
+        return False
+
+
+def _fingerprint_schema_ok(fp) -> bool:
     if not isinstance(fp, dict) or not fp:
         return False
     counts = fp.get("counts")
     if not isinstance(counts, dict) or not all(counts.get(s) for s in ("icd10", "cpt", "hcpcs")):
         return False
+    if not _SHA256_RE.fullmatch(str(fp.get("fingerprint_sha256") or "")):
+        return False
     manifest = fp.get("source_manifest")
     if not isinstance(manifest, dict) or manifest.get("status") != "OK":
+        return False
+    if not str(manifest.get("manifest_version") or "").strip():
+        return False
+    for key in ("missing_required", "integrity_errors"):
+        value = manifest.get(key)
+        if not isinstance(value, list) or value:
+            return False
+    sources = manifest.get("sources")
+    if not isinstance(sources, list) or not sources:
+        return False
+    required = [s for s in sources if isinstance(s, dict) and s.get("required")]
+    if not required:
+        return False
+    for s in required:
+        if not s.get("present") or not isinstance(s.get("bytes"), int) or s["bytes"] <= 0:
+            return False
+        if not _SHA256_RE.fullmatch(str(s.get("sha256") or "")):
+            return False
+    from .capability import manifest_digest
+    if manifest.get("manifest_sha256") != manifest_digest(sources):
         return False
     return True
 
@@ -94,7 +142,11 @@ def code_encounter(
                            "object_event_id": r.object_event_id,
                            "state": r.state.value,
                            "evidence_span_ids": r.evidence_span_ids,
-                           "confidence": r.confidence} for r in relations],
+                           "confidence": r.confidence,
+                           # how (if at all) the edge was independently reconciled -- the
+                           # necessity control reads this, so it must be auditable (F6-R3)
+                           "reconciliation_status": r.reconciliation_status,
+                           "support": r.support} for r in relations],
         }))
         intents = _elig.evaluate(facts, relations, encounter_id, date_of_service)
         audit_hashes.append(audit_repository.append(encounter_id, "eligibility_enforced", {

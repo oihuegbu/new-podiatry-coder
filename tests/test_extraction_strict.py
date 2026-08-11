@@ -124,3 +124,214 @@ def test_organization_as_performer_holds_through_eligibility():
     f.evidence = [EvidenceSpan("svc performed", anchored=True, text_sha256="h", span_id="s")]
     intents = evaluate([f], [], "enc", "2026-08-01")
     assert all(i.state is not EligibilityState.ELIGIBLE_FOR_RETRIEVAL for i in intents)
+
+
+# ------------------------------------------------- F6-R1 round 3: confidence is never coerced
+# A JSON boolean passes Python's `isinstance(x, (int, float))` because bool subclasses int, so
+# `"confidence": true` used to become 1.0 -- MAXIMUM confidence manufactured out of malformed
+# output. Numeric strings, NaN/Infinity (which json.loads accepts by default) and out-of-range
+# numbers were likewise coerced. Every one of them must raise instead.
+# `None` (absent) is the ONE legal non-number and is covered separately below.
+_BAD_CONFIDENCES = [True, False, "0.9", "high", float("nan"), float("inf"), float("-inf"),
+                    -0.1, 1.5, [], {}]
+
+
+@pytest.mark.parametrize("bad", _BAD_CONFIDENCES)
+def test_malformed_scalar_confidence_raises(bad):
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [_fact(confidence=bad)]}))
+
+
+@pytest.mark.parametrize("bad", _BAD_CONFIDENCES)
+def test_malformed_axis_confidence_raises(bad):
+    axes = dict(_fact()["axis_confidence"])
+    axes["occurrence"] = bad
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [_fact(axis_confidence=axes)]}))
+
+
+def test_malformed_unrequired_axis_confidence_also_raises():
+    # an axis the kind does not require is still schema output: malformed is malformed
+    axes = dict(_fact()["axis_confidence"])
+    axes["assertion"] = True                            # not required for a procedure
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [_fact(axis_confidence=axes)]}))
+
+
+@pytest.mark.parametrize("kind,axes", [
+    ("supply", ("occurrence", "action", "evidence", "temporal", "performer", "relationship")),
+    ("drug", ("occurrence", "action", "evidence", "temporal", "performer", "relationship")),
+    ("diagnosis", ("occurrence", "action", "evidence", "temporal", "assertion", "experiencer")),
+    ("imaging", ("occurrence", "action", "evidence", "temporal", "performer", "relationship")),
+    ("evaluation_management",
+     ("occurrence", "action", "evidence", "temporal", "performer", "relationship")),
+])
+def test_confidence_validation_covers_every_fact_kind(kind, axes):
+    """No fact kind bypasses the confidence schema -- SUPPLY/DRUG included."""
+    good = {a: 0.9 for a in axes}
+    bad = dict(good, **{axes[0]: True})
+    extract_note("note", _stub({"facts": [_fact(kind=kind, axis_confidence=good)]}))  # valid
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [_fact(kind=kind, confidence=True,
+                                                    axis_confidence=good)]}))
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [_fact(kind=kind, axis_confidence=bad)]}))
+
+
+@pytest.mark.parametrize("bad", _BAD_CONFIDENCES)
+def test_malformed_relation_confidence_raises(bad):
+    payload = {"facts": [_fact(fact_id="F1"), _fact(fact_id="F2")],
+               "relations": [{"predicate": "reason_for", "subject_event_id": "F1",
+                              "object_event_id": "F2", "state": "asserted",
+                              "evidence_fact_ids": ["F1"], "confidence": bad}]}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub(payload))
+
+
+def test_absent_confidence_is_zero_not_maximum():
+    """The one permitted non-number: an omitted confidence is 0.0 (fail-closed), never 1.0."""
+    f = _fact()
+    f.pop("confidence")
+    res = extract_note("note", _stub({"facts": [f]}))
+    assert res.facts[0].confidence == 0.0
+    missing_axes = _fact()
+    missing_axes["axis_confidence"] = {}
+    res2 = extract_note("note", _stub({"facts": [missing_axes]}))
+    assert set(res2.facts[0].axis_confidence.values()) == {0.0}
+
+
+@pytest.mark.parametrize("bad", [True, False, 7, 1.5, ["nested"], {"no": "text"},
+                                 {"text": True}, {"text": 7}, {"text": "  "}, None])
+def test_malformed_evidence_element_raises(bad):
+    """Adjacent instance of the same coercion class: a non-string quote must NOT be
+    stringified into a pseudo-span (which would then fail ANCHORING for the wrong reason
+    instead of failing the schema loudly)."""
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [_fact(evidence=[bad])]}))
+
+
+def test_boundary_confidences_are_accepted():
+    for value in (0, 1, 0.0, 1.0, 0.5):
+        res = extract_note("note", _stub({"facts": [_fact(confidence=value)]}))
+        assert res.facts[0].confidence == float(value)
+
+
+# ------------------------------- F6-R2 round 3: explicit performer designation, strict schema
+def test_roleless_person_is_not_an_authorized_performer():
+    """The removed `or not prec["roles"]` wildcard: a KNOWN but non-designated person must
+    never be elevated into the billing performer by the model's selection alone."""
+    ctx = {"billing_entity_id": "actor-1", "participants": [
+        {"id": "actor-1", "type": "person"}]}                    # no roles at all
+    a = _attrs({"performer_id": "actor-1"}, ctx)
+    assert "performer_id" not in a
+
+    ctx_empty = {"billing_entity_id": "actor-1", "participants": [
+        {"id": "actor-1", "type": "person", "roles": []}]}       # explicitly empty roles
+    assert "performer_id" not in _attrs({"performer_id": "actor-1"}, ctx_empty)
+
+
+def test_non_performer_role_is_not_an_authorized_performer():
+    ctx = {"billing_entity_id": "org-1", "participants": [
+        {"id": "actor-1", "type": "person", "roles": ["scribe", "supervisor"]},
+        {"id": "org-1", "type": "organization"}]}
+    assert "performer_id" not in _attrs({"performer_id": "actor-1"}, ctx)
+
+
+def test_roleless_self_billing_person_holds_through_eligibility_to_ownership():
+    """extraction -> eligibility -> ownership: the roleless person self-bills, so performer ==
+    billing entity would have PASSED ownership. With no performer resolved, ownership is
+    UNKNOWN and the line never becomes eligible for retrieval."""
+    from claude_coder.eligibility import evaluate, EligibilityState
+    from claude_coder.models import Disposition, EvidenceSpan, Outcome
+    from claude_coder.ownership import classify_ownership, fact_ownership
+    ctx = {"billing_entity_id": "actor-1", "participants": [
+        {"id": "actor-1", "type": "person"}]}
+    res = extract_note("note", _stub({"facts": [_fact(
+        attributes={"performer_id": "actor-1"})]}), billing_context=ctx)
+    f = res.facts[0]
+    f.disposition = Disposition.PERFORMED
+    f.evidence = [EvidenceSpan("svc performed", anchored=True, text_sha256="h", span_id="s")]
+    own = fact_ownership(f)
+    assert own.performer_id is None
+    assert classify_ownership(own.performer_id, own.billing_entity_id,
+                              own.organization_id, own.performer_function) is Outcome.UNKNOWN
+    intents = evaluate([f], [], "enc", "2026-08-01")
+    assert all(i.state is not EligibilityState.ELIGIBLE_FOR_RETRIEVAL for i in intents)
+
+
+@pytest.mark.parametrize("roles", [
+    {"performer": True},                      # a MAPPING was iterated by key -> fake role
+    "performer",                              # a bare string was iterated character-by-char
+    [""], ["  "], [True], [1], [{"role": "performer"}], [None],
+])
+def test_malformed_role_container_is_rejected(roles):
+    ctx = {"billing_entity_id": "actor-1", "participants": [
+        {"id": "actor-1", "type": "person", "roles": roles}]}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [_fact()]}), billing_context=ctx)
+
+
+@pytest.mark.parametrize("affiliations", [{"org-1": True}, "org-1", [None], [3]])
+def test_malformed_affiliation_container_is_rejected(affiliations):
+    ctx = {"billing_entity_id": "org-1", "participants": [
+        {"id": "actor-1", "type": "person", "roles": ["performer"],
+         "affiliations": affiliations},
+        {"id": "org-1", "type": "organization"}]}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [_fact()]}), billing_context=ctx)
+
+
+def test_duplicate_participant_id_is_rejected_not_last_write_wins():
+    """Last-write-wins silently resolved a conflicting identity; a repeated id is now fatal."""
+    ctx = {"billing_entity_id": "org-1", "participants": [
+        {"id": "actor-1", "type": "person", "roles": ["scribe"]},
+        {"id": "actor-1", "type": "person", "roles": ["performer"]},   # conflicting duplicate
+        {"id": "org-1", "type": "organization"}]}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [_fact(
+            attributes={"performer_id": "actor-1"})]}), billing_context=ctx)
+
+
+def test_duplicate_participant_id_with_type_conflict_is_rejected():
+    ctx = {"billing_entity_id": "org-1", "participants": [
+        {"id": "x", "type": "organization"},
+        {"id": "x", "type": "person", "roles": ["performer"]}]}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [_fact(
+            attributes={"performer_id": "x"})]}), billing_context=ctx)
+
+
+@pytest.mark.parametrize("participants", [
+    "actor-1", {"id": "actor-1"}, ["actor-1"], [{"type": "person"}],
+    [{"id": "", "type": "person"}], [{"id": "actor-1"}],
+    [{"id": "actor-1", "type": "robot"}], [{"id": "actor-1", "type": ""}],
+    [{"id": "actor-1", "type": "person", "function": 7}],
+    [{"id": "actor-1", "type": "person", "function": "  "}],
+])
+def test_malformed_participant_shapes_are_rejected(participants):
+    ctx = {"billing_entity_id": "org-1", "participants": participants}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [_fact()]}), billing_context=ctx)
+
+
+@pytest.mark.parametrize("ctx", [
+    "not-a-context", [], {"participants": {}, "billing_entity_id": "b"},
+    {"billing_entity_id": ""}, {"billing_entity_id": 7},
+])
+def test_malformed_billing_context_is_rejected(ctx):
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [_fact()]}), billing_context=ctx)
+
+
+def test_malformed_context_fails_before_the_extraction_call():
+    """A malformed roster can never produce trustworthy ownership -- it must fail closed
+    BEFORE the model is asked anything."""
+    calls = []
+
+    def _llm(system, user):
+        calls.append(user)
+        return json.dumps({"facts": []})
+
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _llm, billing_context={"participants": [{"id": "a"}]})
+    assert calls == []

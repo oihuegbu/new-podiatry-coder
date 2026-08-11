@@ -11,7 +11,9 @@ from the note itself (evidence), never from a code list baked into this file.
 """
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 from .data_access import AUTHORITY_UNAVAILABLE, CodeSource
 from .models import (CodingResult, FactKind, GateResult, Outcome, RelationPredicate,
@@ -140,25 +142,113 @@ def mue_gate(result: CodingResult, source: CodeSource) -> GateResult:
                       "units within MUE" if not detail else "; ".join(detail), "MUE (data)")
 
 
-# Necessity relation control floor: a model-authored REASON_FOR edge below this confidence
-# does not, by itself, certify medical necessity (a 0.0-confidence edge must not). A control
-# threshold, not a medical code.
-_MIN_NECESSITY_RELATION_CONFIDENCE = 0.5
+# The necessity relation control lives in REVIEWED VERSIONED CONFIGURATION, not as an inline
+# Python constant: confidence floor, required relation properties, and which reconciliation
+# statuses count as independent support are all control decisions that must be diffable and
+# citable to an authority. Loading is fail-closed -- there is no built-in default to fall back
+# to, because a silently-defaulted control is exactly the thing being fixed. (Codex F6-R3.)
+_NECESSITY_CONTROL_FILE = (Path(__file__).resolve().parent / "controls"
+                           / "necessity_relation_control.json")
+_NECESSITY_CONTROL_CACHE: dict | None = None
+
+_REQUIRED_CONTROL_KEYS = ("version", "control_mode", "authority", "min_relation_confidence",
+                          "require_anchored_relation_evidence", "require_asserted_state",
+                          "conflicting_edge_disqualifies_support",
+                          "accepted_reconciliation_statuses", "min_independent_assertions")
+
+
+class NecessityControlError(RuntimeError):
+    """The necessity relation control configuration is missing or malformed. Raised (never
+    defaulted) so the gate reports ERROR and autonomy stops."""
+
+
+def load_necessity_control() -> dict:
+    """The reviewed necessity relation control, fully validated. Cached per process."""
+    global _NECESSITY_CONTROL_CACHE
+    if _NECESSITY_CONTROL_CACHE is not None:
+        return _NECESSITY_CONTROL_CACHE
+    try:
+        cfg = json.loads(_NECESSITY_CONTROL_FILE.read_text())
+    except Exception as exc:
+        raise NecessityControlError(
+            f"necessity relation control unreadable at {_NECESSITY_CONTROL_FILE}: {exc}") from exc
+    if not isinstance(cfg, dict):
+        raise NecessityControlError("necessity relation control must be a JSON object")
+    missing = [k for k in _REQUIRED_CONTROL_KEYS if k not in cfg]
+    if missing:
+        raise NecessityControlError(
+            f"necessity relation control is missing required key(s): {missing}")
+    floor = cfg["min_relation_confidence"]
+    if isinstance(floor, bool) or not isinstance(floor, (int, float)) \
+            or not 0.0 <= float(floor) <= 1.0:
+        raise NecessityControlError("min_relation_confidence must be a number in [0.0, 1.0]")
+    accepted = cfg["accepted_reconciliation_statuses"]
+    if not isinstance(accepted, list) or not accepted or \
+            not all(isinstance(s, str) and s.strip() for s in accepted):
+        raise NecessityControlError(
+            "accepted_reconciliation_statuses must be a non-empty array of strings")
+    if not cfg.get("authority"):
+        raise NecessityControlError("a control must cite its authority")
+    _NECESSITY_CONTROL_CACHE = cfg
+    return cfg
+
+
+def _necessity_support_relations(result: CodingResult, control: dict) -> tuple[list, set]:
+    """(usable REASON_FOR edges, disqualified (subject, object) pairs).
+
+    An edge may support necessity only when it is, per the reviewed control:
+      - predicate REASON_FOR and state ASSERTED (a merged conflict collapses to UNCERTAIN);
+      - EVIDENCE-ANCHORED -- it carries verified span references, so the asserted relationship
+        is tied to the source document rather than existing only in the model's output;
+      - at or above the configured confidence floor;
+      - stamped with a reconciliation status the deterministic provenance layer established.
+    Any conflicting (non-asserted) edge between the same endpoints disqualifies that pair
+    outright, so an uncertain/negated duplicate can never be out-voted by a confident one.
+    """
+    accepted = {str(s).strip().lower() for s in control["accepted_reconciliation_statuses"]}
+    floor = float(control["min_relation_confidence"])
+    require_anchor = bool(control["require_anchored_relation_evidence"])
+    require_asserted = bool(control["require_asserted_state"])
+    disqualified: set = set()
+    usable: list = []
+    for r in (result.relations or []):
+        if r.predicate is not RelationPredicate.REASON_FOR:
+            continue
+        pair = (r.subject_event_id, r.object_event_id)
+        if require_asserted and r.state is not RelationState.ASSERTED:
+            if control.get("conflicting_edge_disqualifies_support"):
+                disqualified.add(pair)
+            continue
+        if require_anchor and not list(getattr(r, "evidence_span_ids", None) or []):
+            continue
+        if float(getattr(r, "confidence", 0.0) or 0.0) < floor:
+            continue
+        if str(getattr(r, "reconciliation_status", "") or "").strip().lower() not in accepted:
+            continue
+        usable.append(r)
+    return usable, disqualified
 
 
 def medical_necessity_gate(result: CodingResult,
                            source: "CodeSource | None" = None) -> GateResult:
-    """Every released procedure needs a diagnosis that JUSTIFIES IT, evaluated PER released
-    service and against AUTHORITATIVE coverage policy:
+    """Every released procedure needs a diagnosis that JUSTIFIES IT, and that justification
+    must come from something other than the extraction model's own confidence in itself.
 
-    - the support relation (diagnosis --REASON_FOR--> service) must be asserted AND clear the
-      necessity relation confidence floor -- a low/zero-confidence model edge cannot certify;
-    - when the procedure is governed by an authoritative CMS coverage policy
-      (source.qualifying_dx_for), at least one linked RELEASED diagnosis must qualify under
-      it, else it is a coverage contradiction and HOLDs;
-    - an unavailable required coverage evaluation is UNKNOWN/HOLD.
+    A released procedure is justified by EITHER of two independent routes:
 
-    (Codex F6-R3: an all-to-all count, and even a bare/zero-confidence edge, were insufficient.)"""
+      A. DETERMINISTIC SOURCE-DERIVED LINKAGE -- an authoritative CMS coverage policy
+         (`source.qualifying_dx_for`) itself links a RELEASED diagnosis to this service. The
+         linkage is read from published policy; no model assertion is trusted.
+      B. A RECONCILED SUPPORT RELATION -- a diagnosis --REASON_FOR--> service edge that is
+         asserted, evidence-anchored, at/above the configured confidence floor, and carries a
+         reconciliation status established deterministically by `provenance.reconcile_relations`
+         (independent re-assertion, or a verified verbatim span documenting both endpoints).
+
+    Everything else HOLDs: an unanchored or unreconciled edge, an edge below the floor, a
+    conflicting/uncertain edge, a governed procedure whose linked diagnosis does not qualify,
+    and an unavailable coverage evaluation. A high-confidence but never-independently-verified
+    model edge can no longer manufacture medical necessity. (Codex F6-R3.)
+    """
     procs = result.procedure_lines
     if not procs:
         return GateResult("medical_necessity", Outcome.NOT_APPLICABLE,
@@ -168,43 +258,55 @@ def medical_necessity_gate(result: CodingResult,
         return GateResult("medical_necessity", Outcome.BLOCKED,
                           "performed procedure(s) with no documented diagnosis",
                           "necessity (structural)")
+    try:
+        control = load_necessity_control()
+    except NecessityControlError as exc:
+        return GateResult("medical_necessity", Outcome.ERROR, str(exc),
+                          "necessity relation control (config)", retryable=True)
+    authority = f"necessity (structural + coverage) [{control['version']}]"
     released_dx = {ln.fact.fact_id: ln for ln in dx_lines
                    if ln.fact is not None and ln.fact.fact_id}
-    reason_for = [r for r in (result.relations or [])
-                  if r.predicate is RelationPredicate.REASON_FOR
-                  and r.state is RelationState.ASSERTED
-                  and float(getattr(r, "confidence", 0.0) or 0.0)
-                  >= _MIN_NECESSITY_RELATION_CONFIDENCE]
+    reason_for, disqualified = _necessity_support_relations(result, control)
     holds: list[str] = []
     for ln in procs:
         pid = ln.fact.fact_id if ln.fact is not None else None
         label = (ln.chosen.code if ln.chosen else None) or (
             ln.fact.description if ln.fact else "procedure")
-        support_events = {r.subject_event_id for r in reason_for
-                          if r.object_event_id == pid and r.subject_event_id in released_dx}
-        if not support_events:
-            holds.append(f"{label}: no confident REASON_FOR link to a released diagnosis")
-            continue
+        linked_events = {r.subject_event_id for r in reason_for
+                         if r.object_event_id == pid and r.subject_event_id in released_dx
+                         and (r.subject_event_id, pid) not in disqualified}
+        # Route A: does authoritative coverage policy itself link a released dx to this
+        # service? That linkage is deterministic and needs no model-authored edge.
+        policy_linked: set = set()
+        qualifying = None
         if source is not None and ln.chosen is not None:
             try:
                 qualifying = source.qualifying_dx_for(ln.chosen.code, ln.chosen.system)
             except Exception:
                 holds.append(f"{label}: coverage-policy evaluation unavailable")
                 continue
-            if qualifying is not None:                       # governed by a coverage policy
+            if qualifying is not None:
                 want = {str(q).replace(".", "").upper() for q in qualifying}
-                got = {released_dx[e].chosen.code.replace(".", "").upper()
-                       for e in support_events if released_dx[e].chosen}
-                if not (got & want):
-                    holds.append(
-                        f"{label}: linked diagnosis does not qualify under CMS coverage policy")
-                    continue
+                policy_linked = {e for e, dln in released_dx.items() if dln.chosen
+                                 and dln.chosen.code.replace(".", "").upper() in want}
+        if qualifying is not None:
+            # Governed by policy: a released diagnosis MUST qualify under it, whatever any
+            # model-authored edge claims -- a non-qualifying link is a coverage contradiction.
+            if not policy_linked:
+                holds.append(
+                    f"{label}: linked diagnosis does not qualify under CMS coverage policy")
+            continue
+        # Ungoverned: only a reconciled, anchored support relation can justify the service.
+        if not linked_events:
+            holds.append(
+                f"{label}: no independently reconciled, evidence-anchored REASON_FOR link to a "
+                f"released diagnosis (model self-confidence is not clinical support)")
     if holds:
-        return GateResult("medical_necessity", Outcome.UNKNOWN, "; ".join(holds),
-                          "necessity (structural + coverage)")
+        return GateResult("medical_necessity", Outcome.UNKNOWN, "; ".join(holds), authority)
     return GateResult("medical_necessity", Outcome.PASS,
-                      f"{len(procs)} procedure(s) each supported by a confident, "
-                      "policy-qualifying released diagnosis", "necessity (structural + coverage)")
+                      f"{len(procs)} procedure(s) each justified by authoritative coverage "
+                      f"policy or an independently reconciled, anchored diagnosis link",
+                      authority)
 
 
 def icd_excludes_gate(result: CodingResult, source: CodeSource) -> GateResult:
@@ -293,6 +395,13 @@ def source_manifest_gate(result: CodingResult) -> GateResult:
         return GateResult("source_manifest", Outcome.BLOCKED,
                           "required source(s) missing: " + ", ".join(man["missing_required"]),
                           "capability manifest")
+    # A source that IS present but whose bytes cannot be identified -- undigestible, or
+    # drifted from its reviewed lock -- is just as unsafe as an absent one: the claim would
+    # be certified against data nobody can name. (Codex F6-R5.)
+    if man.get("integrity_errors"):
+        return GateResult("source_manifest", Outcome.BLOCKED,
+                          "authoritative source integrity: "
+                          + "; ".join(man["integrity_errors"]), "capability manifest")
     degraded = man.get("degraded_optional") or []
     detail = ("all required sources loaded"
               + (f"; optional absent: {', '.join(degraded)}" if degraded else ""))

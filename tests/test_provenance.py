@@ -230,3 +230,278 @@ def test_verify_chain_detects_tail_truncation(tmp_path):
     conn.close()
     problems = repo.verify_chain("enc")
     assert any("truncation" in p or "terminal" in p for p in problems)
+
+
+# ---- Codex F6-R4-A round 3: the witness itself is mandatory, sealed, chained and atomic ----
+def _repo(tmp_path, name="prov.db"):
+    from claude_coder.provenance import SqliteAuditRepository
+    return SqliteAuditRepository(tmp_path / name)
+
+
+def _seeded(tmp_path):
+    repo = _repo(tmp_path)
+    repo.append("enc", "a", {"x": 1})
+    repo.append("enc", "b", {"x": 2})
+    assert repo.verify_chain("enc") == []
+    return repo
+
+
+def test_deleted_witness_is_an_integrity_failure_not_success(tmp_path):
+    """Deleting the sidecar used to return {} -> `verify_chain` said 'intact'. It must now be
+    a loud integrity failure, because otherwise deleting the witness and truncating the log
+    reopens the original blind spot."""
+    repo = _seeded(tmp_path)
+    repo._witness_path().unlink()
+    problems = repo.verify_chain("enc")
+    assert problems and any("missing" in p for p in problems)
+
+
+def test_deleted_witness_plus_terminal_row_deletion_is_detected(tmp_path):
+    import sqlite3
+    repo = _seeded(tmp_path)
+    repo._witness_path().unlink()
+    conn = sqlite3.connect(str(repo.db_path))
+    conn.execute("DROP TRIGGER audit_no_delete")
+    conn.execute("DELETE FROM audit_log WHERE seq=(SELECT MAX(seq) FROM audit_log)")
+    conn.commit()
+    conn.close()
+    assert repo.verify_chain("enc")                     # not silently 'intact'
+
+
+def test_empty_witness_is_an_integrity_failure(tmp_path):
+    repo = _seeded(tmp_path)
+    repo._witness_path().write_text("")
+    problems = repo.verify_chain("enc")
+    assert problems and any("empty" in p for p in problems)
+
+
+def test_corrupted_witness_line_is_reported_not_skipped(tmp_path):
+    repo = _seeded(tmp_path)
+    wp = repo._witness_path()
+    lines = wp.read_text().splitlines()
+    lines[0] = "{not json"
+    wp.write_text("\n".join(lines) + "\n")
+    problems = repo.verify_chain("enc")
+    assert any("corrupt" in p for p in problems)
+
+
+def test_edited_witness_entry_fails_its_seal(tmp_path):
+    import json
+    repo = _seeded(tmp_path)
+    wp = repo._witness_path()
+    lines = wp.read_text().splitlines()
+    forged = json.loads(lines[-1])
+    forged["record_sha256"] = "0" * 64                  # rewrite the witnessed head
+    lines[-1] = json.dumps(forged, sort_keys=True)
+    wp.write_text("\n".join(lines) + "\n")
+    problems = repo.verify_chain("enc")
+    assert any("seal mismatch" in p for p in problems)
+
+
+def test_partial_witness_is_detected(tmp_path):
+    """Truncating the witness tail (so it no longer covers every durable row) is detected by
+    the row->witness direction of the anchoring."""
+    repo = _seeded(tmp_path)
+    wp = repo._witness_path()
+    lines = wp.read_text().splitlines()
+    wp.write_text(lines[0] + "\n")                      # drop the terminal witness entry
+    problems = repo.verify_chain("enc")
+    assert any("witness entry for this record is absent" in p for p in problems)
+
+
+def test_duplicate_witness_entry_is_detected(tmp_path):
+    repo = _seeded(tmp_path)
+    wp = repo._witness_path()
+    lines = wp.read_text().splitlines()
+    wp.write_text("\n".join(lines + [lines[-1]]) + "\n")
+    problems = repo.verify_chain("enc")
+    assert problems and any("duplicate" in p or "chain link" in p for p in problems)
+
+
+def test_witness_write_failure_leaves_no_committed_row(tmp_path):
+    """The DB-commit vs witness-write boundary: the witness is fsynced BEFORE the commit, so
+    a witness failure can never leave a committed audit row nothing vouches for."""
+    import pytest
+    repo = _repo(tmp_path)
+    repo.append("enc", "a", {"x": 1})
+    before = len(repo.records("enc"))
+
+    def _boom(*_a, **_k):
+        raise OSError("witness storage unavailable")
+
+    repo._append_head_witness = _boom
+    with pytest.raises(OSError):
+        repo.append("enc", "b", {"x": 2})
+    assert len(_repo(tmp_path).records("enc")) == before     # nothing committed
+    assert _repo(tmp_path).verify_chain("enc") == []         # and still consistent
+
+
+def test_commit_failure_after_witness_write_is_an_in_doubt_tail(tmp_path):
+    """The other side of the boundary: a crash between the witness fsync and the commit is
+    explicitly recoverable -- reported by name, and the writer may extend the chain once."""
+    repo = _repo(tmp_path)
+    repo.append("enc", "a", {"x": 1})
+    repo._append_head_witness("enc", "0" * 64)               # simulate the lost commit
+    problems = repo.verify_chain("enc")
+    assert any("in-doubt" in p for p in problems)
+    fresh = _repo(tmp_path)
+    fresh.append("enc", "c", {"x": 3})                       # recovery: extension allowed once
+
+
+def test_writer_refuses_to_extend_a_destroyed_witness(tmp_path):
+    """Fail closed at WRITE time too: a writer must not quietly keep appending on top of a
+    witness that was deleted or rewritten."""
+    import pytest
+    repo = _seeded(tmp_path)
+    repo._witness_path().unlink()
+    with pytest.raises(OSError):
+        _repo(tmp_path).append("enc", "c", {"x": 3})
+    # ...and the same for a witness whose tail was truncated rather than deleted
+    repo2 = _repo(tmp_path, "trunc.db")
+    repo2.append("enc", "a", {"x": 1})
+    repo2.append("enc", "b", {"x": 2})
+    wp = repo2._witness_path()
+    wp.write_text(wp.read_text().splitlines()[0] + "\n")
+    with pytest.raises(OSError):
+        _repo(tmp_path, "trunc.db").append("enc", "d", {"x": 4})
+
+
+def test_witness_seal_is_keyed_and_records_its_custody(tmp_path, monkeypatch):
+    """An externally provisioned key puts custody outside the audit writer's own directory,
+    so a process holding only the db + witness files cannot forge entries."""
+    monkeypatch.setenv("PROVENANCE_WITNESS_KEY", "an-externally-provisioned-key")
+    repo = _repo(tmp_path, "keyed.db")
+    repo.append("enc", "a", {"x": 1})
+    assert repo.verify_chain("enc") == []
+    assert repo.witness_status()["key_custody"] == "external"
+    assert not repo._witness_key_path().exists()             # no key written to disk
+    monkeypatch.setenv("PROVENANCE_WITNESS_KEY", "a-different-key")
+    problems = repo.verify_chain("enc")                      # cannot re-seal under a new key
+    assert any("seal mismatch" in p for p in problems)
+
+
+def test_legacy_store_may_adopt_the_witness_but_a_destroyed_one_may_not(tmp_path):
+    """Post-fix review, DEPLOY BOUNDARY: a provenance store written before this control
+    existed has unsealed rows and no journal. It must be able to adopt the witness (otherwise
+    the first deploy holds every encounter forever), while a store whose witness was DESTROYED
+    must still fail closed. The two are distinguished by whether anything was ever sealed."""
+    import sqlite3
+    import pytest
+    from claude_coder.provenance import SqliteAuditRepository
+    legacy = tmp_path / "legacy.db"
+    repo = SqliteAuditRepository(legacy)
+    repo.append("enc", "seed", {"x": 0})                  # create the schema
+    repo._witness_path().unlink()                         # simulate a pre-witness store:
+    conn = sqlite3.connect(str(legacy))                   # rows present, nothing sealed
+    conn.execute("DROP TRIGGER audit_no_update")
+    conn.execute("UPDATE audit_log SET witness_sha256=NULL")
+    conn.commit()
+    conn.close()
+    SqliteAuditRepository(legacy).append("enc", "adopted", {"x": 1})   # adoption allowed
+    problems = SqliteAuditRepository(legacy).verify_chain("enc")
+    assert any("no witness seal" in p for p in problems)  # legacy row still reported honestly
+
+    # ...but once anything IS sealed, a deleted journal is fatal
+    SqliteAuditRepository(legacy)._witness_path().unlink()
+    with pytest.raises(OSError):
+        SqliteAuditRepository(legacy).append("enc", "c", {"x": 2})
+
+
+def test_verification_never_mints_a_seal_key(tmp_path):
+    """Post-fix review: `read_witness` must not CREATE a key. Minting one during a read-only
+    integrity check would let a store whose key was deleted be silently re-sealed."""
+    import pytest
+    repo = _seeded(tmp_path)
+    repo._witness_key_path().unlink()
+    entries, problems = repo.read_witness()
+    assert any("seal key is unavailable" in p or "cannot be verified" in p for p in problems)
+    assert not repo._witness_key_path().exists()          # no key written by verification
+    assert repo.verify_chain("enc")                       # and the chain is NOT declared intact
+    with pytest.raises(OSError):                          # nor may a writer extend it
+        _repo(tmp_path).append("enc", "c", {"x": 3})
+
+
+def test_concurrent_first_writers_adopt_one_seal_key(tmp_path):
+    """Post-fix review: the O_EXCL key creation must not fail (or, far worse, overwrite a key
+    that already sealed entries) when writers race the very first append."""
+    import threading
+    from claude_coder.provenance import SqliteAuditRepository
+    repo = SqliteAuditRepository(tmp_path / "race.db")
+    barrier = threading.Barrier(4)
+    keys: list[bytes] = []
+    errors: list[Exception] = []
+
+    def worker():
+        try:
+            barrier.wait()
+            keys.append(repo._witness_key(create=True))
+        except Exception as exc:                          # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors
+    assert len(set(keys)) == 1                            # one key, adopted by all racers
+    assert keys[0] == repo._witness_key_path().read_bytes().strip()
+
+
+def test_concurrent_writers_stay_witnessed(tmp_path):
+    """Post-fix review: the witness append sits inside the same BEGIN IMMEDIATE section as the
+    row, so concurrent writers serialize on it — the journal must not fork or lose entries."""
+    import threading
+    from claude_coder.provenance import SqliteAuditRepository
+    dbp = tmp_path / "concurrent.db"
+    SqliteAuditRepository(dbp).append("enc", "seed", {"n": 0})   # schema + WAL established
+    barrier = threading.Barrier(4)
+    errors: list[Exception] = []
+
+    def worker(i):
+        repo = SqliteAuditRepository(dbp)
+        try:
+            barrier.wait()
+            repo.append("enc", f"k{i}", {"n": i})
+        except Exception as exc:                          # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors
+    repo = SqliteAuditRepository(dbp)
+    assert len(repo.records("enc")) == 5
+    assert repo.verify_chain("enc") == []                 # every row sealed, journal intact
+
+
+def test_in_doubt_write_is_sealed_into_the_journal(tmp_path):
+    """Post-fix review: tolerating ONE in-doubt tail is required for crash recovery, so the
+    anomaly must be permanently RECORDED, not merely inferable while the divergence lasts."""
+    repo = _repo(tmp_path, "indoubt.db")
+    repo.append("enc", "a", {"x": 1})
+    lost = repo._append_head_witness("enc", "0" * 64)     # witness fsynced, commit lost
+    repo.append("enc", "b", {"x": 2})                     # recovery extension
+    entries, _ = repo.read_witness()
+    assert entries[-1].get("in_doubt_over") == lost       # sealed into the entry
+    problems = repo.verify_chain("enc")
+    assert any("IN-DOUBT" in p for p in problems)
+    # ...and the marker survives verification of the seal (it is part of the sealed payload)
+    assert not any("seal mismatch" in p for p in problems)
+
+
+def test_legacy_unwitnessed_rows_are_reported(tmp_path):
+    """A row written before the witness existed is unwitnessed, and says so."""
+    import sqlite3
+    repo = _seeded(tmp_path)
+    conn = sqlite3.connect(str(repo.db_path))
+    conn.execute(
+        "INSERT INTO audit_log(encounter_id, kind, recorded_at, control_mode,"
+        " previous_record_sha256, record_json, record_sha256) VALUES (?,?,?,?,?,?,?)",
+        ("enc2", "legacy", "2026-01-01T00:00:00+00:00", "ENFORCED_FAIL_CLOSED",
+         "", "{}", "legacy-sha"))
+    conn.commit()
+    conn.close()
+    assert any("no witness seal" in p for p in repo.verify_chain("enc2"))

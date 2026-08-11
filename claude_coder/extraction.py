@@ -13,6 +13,7 @@ change, and the hardcoding guard has nothing to catch here.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -148,16 +149,60 @@ def _default_llm(system: str, user: str) -> str:
     return out
 
 
-def _confidence(value: Any) -> float:
-    try:
-        return max(0.0, min(1.0, float(value)))
-    except (TypeError, ValueError):
-        return 0.0
+class ExtractionSchemaError(ValueError):
+    """The extractor returned output that is not a valid claim graph: invalid JSON, a
+    malformed fact/relation object, a blank or duplicate fact id, a malformed confidence, or
+    a malformed encounter/billing context. Raised so the pipeline fails closed to a retryable
+    SYSTEM_HOLD with ZERO retrieval, instead of silently discarding a claim-affecting
+    assertion (a dropped PART_OF leaves an integral component billable; an unparseable graph
+    must not read as 'no findings') or COERCING malformed output into a trusted value.
+    (Codex F6-R1/F6-R2.)"""
+
+
+def _confidence(value: Any, where: str, *, missing_ok: bool = True) -> float:
+    """A confidence is a FINITE JSON number in [0.0, 1.0] — nothing else.
+
+    Malformed output is REJECTED, never coerced: `true`/`false` (JSON booleans, which pass
+    Python's ``isinstance(x, (int, float))`` because ``bool`` subclasses ``int``), numeric
+    strings, ``NaN``/``Infinity`` (which Python's json accepts by default), and out-of-range
+    numbers all raise. Silently coercing them turns malformed model output into a TRUSTED —
+    frequently MAXIMUM — confidence that then drives eligibility, relation and autonomy
+    thresholds; the required behaviour is a typed, retryable extraction hold.
+
+    Out-of-range numbers REJECT rather than clamp: a value outside [0,1] is not a confidence
+    the schema can interpret, and clamping 42 -> 1.0 is the same silent-maximum defect.
+    An ABSENT (null/omitted) confidence is the one permitted non-number and means 0.0 —
+    fail-closed, since zero confidence cannot clear any control floor. (Codex F6-R1.)
+    """
+    if value is None:
+        if missing_ok:
+            return 0.0
+        raise ExtractionSchemaError(f"{where} is required and must be a number in [0.0, 1.0]")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ExtractionSchemaError(
+            f"{where} must be a JSON number in [0.0, 1.0], got {type(value).__name__} "
+            f"{value!r}")
+    num = float(value)
+    if not math.isfinite(num):
+        raise ExtractionSchemaError(f"{where} must be a finite number, got {value!r}")
+    if not 0.0 <= num <= 1.0:
+        raise ExtractionSchemaError(f"{where} must be within [0.0, 1.0], got {value!r}")
+    return num
 
 
 def _evidence_span(value: Any) -> EvidenceSpan | None:
+    """An evidence span, or None when the element is malformed (the caller raises).
+
+    A quote must be a JSON string (or an object with a string `text`). Anything else --
+    a boolean, a number, a nested list -- is NOT stringified into a pseudo-quote: the same
+    coercion class as the confidence defect, and a fabricated "True" span would go on to
+    fail anchoring for the wrong reason instead of failing the schema loudly.
+    """
     if isinstance(value, dict):
-        text = str(value.get("text", ""))
+        raw_text = value.get("text", "")
+        if isinstance(raw_text, bool) or not isinstance(raw_text, str):
+            return None
+        text = raw_text
         if not text.strip():
             return None
         start = value.get("start")
@@ -171,11 +216,17 @@ def _evidence_span(value: Any) -> EvidenceSpan | None:
         except (TypeError, ValueError):
             page = None
         return EvidenceSpan(text=text, section=value.get("section"), start=start, page=page)
-    text = str(value)
-    return EvidenceSpan(text=text) if text.strip() else None
+    if isinstance(value, bool) or not isinstance(value, str):
+        return None                      # never stringify a non-quote into a pseudo-quote
+    return EvidenceSpan(text=value) if value.strip() else None
 
 
-def _relation(value: Any) -> RelationAssertion | None:
+def _relation(value: Any, index: int) -> RelationAssertion | None:
+    """A relation, or None when its identity/shape is malformed (the caller raises).
+
+    Confidence is validated with the SAME strict rule as fact confidence and raises
+    directly, so a boolean/string/NaN relation confidence can never be coerced into a
+    trusted edge weight that the necessity control floor then reads. (Codex F6-R1.)"""
     if not isinstance(value, dict):
         return None
     try:
@@ -191,17 +242,9 @@ def _relation(value: Any) -> RelationAssertion | None:
     if efi is not None and not isinstance(efi, list):
         return None                                  # malformed -> extract_note raises (R1)
     refs = [f"event:{str(x).strip()}" for x in (efi or []) if str(x).strip()]
+    conf = _confidence(value.get("confidence"), f"relation #{index} 'confidence'")
     return RelationAssertion(subject, pred, obj, state=state, evidence_span_ids=refs,
-                             extraction_source="clinical-graph-v1",
-                             confidence=_confidence(value.get("confidence")))
-
-
-class ExtractionSchemaError(ValueError):
-    """The extractor returned output that is not a valid claim graph: invalid JSON, a
-    malformed fact/relation object, a blank or duplicate fact id. Raised so the pipeline
-    fails closed to a retryable SYSTEM_HOLD with ZERO retrieval, instead of silently
-    discarding a claim-affecting assertion (a dropped PART_OF leaves an integral component
-    billable; an unparseable graph must not read as 'no findings'). (Codex F6-R1.)"""
+                             extraction_source="clinical-graph-v1", confidence=conf)
 
 
 def _strict_extract_json(text: str) -> dict:
@@ -221,24 +264,101 @@ def _strict_extract_json(text: str) -> dict:
     return data
 
 
+# Participant kinds the encounter context may declare. This is an identity vocabulary for
+# WHO takes part in an encounter (a natural person vs a legal entity) -- not a medical code
+# set, and nothing here is code-family shaped.
+_PARTICIPANT_TYPES = ("person", "organization")
+
+# The role designation that authorizes a person to be billed as having performed a service.
+# Only an explicit, context-issued designation counts -- there is no "no roles means anything"
+# wildcard, because an unauthorized-but-known person is exactly the actor-authorization defect
+# this graph exists to prevent. (Codex F6-R2.)
+_PERFORMER_ROLE = "performer"
+
+
+def _string_list(value: Any, where: str) -> list[str]:
+    """A strictly typed list of non-blank strings, or a typed error.
+
+    A mapping such as ``{"performer": true}`` is NOT silently iterated by key (which would
+    manufacture a valid ``performer`` role out of malformed input), and a bare string is not
+    iterated character-by-character. Absent/null is an empty list; anything else raises.
+    (Codex F6-R2.)"""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ExtractionSchemaError(
+            f"{where} must be a JSON array of strings, got {type(value).__name__}")
+    out: list[str] = []
+    for i, item in enumerate(value):
+        if isinstance(item, bool) or not isinstance(item, str) or not item.strip():
+            raise ExtractionSchemaError(
+                f"{where}[{i}] must be a non-blank string, got {item!r}")
+        out.append(item.strip())
+    return out
+
+
 def _participant_index(billing_context: dict[str, Any] | None) -> dict[str, dict]:
     """Typed participant graph from the STRUCTURED encounter context: id -> record carrying
     type (person/organization), roles, function, and organization affiliations. Actor
     identity is resolved against THIS graph -- the model may SELECT a participant but cannot
-    invent identity, its type, its affiliation, or its function. (Codex F6-R2.)"""
+    invent identity, its type, its affiliation, or its function. (Codex F6-R2.)
+
+    The WHOLE context schema is validated strictly and fails closed, because every downstream
+    ownership decision is only as trustworthy as this roster:
+      - `participants` must be an array of objects, each with a non-blank string `id`;
+      - `type` must be an explicitly declared participant kind;
+      - `roles`/`affiliations` must be arrays of non-blank strings (a mapping or a bare
+        string is malformed input, never iterated into roles);
+      - `function` must be a non-blank string when present;
+      - a REPEATED participant id is rejected outright rather than resolved last-write-wins,
+        since a duplicate/conflicting identity makes ownership unknowable.
+    """
+    if billing_context is None:
+        return {}
+    if not isinstance(billing_context, dict):
+        raise ExtractionSchemaError("billing_context must be a JSON object")
+    raw_participants = billing_context.get("participants")
+    if raw_participants is None:
+        raw_participants = []
+    if not isinstance(raw_participants, list):
+        raise ExtractionSchemaError("billing_context 'participants' must be an array")
+    entity = billing_context.get("billing_entity_id")
+    if entity is not None and (isinstance(entity, bool) or not isinstance(entity, str)
+                               or not entity.strip()):
+        raise ExtractionSchemaError(
+            "billing_context 'billing_entity_id' must be a non-blank string when present")
     idx: dict[str, dict] = {}
-    for p in (billing_context or {}).get("participants") or []:
+    for i, p in enumerate(raw_participants):
         if not isinstance(p, dict):
-            continue
-        pid = str(p.get("id", "")).strip()
-        if not pid:
-            continue
+            raise ExtractionSchemaError(f"billing_context participant #{i} is not an object")
+        pid = p.get("id")
+        if isinstance(pid, bool) or not isinstance(pid, str) or not pid.strip():
+            raise ExtractionSchemaError(
+                f"billing_context participant #{i} has no non-blank string 'id'")
+        pid = pid.strip()
+        if pid in idx:
+            raise ExtractionSchemaError(
+                f"billing_context declares participant id {pid!r} more than once; a duplicate "
+                f"or conflicting identity makes claim ownership unknowable")
+        ptype = p.get("type")
+        if isinstance(ptype, bool) or not isinstance(ptype, str) \
+                or ptype.strip().lower() not in _PARTICIPANT_TYPES:
+            raise ExtractionSchemaError(
+                f"billing_context participant {pid!r} must declare type one of "
+                f"{list(_PARTICIPANT_TYPES)}, got {ptype!r}")
+        function = p.get("function")
+        if function is not None and (isinstance(function, bool) or not isinstance(function, str)
+                                     or not function.strip()):
+            raise ExtractionSchemaError(
+                f"billing_context participant {pid!r} 'function' must be a non-blank string "
+                f"when present")
         idx[pid] = {
-            "type": str(p.get("type", "")).strip().lower(),
-            "roles": {str(r).strip().lower() for r in (p.get("roles") or [])},
-            "function": (str(p.get("function")).strip() if p.get("function") else None),
-            "affiliations": {str(a).strip() for a in (p.get("affiliations") or [])
-                             if str(a).strip()},
+            "type": ptype.strip().lower(),
+            "roles": {r.lower() for r in
+                      _string_list(p.get("roles"), f"participant {pid!r} 'roles'")},
+            "function": function.strip() if function else None,
+            "affiliations": set(
+                _string_list(p.get("affiliations"), f"participant {pid!r} 'affiliations'")),
         }
     return idx
 
@@ -246,10 +366,12 @@ def _participant_index(billing_context: dict[str, Any] | None) -> dict[str, dict
 def extract_note(note_text: str, llm: LLMFn | None = None,
                  billing_context: dict[str, Any] | None = None) -> ExtractionResult:
     llm = llm or _default_llm
+    # Validate the authoritative encounter context BEFORE spending an extraction call: a
+    # malformed roster can never produce trustworthy ownership, so it fails closed up front.
+    participants = _participant_index(billing_context)
     user = json.dumps({"encounter_context": billing_context or {}, "note": note_text},
                       sort_keys=True)
     raw = _strict_extract_json(llm(_SYSTEM, user))
-    participants = _participant_index(billing_context)
     seen_ids: set[str] = set()
     # R1: strict top-level schema -- 'facts' must be a present array (missing/null/wrong-type
     # is a malformed graph, NOT an empty note); 'relations' must be an array when present.
@@ -300,15 +422,20 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
                 raise ExtractionSchemaError(
                     f"fact #{i} has an empty/malformed evidence element")
             spans.append(sp)
-        raw_conf = item.get("confidence")
-        if raw_conf is not None and not isinstance(raw_conf, (int, float)):
-            raise ExtractionSchemaError(f"fact #{i} 'confidence' must be numeric")
-        scalar = _confidence(raw_conf)
+        # Every confidence -- scalar and per-axis -- is validated as a finite JSON number.
+        # This applies to EVERY fact kind (procedure, diagnosis, supply, drug, imaging, E/M):
+        # `_REQUIRED_AXES` covers all of them, and EVERY supplied axis value is checked, not
+        # only the required axes, so an unused-but-malformed axis cannot ride along either.
+        scalar = _confidence(item.get("confidence"), f"fact #{i} 'confidence'")
         supplied_axes = item.get("axis_confidence")
         if supplied_axes is not None and not isinstance(supplied_axes, dict):
             raise ExtractionSchemaError(f"fact #{i} 'axis_confidence' must be an object")
         supplied_axes = supplied_axes or {}
-        axes = {axis: _confidence(supplied_axes.get(axis)) for axis in _REQUIRED_AXES[kind]}
+        for axis_name, axis_value in supplied_axes.items():
+            _confidence(axis_value, f"fact #{i} axis_confidence[{axis_name!r}]")
+        axes = {axis: _confidence(supplied_axes.get(axis),
+                                  f"fact #{i} axis_confidence[{axis!r}]")
+                for axis in _REQUIRED_AXES[kind]}
         attrs_in = item.get("attributes")
         if attrs_in is not None and not isinstance(attrs_in, dict):
             raise ExtractionSchemaError(f"fact #{i} 'attributes' must be an object")
@@ -325,11 +452,14 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
         # organization id is kept only when the context AFFILIATES this performer to it; a
         # model-authored function is discarded and replaced only by the context's function.
         # Anything unresolved leaves ownership UNKNOWN so the service HOLDS before retrieval.
+        # The performer designation must be EXPLICIT: a context person carrying no roles (or
+        # only non-performer roles such as a scribe/supervisor/referrer) is NOT authorized to
+        # be billed as the performer. The former "or not prec['roles']" wildcard let the model
+        # elevate any known person into the billing performer. (Codex F6-R2.)
         perf = str(attributes.get("performer_id", "")).strip()
         prec = participants.get(perf)
         attributes.pop("performer_function", None)         # never trust a model-authored function
-        if perf and prec and prec["type"] == "person" and (
-                "performer" in prec["roles"] or not prec["roles"]):
+        if perf and prec and prec["type"] == "person" and _PERFORMER_ROLE in prec["roles"]:
             attributes["performer_id"] = perf
             if prec["function"]:
                 attributes["performer_function"] = prec["function"]
@@ -343,7 +473,8 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
             attributes.pop("performer_id", None)
             attributes.pop("organization_id", None)
         if billing_context and billing_context.get("billing_entity_id"):
-            attributes["billing_entity_id"] = billing_context["billing_entity_id"]
+            attributes["billing_entity_id"] = str(
+                billing_context["billing_entity_id"]).strip()
         fid = str(item.get("fact_id") or f"F{i+1}").strip()
         if not fid:
             raise ExtractionSchemaError(f"fact #{i} has a blank fact_id")
@@ -358,7 +489,7 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
         ))
     relations: list[RelationAssertion] = []
     for j, x in enumerate(relations_in):
-        rel = _relation(x)
+        rel = _relation(x, j)
         if rel is None:
             raise ExtractionSchemaError(
                 f"relation #{j} is malformed and cannot be safely dropped: {x!r}")

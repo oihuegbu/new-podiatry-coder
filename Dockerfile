@@ -32,12 +32,19 @@ COPY . .
 # Output and log dirs will typically be bind-mounted from the host
 RUN mkdir -p output/results logs data/result_cache
 
-# Prepare the pinned, checksum-verified authoritative NCCI PTP snapshot from CMS. This runs
-# in the PRODUCTION app stage (and is inherited by the test stage) so a clean-checkout build
-# of --target app -- and a fresh app_data volume seeded from it -- carries the REQUIRED
-# source and passes the source-manifest gate, instead of silently depending on an untracked
-# host copy. The checksum lock makes the artifact reproducible/provenance-verified.
-# (Codex F6-R8.)
+# Prepare the authoritative NCCI PTP snapshot from the PINNED release inputs recorded in
+# data/sources/ncci_ptp.lock.json (exact URLs + sizes + SHA-256, or a controlled immutable
+# copy via NCCI_INPUT_DIR), verifying every input checksum and then the built output's
+# checksum. This runs in the PRODUCTION app stage (and is inherited by the test stage) so a
+# clean-checkout build of --target app -- and a fresh app_data volume seeded from it --
+# carries the REQUIRED source and passes the source-manifest gate, instead of silently
+# depending on an untracked host copy.
+#
+# Both ends are pinned deliberately: pinning only the output detected drift but still
+# resolved whichever quarter CMS exposed at build time, so a clean rebuild of a reviewed
+# commit could fail or change purely because CMS rotated a quarter. Intentional version
+# upgrades go through `tools/build_ncci_ptp.py --refresh`, which proposes a NEW lock for
+# review rather than redefining this build. (Codex F6-R8.)
 RUN PYTHONPATH=/app python tools/prepare_ncci.py
 
 ENV PYTHONUNBUFFERED=1

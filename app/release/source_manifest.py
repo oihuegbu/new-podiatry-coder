@@ -52,6 +52,20 @@ def _authoritative_paths() -> dict[str, Path]:
     return paths
 
 
+def authoritative_paths() -> dict[str, Path]:
+    """Public view of the authoritative source registry ({source_id: path}).
+
+    Exposed so other release-bearing components (the coder's capability manifest) bind the
+    SAME source identities and release metadata instead of maintaining a parallel list that
+    can silently drift. (Codex F6-R5.)"""
+    return _authoritative_paths()
+
+
+def release_metadata(source_id: str) -> dict:
+    """Public view of a source's release/edition/effective window."""
+    return _release_metadata(source_id)
+
+
 def sha256_file(path: Path) -> str:
     stat = path.stat()
     return _sha256_cached(str(path), stat.st_mtime_ns, stat.st_size)

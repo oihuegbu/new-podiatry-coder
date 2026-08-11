@@ -718,12 +718,20 @@ def test_necessity_requires_per_service_diagnosis_linkage():
     # a procedure and an UNRELATED diagnosis -> not defensible -> UNKNOWN (hold)
     unlinked = CodingResult("e", "2026-08-01", lines=[proc, dx])
     assert medical_necessity_gate(unlinked).outcome is Outcome.UNKNOWN
-    # the diagnosis explicitly justifies the procedure (REASON_FOR) -> PASS
+    # the diagnosis explicitly justifies the procedure (REASON_FOR) AND that edge is
+    # evidence-anchored and independently reconciled by the deterministic layer -> PASS
     linked = CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[
         RelationAssertion(subject_event_id="df", predicate=RelationPredicate.REASON_FOR,
                           object_event_id="pf", state=RelationState.ASSERTED,
-                          confidence=0.99)])
+                          confidence=0.99, evidence_span_ids=["span-1"],
+                          reconciliation_status="source_colocated")])
     assert medical_necessity_gate(linked).outcome is Outcome.PASS
+    # the SAME edge without independent reconciliation cannot certify (Codex F6-R3)
+    unreconciled = CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[
+        RelationAssertion(subject_event_id="df", predicate=RelationPredicate.REASON_FOR,
+                          object_event_id="pf", state=RelationState.ASSERTED,
+                          confidence=0.99, evidence_span_ids=["span-1"])])
+    assert medical_necessity_gate(unreconciled).outcome is Outcome.UNKNOWN
     # no diagnosis at all -> BLOCKED
     none_dx = CodingResult("e", "2026-08-01", lines=[proc])
     assert medical_necessity_gate(none_dx).outcome is Outcome.BLOCKED
@@ -743,10 +751,15 @@ def _nec_lines():
     return _line("P1", FactKind.PROCEDURE, "pf"), _line("D1", FactKind.DIAGNOSIS, "df")
 
 
-def _reason(conf):
+def _reason(conf, *, state=None, anchored=True, reconciled="source_colocated"):
+    """A REASON_FOR edge. Defaults to the ONLY shape that may satisfy necessity: asserted,
+    evidence-anchored, and stamped reconciled by the deterministic provenance layer."""
     from claude_coder.models import RelationAssertion, RelationPredicate, RelationState
     return RelationAssertion(subject_event_id="df", predicate=RelationPredicate.REASON_FOR,
-                             object_event_id="pf", state=RelationState.ASSERTED, confidence=conf)
+                             object_event_id="pf",
+                             state=state or RelationState.ASSERTED, confidence=conf,
+                             evidence_span_ids=["span-1"] if anchored else [],
+                             reconciliation_status=reconciled)
 
 
 def test_necessity_rejects_zero_confidence_relation():
@@ -756,7 +769,7 @@ def test_necessity_rejects_zero_confidence_relation():
     r = CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[_reason(0.0)])
     assert medical_necessity_gate(r).outcome is Outcome.UNKNOWN            # low-confidence edge
     r2 = CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[_reason(0.99)])
-    assert medical_necessity_gate(r2).outcome is Outcome.PASS              # confident, ungoverned
+    assert medical_necessity_gate(r2).outcome is Outcome.PASS     # confident, anchored, reconciled
 
 
 def test_necessity_requires_coverage_policy_qualification():
@@ -769,3 +782,99 @@ def test_necessity_requires_coverage_policy_qualification():
     assert medical_necessity_gate(r, gov_nonqualify).outcome is Outcome.UNKNOWN   # contradiction
     gov_qualify = MockSource(); gov_qualify._coverage = {"P1": {"D1"}}
     assert medical_necessity_gate(r, gov_qualify).outcome is Outcome.PASS         # dx qualifies
+
+
+# ---- Codex F6-R3 (round 3): unreconciled/unanchored model edges cannot certify necessity ---
+def test_necessity_rejects_unreconciled_high_confidence_relation():
+    """The reviewer's exact reproduction: an edge that passed `validate_relations` with valid
+    anchored evidence but was NEVER independently reconciled. The extraction model's own
+    confidence is not independent clinical support, so it must HOLD, not PASS."""
+    from claude_coder.models import CodingResult, Outcome
+    from claude_coder.gates import medical_necessity_gate
+    proc, dx = _nec_lines()
+    r = CodingResult("e", "2026-08-01", lines=[proc, dx],
+                     relations=[_reason(0.99, reconciled="unreconciled")])
+    assert medical_necessity_gate(r).outcome is Outcome.UNKNOWN
+
+
+def test_necessity_rejects_unanchored_relation():
+    """A relation with no verified evidence references is not tied to the source document."""
+    from claude_coder.models import CodingResult, Outcome
+    from claude_coder.gates import medical_necessity_gate
+    proc, dx = _nec_lines()
+    r = CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[_reason(0.99, anchored=False)])
+    assert medical_necessity_gate(r).outcome is Outcome.UNKNOWN
+
+
+def test_necessity_rejects_conflicting_edges():
+    """A conflicting/uncertain duplicate edge disqualifies the pair -- a confident edge can
+    never out-vote a documented disagreement."""
+    from claude_coder.models import CodingResult, Outcome, RelationState
+    from claude_coder.gates import medical_necessity_gate
+    proc, dx = _nec_lines()
+    for bad_state in (RelationState.UNCERTAIN, RelationState.NEGATED):
+        r = CodingResult("e", "2026-08-01", lines=[proc, dx],
+                         relations=[_reason(0.99), _reason(0.99, state=bad_state)])
+        assert medical_necessity_gate(r).outcome is Outcome.UNKNOWN
+
+
+def test_necessity_accepts_corroborated_reconciliation():
+    from claude_coder.models import CodingResult, Outcome
+    from claude_coder.gates import medical_necessity_gate
+    proc, dx = _nec_lines()
+    r = CodingResult("e", "2026-08-01", lines=[proc, dx],
+                     relations=[_reason(0.99, reconciled="corroborated")])
+    assert medical_necessity_gate(r).outcome is Outcome.PASS
+
+
+def test_necessity_control_is_versioned_configuration_not_an_inline_constant():
+    """The control floor/accepted statuses are reviewed config, and a missing/malformed control
+    file is an ERROR (autonomy stops) -- never a silent built-in default."""
+    import claude_coder.gates as g
+    from claude_coder.models import CodingResult, Outcome
+    cfg = g.load_necessity_control()
+    assert cfg["control_mode"] == "ENFORCED_FAIL_CLOSED" and cfg["authority"]
+    assert g._NECESSITY_CONTROL_FILE.exists()
+    assert g.medical_necessity_gate(
+        CodingResult("e", "2026-08-01", lines=list(_nec_lines()),
+                     relations=[_reason(0.99)])).authority.endswith(f"[{cfg['version']}]")
+    proc, dx = _nec_lines()
+    saved_cache, saved_path = g._NECESSITY_CONTROL_CACHE, g._NECESSITY_CONTROL_FILE
+    try:
+        g._NECESSITY_CONTROL_CACHE = None
+        g._NECESSITY_CONTROL_FILE = saved_path.parent / "does-not-exist.json"
+        out = g.medical_necessity_gate(
+            CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[_reason(0.99)]))
+        assert out.outcome is Outcome.ERROR           # fail closed, no default floor
+    finally:
+        g._NECESSITY_CONTROL_CACHE, g._NECESSITY_CONTROL_FILE = saved_cache, saved_path
+
+
+def test_reconciliation_status_is_written_only_by_the_deterministic_layer():
+    """A model-authored `reconciliation_status` cannot survive: `validate_relations` restamps
+    every edge from deterministic evidence, so claiming to be reconciled achieves nothing."""
+    from claude_coder import provenance
+    from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind, RelationAssertion,
+                                     RelationPredicate, RelationState)
+    span = EvidenceSpan("shared verbatim passage", anchored=True, text_sha256="h",
+                        span_id="shared-1")
+    dxf = ClinicalFact(FactKind.DIAGNOSIS, "dx", fact_id="df", evidence=[span])
+    prf = ClinicalFact(FactKind.PROCEDURE, "proc", fact_id="pf", evidence=[span])
+    forged = RelationAssertion("df", RelationPredicate.REASON_FOR, "pf",
+                               state=RelationState.ASSERTED, confidence=0.99,
+                               evidence_span_ids=["shared-1"],
+                               reconciliation_status="externally_verified")
+    # co-located: ONE verified span documents both endpoints -> deterministic reconciliation
+    out = provenance.validate_relations([forged], [dxf, prf])
+    assert out[0].reconciliation_status == provenance.SOURCE_COLOCATED
+
+    # no shared span and a single assertion -> unreconciled, whatever the model claimed
+    other = EvidenceSpan("a different passage", anchored=True, text_sha256="h2",
+                         span_id="other-1")
+    prf2 = ClinicalFact(FactKind.PROCEDURE, "proc", fact_id="pf", evidence=[other])
+    forged2 = RelationAssertion("df", RelationPredicate.REASON_FOR, "pf",
+                                state=RelationState.ASSERTED, confidence=0.99,
+                                evidence_span_ids=["shared-1", "other-1"],
+                                reconciliation_status="externally_verified")
+    out2 = provenance.validate_relations([forged2], [dxf, prf2])
+    assert out2[0].reconciliation_status == provenance.UNRECONCILED
