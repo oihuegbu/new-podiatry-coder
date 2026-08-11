@@ -6,7 +6,10 @@ the durable memory** of this project. Claude sessions are disposable working mem
 
 Repo facts this doc assumes:
 - repository: `oihuegbu/new-podiatry-coder`
-- working dir on the box: `~/work`  (the deployed app lives at `/opt/app`)
+- **Claude Code itself runs locally** (your laptop) -- it reaches the EC2 box only over SSH to
+  run shell/docker/git commands there. It does not launch `claude` on the box for normal work.
+- remote working dir (reached over SSH, never logged into directly): `~/work` on the box (the
+  deployed app lives at `/opt/app`)
 - active branch: `claude-medical-coder`
 - engineering contract: `CLAUDE.md`; collaboration contract: `COLLABORATION.md`
 
@@ -55,12 +58,14 @@ commit + handoff       the artifact that outlives the session
 
 ## Session lifecycle
 
-1. **Start clean** on the box:
+1. **Start clean**, from your local Claude Code session, over SSH:
    ```bash
-   cd ~/work
-   git fetch origin && git status --short --branch && git rev-parse HEAD
-   ~/bin/claude-session          # credential-safe launcher (see scripts/)
+   ssh -i terraform/podiatry-coder-key.pem ec2-user@<box-ip> \
+     'cd ~/work && git fetch origin -q && git status --short --branch && git rev-parse HEAD'
    ```
+   Confirm branch + HEAD match what the issue's latest handoff/review expects before touching
+   anything. If the box is stopped, start it (`aws ec2 start-instances` /
+   `aws ec2 wait instance-running`) and re-query its public IP -- it changes on stop/start.
 2. **Bootstrap prompt** (small -- do NOT paste prior Claude/Codex history):
    ```
    Work only on GitHub issue #<N> in oihuegbu/new-podiatry-coder (branch claude-medical-coder).
@@ -72,8 +77,18 @@ commit + handoff       the artifact that outlives the session
    packages or load large datasets. Do not start background loops.
    ```
 3. **Plan (Opus)** -> **implement (per model policy)** -> **focused tests** ->
-   **Opus adversarial self-review** -> **commit + exact-SHA handoff** -> **exit**.
+   **Opus adversarial self-review** -> **commit on the box** -> **push from local** ->
+   **exact-SHA handoff** -> **exit**.
 4. **Codex reviews out of session.** Findings -> **new fresh session** for remediation.
+
+Push happens from local, not the box: the box has no git push credentials and none should be
+installed there. From local: `git remote add ec2 ec2-user@<box-ip>:work`, then
+`GIT_SSH_COMMAND="ssh -i terraform/podiatry-coder-key.pem" git fetch ec2 claude-medical-coder`,
+verify `git merge-base --is-ancestor origin/claude-medical-coder ec2/claude-medical-coder`
+(expect fast-forward -- stop and report if not), then
+`git push origin ec2/claude-medical-coder:refs/heads/claude-medical-coder`, then
+`git remote remove ec2`. This pushes the box's exact fetched objects, not the local working
+tree -- the local checkout is not kept in sync and must never be used as a development copy.
 
 ## Testing discipline
 
@@ -106,8 +121,20 @@ files involved; recommended next diagnostic step. Do not make another speculativ
 
 ## Credential safety (specific to this repo)
 
-The app `.env` (fetched from Secrets Manager) contains `ANTHROPIC_API_KEY` and
-`OPENAI_API_KEY`. An interactive Claude launched from a shell that sourced `.env` would bill
-the app's API account instead of your subscription. Always launch via `~/bin/claude-session`
-(scripts/claude-session.sh), which unsets those before exec-ing `claude`. Never delete the
+Normal work (section above) never launches `claude` on the box at all -- Claude Code runs
+locally and only reaches the box over SSH to run shell/docker/git commands, so the box's own
+credentials are never in play and this section does not apply to it.
+
+It matters only for the **manual fallback**: a human SSHing directly into the box and running
+`claude` interactively there (e.g. exploratory debugging without a laptop on hand). In that
+case: the app `.env` (fetched from Secrets Manager) contains `ANTHROPIC_API_KEY` and
+`OPENAI_API_KEY`, and `~/.bashrc` sources `~/.claude-code-env` into every login shell on the
+box. An interactive Claude launched from such a shell without unsetting those would bill the
+app's API account instead of a subscription. Always launch via `~/bin/claude-session`
+(`scripts/claude-session.sh`), which unsets those before exec-ing `claude`. Never delete the
 app's `.env`.
+
+Note: as of 2026-08-11 the box's `claude` has no subscription login (`claude auth status` ->
+`loggedIn: false`) -- unsetting the API keys with no other credential configured means
+`claude-session` would need an interactive login (device-code OAuth) completed by a human at
+the terminal before first use; it cannot be driven headless/unattended in that state.
