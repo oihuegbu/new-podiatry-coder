@@ -156,3 +156,35 @@ on a live box: `echo IDLE_MINUTES=5 | sudo tee /etc/default/idle-watchdog`.
 ```bash
 terraform destroy
 ```
+
+## Running terraform from the EC2 box
+
+Operator-driven infra work (this repo's own terraform) is meant to run from
+the box over SSH, like everything else — but the box's own always-attached
+IAM role (`podiatry-coder-ec2-role`) is deliberately narrow: it's the same
+identity the running application uses, and it must never be able to widen
+its own permissions or touch the checkpoint-anchor bucket's delete-Deny
+(issue #6, F6-R4-A — a prior version of this file attached PowerUserAccess
+directly to that role, which let it delete/rewrite its own restricting
+policy; that was a real hole, not a theoretical one).
+
+Instead, a separate `podiatry-coder-terraform-operator` role holds
+PowerUserAccess + IAM management scoped to this project's own roles, and is
+assumable only by the account root — never by the box's own instance-profile
+credentials, which are not a trusted principal in its trust policy. To run
+terraform from the box:
+
+```bash
+# from LOCAL (has the account root credentials), generate short-lived creds:
+aws sts assume-role --role-arn arn:aws:iam::<account-id>:role/podiatry-coder-terraform-operator \
+  --role-session-name terraform-work --duration-seconds 3600
+# copy the resulting AccessKeyId/SecretAccessKey/SessionToken into the SSH
+# session's environment (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+# AWS_SESSION_TOKEN) -- never write them to a file on the box, never persist
+# them past that one terraform session. They expire in <= 1 hour regardless.
+cd ~/work/terraform && terraform plan / apply
+```
+
+After applying, sync `terraform.tfstate` back to local (`scp`) so both
+copies stay consistent — there's no shared remote backend, so this is a
+manual step, not automatic.
