@@ -660,7 +660,17 @@ class SqliteAuditRepository(AuditRepository):
                 # the witness tail against the externally anchored checkpoint, so a
                 # CONSISTENT truncation of both mutable sides is refused here, on the
                 # release path, rather than reported after the fact. (Codex F6-R4-A.)
-                in_doubt_over, witness_seq = self._assert_witness_extendable(conn)
+                # ONE anchor object for the whole append. Production resolves a fresh one
+                # per call so a configuration change takes effect without a restart -- but
+                # WITHIN an append the three uses (verify, mark, advance) must be the same
+                # anchor, or a configuration change landing mid-append could seal
+                # `anchored: true` into the journal and then advance nothing, leaving a
+                # committed row whose entry claims an anchor that never recorded it. That
+                # entry would be permanent, unforgeable evidence of a lie, and it would make
+                # the store un-adoptable forever. (Post-fix review.)
+                anchor = self._anchor()
+                in_doubt_over, witness_seq = self._assert_witness_extendable(
+                    conn, anchor=anchor)
                 row = conn.execute(
                     "SELECT record_sha256 FROM audit_log WHERE encounter_id=?"
                     " ORDER BY seq DESC LIMIT 1", (str(encounter_id),)).fetchone()
@@ -683,9 +693,14 @@ class SqliteAuditRepository(AuditRepository):
                 # The previous order (commit, then witness) could leave a committed row with
                 # no witness at all -- indistinguishable from a truncated witness.
                 new_seq = witness_seq + 1
+                # Whether this entry is being written UNDER a configured anchor is sealed
+                # into the entry itself, so the journal carries permanent, unforgeable
+                # evidence of whether this store was ever anchored. That is what makes the
+                # legacy-adoption path safe rather than a bypass: see
+                # `_prior_anchoring_evidence`.
                 witness_sha = self._append_head_witness(
                     encounter_id, entry["record_sha256"], in_doubt_over=in_doubt_over,
-                    expected_seq=new_seq)
+                    expected_seq=new_seq, anchored=bool(anchor.configured))
                 # ...and the externally anchored checkpoint advances between the journal
                 # fsync and the commit, so the anchor is never BEHIND by more than the one
                 # entry a crash can lose, and is never AHEAD of the journal in healthy
@@ -693,7 +708,8 @@ class SqliteAuditRepository(AuditRepository):
                 # journal entries were removed. A failure here aborts the append (no row is
                 # committed), which is the required posture -- an unverifiable anchor must
                 # hold the release, not be logged and ignored.
-                self._advance_checkpoint(new_seq, witness_sha, entry["record_sha256"])
+                self._advance_checkpoint(new_seq, witness_sha, entry["record_sha256"],
+                                         anchor=anchor)
                 conn.execute(
                     "INSERT INTO audit_log(encounter_id, kind, recorded_at, control_mode,"
                     " previous_record_sha256, record_json, record_sha256, witness_sha256)"
@@ -874,7 +890,70 @@ class SqliteAuditRepository(AuditRepository):
             return self._injected_anchor
         return resolve_checkpoint_anchor()
 
-    def _assert_checkpoint_extendable(self, tail: dict | None, tail_seq: int) -> None:
+    def _tail_append_committed(self, tail: dict | None, conn=None) -> bool:
+        """Did the append that wrote the journal's TERMINAL entry commit its durable row?
+
+        The ordering contract is: seal + fsync the journal entry -> advance the checkpoint
+        anchor -> commit the row. So a committed row bearing the tail's seal is proof that
+        the anchor advance for that sequence SUCCEEDED. Conversely a tail with no committed
+        row is the one legitimate state in which an entry can be marked anchored while the
+        anchor holds nothing for it (the anchor write failed, aborting that append).
+
+        With no connection (the reporting path) the answer is unknown, and unknown resolves
+        to True -- the conservative direction, since it withholds the one tolerance the
+        adoption path grants rather than widening it.
+        """
+        if tail is None:
+            return False
+        if conn is None:
+            return True
+        row = conn.execute(
+            "SELECT witness_sha256 FROM audit_log ORDER BY seq DESC LIMIT 1").fetchone()
+        return bool(row and row[0] and str(row[0]) == str(tail.get("seal")))
+
+    def _prior_anchoring_evidence(self, tail: dict | None, tail_seq: int,
+                                  conn=None) -> int | None:
+        """The sequence of a journal entry that PROVES this store was already anchored, or
+        None when nothing in the journal proves it.
+
+        Read on the adoption path only. Adoption exists for exactly one shape -- a journal
+        that PREDATES the anchor, for which "the anchor holds no checkpoint" is simply the
+        truth. For a store that WAS anchored, that same emptiness means the anchored
+        checkpoint was destroyed or the anchor was repointed, which is precisely the attack
+        the anchor exists to catch, and no operator switch may wave it through.
+
+        The evidence is the sealed `anchored` mark. It cannot be stripped without the
+        sealing key (the seal covers it) and it cannot be reached by deleting the anchor
+        store, so it survives exactly the manipulation that produces the adoption prompt.
+
+        Exactly one tolerance: the TERMINAL entry may carry the mark with no checkpoint
+        behind it, because the mark is sealed before the anchor is advanced -- and only
+        while that append is still uncommitted (see `_tail_append_committed`). Every entry
+        below the tail is proof: the entry after it exists, so its own append ran to
+        completion, and completion requires the anchor advance to have succeeded.
+
+        A journal that cannot be read cleanly cannot answer the question at all, so it
+        REFUSES rather than defaulting to "no evidence found" -- the empty-success failure
+        mode this control exists to avoid.
+        """
+        entries, problems = self.read_witness()
+        if problems:
+            raise OSError(
+                f"refusing to adopt store {self.store_id()!r}: its witness journal does not "
+                f"read cleanly, so whether it was already anchored cannot be established "
+                f"({'; '.join(problems[:3])})")
+        tolerated = None if self._tail_append_committed(tail, conn) else int(tail_seq)
+        for entry in entries:
+            if not entry.get("anchored"):
+                continue
+            raw = entry.get("seq")
+            seq = int(raw) if isinstance(raw, int) and not isinstance(raw, bool) else -1
+            if seq != tolerated:
+                return seq
+        return None
+
+    def _assert_checkpoint_extendable(self, tail: dict | None, tail_seq: int,
+                                      conn=None, anchor=None) -> None:
         """Fail closed unless the journal's terminal head still matches its EXTERNAL anchor.
 
         This is the check the self-anchored witness structurally could not make. The anchor is
@@ -889,8 +968,13 @@ class SqliteAuditRepository(AuditRepository):
 
         Refusing means `append()` raises, which the pipeline turns into SYSTEM_HOLD. An
         integrity control that cannot verify itself must hold the release, not warn.
+
+        `conn` is the write path's open connection, used only to tell an uncommitted
+        terminal append from a completed one on the adoption path. It is optional because
+        the reporting path (`checkpoint_status`) has none, and its absence only ever
+        narrows what adoption tolerates.
         """
-        anchor = self._anchor()
+        anchor = self._anchor() if anchor is None else anchor
         if not anchor.configured:
             if checkpoint_required():
                 raise OSError(
@@ -909,7 +993,22 @@ class SqliteAuditRepository(AuditRepository):
             if tail is None:
                 return                       # first ever append: this establishes the anchor
             if checkpoint_adoption_allowed():
-                return                       # explicit, reviewed one-time adoption
+                # ADOPTION IS NOT A BYPASS (Codex F6-R4-A finding A). Operator consent
+                # covers the deploy boundary -- a journal written before the anchor
+                # existed -- and nothing else. A store that carries sealed evidence of
+                # having been anchored, whose anchor now holds nothing, is a DESTROYED
+                # anchor, and it fails closed no matter what this switch says.
+                proven_at = self._prior_anchoring_evidence(tail, tail_seq, conn)
+                if proven_at is None:
+                    return                   # explicit, reviewed one-time adoption
+                raise OSError(
+                    f"refusing to adopt store {self.store_id()!r}: its witness journal "
+                    f"records that entry {proven_at} was written under a checkpoint anchor, "
+                    f"so a checkpoint for it WAS anchored and is now absent -- the anchored "
+                    f"checkpoint was destroyed, or the anchor was repointed at a store that "
+                    f"does not hold this journal's history. {ADOPT_ENV} adopts a journal "
+                    f"that PREDATES the anchor; it cannot re-adopt one whose anchor was "
+                    f"removed")
             raise OSError(
                 f"the terminal-head checkpoint anchor holds no checkpoint for store "
                 f"{self.store_id()!r} although its witness journal has {tail_seq} entries -- "
@@ -951,12 +1050,17 @@ class SqliteAuditRepository(AuditRepository):
                 f"checkpoint (anchor seq {cp.seq}, journal seq {tail_seq}); at most one "
                 f"unanchored entry is recoverable")
 
-    def _advance_checkpoint(self, seq: int, seal: str, record_sha256: str) -> dict | None:
+    def _advance_checkpoint(self, seq: int, seal: str, record_sha256: str,
+                            anchor=None) -> dict | None:
         """Record the new terminal head in the external anchor, signed with the sealing key.
 
         Called between the journal fsync and the row commit, so the anchor can only ever lag
-        by the single entry a crash can lose. Any failure raises, aborting the append."""
-        anchor = self._anchor()
+        by the single entry a crash can lose. Any failure raises, aborting the append.
+
+        `anchor` is passed by `append()` so the object that VERIFIED the head, the one whose
+        `configured` flag was sealed into the journal entry, and the one advanced here are
+        all the same object."""
+        anchor = self._anchor() if anchor is None else anchor
         if not anchor.configured:
             return None
         cp = Checkpoint(
@@ -975,8 +1079,14 @@ class SqliteAuditRepository(AuditRepository):
         the anchored vs journal sequence, and any problem that would hold a release. Total --
         it reports failures instead of raising, because it is also called from `verify_chain`.
         """
+        # `adoption_allowed` is reported because it is a WEAKENED posture: while it is set, a
+        # store whose journal predates the anchor may start anchoring mid-history. It is a
+        # one-run migration switch, and an artifact produced while it was left on must say so
+        # rather than imply the anchor covered the whole journal. It is deliberately NOT a
+        # `problem`: the migration run itself must be able to complete.
         status: dict[str, Any] = {"store_id": self.store_id(),
-                                  "required": checkpoint_required()}
+                                  "required": checkpoint_required(),
+                                  "adoption_allowed": checkpoint_adoption_allowed()}
         problems: list[str] = []
         try:
             anchor = self._anchor()
@@ -1009,13 +1119,13 @@ class SqliteAuditRepository(AuditRepository):
         # raises before any comparison happens, so nothing is skipped. (Post-fix review.)
         if tail_readable:
             try:
-                self._assert_checkpoint_extendable(tail, tail_seq)
+                self._assert_checkpoint_extendable(tail, tail_seq, anchor=anchor)
             except Exception as exc:
                 problems.append(str(exc))
         status["problems"] = problems
         return status
 
-    def _assert_witness_extendable(self, conn) -> tuple[str | None, int]:
+    def _assert_witness_extendable(self, conn, anchor=None) -> tuple[str | None, int]:
         """Refuse to extend a chain whose external witness no longer matches the log.
 
         Returns `(seal of an observed IN-DOUBT tail or None, the journal's terminal sequence)`
@@ -1042,7 +1152,7 @@ class SqliteAuditRepository(AuditRepository):
         # The EXTERNAL check runs first and unconditionally: the whole point is that it is the
         # only one a consistent truncation of both local sides cannot satisfy, so it must not
         # sit behind a branch that a truncated store can take.
-        self._assert_checkpoint_extendable(tail, tail_seq)
+        self._assert_checkpoint_extendable(tail, tail_seq, conn, anchor=anchor)
         if row is None:
             if tail is not None:
                 raise OSError(
@@ -1080,7 +1190,8 @@ class SqliteAuditRepository(AuditRepository):
 
     def _append_head_witness(self, encounter_id: str, record_sha256: str,
                              in_doubt_over: str | None = None,
-                             expected_seq: int | None = None) -> str:
+                             expected_seq: int | None = None,
+                             anchored: bool = False) -> str:
         """Seal and durably append the new terminal head, returning its seal.
 
         Written BEFORE the row is committed and fsynced, so a witness failure aborts the
@@ -1091,7 +1202,16 @@ class SqliteAuditRepository(AuditRepository):
         `expected_seq` is the sequence the caller's extendability check authorised. It is
         asserted rather than assumed: if the journal moved between that check and this append
         the two disagree, and the append aborts instead of anchoring a sequence that was never
-        verified."""
+        verified.
+
+        `anchored` records, INSIDE THE SEAL, that an external checkpoint anchor was
+        configured when this entry was written. It is the store's own durable, unforgeable
+        answer to "was this journal ever anchored?" -- the question the legacy-adoption path
+        must answer to tell a journal that PREDATES the anchor (adoptable) from one whose
+        anchored checkpoint was DESTROYED (never adoptable). It is written as a sealed field
+        rather than kept in a sidecar because a sidecar is exactly as deletable as the
+        checkpoint it is standing in for. Absent on entries predating this field, which is
+        the correct reading for them: they were written with no anchor."""
         tail, tail_seq = self._witness_tail()
         seq = tail_seq + 1
         if expected_seq is not None and int(expected_seq) != seq:
@@ -1108,6 +1228,8 @@ class SqliteAuditRepository(AuditRepository):
         }
         if in_doubt_over:
             entry["in_doubt_over"] = str(in_doubt_over)
+        if anchored:
+            entry["anchored"] = True
         entry["seal"] = self._seal(entry, create_key=True)
         wp = self._witness_path()
         wp.parent.mkdir(parents=True, exist_ok=True)

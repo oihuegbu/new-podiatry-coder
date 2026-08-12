@@ -114,7 +114,96 @@ ssh -i podiatry-coder-key.pem ec2-user@<public_ip>
 sudo /opt/app/refresh-secrets.sh
 ```
 
+> **`secrets.tf` must hold the COMPLETE runtime `.env`.** Each apply writes a
+> new secret version and moves `AWSCURRENT` to it, so a key that is live but
+> absent from `secrets.tf` is deleted from the deployed configuration by the
+> next apply + refresh — silently, because a missing environment variable reads
+> as "use the default" almost everywhere. This had already drifted: the live
+> secret held 22 keys while `secrets.tf` encoded 10, so *any* apply would have
+> dropped model routing, consistency and audit-pass configuration.
+> `terraform validate` warning `Value for undeclared variable` is the tell.
+> Before any apply that touches this resource, confirm the map is a superset:
+>
+> ```bash
+> # extract the map from secrets.tf, drop the API_KEY lines, evaluate it, and
+> # diff the result against the live secret — expect only intended additions
+> terraform console <<<"jsonencode({ ...the non-API_KEY entries... })"
+> aws secretsmanager get-secret-value --secret-id <arn> --query SecretString --output text
+> ```
+
 This overwrites `/opt/app/.env` from the latest Secrets Manager value. `process-notes.sh` and any new `docker compose run` pick it up automatically. A long-running container already started (e.g. a batch launched with `docker compose run -d`) has its env baked in at creation time — stop/recreate it to pick up the new secret.
+
+## Provenance terminal-head checkpoint anchor (enabling + legacy adoption)
+
+The audit chain's external anchor (`claude_coder/checkpoint.py`, issue #6
+F6-R4-A) is wired from source, from two places on purpose:
+
+| Setting | Lives in | Why there |
+|---|---|---|
+| `PROVENANCE_CHECKPOINT_REQUIRED=1` | `docker-compose.yml` | a constant; a stale `.env` must not be able to switch the control off |
+| `PROVENANCE_CHECKPOINT_ANCHOR` | `terraform/secrets.tf` (derived from `aws_s3_bucket.provenance_checkpoint`) | the bucket name carries a random suffix; a hand-copied URI dies at the next clean apply |
+
+Drift can therefore only ever produce *required but unanchored*, which holds
+the release. It can never produce *silently unanchored*.
+
+**Applying it** (one `terraform apply`, via the operator role — see
+"Terraform from the box" above). **The order below is load-bearing**: the new
+`docker-compose.yml` turns the requirement on, so shipping the source *before*
+the anchor URI reaches `.env` leaves the box required-but-unanchored and holds
+every encounter (safe, but a self-inflicted outage).
+
+```bash
+terraform apply        # 1. new secret version + the ListBucket grant in s3_checkpoint.tf
+ssh -i podiatry-coder-key.pem ec2-user@<public_ip>
+sudo /opt/app/refresh-secrets.sh                     # 2. anchor URI -> /opt/app/.env
+sudo bash -c 'aws s3 cp s3://<bucket>/<new-key> /tmp/app.zip && unzip -o /tmp/app.zip -d /opt/app'
+                                                     # 3. only now ship the compose change
+```
+
+Confirm 1+2 landed before doing 3:
+
+```bash
+grep -c PROVENANCE_CHECKPOINT_ANCHOR /opt/app/.env   # expect 1
+aws s3api get-object --bucket <checkpoint-bucket> \
+  --key checkpoints/does-not-exist.json /dev/null    # expect NoSuchKey, NOT AccessDenied
+```
+
+`s3:ListBucket` in that apply is **not optional**. S3 answers `GetObject` for a
+key that does not exist with `403 AccessDenied` rather than `404 NoSuchKey`
+unless the caller can list the bucket, and the anchor refuses to read a 403 as
+"never anchored" (that is the silent-empty-success this control exists to
+prevent). Without the grant, the very first anchored read raises and **every
+encounter holds**. Verified live: with the anchor URI set and the grant absent,
+`code_encounter` returns `REVIEW_REQUIRED` / `SYSTEM_HOLD` at
+`pre_retrieval_integrity` with zero committed audit rows.
+
+**Legacy adoption — one reviewed run.** A provenance store that predates the
+anchor has a witness journal the anchor knows nothing about, which is
+indistinguishable from an anchored checkpoint having been deleted. So the first
+run after enabling refuses, by design, and names the switch:
+
+```bash
+cd /opt/app
+PROVENANCE_CHECKPOINT_ADOPT=1 docker compose run --rm -e PROVENANCE_CHECKPOINT_ADOPT app \
+  python run.py --note <one-note>.pdf          # ONE run
+# then stop passing it — never put it in .env or docker-compose.yml
+```
+
+Confirm it took, then never set it again:
+
+```bash
+docker compose run --rm app python -c \
+  "from claude_coder.provenance import SqliteAuditRepository as R; \
+   print(R('output/provenance.db').checkpoint_status())"
+# expect: external_trust_boundary True, required True, adoption_allowed False,
+#         anchored_seq == journal_seq, problems []
+```
+
+`PROVENANCE_CHECKPOINT_ADOPT` is **not** a general override. Once the store has
+been anchored even once, its journal carries sealed proof of it, and a
+subsequently emptied or repointed anchor fails closed with the switch still set.
+Releases certified while it was on record `adoption_allowed: true` in the
+durable `release_decision` record.
 
 ## Cost model (stop between runs)
 

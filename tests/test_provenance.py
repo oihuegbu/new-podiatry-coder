@@ -569,11 +569,12 @@ def test_legacy_unwitnessed_rows_are_reported(tmp_path):
 #
 # NOTE ON WHAT THESE TESTS PROVE. They drive `LocalFileCheckpointAnchor`, the REFERENCE
 # backend, which lives on the same filesystem as the store it anchors. They prove the
-# detection logic, the fail-closed release path and the backend contract are correct. They do
-# NOT establish a production trust boundary: that requires a separately controlled append-only
-# store (see `checkpoint.py`), which is an infrastructure decision this change deliberately
-# does not take. `test_an_unanchored_store_cannot_detect_consistent_truncation_and_says_so`
-# pins the honest limit that remains until such a backend is configured.
+# detection logic, the fail-closed release path and the backend contract are correct --
+# hermetically, with no network. They do NOT by themselves establish the production trust
+# boundary: that property belongs to the STORE (an append-only bucket the writer cannot
+# delete from), so it is proved against the real bucket from the deployed identity in
+# `tests/test_checkpoint_s3.py`. `test_an_unanchored_store_cannot_detect_consistent_
+# truncation_and_says_so` pins what remains true for any deployment that runs unanchored.
 def _anchored(tmp_path, name="anchored.db"):
     """A fresh repository object bound to a persistent anchor directory. Building a new
     repository AND a new anchor object each time is what a process restart looks like."""
@@ -773,10 +774,71 @@ def test_a_forged_or_malformed_checkpoint_is_not_accepted(tmp_path):
     assert "malformed" in str(err.value)
 
 
-def test_a_deleted_checkpoint_fails_closed_unless_adoption_is_explicit(tmp_path, monkeypatch):
+# ---- the control has to be ON in the DEPLOYED configuration, not merely implementable ----
+# Codex F6-R4-A finding A was not that the anchor did not work; it was that a repository
+# search found neither environment variable in any deployment path, so the shipped default
+# was `{'backend': 'disabled', 'configured': False, 'external': False, 'required': False}`.
+# These assert the wiring itself, from the checked-in source, so deleting it is a failing
+# test rather than a silently disabled integrity control.
+def _repo_root():
+    from pathlib import Path
+    return Path(__file__).resolve().parent.parent
+
+
+def test_the_deployed_runtime_requires_the_anchor_from_checked_in_source():
+    """`PROVENANCE_CHECKPOINT_REQUIRED=1` is pinned in docker-compose.yml, NOT only in .env.
+
+    .env is materialised from Secrets Manager at first boot and refreshed out of band, so it
+    can be stale; docker-compose.yml is the deployed source. Keeping the requirement here
+    means configuration drift can only produce "required but unanchored" (which holds the
+    release) and never "silently unanchored" -- which is the exact state the reviewer found.
+    """
+    compose = (_repo_root() / "docker-compose.yml").read_text()
+    assert "PROVENANCE_CHECKPOINT_REQUIRED=1" in compose, (
+        "the deployed compose file no longer requires the terminal-head checkpoint anchor; "
+        "an unanchored run would silently stop detecting consistent truncation")
+
+
+def test_the_deployed_anchor_uri_is_derived_from_the_bucket_terraform_creates():
+    """...and the anchor URI comes from the bucket RESOURCE, never a literal.
+
+    The bucket name carries a random suffix, so a hand-copied URI survives exactly until the
+    next clean `terraform apply` and then points at a bucket that does not exist -- which,
+    because an unreachable anchor correctly fails closed, presents as a total release outage
+    far from its cause. Deriving it means the runtime is always pointed at the bucket the
+    same config created.
+    """
+    secrets = (_repo_root() / "terraform" / "secrets.tf").read_text()
+    assert "PROVENANCE_CHECKPOINT_ANCHOR" in secrets, (
+        "terraform no longer delivers the checkpoint anchor URI into the runtime .env")
+    line = next(ln for ln in secrets.splitlines() if "PROVENANCE_CHECKPOINT_ANCHOR" in ln
+                and "=" in ln.split("#")[0])
+    assert "aws_s3_bucket.provenance_checkpoint.bucket" in line, line
+    assert "${var.aws_region}" in line, line
+    # ...and it must stay inside the prefix the app role is actually granted.
+    assert "/checkpoints?" in line, line
+
+
+def test_the_documented_example_env_matches_the_deployed_switches():
+    """.env.example is the operator-facing description of the runtime contract. If it stops
+    naming these, the next person to hand-build an .env produces a silently unanchored
+    deployment -- which is how this finding happened in the first place."""
+    example = (_repo_root() / ".env.example").read_text()
+    for key in ("PROVENANCE_CHECKPOINT_ANCHOR", "PROVENANCE_CHECKPOINT_REQUIRED",
+                "PROVENANCE_CHECKPOINT_ADOPT"):
+        assert key in example, f"{key} is undocumented in .env.example"
+
+
+def test_a_deleted_checkpoint_fails_closed_and_adoption_cannot_wave_it_through(
+        tmp_path, monkeypatch):
     """Deleting the anchored checkpoint is the cheapest attack on the anchor, and it looks
-    exactly like enabling the anchor on an existing store. So it fails closed, and adoption is
-    an explicit, reviewed operator action rather than an inference."""
+    exactly like enabling the anchor on an existing store. Both fail closed by default; and
+    the operator switch that exists for the SECOND case must not launder the FIRST.
+
+    (Codex F6-R4-A finding A: `PROVENANCE_CHECKPOINT_ADOPT` used to return unconditionally
+    whenever the anchor held nothing, so setting it turned a destroyed anchor into a clean
+    adoption -- one environment variable away from disabling the whole control on a store
+    that had been anchored for its entire life.)"""
     import pytest
     repo = _anchored(tmp_path)
     repo.append("enc", "a", {"x": 1})
@@ -785,8 +847,210 @@ def test_a_deleted_checkpoint_fails_closed_unless_adoption_is_explicit(tmp_path,
         _anchored(tmp_path).append("enc", "b", {"x": 2})
     assert "holds no checkpoint" in str(err.value)
     monkeypatch.setenv("PROVENANCE_CHECKPOINT_ADOPT", "1")
-    _anchored(tmp_path).append("enc", "b", {"x": 2})                 # one-time adoption
-    assert _anchored(tmp_path).verify_chain("enc") == []
+    with pytest.raises(OSError) as err:
+        _anchored(tmp_path).append("enc", "b", {"x": 2})
+    assert "refusing to adopt" in str(err.value)
+    assert "was written under a checkpoint anchor" in str(err.value)
+    assert len(_anchored(tmp_path).records("enc")) == 1               # nothing committed
+
+
+def test_a_tampered_checkpoint_is_not_adoptable_either(tmp_path, monkeypatch):
+    """The adjacent case: rather than deleting the checkpoint, rewrite it. A record that
+    exists but fails its signature never reaches the adoption branch at all -- adoption is
+    only ever consulted for an EMPTY anchor -- so the switch cannot help there either."""
+    import json
+    import pytest
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_ADOPT", "1")
+    repo = _anchored(tmp_path)
+    repo.append("enc", "a", {"x": 1})
+    path = repo._anchor()._path(repo.store_id())
+    record = json.loads(path.read_text())
+    path.write_text(json.dumps(dict(record, signature="0" * 64), sort_keys=True))
+    with pytest.raises(OSError) as err:
+        _anchored(tmp_path).append("enc", "b", {"x": 2})
+    assert "fails its signature" in str(err.value)
+    assert len(_anchored(tmp_path).records("enc")) == 1
+
+
+def _legacy_unanchored_store(tmp_path, name="legacy.db"):
+    """A store shaped like the one already in production BEFORE this control existed.
+
+    Reproduced rather than described, because the migration has to work on the real thing:
+    an oldest prefix of rows with no witness seal at all (written before the journal
+    existed), then rows that ARE sealed into a journal (written after the journal shipped
+    but before any anchor), and no checkpoint anywhere. Returns the db path.
+    """
+    import sqlite3
+    from claude_coder.provenance import SqliteAuditRepository
+    db = tmp_path / name
+    repo = SqliteAuditRepository(db)
+    for i in range(3):                                   # will be de-witnessed below
+        repo.append("legacy-enc", f"pre-witness-{i}", {"i": i})
+    repo._witness_path().unlink()
+    conn = sqlite3.connect(str(db))
+    conn.execute("DROP TRIGGER audit_no_update")
+    conn.execute("UPDATE audit_log SET witness_sha256=NULL")
+    conn.commit()
+    conn.close()
+    for i in range(3):                                   # witnessed, still unanchored
+        SqliteAuditRepository(db).append("legacy-enc", f"witnessed-{i}", {"i": i})
+    return db
+
+
+def test_a_preexisting_unanchored_store_adopts_the_anchor_exactly_once(tmp_path, monkeypatch):
+    """THE MIGRATION (Codex F6-R4-A finding A). Turning the anchor on in a deployment that
+    already has a provenance store must be a supported, tested operation -- otherwise
+    switching the control on holds every encounter forever and the deployment gets reverted.
+
+    The reviewed sequence, end to end:
+      1. the pre-existing store, unanchored, with legacy unwitnessed rows in its history;
+      2. anchor + REQUIRED on, ADOPT off  -> refuses, and names the switch;
+      3. one run with ADOPT on            -> adopts, commits, anchors from here;
+      4. ADOPT off again                  -> keeps working, now genuinely anchored;
+      5. the anchor advances with the journal from that point on.
+    """
+    import pytest
+    from claude_coder.checkpoint import LocalFileCheckpointAnchor
+    from claude_coder.provenance import SqliteAuditRepository
+    db = _legacy_unanchored_store(tmp_path)
+    anchor_root = tmp_path / "anchor"
+
+    def repo():                                          # a fresh process each time
+        return SqliteAuditRepository(
+            db, checkpoint_anchor=LocalFileCheckpointAnchor(anchor_root))
+
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_REQUIRED", "1")
+    before = len(repo().records("legacy-enc"))
+    assert repo().checkpoint_status()["anchored_seq"] is None
+
+    with pytest.raises(OSError) as err:                                       # step 2
+        repo().append("legacy-enc", "held", {"x": 1})
+    assert "holds no checkpoint" in str(err.value)
+    assert "PROVENANCE_CHECKPOINT_ADOPT" in str(err.value)
+    assert len(repo().records("legacy-enc")) == before                        # nothing lost
+
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_ADOPT", "1")                    # step 3
+    repo().append("legacy-enc", "adopted", {"x": 1})
+    assert len(repo().records("legacy-enc")) == before + 1
+    status = repo().checkpoint_status()
+    assert status["adoption_allowed"] is True            # the weakened posture is RECORDED
+    assert status["anchored_seq"] == status["journal_seq"]
+
+    monkeypatch.delenv("PROVENANCE_CHECKPOINT_ADOPT")                         # step 4
+    repo().append("legacy-enc", "after", {"x": 2})
+    after = repo().checkpoint_status()                                        # step 5
+    assert after["adoption_allowed"] is False
+    assert after["anchored_seq"] == after["journal_seq"]
+    assert after["problems"] == []
+    # The legacy prefix stays reported honestly rather than papered over by the migration:
+    # the only remaining problems are the pre-witness rows, and NOTHING about the anchor.
+    problems = repo().verify_chain("legacy-enc")
+    assert problems and all("no witness seal" in p for p in problems), problems
+
+
+def test_adoption_is_refused_once_the_store_has_been_anchored_even_once(tmp_path, monkeypatch):
+    """The other half, and the reason adoption is safe: the SAME store, after its one
+    adoption run, can never be re-adopted. Destroying the anchor now fails closed with
+    ADOPT still set -- the sealed `anchored` mark in the journal is the evidence, and it
+    lives inside the very object an attacker would have to forge the seal to edit."""
+    import shutil
+    import pytest
+    from claude_coder.checkpoint import LocalFileCheckpointAnchor
+    from claude_coder.provenance import SqliteAuditRepository
+    db = _legacy_unanchored_store(tmp_path, name="adopted.db")
+    anchor_root = tmp_path / "anchor2"
+
+    def repo():
+        return SqliteAuditRepository(
+            db, checkpoint_anchor=LocalFileCheckpointAnchor(anchor_root))
+
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_REQUIRED", "1")
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_ADOPT", "1")
+    repo().append("legacy-enc", "adopted", {"x": 1})
+    repo().append("legacy-enc", "and-another", {"x": 2})
+    committed = len(repo().records("legacy-enc"))
+
+    # Destroy the whole anchor store -- the strongest form of the attack, and exactly what
+    # "enable the anchor on an existing store" looks like from inside the process.
+    shutil.rmtree(anchor_root)
+    with pytest.raises(OSError) as err:
+        repo().append("legacy-enc", "should-not-commit", {"x": 3})
+    assert "refusing to adopt" in str(err.value)
+    assert len(repo().records("legacy-enc")) == committed
+    assert any("refusing to adopt" in p for p in repo().verify_chain("legacy-enc"))
+
+
+def test_an_uncommitted_anchored_tail_is_still_adoptable(tmp_path, monkeypatch):
+    """The boundary between the two rules above, and a real availability trap if it is got
+    wrong. The `anchored` mark is sealed into the journal entry BEFORE the checkpoint is
+    written, so an anchor write that fails leaves a marked entry with no checkpoint and no
+    committed row. If that state were read as "this store was anchored", an S3 hiccup during
+    the very migration run would brick the store permanently -- the adoption it needs would
+    be refused on the strength of the failed attempt itself.
+
+    It is distinguishable and is distinguished: the append never committed, so no durable
+    row carries that entry's seal. Exactly one tolerance, for the terminal entry only.
+    """
+    import pytest
+    from claude_coder.checkpoint import AnchorUnavailable, LocalFileCheckpointAnchor
+    from claude_coder.provenance import SqliteAuditRepository
+
+    class _WriteFails(LocalFileCheckpointAnchor):
+        def write(self, record):
+            raise AnchorUnavailable("simulated anchor-store outage")
+
+    db = _legacy_unanchored_store(tmp_path, name="hiccup.db")
+    root = tmp_path / "anchor3"
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_REQUIRED", "1")
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_ADOPT", "1")
+    committed = len(SqliteAuditRepository(db).records("legacy-enc"))
+
+    with pytest.raises(OSError) as err:                  # the migration run, mid-outage
+        SqliteAuditRepository(db, checkpoint_anchor=_WriteFails(root)).append(
+            "legacy-enc", "a", {"x": 1})
+    assert "could not be anchored" in str(err.value)
+    healthy = SqliteAuditRepository(db, checkpoint_anchor=LocalFileCheckpointAnchor(root))
+    assert len(healthy.records("legacy-enc")) == committed        # nothing committed...
+    assert healthy.checkpoint_status()["journal_seq"] == 4        # ...but the journal moved
+
+    healthy.append("legacy-enc", "a", {"x": 1})                   # retry once S3 is back
+    recovered = SqliteAuditRepository(db, checkpoint_anchor=LocalFileCheckpointAnchor(root))
+    assert len(recovered.records("legacy-enc")) == committed + 1
+    assert recovered.checkpoint_status()["problems"] == []
+    # ...and the store is genuinely anchored now, so it is no longer re-adoptable.
+    import shutil
+    shutil.rmtree(root)
+    with pytest.raises(OSError) as err:
+        SqliteAuditRepository(db, checkpoint_anchor=LocalFileCheckpointAnchor(root)).append(
+            "legacy-enc", "b", {"x": 2})
+    assert "refusing to adopt" in str(err.value)
+
+
+def test_adoption_refuses_a_journal_it_cannot_read_cleanly(tmp_path, monkeypatch):
+    """Fail-closed on the fix's own failure path. `_prior_anchoring_evidence` answers "was
+    this store ever anchored?" by reading the journal; if the journal does not verify, the
+    honest answer is 'unknown', and unknown must refuse rather than fall through to "no
+    evidence found" -- which would be the silent-empty-success bug in a new place."""
+    import json
+    import pytest
+    from claude_coder.checkpoint import LocalFileCheckpointAnchor
+    from claude_coder.provenance import SqliteAuditRepository
+    db = _legacy_unanchored_store(tmp_path, name="corrupt.db")
+    root = tmp_path / "anchor4"
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_REQUIRED", "1")
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_ADOPT", "1")
+    # Edit an INTERIOR entry: the tail still seals, so `_witness_tail` is happy and only the
+    # whole-journal read notices. That is the case a tail-only check would have missed.
+    wp = SqliteAuditRepository(db)._witness_path()
+    lines = [ln for ln in wp.read_text().splitlines() if ln.strip()]
+    first = json.loads(lines[0])
+    first["encounter_id"] = "rewritten"
+    lines[0] = json.dumps(first, sort_keys=True)
+    wp.write_text("\n".join(lines) + "\n")
+    with pytest.raises(OSError) as err:
+        SqliteAuditRepository(db, checkpoint_anchor=LocalFileCheckpointAnchor(root)).append(
+            "legacy-enc", "x", {"x": 1})
+    assert "does not read cleanly" in str(err.value)
 
 
 def test_required_mode_refuses_to_run_without_an_anchor(tmp_path, monkeypatch):

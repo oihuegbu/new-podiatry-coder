@@ -461,10 +461,14 @@ def _terminal_head_anchor(audit_repository) -> dict:
     # checkpoints live, and one that claims an external boundary states what earns the
     # claim), so the durable record says WHICH store anchored this release and on what
     # basis -- not merely that some anchor was configured.
+    # `adoption_allowed` is carried for the same reason as `limitation`: a release certified
+    # during a one-run legacy-adoption migration was NOT anchored for the whole of its
+    # journal's history, and the durable record has to say so rather than let a later reader
+    # infer coverage the anchor never had. (Codex F6-R4-A finding A.)
     return {k: status.get(k) for k in
             ("backend", "configured", "external_trust_boundary", "required",
-             "store_id", "journal_seq", "anchored_seq", "location", "guarantee",
-             "limitation", "problems")
+             "adoption_allowed", "store_id", "journal_seq", "anchored_seq", "location",
+             "guarantee", "limitation", "problems")
             if k in status}
 
 

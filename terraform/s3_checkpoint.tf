@@ -43,28 +43,60 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "provenance_checkp
   }
 }
 
-# Deliberately PutObject + GetObject only -- no DeleteObject,
-# DeleteObjectVersion, PutObjectRetention, BypassGovernanceRetention, or
-# bucket-policy actions. The app role can append and read; it cannot erase
-# or weaken retention on anything already written. Deleting/retention
-# changes require the account's own (human) credentials, outside this role.
+# Deliberately PutObject + GetObject (+ read-only ListBucket, see below) --
+# no DeleteObject, DeleteObjectVersion, PutObjectRetention,
+# BypassGovernanceRetention, or bucket-policy actions. The app role can
+# append and read; it cannot erase or weaken retention on anything already
+# written. Deleting/retention changes require the account's own (human)
+# credentials, outside this role.
 #
-# The explicit Deny statement below is load-bearing, not decorative: this
-# role also holds PowerUserAccess (see iam_terraform_access.tf, granted so
-# the box can run terraform for infra work) which independently grants full
-# s3:DeleteObject etc. on every bucket in the account, including this one.
-# IAM allows are additive across policies, so without an explicit Deny here
-# PowerUserAccess would silently restore full delete/overwrite/retention-
-# bypass access to the one bucket this whole fix depends on being append-
-# only -- confirmed by reproduction: `aws s3 rm` on this bucket succeeded
-# before this Deny was added. An explicit Deny always wins over any Allow
-# from any other attached policy, so this holds regardless of what else is
-# ever attached to this role.
+# The explicit Deny statement below is load-bearing, not decorative. It was
+# added when this role still carried PowerUserAccess, which independently
+# granted full s3:DeleteObject on every bucket in the account -- confirmed by
+# reproduction: `aws s3 rm` on this bucket succeeded before the Deny existed.
+# PowerUserAccess has since moved to the separate, root-assumable
+# terraform-operator role (iam_terraform_access.tf, F6-R4-A finding B), so the
+# Deny is no longer counteracting a live Allow -- but it stays, because an
+# explicit Deny outranks any Allow from any policy ever attached to this role
+# in future, and that durability is precisely what the anchor's external-trust
+# claim rests on.
 data "aws_iam_policy_document" "provenance_checkpoint" {
   statement {
     sid       = "AppendProvenanceCheckpoint"
     actions   = ["s3:PutObject", "s3:GetObject"]
     resources = ["${aws_s3_bucket.provenance_checkpoint.arn}/checkpoints/*"]
+  }
+
+  # ABSENCE MUST BE OBSERVABLE, or the control fails closed on every single read.
+  #
+  # S3 answers GetObject for a key that does not exist with 403 AccessDenied --
+  # not 404 NoSuchKey -- unless the caller holds s3:ListBucket on the bucket.
+  # S3CheckpointAnchor treats anything other than NoSuchKey as UNVERIFIABLE and
+  # holds the release, deliberately: folding 403 into "this store was never
+  # anchored" is exactly how one permission regression would silently switch the
+  # whole control off while every release kept certifying an external anchor.
+  #
+  # So without this statement the first read of any store raises
+  # AnchorUnavailable and every encounter holds. That is not hypothetical: it
+  # was PROVED live from the instance role -- once finding B removed
+  # PowerUserAccess (which had been supplying s3:ListBucket bucket-wide as a
+  # side effect), 9 of the 16 live anchor regressions failed with AccessDenied
+  # on a nonexistent key. The fix belongs here, not in the client: "may this
+  # principal observe that an object does not exist" is an authorization
+  # question, and answering it by treating 403 as absent is the silent-empty-
+  # success failure this whole module exists to refuse.
+  #
+  # Deliberately UNCONDITIONAL rather than scoped with an s3:prefix condition.
+  # The 404-vs-403 authorization check S3 performs for GetObject does not carry
+  # an s3:prefix request context, so a prefix-conditioned grant does not satisfy
+  # it -- the release path would keep failing closed, with the policy looking
+  # correct. Listing is read-only metadata over a bucket that holds nothing but
+  # checkpoint objects, and it confers no ability to write, overwrite or delete;
+  # the Deny below and the prefix scoping on Get/PutObject are untouched.
+  statement {
+    sid       = "ObserveProvenanceCheckpointAbsence"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.provenance_checkpoint.arn]
   }
 
   statement {

@@ -91,6 +91,27 @@ def _checkpoint(store_id, seq, seal="a" * 64):
                       written_at="2026-08-11T00:00:00+00:00", signature="sig-" + seal[:8])
 
 
+# ------------------------------------------------ absence must be OBSERVABLE, not guessed
+def test_the_deployed_identity_can_tell_absent_from_denied():
+    """The precondition every other test here rests on, pinned as its own regression.
+
+    S3 answers GetObject for a key that does not exist with 403 AccessDenied -- not 404
+    NoSuchKey -- unless the caller holds `s3:ListBucket` on the bucket. This backend refuses
+    to read 403 as "never anchored" (that would be the silent-empty-success this whole
+    module exists to prevent), so without that grant `read()` raises on every first read and
+    every encounter holds. The failure is total, and it is invisible in any mocked test and
+    in any policy review that only looks at Get/Put/Delete.
+
+    This is not hypothetical: it is what removing PowerUserAccess from the runtime role
+    (F6-R4-A finding B) actually did -- PowerUserAccess had been supplying ListBucket
+    bucket-wide as a side effect, so narrowing the role correctly also, silently, removed
+    the anchor's ability to observe absence. `terraform/s3_checkpoint.tf` now grants it
+    explicitly; this test is what tells you if it is ever dropped again.
+    """
+    anchor = _anchor()
+    assert anchor.read(_store_id("absence")) is None
+
+
 # ---------------------------------------------------------------- the basic round trip
 def test_a_checkpoint_written_to_the_real_bucket_reads_back_identically():
     """The floor: a real PutObject followed by a real GetObject returns the same record,
@@ -137,6 +158,63 @@ def test_the_writer_role_cannot_delete_what_it_anchored():
         client.delete_object(Bucket=anchor.bucket, Key=key, VersionId="null")
     assert anchor._error_code(err.value) == "AccessDenied"
     assert _anchor().read(store) is not None                # still there afterwards
+
+
+def test_the_writer_role_cannot_reach_outside_the_granted_prefix():
+    """The anchor's grant is PREFIX-SCOPED, and that scoping is now independently enforced
+    rather than subsumed by a broader grant on the same role.
+
+    This is what changed with F6-R4-A finding B: the runtime role used to carry
+    PowerUserAccess, which allowed Get/PutObject bucket-wide, so the prefix in the anchor's
+    own statement bought nothing. PowerUserAccess now lives on a separate terraform-operator
+    role that the box's instance credentials cannot assume, and the runtime role's ONLY
+    reach into this bucket is the anchor prefix. Asserted from the deployed identity,
+    because a policy is only worth what the live principal is actually refused."""
+    from botocore.exceptions import ClientError
+    anchor = _anchor()
+    client = anchor._s3()
+    outside = f"outside-the-anchor-prefix/{uuid.uuid4().hex}.json"
+    with pytest.raises(ClientError) as err:
+        client.put_object(Bucket=anchor.bucket, Key=outside, Body=b"{}")
+    assert anchor._error_code(err.value) == "AccessDenied"
+    with pytest.raises(ClientError) as err:
+        client.get_object(Bucket=anchor.bucket, Key=outside)
+    assert anchor._error_code(err.value) == "AccessDenied"
+
+
+def test_the_writer_role_cannot_weaken_the_policy_that_denies_it():
+    """A Deny is a boundary only if it lives outside the principal it constrains.
+
+    The delete-Deny is an inline policy on the runtime role itself, so the question that
+    decides whether it is a real boundary is whether that role can edit its own policies.
+    It cannot: no IAM permission over itself, and the terraform-capable role that does hold
+    them is assumable only by the account root (terraform/iam_terraform_access.tf).
+
+    The probe is deliberately harmless in the failure case as well as the success case: it
+    attempts to ADD a policy under an unused name granting an action that requires no
+    permission, never to edit or delete the load-bearing one -- and if it unexpectedly
+    succeeds it fails the test loudly and removes what it created."""
+    import boto3
+    from botocore.exceptions import ClientError
+    sts = boto3.client("sts", region_name=_anchor().region or "us-east-1")
+    role = sts.get_caller_identity()["Arn"].split("/")[1]   # assumed-role/<role>/<session>
+    iam = boto3.client("iam", region_name=_anchor().region or "us-east-1")
+    probe = f"provenance-checkpoint-tamper-probe-{uuid.uuid4().hex[:8]}"
+    document = json.dumps({"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Action": "sts:GetCallerIdentity", "Resource": "*"}]})
+    try:
+        with pytest.raises(ClientError) as err:
+            iam.put_role_policy(RoleName=role, PolicyName=probe, PolicyDocument=document)
+    finally:
+        try:
+            iam.delete_role_policy(RoleName=role, PolicyName=probe)
+        except ClientError:
+            pass                                            # the expected case: never created
+    assert "AccessDenied" in str(err.value)
+    # ...and it cannot even read its own policies, let alone rewrite them.
+    with pytest.raises(ClientError) as err:
+        iam.list_role_policies(RoleName=role)
+    assert "AccessDenied" in str(err.value)
 
 
 def test_an_anchored_sequence_cannot_be_overwritten_even_by_the_writer():
@@ -283,11 +361,12 @@ def test_the_anchor_is_selected_by_configuration_alone(tmp_path, monkeypatch):
 
 # ------------------------------------------------- unreachable/denied must HOLD, not pass
 def _unsigned_client(anchor):
-    """A REAL S3 client with no credentials attached, so the real bucket answers a real
-    403. Used instead of revoking a permission because the app role also carries
-    PowerUserAccess (for operator terraform work), which allows Get/PutObject bucket-wide
-    -- there is no prefix on this bucket it can actually be denied at. Anonymous access to
-    a private bucket produces the identical AccessDenied the classification turns on."""
+    """A REAL S3 client with no credentials attached, so the real bucket answers a real 403.
+
+    Used rather than revoking a permission because these tests must not mutate the IAM
+    posture they are verifying (and, by design, this identity could not put it back).
+    Anonymous access to a private bucket produces the identical `AccessDenied` the
+    classification turns on."""
     import boto3
     from botocore import UNSIGNED
     from botocore.config import Config

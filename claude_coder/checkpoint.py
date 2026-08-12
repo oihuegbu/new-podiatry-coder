@@ -40,12 +40,24 @@ overwrite, truncate or delete.
     that claim is documented on the class and proved by its regressions, which run
     against the live bucket rather than a mock.
 
-TURNING IT ON (configuration only — no code change)
----------------------------------------------------
+HOW IT IS TURNED ON (checked-in configuration — no code change)
+---------------------------------------------------------------
     PROVENANCE_CHECKPOINT_ANCHOR='s3://<bucket>/checkpoints?region=us-east-1'
     PROVENANCE_CHECKPOINT_REQUIRED=1     # an unanchored run then fails closed
     PROVENANCE_CHECKPOINT_ADOPT=1        # ONE reviewed run, only to adopt a journal that
                                          # predates the anchor; unset it again afterwards
+
+The deployed runtime sets the first two from source, and deliberately from two DIFFERENT
+places (Codex F6-R4-A finding A):
+
+  * `PROVENANCE_CHECKPOINT_REQUIRED=1` is a constant in `docker-compose.yml`, so it cannot
+    be lost by a stale or unrefreshed `.env`;
+  * `PROVENANCE_CHECKPOINT_ANCHOR` is derived from the bucket resource in
+    `terraform/secrets.tf` and delivered through the runtime secret, so it is never a
+    hand-copied bucket name that a clean `terraform apply` would silently invalidate.
+
+The split is the fail-safe direction: config drift can only leave the run REQUIRED with no
+anchor, which holds the release. It can never leave it silently unanchored.
 
 The bucket and its grants are `terraform/s3_checkpoint.tf`; the key prefix must be one the
 role is granted, and credentials come from the instance role (nothing here reads any). A
@@ -370,14 +382,19 @@ class S3CheckpointAnchor(CheckpointAnchor):
          exists — not our own bookkeeping. This is what stops an ordinary rollback/replay
          from succeeding at all rather than merely leaving evidence.
 
-    HONEST LIMIT: the anchor's own IAM statement grants `PutObject`/`GetObject` under one
-    prefix, but the role separately carries `PowerUserAccess` (granted so operators can run
-    terraform from the box), which already allows those two verbs bucket-wide. So the
-    prefix scoping is defence in depth that is currently subsumed, and (3) is enforced by
-    the request this code sends rather than by policy. Neither weakens (1) or (2), which
-    are policy-enforced and are the properties the control depends on: an attacker running
-    as this role can add to the anchored history and, with effort, obscure the newest
-    pointer, but cannot remove or destroy what was anchored.
+    WHAT ADMINISTERS THE BOUNDARY. The Deny above must live outside the principal it
+    constrains, or it is advice rather than a boundary. It does: the runtime role holds no
+    IAM permissions over itself, and the broader terraform-capable permissions live on a
+    separate role assumable only by the account root, never by the box's instance
+    credentials (`terraform/iam_terraform_access.tf`, Codex F6-R4-A finding B). The
+    anchor's grant is therefore the whole of what the writer can do to this bucket:
+    `PutObject`/`GetObject` under one prefix, and nothing else anywhere in it.
+
+    HONEST LIMIT: (3) is enforced by the request this code sends, not by a bucket policy or
+    an Object-Lock retention rule. It does not weaken (1) or (2), which are policy-enforced
+    and are the properties the control depends on: an attacker running as this role can add
+    to the anchored history and, with effort, obscure the newest pointer, but cannot remove
+    or destroy what was anchored.
 
     The mutable `head.json` pointer is deliberately NOT trusted. It is a starting FLOOR
     for `read()`, which then walks forward over the write-once objects, so rolling the
@@ -417,10 +434,9 @@ class S3CheckpointAnchor(CheckpointAnchor):
         if not prefix:
             # Refused at CONFIGURATION time rather than at the first write: the anchor's
             # IAM statement scopes its grant to a prefix, so a bucket-root spec writes
-            # outside the reviewed grant -- and the day the role stops carrying
-            # PowerUserAccess (see the class docstring's HONEST LIMIT) it would start
-            # failing AccessDenied on the release path instead, diagnosed hours later and
-            # far from the typo that caused it.
+            # outside the reviewed grant and is answered AccessDenied on the RELEASE path --
+            # diagnosed hours later and far from the typo that caused it. (Proved live: the
+            # runtime role is denied PutObject outside the granted prefix.)
             raise CheckpointConfigError(
                 "checkpoint anchor names no S3 key prefix; the anchor grant is "
                 "prefix-scoped, so a bucket-root spec cannot be honoured")

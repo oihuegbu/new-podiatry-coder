@@ -22,6 +22,20 @@ services:
     environment:
       - QDRANT_URL=http://qdrant:6333
       - NOTES_DIR=/app/attachments
+      # Terminal-head checkpoint anchor (claude_coder/checkpoint.py, issue #6 F6-R4-A).
+      # ON, from source, in every deployed container. This is the switch, not the address:
+      # the anchor URI itself is deployment-specific (it names a terraform-created bucket
+      # whose name carries a random suffix), so it is derived in terraform/secrets.tf and
+      # arrives via .env rather than being hand-copied here where a clean `terraform apply`
+      # would silently invalidate it.
+      #
+      # The two live in different places ON PURPOSE. .env is materialised from Secrets
+      # Manager at first boot and refreshed by ./refresh-secrets.sh, so it CAN be stale;
+      # this file is the deployed source. Keeping the requirement here means the only
+      # drift config can produce is "required, but no anchor" -- which fails closed and
+      # holds the release. It can never produce "silently running unanchored", which is
+      # exactly the default the reviewer found and rejected.
+      - PROVENANCE_CHECKPOINT_REQUIRED=1
     volumes:
       - ./doctors_notes:/app/attachments:ro
       - ./output:/app/output
