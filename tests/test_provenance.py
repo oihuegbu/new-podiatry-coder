@@ -805,14 +805,85 @@ def test_an_unimplemented_anchor_backend_fails_closed(tmp_path, monkeypatch):
     import pytest
     from claude_coder.checkpoint import CheckpointConfigError, resolve_checkpoint_anchor
     with pytest.raises(CheckpointConfigError):
-        resolve_checkpoint_anchor("s3://some-bucket/checkpoints")
+        resolve_checkpoint_anchor("gs://some-bucket/checkpoints")   # unimplemented scheme
     with pytest.raises(CheckpointConfigError):
         resolve_checkpoint_anchor("file:")
-    monkeypatch.setenv("PROVENANCE_CHECKPOINT_ANCHOR", "s3://some-bucket/checkpoints")
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_ANCHOR", "gs://some-bucket/checkpoints")
     with pytest.raises(Exception):
         _repo(tmp_path, "badspec.db").append("enc", "a", {"x": 1})
     assert any("unusable" in p for p in
                _repo(tmp_path, "badspec.db").verify_chain("enc"))
+
+
+def test_the_s3_anchor_spec_is_parsed_and_validated_without_touching_the_network(tmp_path):
+    """The S3 backend is selected by CONFIGURATION, and every way of misconfiguring it is
+    refused where the operator can see it -- at resolution, not on the release path hours
+    later. Hermetic: constructing the backend resolves no credentials and makes no call."""
+    import pytest
+    from claude_coder.checkpoint import (CheckpointConfigError, S3CheckpointAnchor,
+                                         resolve_checkpoint_anchor)
+    anchor = resolve_checkpoint_anchor("s3://a-bucket/checkpoints?region=us-east-1")
+    assert isinstance(anchor, S3CheckpointAnchor)
+    assert (anchor.bucket, anchor.prefix, anchor.region) == \
+        ("a-bucket", "checkpoints/", "us-east-1")
+    described = anchor.describe()
+    # The property F6-R4-A actually asked for: this backend is a real privilege boundary
+    # and says so, where the reference backend must not.
+    assert described["external_trust_boundary"] is True
+    assert described["configured"] is True
+    assert described["location"] == "s3://a-bucket/checkpoints/"
+    assert "cannot erase it" in described["guarantee"]
+    assert "limitation" not in described
+    # A trailing-slash-less prefix is the same anchor, not a second namespace.
+    assert resolve_checkpoint_anchor("s3://a-bucket/checkpoints/").prefix == "checkpoints/"
+    with pytest.raises(CheckpointConfigError):
+        resolve_checkpoint_anchor("s3://a-bucket")                  # no prefix: grant is
+    with pytest.raises(CheckpointConfigError):
+        resolve_checkpoint_anchor("s3://a-bucket/")                 # prefix-scoped
+    with pytest.raises(CheckpointConfigError):
+        resolve_checkpoint_anchor("s3:///checkpoints")              # no bucket
+    with pytest.raises(CheckpointConfigError):
+        resolve_checkpoint_anchor("s3://a-bucket/checkpoints?regoin=us-east-1")  # typo
+    with pytest.raises(CheckpointConfigError):
+        resolve_checkpoint_anchor("s3://a-bucket/checkpoints#frag")
+
+
+def test_the_s3_anchor_uses_one_write_once_object_per_sequence(tmp_path):
+    """Key layout is part of the guarantee, so it is asserted, not assumed: one immutable
+    object per sequence (what a truncation cannot remove) plus an explicitly untrusted
+    head pointer. Hermetic -- key derivation only."""
+    from claude_coder.checkpoint import S3CheckpointAnchor
+    anchor = S3CheckpointAnchor("b", "checkpoints/", region="us-east-1")
+    assert anchor._head_key("prov.db") == "checkpoints/prov.db/head.json"
+    assert anchor._seq_key("prov.db", 7) == "checkpoints/prov.db/seq/000000000007.json"
+    assert anchor._seq_key("prov.db", 7) < anchor._seq_key("prov.db", 12)   # sorts by seq
+    # A store id can never escape the granted prefix, whatever it contains.
+    assert "/../" not in anchor._seq_key("../../etc/passwd", 1)
+    assert anchor._seq_key("../../etc/passwd", 1).startswith("checkpoints/")
+
+
+def test_the_s3_anchor_shares_one_client_per_process_and_region(monkeypatch):
+    """Post-fix review, COST/RATE-LIMIT BOUNDARY. Production resolves a FRESH anchor object
+    for every anchor operation, so a per-object client rebuilt a botocore session, reloaded
+    the S3 model and re-resolved instance-role credentials several times per audit record.
+    Instance metadata is rate-limited, so that is not just slow -- under load it returns
+    throttles, and a throttle here is an UNVERIFIABLE anchor that holds a release for no
+    reason. The client is shared per (pid, region): per REGION so it is reused, and per PID
+    so a client's open sockets are never inherited across a fork into a worker."""
+    import os
+    from claude_coder import checkpoint as ck
+    monkeypatch.setattr(ck, "_S3_CLIENTS", {}, raising=True)
+    first = ck.resolve_checkpoint_anchor("s3://a-bucket/checkpoints?region=us-east-1")._s3()
+    second = ck.resolve_checkpoint_anchor("s3://b-bucket/other/?region=us-east-1")._s3()
+    assert first is second                                   # reused across anchor objects
+    other_region = ck.resolve_checkpoint_anchor(
+        "s3://a-bucket/checkpoints?region=us-west-2")._s3()
+    assert other_region is not first                         # never across regions
+    assert set(ck._S3_CLIENTS) == {(os.getpid(), "us-east-1"), (os.getpid(), "us-west-2")}
+    # An explicitly injected client is always honoured over the shared one.
+    sentinel = object()
+    assert ck.S3CheckpointAnchor("a-bucket", "checkpoints/", region="us-east-1",
+                                 client=sentinel)._s3() is sentinel
 
 
 def test_the_journal_sequence_is_inside_the_seal(tmp_path):

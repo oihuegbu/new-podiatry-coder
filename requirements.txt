@@ -8,3 +8,11 @@ pdfplumber>=0.10.0
 python-dotenv>=1.0.0
 requests>=2.31.0
 pydantic>=2.0.0
+# AWS SDK. A RUNTIME dependency, not tooling-only: the provenance audit chain's
+# external terminal-head checkpoint anchor (claude_coder/checkpoint.py,
+# S3CheckpointAnchor) is a production integrity control that fails CLOSED, so a
+# deployed image without boto3 could not honour PROVENANCE_CHECKPOINT_ANCHOR=s3://...
+# at all -- it would refuse every append rather than degrade. Declared here so a
+# clean build can run the control, instead of relying on a lazy import that is
+# only ever satisfied by hand.
+boto3>=1.34.0

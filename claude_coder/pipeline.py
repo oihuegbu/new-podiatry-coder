@@ -456,9 +456,14 @@ def _terminal_head_anchor(audit_repository) -> dict:
         return {**unknown, "backend": "error", "problems": [type(exc).__name__]}
     if not isinstance(status, dict):               # pragma: no cover - defensive
         return unknown
+    # `location`/`guarantee` are backend-agnostic (every backend names where its
+    # checkpoints live, and one that claims an external boundary states what earns the
+    # claim), so the durable record says WHICH store anchored this release and on what
+    # basis -- not merely that some anchor was configured.
     return {k: status.get(k) for k in
             ("backend", "configured", "external_trust_boundary", "required",
-             "store_id", "journal_seq", "anchored_seq", "limitation", "problems")
+             "store_id", "journal_seq", "anchored_seq", "location", "guarantee",
+             "limitation", "problems")
             if k in status}
 
 
