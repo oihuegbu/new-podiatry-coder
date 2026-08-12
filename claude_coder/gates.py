@@ -487,27 +487,44 @@ def icd_excludes_gate(result: CodingResult, source: CodeSource) -> GateResult:
     Fail-closed: a detected Excludes1 co-occurrence returns UNKNOWN (stops autonomy,
     routes to review) rather than PASS or BLOCKED — the coder cannot deterministically
     assert the two conditions are unrelated, so it cannot certify the set clean, and
-    it also must not silently drop a possibly-valid code."""
+    it also must not silently drop a possibly-valid code.
+
+    Fail-closed on its AUTHORITY too: when the Tabular instructional notes cannot be read,
+    this gate holds. Previously an unreadable note file degraded to an empty table, every
+    pair looked clean, and the gate reported PASS — a compliance gate silently relaxing
+    itself into a rubber stamp, which is worse than a lookup returning nothing. "No
+    Excludes1 note applies" and "nobody could tell us whether one applies" are opposite
+    conclusions and only the first may clear a claim. (Round 5, phase 4.)"""
+    from .data_access import AuthoritativeDataUnavailable
     dx = [ln.chosen for ln in result.billable_lines
           if ln.chosen and ln.chosen.system == "icd10"]
     if len(dx) < 2:
+        # Genuinely inapplicable, not a degraded read: a single diagnosis cannot be in an
+        # Excludes1 relationship with anything, so the notes are never consulted.
         return GateResult("icd_excludes1", Outcome.NOT_APPLICABLE,
                           "fewer than two diagnoses", "ICD-10-CM Tabular (data)")
     conflicts: list[str] = []
     seen: set[frozenset[str]] = set()
-    for a in dx:
-        refs = source.excludes1_refs(a.code, "icd10")
-        if not refs:
-            continue
-        for b in dx:
-            if a.code == b.code:
+    try:
+        for a in dx:
+            refs = source.excludes1_refs(a.code, "icd10")
+            if not refs:
                 continue
-            bu = str(b.code).replace(".", "").upper()
-            if any(bu.startswith(r) for r in refs):
-                pair = frozenset((a.code, b.code))
-                if pair not in seen:
-                    seen.add(pair)
-                    conflicts.append(f"{a.code}/{b.code}")
+            for b in dx:
+                if a.code == b.code:
+                    continue
+                bu = str(b.code).replace(".", "").upper()
+                if any(bu.startswith(r) for r in refs):
+                    pair = frozenset((a.code, b.code))
+                    if pair not in seen:
+                        seen.add(pair)
+                        conflicts.append(f"{a.code}/{b.code}")
+    except AuthoritativeDataUnavailable as exc:
+        return GateResult(
+            "icd_excludes1", Outcome.UNKNOWN,
+            f"ICD-10-CM Tabular instructional notes unavailable — an Excludes1 conflict "
+            f"between the reported diagnoses cannot be ruled out: {exc}",
+            "ICD-10-CM Tabular (data)", retryable=True)
     if conflicts:
         return GateResult("icd_excludes1", Outcome.UNKNOWN,
                           "Excludes1 pair(s) — confirm the conditions are unrelated "

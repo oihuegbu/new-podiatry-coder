@@ -15,6 +15,19 @@ _COMPLIANCE_DB_PATH = DATA_DIR / "compliance.db"
 _OPEN = "9999-12-31"
 
 
+class SnomedRootsUnavailable(RuntimeError):
+    """The SNOMED root-concept control table could not be read.
+
+    Raised rather than warned-and-continued because the table is a RESTRICTION, not a
+    lookup: a concept in it has its confidence CAPPED. An empty root set means
+    `is_snomed_root` answers False for every concept, the cap is never applied, and a
+    top-level parent concept keeps its full confidence — corruption RELAXING a control.
+    Absence of this REQUIRED release source already blocks certification; presence with
+    unreadable bytes has to fail the same way instead of quietly loading nothing.
+    (Round 5, phase 4.)
+    """
+
+
 def _norm(code: str) -> str:
     return (code or "").replace(".", "").strip().upper()
 
@@ -158,14 +171,27 @@ class CodeReferenceDB:
         logger.info(f"Loaded {len(self.mue)} MUE entries")
 
     def _load_snomed_roots(self) -> None:
+        """FAIL-CLOSED: see `SnomedRootsUnavailable`. The cap is REQUIRED to be published
+        by the table rather than defaulted in code, so a truncated file cannot leave the
+        restriction in place while silently substituting a threshold nobody reviewed."""
         try:
             with open(SNOMED_ROOTS_FILE) as f:
                 data = json.load(f)
-            self.snomed_roots = data.get("root_concepts", {})
-            self.snomed_root_confidence_cap = float(data.get("confidence_cap", 0.4))
-            logger.info(f"Loaded {len(self.snomed_roots)} SNOMED root concept IDs")
-        except Exception as e:
-            logger.warning(f"Could not load SNOMED roots file: {e}")
+            if not isinstance(data, dict):
+                raise TypeError(f"expected a JSON object, got {type(data).__name__}")
+            roots = data.get("root_concepts")
+            if not isinstance(roots, dict) or not roots:
+                raise ValueError("no non-empty 'root_concepts' table")
+            cap = float(data["confidence_cap"])
+            if not 0 < cap <= 1:
+                raise ValueError(f"confidence_cap {cap} is outside (0, 1]")
+        except Exception as exc:
+            raise SnomedRootsUnavailable(
+                f"SNOMED root-concept control table unreadable at {SNOMED_ROOTS_FILE}: "
+                f"{exc}") from exc
+        self.snomed_roots = roots
+        self.snomed_root_confidence_cap = cap
+        logger.info(f"Loaded {len(self.snomed_roots)} SNOMED root concept IDs")
 
     # --- Lookup helpers ---
 

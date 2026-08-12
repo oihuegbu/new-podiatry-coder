@@ -31,10 +31,54 @@ from .models import CandidateCode, Outcome
 AUTHORITY_UNAVAILABLE = "__unavailable__"
 
 
-class CoverageDataUnavailable(RuntimeError):
+class AuthoritativeDataUnavailable(RuntimeError):
+    """A REQUIRED authoritative source could not be read as authoritative data.
+
+    ABSENCE of a required source is caught upstream: the capability manifest reports it as
+    `missing_required` and `source_manifest_gate` BLOCKS before any certificate exists.
+    PRESENCE is what this exception exists for. A file that is present but malformed,
+    truncated, or structurally wrong is hashed happily by the manifest -- it is there, it
+    has bytes, it has an identity -- and every one of these read paths used to swallow the
+    parse failure into an EMPTY table.
+
+    An empty table is never a neutral answer here; for each of these sources it is the
+    PERMISSIVE one: "this code has no global period" (so the global surgical package is not
+    applied), "no modifier applies" (so the claim goes out bare), "this diagnosis carries no
+    Excludes1 note" (so the conflict gate passes), "this service is governed by no coverage
+    policy" (so the less restrictive ungoverned path is taken). Corruption therefore RELAXED
+    the claim instead of holding it -- absence blocked, corruption did not.
+
+    Every consumer converts this into a hold: the pipeline's fail-closed boundary for the
+    tables read during claim ASSEMBLY (before any gate runs), and the owning gate for the
+    tables a gate itself reads. (Round 5, phase 4.)
+    """
+
+
+class CoverageDataUnavailable(AuthoritativeDataUnavailable):
     """The authoritative coverage policy could not be read. Raised (never degraded to an
     empty map) because "no coverage data" and "this service is governed by no policy" are
     opposite conclusions: the second releases a claim the first must hold."""
+
+
+class PfsIndicatorsUnavailable(AuthoritativeDataUnavailable):
+    """The CMS PFS indicator table (global period + bilateral indicator) could not be read.
+    Raised because an empty table makes every code look like it has NO global period -- so
+    `apply_global_package` stops bundling a related same-day E/M into the global surgical
+    package -- and like the bilateral concept does not apply, changing which laterality
+    modifiers the claim carries."""
+
+
+class InstructionalNotesUnavailable(AuthoritativeDataUnavailable):
+    """The ICD-10-CM Tabular instructional notes could not be read. Raised because an empty
+    note table makes every diagnosis pair look Excludes1-clean, which does not merely lose a
+    lookup: it RELAXES the Excludes1 compliance gate from a real check into a silent pass."""
+
+
+class ModifierDefinitionsUnavailable(AuthoritativeDataUnavailable):
+    """The authoritative modifier definitions could not be read. Raised because the engine
+    DISCOVERS every modifier it emits from these descriptions, so an empty table is
+    indistinguishable from "no modifier is warranted" and silently ships a claim stripped of
+    the laterality / distinct-service / separately-identifiable-E-M modifiers it needs."""
 
 
 def _source_path(source_id: str):
@@ -47,6 +91,54 @@ def _source_path(source_id: str):
     """
     from app.release.source_manifest import declared_source_path
     return declared_source_path(source_id)
+
+
+def declared_document(source_id: str,
+                      error: type[AuthoritativeDataUnavailable]) -> dict:
+    """The parsed JSON document a REQUIRED authoritative source publishes, read FAIL-CLOSED.
+
+    Unreadable, unparseable, truncated, or not-an-object all raise `error`. This is the ONE
+    mechanic every required decision-time read shares, so the next required source added to
+    the declaration inherits the fail-closed behavior instead of re-deriving (and re-losing)
+    it in its own `try: ... except: return {}`. (Round 5, phase 4.)
+    """
+    try:
+        path = _source_path(source_id)
+    except Exception as exc:
+        # The DECLARATION itself is unresolvable -- an unregistered identity, or a registry
+        # that is not fully dispositioned. The coder cannot obtain the authority, which is
+        # the same conclusion as unreadable bytes, so it travels the same typed path and
+        # holds, instead of escaping as a bare RuntimeError from a module no caller expects
+        # to raise. (Round 5, phase 4.)
+        raise error(f"authoritative {source_id} is not resolvable from the release-source "
+                    f"declaration: {exc}") from exc
+    try:
+        import json
+        with open(path) as fh:
+            payload = json.load(fh)
+    except Exception as exc:
+        raise error(f"authoritative {source_id} unreadable at {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise error(f"authoritative {source_id} at {path} is not a JSON object "
+                    f"(got {type(payload).__name__})")
+    return payload
+
+
+def declared_table(source_id: str, key: str,
+                   error: type[AuthoritativeDataUnavailable]) -> dict:
+    """The non-empty mapping a REQUIRED authoritative source publishes under `key`.
+
+    NON-EMPTY is part of the contract, not a nicety: a document that parses but carries no
+    table (wrong schema, truncated write, an extract whose builder failed) yields exactly
+    the same `{}` the swallowed-exception path used to yield, and `{}` is the permissive
+    answer for every one of these sources.
+    """
+    payload = declared_document(source_id, error)
+    table = payload.get(key)
+    if not isinstance(table, dict) or not table:
+        raise error(f"authoritative {source_id} at {_source_path(source_id)} publishes no "
+                    f"non-empty {key!r} table")   # the path resolved above, so this cannot raise
+    return table
 
 
 @runtime_checkable
@@ -93,6 +185,8 @@ class CodeSource(Protocol):
     def mue_available(self) -> bool: ...
 
     def excludes1_refs(self, code: str, system: str) -> set[str]: ...
+
+    def assert_claim_assembly_data_readable(self) -> None: ...
 
     def data_fingerprint(self) -> dict[str, Any]: ...
 
@@ -409,22 +503,43 @@ class AuthoritativeSource:
             return {_dot(undot)}
         return {_dot(u) for u in under}          # category -> its billable children
 
-    def _pfs(self, code: str) -> dict:
-        """The CMS PFS indicator record for a code ({'global':…, 'bilat':…})."""
+    def _pfs_table(self) -> dict:
+        """The whole CMS PFS indicator table, read FAIL-CLOSED and cached.
+
+        Absence of this REQUIRED source is caught by the capability gate before any
+        certificate exists. PRESENT-BUT-CORRUPT is not: the manifest hashes the bytes
+        happily, and this read used to swallow the parse failure into `{}` -- at which point
+        every code reports global period None and bilateral indicator None, so
+        `apply_global_package` bundles nothing and the laterality modifiers change. That is
+        corruption RELAXING the claim, so it raises. (Round 5, phase 4.)
+        """
         if self._gp is None:
-            # REQUIRED source: its absence is caught by the capability gate before any
-            # certificate exists, so the empty fallback here can never certify a claim
-            # coded without it. The path comes from the declaration so the bytes the
-            # release fingerprint attests are provably the bytes read here.
-            path = _source_path("pfs_indicators")
-            try:
-                import json
-                with open(path) as fh:
-                    self._gp = json.load(fh).get("codes", {})
-            except Exception:
-                self._gp = {}
-        rec = self._gp.get(code) or self._gp.get(code.replace(".", ""))
+            self._gp = declared_table("pfs_indicators", "codes", PfsIndicatorsUnavailable)
+        return self._gp
+
+    def _pfs(self, code: str) -> dict:
+        """The CMS PFS indicator record for a code ({'global':…, 'bilat':…}). {} when the
+        table has no record for this code -- a real answer from readable data, never the
+        table failing to load (that raises `PfsIndicatorsUnavailable`)."""
+        table = self._pfs_table()
+        rec = table.get(code) or table.get(code.replace(".", ""))
         return rec if isinstance(rec, dict) else {}
+
+    def assert_claim_assembly_data_readable(self) -> None:
+        """Prove the authoritative tables CLAIM ASSEMBLY reads are readable, before it runs.
+
+        The PFS indicator table is consumed while the claim is being BUILT (per-line
+        bilateral modifiers, then the global surgical package) -- before the first gate
+        executes -- so unlike coverage policy or the Tabular notes there is no gate
+        downstream that could convert its unavailability into a hold. Asserting it here,
+        once, is what makes the raise land on the pipeline's fail-closed boundary rather
+        than escaping assembly as a crash.
+
+        This is the SAME cached load assembly performs, not a second one that could
+        disagree with it: once this returns, `_pfs` is served from `self._gp` and cannot
+        raise later within the same encounter.
+        """
+        self._pfs_table()
 
     def global_period(self, code: str) -> str | None:
         """CMS global-surgical-package days (000/010/090/XXX/YYY/ZZZ/MMM). None if
@@ -592,9 +707,16 @@ class AuthoritativeSource:
     def mue_available(self) -> bool:
         """Whether the MUE table is loaded at all. Lets the gate distinguish 'this
         code has no published MUE' (limit None, fine) from 'the MUE table could not
-        be loaded' (assert nothing -> UNKNOWN)."""
+        be loaded' (assert nothing -> UNKNOWN).
+
+        NON-EMPTY, not merely `isinstance(..., dict)`: an empty dict is exactly what a
+        present-but-structurally-wrong MUE file produces, and it answers "no MUE is
+        published for any code" -- so `mue_gate` reported NOT_APPLICABLE and every unit
+        count went unchecked. Same class as the corruption fixes above; an empty table is
+        indistinguishable from an unloaded one, so it must read as unloaded.
+        (Round 5, phase 4.)"""
         try:
-            return isinstance(getattr(self._reference(), "mue", None), dict)
+            return bool(getattr(self._reference(), "mue", None))
         except Exception:
             return False
 
@@ -635,28 +757,36 @@ class AuthoritativeSource:
 
     def _excludes1_map(self) -> dict[str, set[str]]:
         """{undotted category key -> set of undotted Excludes1 target prefixes} from
-        the ICD-10-CM Tabular instructional notes (icd10cm_instructional_notes.json).
-        Excludes1 = 'NOT CODED HERE': the two conditions are mutually exclusive and
-        should not be reported together (unless genuinely unrelated — a human
-        judgement). Cached; {} if the file is absent."""
+        the ICD-10-CM Tabular instructional notes. Excludes1 = 'NOT CODED HERE': the two
+        conditions are mutually exclusive and should not be reported together (unless
+        genuinely unrelated — a human judgement). Cached.
+
+        FAIL-CLOSED: unreadable, unparseable or noteless instructional data RAISES
+        `InstructionalNotesUnavailable`. It used to degrade to {}, and {} does not merely
+        lose a lookup — it makes every diagnosis pair look Excludes1-clean, turning
+        `icd_excludes_gate` from a compliance check into a silent PASS. A gate that cannot
+        read its authority must hold, not clear the claim. (Round 5, phase 4.)
+        """
         cache = getattr(self, "_excl1", None)
         if cache is not None:
             return cache
+        entries = declared_table("instructional_notes", "codes",
+                                 InstructionalNotesUnavailable)
         cache = {}
-        path = _source_path("instructional_notes")
-        try:
-            import json
-            with open(path) as fh:
-                entries = json.load(fh).get("codes", {})
-            for key, rec in entries.items():
-                if not isinstance(rec, dict):
-                    continue
-                refs = rec.get("excludes1_code_refs") or []
-                pref = {str(r).replace(".", "").upper() for r in refs if r}
-                if pref:
-                    cache[str(key).replace(".", "").upper()] = pref
-        except Exception:
-            cache = {}
+        for key, rec in entries.items():
+            if not isinstance(rec, dict):
+                continue
+            refs = rec.get("excludes1_code_refs") or []
+            pref = {str(r).replace(".", "").upper() for r in refs if r}
+            if pref:
+                cache[str(key).replace(".", "").upper()] = pref
+        if not cache:
+            # The document parsed and carries code entries, but not one of them declares an
+            # Excludes1 reference -- a schema/field drift in the extract, not a real edition
+            # of the ICD-10-CM Tabular. Indistinguishable at the gate from "no conflicts".
+            raise InstructionalNotesUnavailable(
+                f"authoritative instructional_notes at {_source_path('instructional_notes')} "
+                f"declares no Excludes1 reference for any code")
         self._excl1 = cache
         return cache
 
@@ -674,12 +804,10 @@ class AuthoritativeSource:
         cache = getattr(self, "_cov", None)
         if cache is not None:
             return cache
+        d = declared_document("coverage_policy", CoverageDataUnavailable)
+        path = _source_path("coverage_policy")   # resolved above, so this cannot raise
         cache = {}
-        path = _source_path("coverage_policy")
         try:
-            import json
-            with open(path) as fh:
-                d = json.load(fh)
             for row in (d.get("lcd") or []) + (d.get("article") or []):
                 qd = {str(x).replace(".", "").upper()
                       for x in (row.get("qualifying_dx") or [])}
@@ -712,13 +840,14 @@ class AuthoritativeSource:
         from the code AND its ancestor categories (an Excludes1 at a 3-character
         category governs every child code under it). A billed diagnosis whose code
         starts with any
-        returned prefix is in an Excludes1 relationship with `code`. ICD-10-CM only;
-        empty when the notes file is absent (gate degrades to NOT_APPLICABLE)."""
+        returned prefix is in an Excludes1 relationship with `code`. ICD-10-CM only.
+
+        Raises `InstructionalNotesUnavailable` when the Tabular notes cannot be read: an
+        empty result must mean "this diagnosis carries no Excludes1 note", never "nobody
+        could tell us" -- the caller (`gates.icd_excludes_gate`) holds on the second."""
         if system != "icd10":
             return set()
         table = self._excludes1_map()
-        if not table:
-            return set()
         undot = str(code).replace(".", "").upper()
         out: set[str] = set()
         for length in range(len(undot), 2, -1):        # code, then each ancestor category
@@ -849,6 +978,12 @@ class MockSource:
 
     def mue_available(self):
         return True
+
+    def assert_claim_assembly_data_readable(self) -> None:
+        """No-op: the mock's tables are the in-memory ones it was constructed with, so
+        there is no file whose readability could be asserted. Implemented (rather than
+        left off) so the mock satisfies the full `CodeSource` contract."""
+        return None
 
     def data_fingerprint(self):
         """A schema-COMPLETE synthetic fingerprint: the mock must satisfy exactly the same

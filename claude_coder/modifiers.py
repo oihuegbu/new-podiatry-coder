@@ -18,18 +18,20 @@ from .models import ClinicalFact
 
 def load_modifier_defs() -> dict:
     """{modifier_code: {description: ...}} from the authoritative modifier file.
-    Fail-safe: any problem (no app config, missing file) yields {} so the engine
-    simply assigns no modifiers rather than erroring — safe only because the file is a
-    REQUIRED release source, so its absence blocks certification upstream rather than
-    quietly producing a claim with no modifiers."""
-    try:
-        import json
-        from app.release.source_manifest import declared_source_path
-        with open(declared_source_path("modifier_definitions")) as fh:
-            data = json.load(fh)
-        return data.get("modifiers", {}) or {}
-    except Exception:
-        return {}
+
+    FAIL-CLOSED: unreadable, unparseable or empty modifier definitions raise
+    `ModifierDefinitionsUnavailable`. This used to yield {} on any problem, justified by
+    "the file is a REQUIRED release source, so its ABSENCE blocks certification upstream" --
+    true, and exactly half the problem. A file that is PRESENT but corrupt has bytes, so the
+    capability manifest sees nothing missing and certification proceeds, while every
+    `_discover` below returns None and the claim goes out with no laterality, no
+    distinct-service and no separately-identifiable-E/M modifier at all. Since the engine
+    DISCOVERS its modifiers from these descriptions rather than naming them, an empty table
+    is indistinguishable from "no modifier is warranted". (Round 5, phase 4.)
+    """
+    from .data_access import ModifierDefinitionsUnavailable, declared_table
+    return declared_table("modifier_definitions", "modifiers",
+                          ModifierDefinitionsUnavailable)
 
 
 def _descr(entry) -> str:

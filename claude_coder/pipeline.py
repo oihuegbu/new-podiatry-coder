@@ -148,7 +148,29 @@ def code_encounter(
     from .models import GateResult, Outcome
     from .modifiers import ModifierEngine
     source = source or AuthoritativeSource()
-    modifier_engine = modifier_engine or ModifierEngine()
+
+    # ---- Fail-closed boundary for the data CLAIM ASSEMBLY reads ----------------------
+    # `pfs_indicators` (global period + bilateral indicator) and `modifier_definitions` are
+    # REQUIRED release sources consumed while the claim is being BUILT -- per-line
+    # modifiers, then the global surgical package -- which is BEFORE the first gate runs.
+    # So, unlike coverage policy or the Tabular notes, no gate downstream can convert their
+    # unavailability into a hold; a present-but-corrupt file used to degrade to an empty
+    # table right here, and an empty table is the PERMISSIVE answer for both (nothing has a
+    # global period, no modifier applies). They are therefore proven readable ONCE, up
+    # front -- before any LLM call is spent -- and any typed unavailability becomes the same
+    # retryable system hold every other enforced boundary in this function produces.
+    # (Round 5, phase 4.)
+    from .data_access import AuthoritativeDataUnavailable
+    try:
+        probe = getattr(source, "assert_claim_assembly_data_readable", None)
+        if callable(probe):
+            probe()
+        # A caller-supplied engine carries its own reviewed definitions; only the default
+        # engine reads the authoritative file, and that read is the assertion.
+        modifier_engine = modifier_engine or ModifierEngine()
+    except AuthoritativeDataUnavailable as exc:
+        return _system_hold_result(encounter_id, date_of_service,
+                                   "authoritative_data_integrity", exc, source)
 
     # Propose-then-verify is enabled in real mode (no stubbed LLMs). It grounds every
     # procedure code in an authoritative descriptor the documentation entails — the

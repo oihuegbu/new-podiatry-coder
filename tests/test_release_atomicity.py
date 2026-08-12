@@ -346,7 +346,13 @@ def test_a_broken_declaration_holds_the_release_instead_of_certifying(monkeypatc
         MockSource().data_fingerprint()
     assert pl._fingerprint_certifiable(_UNSEALED_VALID) is False   # validator stays total
     r, _audit = _run()
-    assert r.certificate is None and _has_gate(r, "data_fingerprint")
+    # The pipeline holds EARLIER than it used to, for the same broken declaration: the
+    # modifier engine resolves its authority through that declaration, and (round 5, phase
+    # 4) it no longer swallows an unresolvable one into an empty modifier table -- which is
+    # the only reason the run previously got as far as the fingerprint check. Same
+    # fail-closed conclusion, named at the boundary that actually detected it.
+    assert r.certificate is None
+    assert _has_gate(r, "authoritative_data_integrity")
 
 
 def test_omitting_any_required_source_is_not_certifiable():
@@ -809,7 +815,13 @@ def test_removing_any_newly_required_source_blocks_the_real_capability_manifest(
                            corroborate_llm=_sel, audit_repository=_CapturingAudit(),
                            billing_context=_CTX)
         assert r.certificate is None, source_id
-        assert _has_gate(r, "data_fingerprint"), source_id
+        # WHICH fail-closed boundary catches it is asserted exactly, not loosely:
+        # `modifier_definitions` is read during claim ASSEMBLY, so (round 5, phase 4) the
+        # pipeline's authoritative-data boundary detects it before the fingerprint check
+        # ever runs; every other identity still surfaces as the fingerprint hold.
+        assert _has_gate(r, "authoritative_data_integrity"
+                         if source_id == "modifier_definitions"
+                         else "data_fingerprint"), source_id
         monkeypatch.undo()
 
 
@@ -953,3 +965,298 @@ def test_no_decision_module_composes_an_authoritative_filename_literal():
     assert not offenders, (
         "authoritative filename literal(s) outside the release-source declaration: "
         + "; ".join(offenders))
+
+
+# ---- Round 5, phase 4: PRESENT-BUT-CORRUPT required sources must hold, not degrade ------
+# Phase 1 made the required set complete and made `coverage_policy` fail closed on a bad
+# read. Its own report flagged the rest of the class: for every other required source,
+# ABSENCE blocked (the capability manifest reports `missing_required`) but CORRUPTION did
+# not -- a present file has bytes, the manifest hashes them, and the read path swallowed the
+# parse failure into an empty table. For each of these sources an empty table is the
+# PERMISSIVE answer, so corruption relaxed the claim rather than holding it.
+#
+# The corruption shapes below are one list, applied to every source, so a new required
+# source cannot be signed off against a narrower set of failures than its siblings.
+_CORRUPTIONS = (
+    "",                       # truncated to nothing
+    "{not json",              # malformed
+    "[]",                     # valid JSON, wrong root type
+    "{}",                     # parses, declares no table
+    '{"codes": {}}',          # declares an EMPTY table -- the exact shape of the old {}
+    '{"codes": []}',          # right key, wrong type
+)
+
+
+def _corrupted_source(monkeypatch, source_id, content, tmp_path):
+    """Point a REQUIRED source's declared identity at bytes that are present but unusable.
+    Present, not absent: absence is already blocked by the capability manifest, and the
+    whole point of this class is that corruption never was."""
+    from app.release import source_manifest as sm
+    path = tmp_path / f"{source_id}.json"
+    path.write_text(content)
+    registry = dict(sm._AUTHORITATIVE)
+    registry[source_id] = path
+    monkeypatch.setattr(sm, "_AUTHORITATIVE", registry)
+    return path
+
+
+def test_corrupt_pfs_indicators_raise_instead_of_an_empty_indicator_table(monkeypatch,
+                                                                         tmp_path):
+    """`_pfs` swallowed every read failure into {}, which reports global period None and
+    bilateral indicator None for EVERY code -- so `apply_global_package` bundles nothing and
+    the laterality modifiers change. Both are the permissive direction."""
+    from claude_coder.data_access import (AuthoritativeDataUnavailable, AuthoritativeSource,
+                                          PfsIndicatorsUnavailable)
+    for content in _CORRUPTIONS:
+        _corrupted_source(monkeypatch, "pfs_indicators", content, tmp_path)
+        src = AuthoritativeSource()
+        for probe in (lambda: src.global_period("SYNTHETIC_PROC"),
+                      lambda: src.bilat_indicator("SYNTHETIC_PROC"),
+                      src.assert_claim_assembly_data_readable):
+            with pytest.raises(PfsIndicatorsUnavailable):
+                probe()
+        assert issubclass(PfsIndicatorsUnavailable, AuthoritativeDataUnavailable)
+        monkeypatch.undo()
+
+
+def test_corrupt_modifier_definitions_raise_instead_of_a_bare_claim(monkeypatch, tmp_path):
+    """The engine DISCOVERS every modifier it emits from these descriptions, so {} is
+    indistinguishable from 'no modifier is warranted' and ships the claim bare."""
+    from claude_coder.data_access import (AuthoritativeDataUnavailable,
+                                          ModifierDefinitionsUnavailable)
+    from claude_coder.modifiers import ModifierEngine, load_modifier_defs
+    for content in _CORRUPTIONS + ('{"modifiers": {}}',):
+        _corrupted_source(monkeypatch, "modifier_definitions", content, tmp_path)
+        with pytest.raises(ModifierDefinitionsUnavailable):
+            load_modifier_defs()
+        with pytest.raises(ModifierDefinitionsUnavailable):
+            ModifierEngine()                      # the default engine reads the authority
+        # an engine handed REVIEWED definitions is unaffected -- it never reads the file
+        assert ModifierEngine(defs={"MR": {"description": "Right side of the body"}})
+        assert issubclass(ModifierDefinitionsUnavailable, AuthoritativeDataUnavailable)
+        monkeypatch.undo()
+
+
+def test_corrupt_instructional_notes_raise_instead_of_an_excludes1_clean_bill_of_health(
+        monkeypatch, tmp_path):
+    """The worst of the three: an empty note table does not merely lose a lookup, it makes
+    every diagnosis pair look Excludes1-clean."""
+    from claude_coder.data_access import (AuthoritativeDataUnavailable, AuthoritativeSource,
+                                          InstructionalNotesUnavailable)
+    shapes = _CORRUPTIONS + (
+        # parses, has code entries, but not one declares an Excludes1 reference: schema
+        # drift in the extract, indistinguishable at the gate from "no conflicts"
+        '{"codes": {"SYNTHETIC_DX": {"includes": ["x"]}}}',
+    )
+    for content in shapes:
+        _corrupted_source(monkeypatch, "instructional_notes", content, tmp_path)
+        src = AuthoritativeSource()
+        with pytest.raises(InstructionalNotesUnavailable):
+            src.excludes1_refs("SYNTHETIC_DX", "icd10")
+        assert issubclass(InstructionalNotesUnavailable, AuthoritativeDataUnavailable)
+        monkeypatch.undo()
+
+
+def _excludes1_result():
+    from claude_coder.models import (CandidateCode, ClinicalFact, CodingResult, EvidenceSpan,
+                                     FactKind, ResolutionMethod, ResolvedLine)
+
+    def _dx(code, fid):
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="x", fact_id=fid,
+                            evidence=[EvidenceSpan("x", anchored=True, span_id=fid)])
+        return ResolvedLine(fact=fact, chosen=CandidateCode(code, "icd10", "d", 0.9),
+                            method=ResolutionMethod.DETERMINISTIC)
+
+    return CodingResult("e", "2026-08-01", lines=[_dx("DX_A", "a"), _dx("DX_B", "b")])
+
+
+def test_unavailable_instructional_notes_hold_the_excludes1_gate_instead_of_passing():
+    """Boundary: the raise has to land as a HOLD in the gate that consumes it. This is the
+    one that is a COMPLIANCE GATE relaxing itself -- pre-fix the same input returned PASS,
+    'no Excludes1 conflicts among diagnoses', on an authority nobody could read."""
+    from claude_coder.data_access import InstructionalNotesUnavailable
+    from claude_coder.gates import icd_excludes_gate
+    from claude_coder.models import Outcome
+
+    class _Unavailable:
+        def excludes1_refs(self, code, system):
+            raise InstructionalNotesUnavailable("instructional notes unreadable")
+
+    class _Clean:
+        def excludes1_refs(self, code, system):
+            return set()
+
+    held = icd_excludes_gate(_excludes1_result(), _Unavailable())
+    assert held.outcome is Outcome.UNKNOWN and held.retryable
+    assert "instructional notes unavailable" in held.detail.lower()
+    # ...and a source that CAN read its authority and finds nothing still passes: the hold
+    # is about unreadability, not about being conservative everywhere.
+    assert icd_excludes_gate(_excludes1_result(), _Clean()).outcome is Outcome.PASS
+
+
+def test_the_excludes1_gate_holds_on_a_corrupt_notes_file_end_to_end(monkeypatch, tmp_path):
+    """The defect exactly as production would meet it, through the REAL source: the notes
+    file is PRESENT -- so the capability manifest reports nothing missing and certification
+    proceeds -- but its bytes are unusable. Pre-fix this returned PASS, "no Excludes1
+    conflicts among diagnoses", on an authority nobody could read."""
+    from claude_coder.data_access import AuthoritativeSource
+    from claude_coder.gates import icd_excludes_gate
+    from claude_coder.models import Outcome
+    _corrupted_source(monkeypatch, "instructional_notes", "{not json", tmp_path)
+    held = icd_excludes_gate(_excludes1_result(), AuthoritativeSource())
+    assert held.outcome is Outcome.UNKNOWN and held.retryable
+
+
+def test_a_single_diagnosis_never_consults_the_notes_at_all():
+    """Failure path of the fix itself: the <2-diagnosis short-circuit must stay a genuine
+    NOT_APPLICABLE and must not start holding claims on an unreadable file it never reads --
+    one diagnosis cannot be in an Excludes1 relationship with anything."""
+    from claude_coder.data_access import InstructionalNotesUnavailable
+    from claude_coder.gates import icd_excludes_gate
+    from claude_coder.models import Outcome
+
+    class _Unavailable:
+        def excludes1_refs(self, code, system):
+            raise InstructionalNotesUnavailable("instructional notes unreadable")
+
+    result = _excludes1_result()
+    result.lines = result.lines[:1]
+    assert icd_excludes_gate(result, _Unavailable()).outcome is Outcome.NOT_APPLICABLE
+
+
+@pytest.mark.parametrize("source_id", ["pfs_indicators", "modifier_definitions"])
+def test_corrupt_claim_assembly_data_holds_the_whole_pipeline(monkeypatch, tmp_path,
+                                                              source_id):
+    """The reads that happen during claim ASSEMBLY -- per-line modifiers, then the global
+    surgical package -- run BEFORE the first gate, so no gate downstream could convert their
+    unavailability into a hold. `code_encounter` must return a fail-closed system hold with
+    no certificate rather than crashing or coding around the missing indicators."""
+    from claude_coder.data_access import AuthoritativeSource
+    from claude_coder.models import Destination, Outcome, Verdict
+    _corrupted_source(monkeypatch, source_id, "{not json", tmp_path)
+    r = code_encounter("e", _NOTE, "2026-03-14", source=AuthoritativeSource(),
+                       extract_llm=lambda s, u: _FACTS, verify_llm=_sel,
+                       corroborate_llm=_sel, audit_repository=_CapturingAudit(),
+                       billing_context=_CTX)
+    assert _has_gate(r, "authoritative_data_integrity")
+    hold = [g for g in r.gates if g.name == "authoritative_data_integrity"][0]
+    assert hold.outcome is Outcome.UNKNOWN and hold.retryable
+    assert r.certificate is None
+    assert r.verdict is not Verdict.AUTO_READY
+    assert r.destination is Destination.SYSTEM_HOLD
+    assert not r.billable_lines
+
+
+def test_corrupt_snomed_root_concepts_raise_instead_of_disabling_the_confidence_cap(
+        monkeypatch, tmp_path):
+    """Post-fix review, adjacent instance in the SAME required set: the root table is a
+    RESTRICTION (a root-level concept has its confidence CAPPED), and the loader warned and
+    continued with an empty set -- so corruption silently lifted the cap. Absence of this
+    required source blocks certification; presence with unreadable bytes must fail too."""
+    import app.rag.code_reference as cr
+    corrupt = tmp_path / "snomed_root_concepts.json"
+    for content in ("", "{not json", "[]", "{}", '{"root_concepts": {}, "confidence_cap": 0.4}',
+                    '{"root_concepts": {"1": "x"}}',            # no published cap
+                    '{"root_concepts": {"1": "x"}, "confidence_cap": 0}'):
+        corrupt.write_text(content)
+        monkeypatch.setattr(cr, "SNOMED_ROOTS_FILE", corrupt)
+        with pytest.raises(cr.SnomedRootsUnavailable):
+            cr.CodeReferenceDB()._load_snomed_roots()
+        monkeypatch.undo()
+    # the real, intact table still loads and publishes both halves of the control
+    db = cr.CodeReferenceDB()
+    db._load_snomed_roots()
+    assert db.snomed_roots and 0 < db.snomed_root_confidence_cap <= 1
+
+
+def test_corrupt_validator_rule_pack_raises_instead_of_disabling_every_rule(tmp_path):
+    """Same class again: every declarative rule is a RESTRICTION on what may be released, so
+    a pack that degrades to `{"rules": []}` silently clears claims the reviewed pack flags."""
+    from app.validation.rule_engine import RulePackUnavailable, load_rule_pack
+    for content in ("", "{not json", "[]", "{}", '{"version": "x", "rules": []}',
+                    '{"version": "x", "rules": {}}', '{"rules": [{"id": "r"}]}'):
+        pack = tmp_path / "pack.json"
+        pack.write_text(content)
+        with pytest.raises(RulePackUnavailable):
+            load_rule_pack(str(pack))
+    with pytest.raises(RulePackUnavailable):
+        load_rule_pack(str(tmp_path / "absent.json"))
+    # The real, reviewed pack still loads -- addressed by its DECLARED identity, so this
+    # asserts the required source itself rather than whatever the module global happens to
+    # point at after some other test or tool swapped it.
+    from app.release.source_manifest import declared_source_path
+    real = load_rule_pack(str(declared_source_path("validator_rules")))
+    assert real["rules"] and str(real["version"]).strip()
+
+
+def test_the_rule_engines_default_pack_is_the_declared_release_source():
+    """Guard for the leak this fix exposed: `RULES_FILE` is a module attribute that offline
+    tools repoint to replay a candidate pack, and a swap that restores the WRONG value left
+    the engine aimed at a deleted temp file -- which used to degrade silently to zero
+    declarative rules. It must always be the declared `validator_rules` identity."""
+    from pathlib import Path
+    import app.validation.rule_engine as re_mod
+    from app.release.source_manifest import declared_source_path
+    assert Path(re_mod.RULES_FILE) == declared_source_path("validator_rules")
+
+
+def test_every_required_source_the_coder_reads_fails_closed_on_corruption(monkeypatch,
+                                                                          tmp_path):
+    """The audit itself, executable: for EVERY required source the coder resolves through
+    the declaration and reads at decision time, a present-but-corrupt file must raise a
+    typed `AuthoritativeDataUnavailable` -- never return an empty table. A new required
+    source wired into a decision path fails here until it fails closed."""
+    from claude_coder.data_access import AuthoritativeDataUnavailable, AuthoritativeSource
+    from claude_coder.modifiers import load_modifier_defs
+    probes = {
+        "coverage_policy": lambda s: s.qualifying_dx_for("SYNTHETIC_PROC", "cpt"),
+        "pfs_indicators": lambda s: s.global_period("SYNTHETIC_PROC"),
+        "instructional_notes": lambda s: s.excludes1_refs("SYNTHETIC_DX", "icd10"),
+        "modifier_definitions": lambda s: load_modifier_defs(),
+    }
+    for source_id, probe in probes.items():
+        for content in ("", "{not json", "[]", "{}"):
+            _corrupted_source(monkeypatch, source_id, content, tmp_path)
+            with pytest.raises(AuthoritativeDataUnavailable):
+                probe(AuthoritativeSource())
+            monkeypatch.undo()
+
+
+def test_every_code_source_implements_the_claim_assembly_data_assertion():
+    """Structural closure for the preflight: the pipeline asks the SOURCE to prove the
+    tables claim assembly reads are readable, and a source that does not implement the
+    method is skipped (a mock has no files to assert). That skip is only safe while every
+    real implementation HAS it -- one that forgot would read its files mid-assembly, where
+    no boundary converts the raise into a hold."""
+    from claude_coder.data_access import AuthoritativeSource, MockSource
+    for impl in (AuthoritativeSource, MockSource):
+        assert callable(getattr(impl, "assert_claim_assembly_data_readable", None)), impl
+
+
+def test_an_empty_mue_table_reads_as_unavailable_not_as_no_limits(monkeypatch):
+    """Post-fix review, same class inside the same required set: `mue_available` asked
+    `isinstance(table, dict)`, so a present-but-structurally-wrong `mue_limits` file
+    produced an EMPTY dict that answered "no MUE is published for any code" -- and
+    `mue_gate` reported NOT_APPLICABLE with every unit count unchecked."""
+    from claude_coder.data_access import AuthoritativeSource
+    from claude_coder.gates import mue_gate
+    from claude_coder.models import (CandidateCode, ClinicalFact, CodingResult, EvidenceSpan,
+                                     FactKind, Outcome, ResolutionMethod, ResolvedLine)
+
+    class _Reference:
+        mue: dict = {}
+
+    src = AuthoritativeSource()
+    monkeypatch.setattr(src, "_reference", lambda: _Reference())
+    assert src.mue_available() is False
+    _Reference.mue = {"SYNTHETIC_PROC": {"mue_value": 1}}
+    assert src.mue_available() is True
+
+    # ...and the gate holds rather than clearing the claim on the empty table
+    _Reference.mue = {}
+    fact = ClinicalFact(kind=FactKind.PROCEDURE, description="x", fact_id="pf",
+                        evidence=[EvidenceSpan("x", anchored=True, span_id="s1")])
+    line = ResolvedLine(fact=fact, chosen=CandidateCode("PROC_X", "cpt", "d", 0.9),
+                        method=ResolutionMethod.DETERMINISTIC)
+    held = mue_gate(CodingResult("e", "2026-08-01", lines=[line]), src)
+    assert held.outcome is Outcome.UNKNOWN and held.retryable

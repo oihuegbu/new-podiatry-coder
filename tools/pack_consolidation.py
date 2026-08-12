@@ -176,9 +176,14 @@ class _temp_pack:
 
     def __enter__(self):
         import app.validation.rule_engine as re_mod
-        from tools.auto_actuate import RULES_PATH
         self._re_mod = re_mod
-        self._real = RULES_PATH
+        # Restore what RULES_FILE ACTUALLY was, not `auto_actuate.RULES_PATH`. They are the
+        # same object in normal operation but NOT when a caller has already repointed the
+        # pack, and restoring the wrong one leaves the engine aimed at the temp file this
+        # context manager is about to delete -- after which every later `load_rule_pack()`
+        # in the process silently degraded to zero declarative rules. (Round 5, phase 4:
+        # that degradation is now a raise, so the leak is loud instead of invisible.)
+        self._real = re_mod.RULES_FILE
         fd = tempfile.NamedTemporaryFile(
             "w", suffix=".json", prefix="pack_consolidation_",
             delete=False)

@@ -24,9 +24,12 @@ from functools import lru_cache
 
 from loguru import logger
 
-from app.core.config import DATA_DIR
+from app.core import config
 
-RULES_FILE = DATA_DIR / "rules" / "validator_rules.json"
+# The DECLARED `validator_rules` release source, not a parallel path literal that could
+# drift from the identity the release fingerprint attests. It stays a module attribute
+# because offline tools deliberately repoint it to replay a candidate pack.
+RULES_FILE = config.VALIDATOR_RULES_FILE
 
 
 class _SafeMap(dict):
@@ -44,16 +47,34 @@ def _fmt(template: str, **kw) -> str:
         return str(template)
 
 
+class RulePackUnavailable(RuntimeError):
+    """The deterministic validation rule pack could not be read.
+
+    Raised rather than degraded to `{"version": "missing", "rules": []}` because an empty
+    pack is not a neutral state: every declarative rule in it is a RESTRICTION on what may
+    be released, so "no rules" silently clears claims that the reviewed pack would have
+    flagged. Absence of this REQUIRED release source already blocks certification; a file
+    that is PRESENT but truncated or schema-drifted has bytes the manifest happily hashes,
+    so it has to fail here instead. (Round 5, phase 4.)
+    """
+
+
 @lru_cache(maxsize=1)
 def load_rule_pack(path: str = "") -> dict:
     p = path or str(RULES_FILE)
     try:
         with open(p, encoding="utf-8") as f:
             pack = json.load(f)
-    except FileNotFoundError:
-        logger.warning(f"Rule pack not found at {p} — declarative rules disabled")
-        return {"version": "missing", "rules": []}
-    n = sum(1 for r in pack.get("rules", []) if r.get("enabled", True))
+        if not isinstance(pack, dict):
+            raise TypeError(f"expected a JSON object, got {type(pack).__name__}")
+    except Exception as exc:
+        raise RulePackUnavailable(f"validation rule pack unreadable at {p}: {exc}") from exc
+    rules = pack.get("rules")
+    if not isinstance(rules, list) or not rules:
+        raise RulePackUnavailable(f"validation rule pack at {p} publishes no rules")
+    if not str(pack.get("version") or "").strip():
+        raise RulePackUnavailable(f"validation rule pack at {p} declares no version")
+    n = sum(1 for r in rules if r.get("enabled", True))
     logger.info(f"Rule pack {pack.get('version')}: {n} active declarative rules")
     return pack
 

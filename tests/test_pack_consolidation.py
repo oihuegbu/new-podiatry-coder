@@ -50,18 +50,29 @@ class _PackDir:
             {"version": "test", "rules": self.rules}))
         self.state_path = d / "rule_exercise.json"
         self.proposals_dir = d / "proposals"
+        import app.validation.rule_engine as re_mod
+        self._re_mod = re_mod
         self.patches = [
             mock.patch.object(aa, "RULES_PATH", self.pack_path),
+            # The tool deliberately syncs the ENGINE's RULES_FILE to RULES_PATH while it
+            # replays, so patching only RULES_PATH left the engine aimed at this temp pack
+            # after the block exited -- and the temp directory is deleted right below.
+            # Patch both, so the restore is symmetric. (Round 5, phase 4: an unreadable
+            # pack now RAISES instead of silently degrading to zero declarative rules, so
+            # this leak is loud rather than invisible.)
+            mock.patch.object(re_mod, "RULES_FILE", self.pack_path),
             mock.patch.object(pcons, "STATE_PATH", self.state_path),
             mock.patch.object(pcons, "PROPOSALS_DIR", self.proposals_dir),
         ]
         for p in self.patches:
             p.start()
+        re_mod.load_rule_pack.cache_clear()
         return self
 
     def __exit__(self, *exc):
         for p in self.patches:
             p.stop()
+        self._re_mod.load_rule_pack.cache_clear()
         self.tmp.cleanup()
         return False
 
