@@ -548,3 +548,153 @@ def test_the_release_record_reports_a_configured_anchor(tmp_path):
     assert anchor["external_trust_boundary"] is False        # reference backend, not a boundary
     assert anchor["anchored_seq"] == anchor["journal_seq"]
     assert repo.verify_chain("e") == []
+
+
+# ---- Cross-finding integration: F6-R3 + F6-R4-A + F6-R5 compose on ONE release ------------
+# The three remediations were implemented in separate commits but land on the SAME two
+# artifacts -- the release certificate and the terminal `release_decision` audit record --
+# and each was covered only by its own isolated suite. Passing three isolated suites does
+# not establish that the three provenance facts coexist on one real release: a later change
+# could bind the necessity support and quietly drop the fingerprint identity, or record an
+# anchor while certifying against data it does not name, and every existing test would stay
+# green. These two tests are the composition check.
+def _auto_ready_release(tmp_path, *, encounter_id="enc-compose"):
+    """One full AUTO_READY encounter through the REAL durable store (hash-chained SQLite +
+    sealed witness journal) with a terminal-head checkpoint anchor configured."""
+    from claude_coder.checkpoint import LocalFileCheckpointAnchor
+    from claude_coder.provenance import SqliteAuditRepository
+    from tests.test_claude_coder import NOTE, _arbitrate_stub, _extract_stub, _source
+    repo = SqliteAuditRepository(
+        tmp_path / "prov.db",
+        checkpoint_anchor=LocalFileCheckpointAnchor(tmp_path / "anchor"))
+    result = code_encounter(
+        encounter_id, NOTE, "2026-03-14", source=_source(),
+        extract_llm=_extract_stub, arbitrate_llm=_arbitrate_stub,
+        audit_repository=repo,
+        billing_context={"billing_entity_id": "actor-1",
+                         "participants": [{"id": "actor-1", "type": "person",
+                                           "roles": ["performer"]}]})
+    return result, repo, NOTE
+
+
+def test_necessity_binding_data_identity_and_terminal_anchor_coexist_on_one_release(tmp_path):
+    """All THREE remediations are present, correct and mutually consistent on a single
+    AUTO_READY release -- not merely green in three separate suites.
+
+      * F6-R5  the certificate's bound data identity accounts for the COMPLETE required
+               source set and its two digests are the RECOMPUTED ones, not digest-shaped;
+      * F6-R3  the SAME certificate answers WHY each released service was necessary (the
+               claim-line diagnosis pointer plus the accepted relation's provenance);
+      * F6-R4-A the durable terminal release record states which terminal-head anchor was
+               actually in force, and does not overstate it;
+    and the returned verdict, the certificate and the last durable record all agree over an
+    intact hash-chained, sealed, anchored store.
+    """
+    import claude_coder.capability as cap
+    import claude_coder.pipeline as pl
+    from app.release.source_manifest import (REQUIRED_SOURCE_SCHEMA_VERSION,
+                                             required_release_sources)
+    from claude_coder.models import Verdict
+
+    r, repo, note = _auto_ready_release(tmp_path)
+    assert r.verdict is Verdict.AUTO_READY, r.notes
+    cert = r.certificate
+    assert cert is not None
+
+    # --- F6-R5: the identity of the data this claim was coded against -----------------
+    fingerprint = cert["source_identity"]["data"]
+    assert pl._fingerprint_certifiable(fingerprint) is True
+    manifest = fingerprint["source_manifest"]
+    assert manifest["required_sources_schema"] == REQUIRED_SOURCE_SCHEMA_VERSION
+    assert ({s["source_id"] for s in manifest["sources"] if s["required"]}
+            == set(required_release_sources()))
+    # recomputed, not shape-matched: both digests must BE digests of what they describe
+    assert manifest["manifest_sha256"] == cap.manifest_digest(manifest["sources"])
+    assert fingerprint["fingerprint_sha256"] == cap.fingerprint_digest(
+        fingerprint["counts"], manifest)
+
+    # --- F6-R3: why each released service was medically necessary ---------------------
+    procedures = {ln.fact.fact_id for ln in r.procedure_lines}
+    assert procedures
+    bound = {b["procedure_event_id"] for b in cert["necessity_support"]}
+    assert bound == procedures                 # every released procedure is justified
+    for binding in cert["necessity_support"]:
+        assert binding["supports"]
+        for support in binding["supports"]:
+            assert support["diagnosis_event_id"] and support["diagnosis_code"]
+            # the status was written by the deterministic provenance layer, never by the
+            # extraction model, and the spans that proved it are the edge's own
+            assert support["reconciliation_status"] in ("corroborated", "source_directional")
+            assert support["assertion_origins"] and all(support["assertion_origins"])
+            assert set(support["reconciliation_evidence"]) <= set(support["evidence_span_ids"])
+
+    # --- F6-R4-A: what the chain-of-custody guarantee ACTUALLY was --------------------
+    releases = [rec for rec in repo.records(r.encounter_id)
+                if rec["kind"] == "release_decision"]
+    assert len(releases) == 1                  # exactly one terminal decision
+    record = releases[-1]["record"]
+    anchor = record["terminal_head_anchor"]
+    assert anchor["configured"] is True and anchor["backend"] == "local-file"
+    assert anchor["external_trust_boundary"] is False    # honest: reference backend only
+    assert anchor["problems"] == []
+    assert anchor["anchored_seq"] == anchor["journal_seq"]
+
+    # --- the four artifacts agree, and the store verifies end to end ------------------
+    assert record["verdict"] == r.verdict.value
+    assert record["certificate_sha256"] == cert["certificate_sha256"]
+    assert repo.verify_chain(r.encounter_id) == []
+
+    # --- neither remediation displaced the other inside the ONE tamper-evident hash ----
+    # Both the necessity binding (F6-R3) and the data identity (F6-R5) must be covered by
+    # `certificate_sha256`; if either had been bound outside it, the other's regression
+    # suite would still pass while the artifact silently stopped being tamper-evident.
+    import copy
+
+    def _rehash(payload):
+        payload.pop("certificate_sha256")
+        return cert_mod._sha(cert_mod._canonical(payload))
+
+    # control: an UNCHANGED payload must reproduce the recorded hash, otherwise the
+    # comparisons below would "pass" for the wrong reason
+    assert _rehash(copy.deepcopy(cert)) == cert["certificate_sha256"]
+    for mutate in (
+            lambda p: p["necessity_support"][0]["supports"][0].update({"diagnosis_code": "X"}),
+            lambda p: p["source_identity"]["data"].update(
+                {"fingerprint_sha256": "sha256:" + "0" * 64}),
+    ):
+        payload = copy.deepcopy(cert)
+        mutate(payload)
+        assert _rehash(payload) != cert["certificate_sha256"]
+
+
+def test_a_consistently_truncated_store_holds_the_whole_encounter(tmp_path):
+    """The reviewer's exact attack, driven through `code_encounter` rather than through
+    `append` alone: with an anchor configured, removing the terminal journal entry AND the
+    terminal durable row together must stop the NEXT encounter at the pipeline boundary.
+
+    The append-level regressions prove the repository raises; only this proves the raise is
+    actually converted into a fail-closed pipeline outcome instead of being swallowed on the
+    way out -- and that no certificate is produced for a claim written onto a rewritten
+    history. (Codex F6-R4-A.)
+    """
+    from claude_coder.models import Destination, Verdict
+    r, repo, _note = _auto_ready_release(tmp_path, encounter_id="enc-1")
+    assert r.verdict is Verdict.AUTO_READY and repo.verify_chain() == []
+
+    # drop the final witness line and the final audit row together
+    import sqlite3
+    witness = repo._witness_path()
+    lines = [ln for ln in witness.read_text().splitlines() if ln.strip()]
+    witness.write_text("\n".join(lines[:-1]) + "\n")
+    conn = sqlite3.connect(str(repo.db_path))
+    conn.execute("DROP TRIGGER audit_no_delete")
+    conn.execute("DELETE FROM audit_log WHERE seq=(SELECT MAX(seq) FROM audit_log)")
+    conn.commit()
+    conn.close()
+    assert any("SHORTER than its anchored checkpoint" in p for p in repo.verify_chain())
+
+    held, _repo2, _note2 = _auto_ready_release(tmp_path, encounter_id="enc-2")
+    assert held.verdict is not Verdict.AUTO_READY
+    assert held.destination is Destination.SYSTEM_HOLD
+    assert held.certificate is None
+    assert not held.billable_lines
