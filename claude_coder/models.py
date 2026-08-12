@@ -304,12 +304,25 @@ class RelationAssertion:
     evidence_span_ids: list[str] = field(default_factory=list)
     extraction_source: str = ""
     confidence: float = 0.0
+    # GROUNDING: what the SOURCE DOCUMENT establishes about this edge, written only by
+    # `provenance.reconcile_relations` (values: `provenance.RECONCILIATION_STATUSES`). A
+    # claim-affecting control may accept only a member of
+    # `provenance.GROUNDED_RECONCILIATION_STATUSES`.
     reconciliation_status: str = "unreconciled"
     # The verified span ids that ESTABLISHED `reconciliation_status` (the two endpoint
     # mentions for a directional proof, the shared passage for a co-location observation).
     # Written by the deterministic provenance layer so a certificate can show WHICH source
-    # text proved the relationship, not merely that something did.
+    # text proved the relationship, not merely that something did. A grounded status always
+    # names at least one span; an empty list means nothing in the record was proved.
     reconciliation_evidence: list[str] = field(default_factory=list)
+    # AGREEMENT: whether DISTINCT assertion origins asserted this same edge (values:
+    # `provenance.CORROBORATION_STATUSES`; the literal default mirrors
+    # `provenance.SINGLE_ORIGIN`, which this module cannot import without a cycle -- a
+    # regression asserts they stay equal). Deliberately a SEPARATE field from
+    # `reconciliation_status`: agreement between model runs is audit and confidence
+    # information, and can never by itself make a relation claim-affecting, so no control
+    # reads this value as justification. (Codex F6-R3, round 5.)
+    corroboration_status: str = "single_origin"
     # RAW number of times this edge was asserted, across every origin. Observability only:
     # it says nothing about INDEPENDENCE, because one model can emit the same edge twice in
     # one response. Corroboration reads `independent_support`. (Codex F6-R3.)

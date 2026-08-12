@@ -138,12 +138,13 @@ def test_materiality_from_authoritative_coverage():
     src = MockSource(coverage={"GG01": {"DQ01"}})   # governed procedure GG01, qualifying dx DQ01
 
     def _link(dx_event):
-        """A reconciled, anchored REASON_FOR edge from `dx_event` to the procedure."""
+        """A record-grounded, anchored REASON_FOR edge from `dx_event` to the procedure."""
         from claude_coder.models import RelationAssertion, RelationPredicate, RelationState
         return RelationAssertion(dx_event, RelationPredicate.REASON_FOR, "P",
                                  state=RelationState.ASSERTED, confidence=0.99,
                                  evidence_span_ids=["span-1"],
                                  reconciliation_status="source_directional",
+                                 reconciliation_evidence=["span-1"],
                                  assertion_origins=["origin-a"])
 
     def run(lines, relations=(), source=src):
@@ -751,7 +752,8 @@ def test_necessity_requires_per_service_diagnosis_linkage():
         RelationAssertion(subject_event_id="df", predicate=RelationPredicate.REASON_FOR,
                           object_event_id="pf", state=RelationState.ASSERTED,
                           confidence=0.99, evidence_span_ids=["span-1"],
-                          reconciliation_status="source_directional")])
+                          reconciliation_status="source_directional",
+                          reconciliation_evidence=["span-1"])])
     assert medical_necessity_gate(linked).outcome is Outcome.PASS
     # the SAME edge without independent reconciliation cannot certify (Codex F6-R3)
     unreconciled = CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[
@@ -778,15 +780,20 @@ def _nec_lines():
     return _line("P1", FactKind.PROCEDURE, "pf"), _line("D1", FactKind.DIAGNOSIS, "df")
 
 
-def _reason(conf, *, state=None, anchored=True, reconciled="source_directional"):
+def _reason(conf, *, state=None, anchored=True, reconciled="source_directional",
+            proof=("span-1",), corroboration="single_origin"):
     """A REASON_FOR edge. Defaults to the ONLY shape that may satisfy necessity: asserted,
-    evidence-anchored, and stamped reconciled by the deterministic provenance layer."""
+    evidence-anchored, and stamped by the deterministic provenance layer with a status that
+    GROUNDS it in the record, naming the span(s) that grounded it. `corroboration` is the
+    separate agreement axis, which never releases anything on its own."""
     from claude_coder.models import RelationAssertion, RelationPredicate, RelationState
     return RelationAssertion(subject_event_id="df", predicate=RelationPredicate.REASON_FOR,
                              object_event_id="pf",
                              state=state or RelationState.ASSERTED, confidence=conf,
                              evidence_span_ids=["span-1"] if anchored else [],
-                             reconciliation_status=reconciled)
+                             reconciliation_status=reconciled,
+                             reconciliation_evidence=list(proof),
+                             corroboration_status=corroboration)
 
 
 def test_necessity_rejects_zero_confidence_relation():
@@ -845,13 +852,73 @@ def test_necessity_rejects_conflicting_edges():
         assert medical_necessity_gate(r).outcome is Outcome.UNKNOWN
 
 
-def test_necessity_accepts_corroborated_reconciliation():
+def test_necessity_rejects_agreement_only_reconciliation():
+    """Round 5: 'corroborated' is no longer a reconciliation status at all, and an edge whose
+    only distinction is that several origins asserted it is not grounded in the record --
+    whatever the corroboration axis says, and whatever a stale value in that field claims."""
+    from claude_coder.models import CodingResult, Outcome
+    from claude_coder.gates import medical_necessity_gate
+    from claude_coder import provenance
+    proc, dx = _nec_lines()
+    for status in sorted(provenance.RETIRED_RECONCILIATION_STATUSES) + [
+            provenance.SOURCE_COLOCATED, provenance.UNRECONCILED]:
+        r = CodingResult("e", "2026-08-01", lines=[proc, dx],
+                         relations=[_reason(0.99, reconciled=status,
+                                            corroboration=provenance.MULTIPLY_ASSERTED)])
+        assert medical_necessity_gate(r).outcome is Outcome.UNKNOWN, status
+        assert not r.necessity_support, status
+    # the grounded edge still releases, and being multiply asserted does not change that
+    ok = CodingResult("e", "2026-08-01", lines=[proc, dx],
+                      relations=[_reason(0.99, corroboration=provenance.MULTIPLY_ASSERTED)])
+    assert medical_necessity_gate(ok).outcome is Outcome.PASS
+    assert ok.necessity_support[0]["supports"][0]["corroboration_status"] \
+        == provenance.MULTIPLY_ASSERTED
+
+
+def test_necessity_rejects_a_grounded_status_that_names_no_source_span():
+    """A grounded status with an empty evidence list would certify necessity while citing no
+    source text -- the exact shape Codex reported (`reconciliation_evidence: []` on a PASS).
+    Unreachable from the provenance layer now, and refused by the gate regardless."""
     from claude_coder.models import CodingResult, Outcome
     from claude_coder.gates import medical_necessity_gate
     proc, dx = _nec_lines()
-    r = CodingResult("e", "2026-08-01", lines=[proc, dx],
-                     relations=[_reason(0.99, reconciled="corroborated")])
-    assert medical_necessity_gate(r).outcome is Outcome.PASS
+    r = CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[_reason(0.99, proof=())])
+    assert medical_necessity_gate(r).outcome is Outcome.UNKNOWN
+    assert not r.necessity_support
+
+
+def test_necessity_control_cannot_readmit_an_agreement_only_status(tmp_path):
+    """The invariant is structural, not a property of today's config file: a control that
+    lists an agreement-only or observational status fails to load, so the gate ERRORs (autonomy
+    stops) instead of releasing claims on model agreement. Restoring the round-4 revision of
+    this control is exactly that edit."""
+    import json
+    import claude_coder.gates as g
+    from claude_coder.models import CodingResult, Outcome
+    from claude_coder import provenance
+    from app.release import source_manifest as sm
+    cfg = dict(g.load_necessity_control())
+    assert set(cfg["accepted_reconciliation_statuses"]) \
+        <= provenance.GROUNDED_RECONCILIATION_STATUSES
+    proc, dx = _nec_lines()
+    saved_cache, saved_registry = g._NECESSITY_CONTROL_CACHE, dict(sm._AUTHORITATIVE)
+    for bad in ("corroborated", "externally_verified", provenance.SOURCE_COLOCATED,
+                provenance.MULTIPLY_ASSERTED, provenance.UNRECONCILED):
+        tmp = tmp_path / f"bad_control_{bad}.json"
+        tmp.write_text(json.dumps(dict(
+            cfg, accepted_reconciliation_statuses=[bad, "source_directional"])))
+        try:
+            g._NECESSITY_CONTROL_CACHE = None
+            sm._AUTHORITATIVE[g._NECESSITY_CONTROL_ID] = tmp
+            out = g.medical_necessity_gate(
+                CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[_reason(0.99)]))
+            assert out.outcome is Outcome.ERROR, bad
+            assert bad in out.detail
+        finally:
+            g._NECESSITY_CONTROL_CACHE = saved_cache
+            sm._AUTHORITATIVE.clear()
+            sm._AUTHORITATIVE.update(saved_registry)
+            tmp.unlink(missing_ok=True)
 
 
 def test_necessity_control_is_versioned_configuration_not_an_inline_constant():
@@ -982,18 +1049,22 @@ def test_duplicate_edge_in_one_response_is_not_independent_corroboration():
     (edge,) = rels
     assert edge.support == 2                        # it WAS asserted twice ...
     assert edge.independent_support == 1            # ... by exactly one origin
-    assert edge.reconciliation_status != provenance.CORROBORATED
+    assert edge.corroboration_status == provenance.SINGLE_ORIGIN
 
 
-def test_cross_run_same_provider_is_legitimate_corroboration():
+def test_cross_run_same_provider_is_recorded_as_multiply_asserted_only():
     """Two separate runs of the same provider are two recorded origins, so the identical edge
-    IS independently corroborated -- the fix targets repetition, not re-running."""
+    is recorded as multiply asserted -- the origin count targets repetition, not re-running.
+    That count is an observation about the MODEL: it lands on the corroboration axis, never on
+    the grounding axis, which here is decided (independently) by the note's own wording."""
     from claude_coder import provenance
     one = _r4_response(_R4_QUOTES, [_R4_EDGE])
     facts, rels = _r4_graph(_R4_NOTE, one, extra_responses=(one,))
     (edge,) = rels
     assert edge.independent_support == 2
-    assert edge.reconciliation_status == provenance.CORROBORATED
+    assert edge.corroboration_status == provenance.MULTIPLY_ASSERTED
+    assert edge.corroboration_status not in provenance.RECONCILIATION_STATUSES
+    assert edge.reconciliation_status == provenance.SOURCE_DIRECTIONAL   # from the NOTE
 
 
 def test_conflicting_origins_collapse_and_cannot_support_necessity():
@@ -1130,24 +1201,149 @@ def test_necessity_binding_is_recorded_and_bound_into_the_certificate():
 
 
 def test_corroboration_threshold_is_read_from_config_not_hardcoded():
-    """The threshold that decides CORROBORATED must be configuration the layer ACTUALLY
-    reads: raising it to three must stop two origins from corroborating. (A threshold
-    declared in a file nobody consumes is worse than no threshold — it reads as a control.)"""
+    """The threshold that decides MULTIPLY_ASSERTED must be configuration the layer ACTUALLY
+    reads: raising it to three must stop two origins from being recorded as agreement. (A
+    threshold declared in a file nobody consumes is worse than no threshold — it reads as a
+    control.) It moves only the audit axis: the grounding the note supplies is unchanged."""
     from claude_coder import provenance
     one = _r4_response(_R4_QUOTES, [_R4_EDGE])
     grammar = provenance.load_relation_grammar()
     assert grammar["min_independent_assertions"] == 2
     facts, rels = _r4_graph(_R4_NOTE, one, extra_responses=(one,))
-    assert rels[0].reconciliation_status == provenance.CORROBORATED
+    assert rels[0].corroboration_status == provenance.MULTIPLY_ASSERTED
     saved = grammar["min_independent_assertions"]
     try:
         grammar["min_independent_assertions"] = 3
         (edge,) = provenance.reconcile_relations(
             provenance.merge_relations([rels[0]]), facts, _R4_NOTE)
         assert edge.independent_support == 2
-        assert edge.reconciliation_status != provenance.CORROBORATED
+        assert edge.corroboration_status == provenance.SINGLE_ORIGIN
+        assert edge.reconciliation_status == provenance.SOURCE_DIRECTIONAL
     finally:
         grammar["min_independent_assertions"] = saved
+
+
+# ---- Codex F6-R3 (round 5): agreement between extraction runs is not source grounding -----
+# The reviewer's reproduction at 6217503: two disjoint note phrases -- one diagnosis mention,
+# one performed-service mention -- in a note that states NO causal/necessity relationship
+# between them, with the SAME model-authored REASON_FOR assertion supplied under two run
+# origins. Round 4 answered {'status': 'corroborated', 'reconciliation_evidence': [],
+# 'gate': 'PASS', 'bindings': 1}: necessity certified on an inference the source never makes,
+# naming zero source evidence. All identifiers are synthetic; no medical code or term appears.
+
+# Two documented events and NOTHING linking them. Separate sentences, so no candidate linking
+# text can stay inside one clause, and separate mentions, so nothing is even co-located.
+_R5_NOTE = "Condition alpha noted on review. Service beta was performed. End of note."
+_R5_QUOTES = {"D": ["Condition alpha"], "S": ["Service beta"]}
+_R5_OTHER_PROFILE = {"provider": "provider-two", "model": "profile-two",
+                     "callable": "tests.stub.other"}
+
+
+def _r5_graph(profiles):
+    """The identical edge asserted once per profile, each in its OWN run -- N distinct origins
+    over a note that states no relationship."""
+    from claude_coder import provenance
+    response = _r4_response(_R5_QUOTES, [_R4_EDGE])
+    facts, relations = [], []
+    for i, profile in enumerate(profiles):
+        out = extraction.extract_note(_R5_NOTE, lambda _s, _u, _r=response: _r,
+                                      run_id=f"run-{i + 1}", model_profile=profile)
+        if not facts:                      # the events are the first pass's; later passes
+            facts = out.facts              # only contribute their assertion of the edge
+            provenance.anchor_facts(_R5_NOTE, facts)
+        relations.extend(provenance.bind_relation_evidence(out.relations, facts))
+    return facts, provenance.validate_relations(relations, facts, _R5_NOTE)
+
+
+def _r5_necessity(edge, source=None):
+    """Run the REAL gate over `edge`, re-pointed at a claim's released events."""
+    from dataclasses import replace
+    from claude_coder.models import CodingResult
+    from claude_coder.gates import medical_necessity_gate
+    proc, dx = _nec_lines()
+    r = CodingResult("e", "2026-08-01", lines=[proc, dx],
+                     relations=[replace(edge, subject_event_id="df", object_event_id="pf")])
+    return medical_necessity_gate(r, source), r
+
+
+def test_two_same_provider_runs_agreeing_on_an_ungrounded_relation_hold():
+    """The reviewer's exact reproduction. Two runs of one provider are two origins and the edge
+    is honestly recorded as multiply asserted -- but the note states no relationship, so the
+    grounding axis stays UNRECONCILED with no evidence, and the encounter HOLDS."""
+    from claude_coder import provenance
+    from claude_coder.models import Outcome
+    facts, rels = _r5_graph([_R4_PROFILE, _R4_PROFILE])
+    (edge,) = rels
+    assert edge.independent_support == 2
+    assert edge.corroboration_status == provenance.MULTIPLY_ASSERTED
+    assert edge.reconciliation_status == provenance.UNRECONCILED
+    assert edge.reconciliation_evidence == []
+    out, r = _r5_necessity(edge)
+    assert out.outcome is Outcome.UNKNOWN
+    assert not r.necessity_support
+
+
+def test_two_cross_provider_runs_agreeing_on_an_ungrounded_relation_still_hold():
+    """Cross-provider agreement is not a magic exception: two vendors' models agreeing is still
+    model inference, not something the record says, so it grounds nothing either."""
+    from claude_coder import provenance
+    from claude_coder.models import Outcome
+    facts, rels = _r5_graph([_R4_PROFILE, _R5_OTHER_PROFILE])
+    (edge,) = rels
+    assert edge.independent_support == 2
+    assert {o for o in edge.assertion_origins} != set()   # two genuinely different origins
+    assert edge.corroboration_status == provenance.MULTIPLY_ASSERTED
+    assert edge.reconciliation_status == provenance.UNRECONCILED
+    out, r = _r5_necessity(edge)
+    assert out.outcome is Outcome.UNKNOWN
+    assert not r.necessity_support
+
+
+def test_coverage_policy_does_not_rescue_an_ungrounded_agreed_relation():
+    """Nor does an authoritative coverage policy that happens to qualify the linked diagnosis:
+    the policy check is an ADDITIONAL requirement in both directions, never a substitute for
+    grounding the linkage in this note."""
+    from claude_coder.models import Outcome
+    facts, rels = _r5_graph([_R4_PROFILE, _R5_OTHER_PROFILE])
+    governed = MockSource(); governed._coverage = {"P1": {"D1"}}
+    out, r = _r5_necessity(rels[0], source=governed)
+    assert out.outcome is Outcome.UNKNOWN
+    assert not r.necessity_support
+
+
+def test_source_grounded_relation_still_releases_and_names_its_evidence():
+    """The positive case is unchanged: when the note itself states the direction, the edge is
+    grounded, the spans that state it are named, and the claim releases -- with agreement
+    recorded beside the grounding rather than in place of it."""
+    from claude_coder import provenance
+    from claude_coder.models import Outcome
+    one = _r4_response(_R4_QUOTES, [_R4_EDGE])
+    facts, rels = _r4_graph(_R4_NOTE, one, extra_responses=(one,))
+    (edge,) = rels
+    assert edge.reconciliation_status == provenance.SOURCE_DIRECTIONAL
+    assert set(edge.reconciliation_evidence) <= set(edge.evidence_span_ids)
+    assert edge.reconciliation_evidence
+    out, r = _r5_necessity(edge)
+    assert out.outcome is Outcome.PASS
+    (support,) = r.necessity_support[0]["supports"]
+    assert support["reconciliation_status"] == provenance.SOURCE_DIRECTIONAL
+    assert support["corroboration_status"] == provenance.MULTIPLY_ASSERTED   # recorded only
+    assert support["reconciliation_evidence"]
+
+
+def test_grounding_and_corroboration_are_disjoint_vocabularies():
+    """The distinction is legible in the data model, not only enforced at the gate: the two
+    axes are different fields with non-overlapping value sets, and the model's declared default
+    tracks the provenance layer's."""
+    from claude_coder import provenance
+    from claude_coder.models import RelationAssertion, RelationPredicate
+    assert not (provenance.RECONCILIATION_STATUSES & provenance.CORROBORATION_STATUSES)
+    assert provenance.GROUNDED_RECONCILIATION_STATUSES < provenance.RECONCILIATION_STATUSES
+    assert not (provenance.GROUNDED_RECONCILIATION_STATUSES
+                & provenance.RETIRED_RECONCILIATION_STATUSES)
+    fresh = RelationAssertion("a", RelationPredicate.REASON_FOR, "b")
+    assert fresh.corroboration_status == provenance.SINGLE_ORIGIN
+    assert fresh.reconciliation_status == provenance.UNRECONCILED
 
 
 def test_relation_grammar_is_versioned_configuration_and_fails_closed():

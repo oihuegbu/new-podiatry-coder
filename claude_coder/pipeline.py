@@ -196,10 +196,13 @@ def code_encounter(
                            "state": r.state.value,
                            "evidence_span_ids": r.evidence_span_ids,
                            "confidence": r.confidence,
-                           # how (if at all) the edge was independently reconciled -- the
-                           # necessity control reads this, so it must be auditable (F6-R3)
+                           # GROUNDING: what the RECORD establishes about the edge, and the
+                           # spans that establish it -- the necessity control reads this, so
+                           # it must be auditable (F6-R3)
                            "reconciliation_status": r.reconciliation_status,
                            "reconciliation_evidence": list(r.reconciliation_evidence or []),
+                           # AGREEMENT: recorded for audit/confidence, never justification
+                           "corroboration_status": r.corroboration_status,
                            "assertion_origins": sorted(str(o) for o in (r.assertion_origins or [])),
                            "independent_support": r.independent_support,
                            "support": r.support} for r in relations],

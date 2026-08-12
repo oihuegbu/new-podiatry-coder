@@ -113,6 +113,12 @@ class ExtractionOrigin:
     differs: the run, the provider/profile that answered, the prompt, or the response
     schema. This is derived from the call metadata the pipeline already records
     (`_model_profile_identity`) — it is not a parallel id scheme. (Codex F6-R3.)
+
+    What a count of distinct origins is FOR: the audit trail and confidence display. It is
+    not evidence about the record, so it cannot ground a claim-affecting relation — see
+    `provenance.MULTIPLY_ASSERTED`, which is a separate axis from
+    `provenance.GROUNDED_RECONCILIATION_STATUSES` precisely so that agreement between runs,
+    same-provider or cross-provider, can never be read as documentation.
     """
     run_id: str
     provider: str = ""
@@ -155,7 +161,9 @@ def call_origin(note_text: str, raw_response: str, *, run_id: str | None = None,
     """The origin identity for one extraction call.
 
     `run_id` is supplied by a caller that genuinely runs more than one pass (each pass is
-    its own run, so two passes of the SAME provider legitimately corroborate). When it is
+    its own run, so two passes of the SAME provider are two origins and the edge is recorded
+    as multiply-asserted — which is an observation about the model, not about the note, and
+    releases nothing on its own). When it is
     not supplied the run is identified by its own content — document, prompt, profile and
     the exact response — so a single pass is reproducible (certificates stay stable) and a
     response cannot be counted twice by being replayed into the same graph."""

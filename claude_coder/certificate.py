@@ -88,10 +88,13 @@ def build_certificate(result: CodingResult, note_text: str,
         "evidence_span_ids": list(r.evidence_span_ids),
         "extraction_source": r.extraction_source,
         "confidence": r.confidence,
+        # GROUNDING: what the RECORD establishes, and WHICH source text established it.
         "reconciliation_status": r.reconciliation_status,
-        # WHICH source text established that status, and from HOW MANY DISTINCT assertion
-        # origins the edge arrived — so a reader can tell corroboration from repetition.
         "reconciliation_evidence": list(getattr(r, "reconciliation_evidence", []) or []),
+        # AGREEMENT: from how many DISTINCT assertion origins the edge arrived — so a reader
+        # can tell repetition from re-assertion, and both of those from source grounding.
+        # Recorded, never accepted as justification. (Codex F6-R3, round 5.)
+        "corroboration_status": str(getattr(r, "corroboration_status", "") or ""),
         "assertion_origins": sorted(str(o) for o in (r.assertion_origins or [])),
         "independent_support": r.independent_support,
         "support": r.support,

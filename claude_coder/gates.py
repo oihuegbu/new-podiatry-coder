@@ -236,6 +236,34 @@ def load_necessity_control() -> dict:
             not all(isinstance(s, str) and s.strip() for s in accepted):
         raise NecessityControlError(
             "accepted_reconciliation_statuses must be a non-empty array of strings")
+    # A claim-affecting control may accept ONLY a status that means the SOURCE RECORD grounds
+    # the edge. This is validated against the provenance layer's own declaration rather than
+    # trusted to the config's contents, so no config edit -- including restoring an older
+    # revision of this file -- can re-admit an agreement-only status as justification. It
+    # fails closed: the gate reports ERROR and autonomy stops. (Codex F6-R3, round 5.)
+    try:
+        from . import provenance as _prov
+    except Exception as exc:                          # pragma: no cover - defensive
+        # Typed and fail-closed: without the grounding declaration the control cannot be
+        # validated, so the gate must ERROR (SYSTEM_HOLD) rather than run unvalidated.
+        raise NecessityControlError(
+            f"cannot validate accepted_reconciliation_statuses: the provenance grounding "
+            f"declaration is unavailable ({exc})") from exc
+    for status in accepted:
+        norm = str(status).strip().lower()
+        if norm in _prov.GROUNDED_RECONCILIATION_STATUSES:
+            continue
+        if norm in _prov.RETIRED_RECONCILIATION_STATUSES:
+            raise NecessityControlError(
+                f"accepted_reconciliation_statuses lists {norm!r}, which is no longer a "
+                f"reconciliation status: agreement between assertion origins is recorded on "
+                f"the separate corroboration axis and can never ground a claim-affecting "
+                f"relation. Accepted values are grounded statuses only: "
+                f"{sorted(_prov.GROUNDED_RECONCILIATION_STATUSES)}")
+        raise NecessityControlError(
+            f"accepted_reconciliation_statuses lists {norm!r}, which does not establish that "
+            f"the source record grounds the relation. Accepted values are grounded statuses "
+            f"only: {sorted(_prov.GROUNDED_RECONCILIATION_STATUSES)}")
     if not cfg.get("authority"):
         raise NecessityControlError("a control must cite its authority")
     _NECESSITY_CONTROL_CACHE = cfg
@@ -250,9 +278,16 @@ def _necessity_support_relations(result: CodingResult, control: dict) -> tuple[l
       - EVIDENCE-ANCHORED -- it carries verified span references, so the asserted relationship
         is tied to the source document rather than existing only in the model's output;
       - at or above the configured confidence floor;
-      - stamped with a reconciliation status the deterministic provenance layer established
-        from DISTINCT recorded assertion origins or from a clause of the source document that
-        states the relationship directionally -- never from repetition or co-occurrence.
+      - GROUNDED IN THE RECORD -- stamped by the deterministic provenance layer with a
+        reconciliation status the control accepts, which the loader has already constrained to
+        `provenance.GROUNDED_RECONCILIATION_STATUSES` (a clause of the source document that
+        states the relationship directionally). Never from repetition, co-occurrence, or
+        agreement between assertion origins: how many model runs asserted an edge is recorded
+        on the separate `corroboration_status` axis and is read here for the audit record
+        only, never as justification. (Codex F6-R3, round 5.)
+      - and NAMING the verified spans that grounded it: a grounded status with an empty
+        `reconciliation_evidence` list would certify necessity while citing no source text, so
+        it is refused here as well as being unreachable in the provenance layer.
     Any conflicting (non-asserted) edge between the same endpoints disqualifies that pair
     outright, so an uncertain/negated duplicate can never be out-voted by a confident one.
     """
@@ -276,6 +311,8 @@ def _necessity_support_relations(result: CodingResult, control: dict) -> tuple[l
             continue
         if str(getattr(r, "reconciliation_status", "") or "").strip().lower() not in accepted:
             continue
+        if not list(getattr(r, "reconciliation_evidence", None) or []):
+            continue
         usable.append(r)
     return usable, disqualified
 
@@ -288,8 +325,12 @@ def _support_record(dx_line, relation, *, policy_qualifying: bool | None) -> dic
         "diagnosis_code": dx_line.chosen.code if dx_line.chosen else None,
         "diagnosis_system": dx_line.chosen.system if dx_line.chosen else None,
         "relation_id": relation.relation_id,
+        # GROUNDING (what released this) and AGREEMENT (audit/confidence only) are recorded as
+        # the two separate facts they are, so a reader of the certificate can tell which one
+        # justified the service without having to know the vocabulary. (Codex F6-R3, round 5.)
         "reconciliation_status": relation.reconciliation_status,
         "reconciliation_evidence": list(getattr(relation, "reconciliation_evidence", []) or []),
+        "corroboration_status": str(getattr(relation, "corroboration_status", "") or ""),
         "assertion_origins": sorted(str(o) for o in (relation.assertion_origins or [])),
         "independent_support": int(getattr(relation, "independent_support", 0) or 0),
         "support": int(getattr(relation, "support", 0) or 0),
@@ -307,9 +348,17 @@ def medical_necessity_gate(result: CodingResult,
 
     EVERY released procedure requires an ENCOUNTER-SPECIFIC RESOLVED LINKAGE: a diagnosis
     --REASON_FOR--> service edge that is asserted, evidence-anchored, at/above the configured
-    confidence floor, and carries a reconciliation status established deterministically by
-    `provenance.reconcile_relations` -- distinct recorded assertion origins, or a clause of
-    the source document that states the relationship directionally.
+    confidence floor, and GROUNDED IN THE RECORD by `provenance.reconcile_relations` -- a
+    clause of the source document that states the relationship directionally, naming the
+    verified spans that state it.
+
+    Agreement between extraction runs is NOT such a grounding and can never substitute for it.
+    Distinct assertion origins are still counted and recorded (`corroboration_status`,
+    `assertion_origins`, `independent_support`) for the audit trail and confidence display,
+    but N runs of a model agreeing -- same provider or different providers -- is that model's
+    self-confidence sampled N times, not documentation. The control config cannot re-admit it:
+    `load_necessity_control` refuses any accepted status outside
+    `provenance.GROUNDED_RECONCILIATION_STATUSES`. (Codex F6-R3, round 5.)
 
     Where an authoritative CMS coverage policy GOVERNS the service (`qualifying_dx_for`
     returns a set), that is an ADDITIONAL requirement, not a substitute: the diagnosis linked
@@ -318,7 +367,14 @@ def medical_necessity_gate(result: CodingResult,
     so an unrelated covered diagnosis on the encounter can no longer release a governed
     service with no relation at all. (Codex F6-R3.)
 
-    Everything else HOLDs: an unanchored or unreconciled edge, an edge below the floor, a
+    That coverage check stays an ADDITIONAL requirement in BOTH directions: it is also never
+    accepted IN PLACE OF record grounding. A coverage policy says a code pair can qualify in
+    general; it says nothing about what this note documents, so admitting it as a substitute
+    would weaken the ungrounded-edge hold this gate exists to enforce rather than strengthen
+    it. Grounding comes from the record; policy compatibility is checked on top of it.
+
+    Everything else HOLDs: an unanchored edge, an edge the record does not ground (including
+    one that only agreeing extraction runs assert), an edge below the floor, a
     conflicting/uncertain edge, a governed procedure whose linked diagnosis does not qualify,
     a governed procedure whose qualifying diagnosis is not the linked one, and an unavailable
     coverage evaluation.
@@ -374,8 +430,9 @@ def medical_necessity_gate(result: CodingResult,
                 want = {str(q).replace(".", "").upper() for q in qualifying}
                 policy_linked = {e for e, dln in released_dx.items() if dln.chosen
                                  and dln.chosen.code.replace(".", "").upper() in want}
-        no_link = (f"{label}: no independently reconciled, evidence-anchored REASON_FOR link "
-                   f"to a released diagnosis (model self-confidence is not clinical support)")
+        no_link = (f"{label}: no record-grounded, evidence-anchored REASON_FOR link to a "
+                   f"released diagnosis (neither the model's own confidence nor agreement "
+                   f"between extraction runs is clinical support)")
         if qualifying is not None:
             # GOVERNED: encounter linkage AND policy compatibility, on the SAME diagnosis.
             accepted = sorted(set(linked) & policy_linked)
@@ -414,9 +471,9 @@ def medical_necessity_gate(result: CodingResult,
     if holds:
         return GateResult("medical_necessity", Outcome.UNKNOWN, "; ".join(holds), authority)
     return GateResult("medical_necessity", Outcome.PASS,
-                      f"{len(procs)} procedure(s) each justified by an independently "
-                      f"reconciled, anchored diagnosis link in this encounter, and by "
-                      f"authoritative coverage policy where one governs the service",
+                      f"{len(procs)} procedure(s) each justified by a record-grounded, "
+                      f"anchored diagnosis link in this encounter, and by authoritative "
+                      f"coverage policy where one governs the service",
                       authority)
 
 

@@ -14,6 +14,7 @@ from claude_coder.data_access import MockSource
 from claude_coder.models import CandidateCode
 from claude_coder.pipeline import code_encounter
 import claude_coder.certificate as cert_mod
+import claude_coder.provenance as provenance
 
 _FACTS = ('{"facts":[{"kind":"procedure","description":"excision of lesion",'
           '"attributes":{"performer_id":"actor-1","billing_entity_id":"actor-1"},'
@@ -624,7 +625,10 @@ def test_necessity_binding_data_identity_and_terminal_anchor_coexist_on_one_rele
             assert support["diagnosis_event_id"] and support["diagnosis_code"]
             # the status was written by the deterministic provenance layer, never by the
             # extraction model, and the spans that proved it are the edge's own
-            assert support["reconciliation_status"] in ("corroborated", "source_directional")
+            # ... and it GROUNDS the edge in the record: agreement between extraction runs is
+            # recorded on its own axis and can never appear here. (Codex F6-R3, round 5.)
+            assert support["reconciliation_status"] in provenance.GROUNDED_RECONCILIATION_STATUSES
+            assert support["corroboration_status"] in provenance.CORROBORATION_STATUSES
             assert support["assertion_origins"] and all(support["assertion_origins"])
             assert set(support["reconciliation_evidence"]) <= set(support["evidence_span_ids"])
 

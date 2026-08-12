@@ -161,7 +161,10 @@ def merge_relations(relations: list[RelationAssertion]) -> list[RelationAssertio
     separate: one extraction response that emits the identical edge twice raises support to
     2 while contributing exactly ONE origin, so nothing downstream can read that repetition
     as two sources agreeing. Independence is a property of where an assertion came from,
-    never of how many times it was written down. (Codex F6-R3.)"""
+    never of how many times it was written down. (Codex F6-R3.)
+
+    Neither number is grounding. Both feed the corroboration axis, which `reconcile_relations`
+    records for audit and confidence and which no claim-affecting control may accept."""
     by_id: dict[str, RelationAssertion] = {}
     for r in relations:
         rid = r.relation_id
@@ -326,15 +329,24 @@ def bind_relation_evidence(relations: list[RelationAssertion], facts: list) -> l
     return bound
 
 
-# Reconciliation statuses this module can establish DETERMINISTICALLY. They are written by
-# `reconcile_relations` only; nothing an extraction model emits can set them, because the
-# whole point is that an edge asserted by the same model that authored the events is not
-# independent support for that edge. (Codex F6-R3.)
+# An edge carries TWO INDEPENDENT, SEPARATELY RECORDED provenance facts. Conflating them into
+# one enum is what let model agreement stand in for documentation, so they are different
+# fields with different vocabularies and only one of them can release a claim. (Codex F6-R3,
+# round 5.)
+#
+#   1. `reconciliation_status` -- GROUNDING: what THE RECORD says about this edge. Established
+#      by re-reading the source document at verified offsets. Only a grounded status may be
+#      accepted by a claim-affecting control.
+#   2. `corroboration_status`  -- AGREEMENT: how many distinct assertion origins said it.
+#      Legitimate for the audit trail and confidence display; never grounding, because N
+#      samples of one model's belief is still that model's belief.
+#
+# Both are written by `reconcile_relations` only; nothing an extraction model emits can set
+# either, because an edge asserted by the same model that authored the events is not
+# independent support for that edge.
+
+# ---- grounding axis (what the source document establishes) --------------------------------
 UNRECONCILED = "unreconciled"
-# The same edge came from at least `min_independent_assertions` DISTINCT recorded assertion
-# origins (run + provider/profile + prompt + schema). Repetition inside one response is one
-# origin and therefore does not corroborate anything.
-CORROBORATED = "corroborated"
 # One clause of the source document STATES the directional relationship: the two endpoints'
 # own verified verbatim mentions sit either side of a linking phrase from the reviewed
 # grammar, in the orientation that phrase declares.
@@ -343,6 +355,37 @@ SOURCE_DIRECTIONAL = "source_directional"
 # that passage states the DIRECTIONAL claim. Co-occurrence is not a clinical proposition, so
 # this status exists to record what was seen, not to satisfy a release control.
 SOURCE_COLOCATED = "source_colocated"
+
+# The statuses that constitute INDEPENDENT GROUNDING IN THE RECORD -- the only values a
+# claim-affecting control may accept. This set is the single place that answers "does this
+# status mean the document itself supports the edge?", so a control config is validated
+# against it (see `gates.load_necessity_control`) rather than being trusted to list only
+# safe values. A status is a member because a deterministic re-read of the source proved it,
+# never because assertions agreed.
+GROUNDED_RECONCILIATION_STATUSES = frozenset({SOURCE_DIRECTIONAL})
+# Every status this layer can stamp. UNRECONCILED and SOURCE_COLOCATED are deliberately NOT
+# grounded: they record, respectively, that nothing was proved and that co-occurrence was
+# observed.
+RECONCILIATION_STATUSES = frozenset({UNRECONCILED, SOURCE_DIRECTIONAL, SOURCE_COLOCATED})
+# Values that WERE reconciliation statuses and no longer are. Named so that a control config
+# (or a persisted record) still carrying one fails loudly with the reason, instead of quietly
+# matching nothing -- or, worse, being re-added by a config edit and silently reinstating the
+# defect. "corroborated" moved to the corroboration axis below in round 5.
+RETIRED_RECONCILIATION_STATUSES = frozenset({"corroborated", "externally_verified"})
+
+# ---- corroboration axis (how many distinct origins asserted it) ---------------------------
+# Exactly one recorded assertion origin -- or none, which scores as one for display and as
+# zero support everywhere it matters.
+SINGLE_ORIGIN = "single_origin"
+# The same edge came from at least `min_independent_assertions` DISTINCT recorded assertion
+# origins (run + provider/profile + prompt + schema). Repetition inside one response is one
+# origin and therefore does not corroborate anything. This is AUDIT AND CONFIDENCE
+# INFORMATION ONLY: multiple agreeing model runs -- same provider or cross-provider -- are
+# still model self-confidence sampled more than once, so this value can never, on its own,
+# make a relation claim-affecting. (Codex F6-R3, round 5: cross-provider agreement is not a
+# magic exception; it is still not source grounding.)
+MULTIPLY_ASSERTED = "multiply_asserted"
+CORROBORATION_STATUSES = frozenset({SINGLE_ORIGIN, MULTIPLY_ASSERTED})
 
 
 def _usable_span(span, note_text: str, doc_sha: str):
@@ -396,26 +439,40 @@ def _directional_proof(rel, subject_spans: list, object_spans: list, note_text: 
 def reconcile_relations(relations: list[RelationAssertion], facts: list, note_text: str,
                         *, min_independent_assertions: int | None = None
                         ) -> list[RelationAssertion]:
-    """Stamp each edge with how -- if at all -- it was independently reconciled.
+    """Stamp each edge with the two provenance facts a control may read about it.
 
-    Deterministic, re-checkable criteria, in priority order:
+    GROUNDING (`reconciliation_status`) -- what the SOURCE DOCUMENT establishes, by
+    deterministic, re-checkable re-reading of the note at verified offsets:
 
-      1. CORROBORATED -- the identical (subject, predicate, object) edge arrived from at least
-         `min_independent_assertions` (default: the reviewed grammar's, so the threshold is
-         configuration that is actually READ) DISTINCT recorded assertion origins. An origin is one
-         extraction call (run + provider/profile + prompt + schema), so the same edge emitted
-         twice in one response is ONE origin and corroborates nothing, while the same edge
-         from two separate runs of the same provider legitimately does.
-      2. SOURCE_DIRECTIONAL -- the source document itself STATES the directional relationship:
+      1. SOURCE_DIRECTIONAL -- the source document itself STATES the directional relationship:
          each endpoint has its own verified verbatim mention, the two mentions are disjoint,
          and the text between them links them, within one clause, by a phrase the reviewed
-         relation-evidence grammar declares for this predicate in that orientation.
-      3. SOURCE_COLOCATED -- observational only: one verified passage documents both endpoints
+         relation-evidence grammar declares for this predicate in that orientation. This is
+         the only grounded status (`GROUNDED_RECONCILIATION_STATUSES`).
+      2. SOURCE_COLOCATED -- observational only: one verified passage documents both endpoints
          but states no directional claim. Recorded so the audit shows what WAS seen; it is not
          an accepted justification.
+      3. UNRECONCILED -- the record establishes nothing about this edge.
 
-    Anything else stays UNRECONCILED. This never raises confidence and never changes state; it
-    only records a verifiable provenance fact that release controls may then require.
+    A non-UNRECONCILED status ALWAYS names the verified spans that established it, so a
+    certificate can never report a grounded relation while citing no source text.
+
+    CORROBORATION (`corroboration_status`) -- how many DISTINCT recorded assertion origins
+    asserted the identical (subject, predicate, object) edge. An origin is one extraction call
+    (run + provider/profile + prompt + schema), so the same edge emitted twice in one response
+    is ONE origin, while the same edge from two separate runs carries two. At or above
+    `min_independent_assertions` (default: the reviewed grammar's, so the threshold is
+    configuration that is actually READ) the edge is MULTIPLY_ASSERTED.
+
+    The two axes are deliberately independent and are never combined here. Agreement between
+    model runs -- however many, whatever provider -- is not evidence about the record, so it
+    cannot raise, substitute for, or short-circuit the grounding axis. Round 4 ranked
+    corroboration ABOVE directional proof in one enum, which let two agreeing runs certify an
+    edge the note never states, with an empty evidence list; that ranking is gone. (Codex
+    F6-R3, round 5.)
+
+    This never raises confidence and never changes state; it only records verifiable
+    provenance facts that release controls may then require.
     """
     grammar = load_relation_grammar()
     compiled = _grammar_patterns(grammar)
@@ -441,14 +498,19 @@ def reconcile_relations(relations: list[RelationAssertion], facts: list, note_te
         directional = _directional_proof(
             rel, located_by_event.get(rel.subject_event_id, []),
             located_by_event.get(rel.object_event_id, []), note_text or "", compiled)
-        if int(getattr(rel, "independent_support", 0) or 0) >= threshold:
-            status, proof = CORROBORATED, sorted(directional or shared)
-        elif directional:
+        # GROUNDING: only what the document proves. Corroboration is NOT consulted here --
+        # that is the whole point of the two axes being separate.
+        if directional:
             status, proof = SOURCE_DIRECTIONAL, list(directional)
         elif shared:
             status, proof = SOURCE_COLOCATED, sorted(shared)
+        # AGREEMENT: recorded beside the grounding, never folded into it.
+        corroboration = (MULTIPLY_ASSERTED
+                         if int(getattr(rel, "independent_support", 0) or 0) >= threshold
+                         else SINGLE_ORIGIN)
         out.append(replace(rel, reconciliation_status=status,
-                           reconciliation_evidence=list(proof)))
+                           reconciliation_evidence=list(proof),
+                           corroboration_status=corroboration))
     return out
 
 

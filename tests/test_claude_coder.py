@@ -168,6 +168,51 @@ class AutonomousCoderTest(unittest.TestCase):
         self.assertEqual(nec.outcome, Outcome.UNKNOWN, nec.detail)
         self.assertNotEqual(r.verdict, Verdict.AUTO_READY)
 
+    def test_agreeing_origins_cannot_certify_an_ungrounded_link_end_to_end(self):
+        """F6-R3 round 5 end-to-end: the SAME ungrounded note, with the corroboration axis
+        forced to its agreeing value. (Lowering the threshold stands in for a multi-pass
+        caller: the deployed pipeline extracts once, so agreement is only ever reachable from
+        a caller that runs more passes — which is exactly the hole being closed.) The edge is
+        honestly recorded as multiply asserted, the grounding axis still says the record
+        proves nothing, and the whole encounter still loses autonomy with no binding."""
+        from claude_coder import provenance
+        from claude_coder.provenance import NullAuditRepository
+        note = NOTE.replace(_LINK_SENTENCE + ". ", "")
+        facts = _facts_json(link_evidence=False)
+        grammar = provenance.load_relation_grammar()
+        saved = grammar["min_independent_assertions"]
+        try:
+            grammar["min_independent_assertions"] = 1
+            r = code_encounter("enc-1", note, "2026-03-14", source=_source(),
+                               extract_llm=lambda s, u: facts,
+                               arbitrate_llm=_arbitrate_stub,
+                               audit_repository=NullAuditRepository(),
+                               billing_context={"billing_entity_id": "actor-1", "participants": [
+                                   {"id": "actor-1", "type": "person",
+                                    "roles": ["performer"]}]})
+        finally:
+            grammar["min_independent_assertions"] = saved
+        from claude_coder.models import RelationPredicate
+        reasons = [rel for rel in r.relations
+                   if rel.predicate is RelationPredicate.REASON_FOR]
+        self.assertTrue(reasons)
+        for rel in reasons:
+            self.assertEqual(rel.corroboration_status, provenance.MULTIPLY_ASSERTED)
+            self.assertEqual(rel.reconciliation_status, provenance.UNRECONCILED)
+            self.assertEqual(rel.reconciliation_evidence, [])
+        nec = next(g for g in r.gates if g.name == "medical_necessity")
+        self.assertEqual(nec.outcome, Outcome.UNKNOWN, nec.detail)
+        self.assertFalse(r.necessity_support)
+        self.assertEqual(r.verdict, Verdict.REVIEW_REQUIRED)
+        # the certificate of the held encounter binds NO necessity support and shows both
+        # axes, so the audit record says exactly what was and was not established
+        self.assertEqual(r.certificate["necessity_support"], [])
+        (cert_rel,) = [rel for rel in r.certificate["relations"]
+                       if rel["predicate"] == "reason_for"]
+        self.assertEqual(cert_rel["corroboration_status"], provenance.MULTIPLY_ASSERTED)
+        self.assertEqual(cert_rel["reconciliation_status"], provenance.UNRECONCILED)
+        self.assertEqual(cert_rel["reconciliation_evidence"], [])
+
     def test_planned_work_not_billed(self):
         r = self._run()
         billed = {ln.chosen.code for ln in r.billable_lines}
