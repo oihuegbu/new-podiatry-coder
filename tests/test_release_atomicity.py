@@ -518,3 +518,33 @@ def test_the_real_capability_manifest_declares_the_complete_required_set():
         assert record["role"] == spec["role"]
         if record["present"] and spec["release_metadata_required"]:
             assert release_window_populated(record["release"]), source_id
+
+
+def test_the_release_record_declares_the_terminal_head_trust_boundary():
+    """Codex F6-R4-A: the durable release record must state what chain-of-custody guarantee
+    was ACTUALLY in force -- which terminal-head anchor backend, and whether it is a real
+    external trust boundary. A repository that cannot answer is described as unanchored, never
+    omitted: silence would read as 'fine' when the honest answer is 'not externally anchored'.
+    """
+    _r, audit = _run()
+    anchor = audit.last_release()["terminal_head_anchor"]
+    assert anchor["configured"] is False                     # this double has no anchor
+    assert anchor["external_trust_boundary"] is False        # ...and never claims one
+
+
+def test_the_release_record_reports_a_configured_anchor(tmp_path):
+    """...and when an anchor IS configured, the record names it and its sequence, so an
+    artifact can be checked against the anchor store after the fact."""
+    from claude_coder.checkpoint import LocalFileCheckpointAnchor
+    from claude_coder.provenance import SqliteAuditRepository
+    repo = SqliteAuditRepository(tmp_path / "rel.db",
+                                 checkpoint_anchor=LocalFileCheckpointAnchor(tmp_path / "a"))
+    r, _audit = _run(audit=repo)
+    assert r.encounter_id == "e"
+    release = [rec for rec in repo.records("e") if rec["kind"] == "release_decision"]
+    anchor = release[-1]["record"]["terminal_head_anchor"]
+    assert anchor["backend"] == "local-file"
+    assert anchor["configured"] is True
+    assert anchor["external_trust_boundary"] is False        # reference backend, not a boundary
+    assert anchor["anchored_seq"] == anchor["journal_seq"]
+    assert repo.verify_chain("e") == []

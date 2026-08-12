@@ -418,6 +418,12 @@ def code_encounter(
                 "billable_event_ids": [ln.fact.fact_id for ln in result.billable_lines],
                 "gate_outcomes": [{"name": g.name, "outcome": g.outcome.value}
                                   for g in result.gates],
+                # What the chain-of-custody guarantee ACTUALLY was for this release: which
+                # terminal-head anchor backend was in force and whether it is a real external
+                # trust boundary. Recorded so no artifact can imply an integrity property that
+                # was not enforced -- when no anchor is configured this says so, in the record
+                # itself. (Codex F6-R4-A.)
+                "terminal_head_anchor": _terminal_head_anchor(audit_repository),
                 **terminal_extra,
             }))
     except Exception as exc:
@@ -428,6 +434,32 @@ def code_encounter(
             "audit/certificate integrity", retryable=True))
         decide(result, source=source)
     return result
+
+
+def _terminal_head_anchor(audit_repository) -> dict:
+    """Declare, in the durable release record, what the terminal-head trust boundary was.
+
+    Total by construction: a repository implementation without an anchor (or one whose
+    status cannot be read) is DESCRIBED as such, never omitted -- an absent field would
+    read as 'nothing to report' when the honest answer is 'not externally anchored'.
+    Enforcement lives in the repository's append path, which raises and holds the release;
+    this is the attestation of what was in force, not the control itself.
+    """
+    unknown = {"backend": "unavailable", "configured": False,
+               "external_trust_boundary": False}
+    status_fn = getattr(audit_repository, "checkpoint_status", None)
+    if not callable(status_fn):
+        return unknown
+    try:
+        status = status_fn()
+    except Exception as exc:                       # pragma: no cover - defensive
+        return {**unknown, "backend": "error", "problems": [type(exc).__name__]}
+    if not isinstance(status, dict):               # pragma: no cover - defensive
+        return unknown
+    return {k: status.get(k) for k in
+            ("backend", "configured", "external_trust_boundary", "required",
+             "store_id", "journal_seq", "anchored_seq", "limitation", "problems")
+            if k in status}
 
 
 def _system_hold_result(encounter_id: str, date_of_service: str | None,

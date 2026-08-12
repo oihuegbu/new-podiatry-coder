@@ -559,3 +559,348 @@ def test_legacy_unwitnessed_rows_are_reported(tmp_path):
     conn.commit()
     conn.close()
     assert any("no witness seal" in p for p in repo.verify_chain("enc2"))
+
+
+# ---- Codex F6-R4-A round 4: the terminal head is anchored OUTSIDE the DB+journal pair ------
+# The journal detects edits and ONE-SIDED truncation. Removing the terminal journal entry AND
+# the terminal durable row TOGETHER leaves an internally consistent prefix that verifies clean
+# and can be extended -- no key needed, and a better-held key does not help. Only an expected
+# terminal POSITION held outside both mutable objects can catch it.
+#
+# NOTE ON WHAT THESE TESTS PROVE. They drive `LocalFileCheckpointAnchor`, the REFERENCE
+# backend, which lives on the same filesystem as the store it anchors. They prove the
+# detection logic, the fail-closed release path and the backend contract are correct. They do
+# NOT establish a production trust boundary: that requires a separately controlled append-only
+# store (see `checkpoint.py`), which is an infrastructure decision this change deliberately
+# does not take. `test_an_unanchored_store_cannot_detect_consistent_truncation_and_says_so`
+# pins the honest limit that remains until such a backend is configured.
+def _anchored(tmp_path, name="anchored.db"):
+    """A fresh repository object bound to a persistent anchor directory. Building a new
+    repository AND a new anchor object each time is what a process restart looks like."""
+    from claude_coder.checkpoint import LocalFileCheckpointAnchor
+    from claude_coder.provenance import SqliteAuditRepository
+    return SqliteAuditRepository(
+        tmp_path / name,
+        checkpoint_anchor=LocalFileCheckpointAnchor(tmp_path / "anchor"))
+
+
+def _truncate_both_tails(repo):
+    """The reviewer's exact reproduction: drop the final witness line, then drop the SQLite
+    delete trigger and the final audit row."""
+    import sqlite3
+    wp = repo._witness_path()
+    lines = [ln for ln in wp.read_text().splitlines() if ln.strip()]
+    wp.write_text("\n".join(lines[:-1]) + ("\n" if len(lines) > 1 else ""))
+    conn = sqlite3.connect(str(repo.db_path))
+    conn.execute("DROP TRIGGER audit_no_delete")
+    conn.execute("DELETE FROM audit_log WHERE seq=(SELECT MAX(seq) FROM audit_log)")
+    conn.commit()
+    conn.close()
+
+
+def test_consistent_db_and_journal_tail_truncation_is_detected(tmp_path):
+    """THE reported reproduction. Both tails removed together; the remaining prefix is
+    internally consistent, so only the external anchor can contradict it."""
+    repo = _anchored(tmp_path)
+    repo.append("enc", "a", {"x": 1})
+    repo.append("enc", "b", {"x": 2})                     # terminal release record
+    assert repo.verify_chain("enc") == []
+    _truncate_both_tails(repo)
+    problems = _anchored(tmp_path).verify_chain("enc")
+    assert any("SHORTER than its anchored checkpoint" in p for p in problems), problems
+
+
+def test_a_subsequent_append_after_consistent_truncation_is_refused(tmp_path):
+    """...and the system must not carry on issuing releases on the rewritten history. This is
+    the RELEASE PATH: `append` raises, which `code_encounter` turns into SYSTEM_HOLD."""
+    import pytest
+    repo = _anchored(tmp_path)
+    repo.append("enc", "a", {"x": 1})
+    repo.append("enc", "b", {"x": 2})
+    _truncate_both_tails(repo)
+    with pytest.raises(OSError) as err:
+        _anchored(tmp_path).append("enc", "c", {"x": 3})
+    assert "truncated together" in str(err.value)
+
+
+def test_an_unanchored_store_cannot_detect_consistent_truncation_and_says_so(tmp_path):
+    """The honest residual limit, pinned. With NO anchor configured the same attack is
+    invisible -- so the status must declare that, rather than reporting a clean chain as
+    though the guarantee held. Delete this test the day a real external backend is required."""
+    repo = _repo(tmp_path, "unanchored.db")               # DisabledCheckpointAnchor
+    repo.append("enc", "a", {"x": 1})
+    repo.append("enc", "b", {"x": 2})
+    _truncate_both_tails(repo)
+    assert _repo(tmp_path, "unanchored.db").verify_chain("enc") == []     # undetectable
+    status = _repo(tmp_path, "unanchored.db").witness_status()["checkpoint"]
+    assert status["configured"] is False
+    assert status["external_trust_boundary"] is False
+    assert "NOT detectable" in status["limitation"]
+
+
+def test_the_anchor_survives_restart_and_tracks_the_journal(tmp_path):
+    """RESTART: a new process (new repository object, new anchor object) reads the same
+    anchored state, extends normally, and stays aligned."""
+    _anchored(tmp_path).append("enc", "a", {"x": 1})
+    _anchored(tmp_path).append("enc", "b", {"x": 2})
+    _anchored(tmp_path).append("enc2", "c", {"x": 3})      # anchor is per STORE, not encounter
+    repo = _anchored(tmp_path)
+    assert repo.verify_chain() == []
+    status = repo.witness_status()["checkpoint"]
+    assert status["journal_seq"] == 3 and status["anchored_seq"] == 3
+    assert status["configured"] is True and status["problems"] == []
+
+
+def test_an_unavailable_checkpoint_anchor_holds_the_release(tmp_path):
+    """UNVERIFIABLE must fail closed. An anchor that cannot be READ stops the append (and is
+    reported by verification); it can never be treated as an implicit pass."""
+    import pytest
+    from claude_coder.checkpoint import AnchorUnavailable, CheckpointAnchor
+    from claude_coder.provenance import SqliteAuditRepository
+
+    class _Unreachable(CheckpointAnchor):
+        backend_id, configured, external = "stub-unreachable", True, True
+
+        def read(self, store_id):
+            raise AnchorUnavailable("checkpoint store unreachable")
+
+        def write(self, record):
+            raise AnchorUnavailable("checkpoint store unreachable")
+
+    repo = SqliteAuditRepository(tmp_path / "unreachable.db",
+                                 checkpoint_anchor=_Unreachable())
+    with pytest.raises(OSError) as err:
+        repo.append("enc", "a", {"x": 1})
+    assert "unverifiable" in str(err.value)
+    assert repo.records("enc") == []                       # nothing committed
+    assert any("unverifiable" in p for p in repo.verify_chain("enc"))
+
+
+def test_an_unwritable_checkpoint_anchor_leaves_no_committed_row(tmp_path):
+    """The other side of the ordering contract: the checkpoint is advanced BETWEEN the journal
+    fsync and the commit, so a write failure aborts the append rather than committing a row
+    the anchor never covered."""
+    import pytest
+    from claude_coder.checkpoint import AnchorUnavailable, LocalFileCheckpointAnchor
+    from claude_coder.provenance import SqliteAuditRepository
+
+    class _ReadOnly(LocalFileCheckpointAnchor):
+        def write(self, record):
+            raise AnchorUnavailable("checkpoint store is read-only")
+
+    repo = SqliteAuditRepository(tmp_path / "readonly.db",
+                                 checkpoint_anchor=_ReadOnly(tmp_path / "anchor"))
+    with pytest.raises(OSError) as err:
+        repo.append("enc", "a", {"x": 1})
+    assert "could not be anchored" in str(err.value)
+    assert repo.records("enc") == []
+
+
+def test_a_rolled_back_anchor_is_detected(tmp_path):
+    """ROLLBACK: restoring an OLDER checkpoint leaves the journal further ahead than any crash
+    can explain (at most one entry is recoverable), so it fails closed."""
+    import json
+    import pytest
+    repo = _anchored(tmp_path)
+    repo.append("enc", "a", {"x": 1})
+    anchor = repo._anchor()
+    stale = json.loads(anchor._path(repo.store_id()).read_text())      # checkpoint at seq 1
+    _anchored(tmp_path).append("enc", "b", {"x": 2})
+    _anchored(tmp_path).append("enc", "c", {"x": 3})
+    anchor._path(repo.store_id()).write_text(json.dumps(stale, sort_keys=True))
+    with pytest.raises(OSError) as err:
+        _anchored(tmp_path).append("enc", "d", {"x": 4})
+    assert "beyond its anchored checkpoint" in str(err.value)
+
+
+def test_a_replayed_journal_at_the_same_sequence_is_detected(tmp_path):
+    """REPLAY: a journal restored from an older backup can reach the anchored sequence again
+    only with different seals. Same position, different content, is a rewrite."""
+    import json
+    import pytest
+    from dataclasses import replace
+    from claude_coder.checkpoint import Checkpoint
+    repo = _anchored(tmp_path)
+    repo.append("enc", "a", {"x": 1})
+    anchor = repo._anchor()
+    current = Checkpoint.from_record(anchor.read(repo.store_id()))
+    other = replace(current, seal="f" * 64)
+    other = replace(other, signature=repo._seal(other.payload(), create_key=True))
+    # written straight to the backing store: the backend's own fork guard would refuse it,
+    # which is itself the point -- reaching this state requires overwriting the anchor.
+    anchor._path(repo.store_id()).write_text(json.dumps(other.as_record(), sort_keys=True))
+    with pytest.raises(OSError) as err:
+        _anchored(tmp_path).append("enc", "b", {"x": 2})
+    assert "rewritten, rolled back or replayed" in str(err.value)
+
+
+def test_the_reference_backend_refuses_to_move_backwards_or_fork(tmp_path):
+    """The backend contract a real (WORM/object-locked) store would enforce structurally."""
+    import pytest
+    from claude_coder.checkpoint import AnchorRollback, Checkpoint, LocalFileCheckpointAnchor
+    anchor = LocalFileCheckpointAnchor(tmp_path / "anchor")
+    base = Checkpoint(store_id="s", seq=2, seal="a" * 64, record_sha256="b" * 64,
+                      witness_version="v", written_at="2026-01-01T00:00:00+00:00",
+                      signature="sig")
+    anchor.write(base.as_record())
+    from dataclasses import replace as _replace
+    with pytest.raises(AnchorRollback):
+        anchor.write(_replace(base, seq=1).as_record())            # backwards
+    with pytest.raises(AnchorRollback):
+        anchor.write(_replace(base, seal="c" * 64).as_record())    # fork at the same seq
+    anchor.write(_replace(base, seq=3).as_record())                # forward is fine
+    assert Checkpoint.from_record(anchor.read("s")).seq == 3
+
+
+def test_a_forged_or_malformed_checkpoint_is_not_accepted(tmp_path):
+    """The anchor store is not blindly trusted either: the checkpoint is signed with the same
+    custody as the journal seal, so a third party who can write the anchor cannot fabricate a
+    terminal head, and a malformed record is an error rather than 'no checkpoint'."""
+    import json
+    import pytest
+    repo = _anchored(tmp_path)
+    repo.append("enc", "a", {"x": 1})
+    path = repo._anchor()._path(repo.store_id())
+    forged = json.loads(path.read_text())
+    forged["signature"] = "0" * 64
+    path.write_text(json.dumps(forged, sort_keys=True))
+    with pytest.raises(OSError) as err:
+        _anchored(tmp_path).append("enc", "b", {"x": 2})
+    assert "fails its signature" in str(err.value)
+    path.write_text(json.dumps({"version": "terminal-head-checkpoint-v1"}))
+    with pytest.raises(OSError) as err:
+        _anchored(tmp_path).append("enc", "b", {"x": 2})
+    assert "malformed" in str(err.value)
+
+
+def test_a_deleted_checkpoint_fails_closed_unless_adoption_is_explicit(tmp_path, monkeypatch):
+    """Deleting the anchored checkpoint is the cheapest attack on the anchor, and it looks
+    exactly like enabling the anchor on an existing store. So it fails closed, and adoption is
+    an explicit, reviewed operator action rather than an inference."""
+    import pytest
+    repo = _anchored(tmp_path)
+    repo.append("enc", "a", {"x": 1})
+    repo._anchor()._path(repo.store_id()).unlink()
+    with pytest.raises(OSError) as err:
+        _anchored(tmp_path).append("enc", "b", {"x": 2})
+    assert "holds no checkpoint" in str(err.value)
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_ADOPT", "1")
+    _anchored(tmp_path).append("enc", "b", {"x": 2})                 # one-time adoption
+    assert _anchored(tmp_path).verify_chain("enc") == []
+
+
+def test_required_mode_refuses_to_run_without_an_anchor(tmp_path, monkeypatch):
+    """The switch that turns this control on once a real backend exists -- no code change."""
+    import pytest
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_REQUIRED", "1")
+    with pytest.raises(OSError) as err:
+        _repo(tmp_path, "required.db").append("enc", "a", {"x": 1})
+    assert "no terminal-head checkpoint anchor is configured" in str(err.value)
+
+
+def test_an_unimplemented_anchor_backend_fails_closed(tmp_path, monkeypatch):
+    """A backend spec this build cannot honour must STOP the writer. Reading it as 'no anchor
+    configured' would let a typo (or an aspirational deployment setting) silently disable the
+    control -- the exact class of silent-weakening this guard exists to prevent."""
+    import pytest
+    from claude_coder.checkpoint import CheckpointConfigError, resolve_checkpoint_anchor
+    with pytest.raises(CheckpointConfigError):
+        resolve_checkpoint_anchor("s3://some-bucket/checkpoints")
+    with pytest.raises(CheckpointConfigError):
+        resolve_checkpoint_anchor("file:")
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_ANCHOR", "s3://some-bucket/checkpoints")
+    with pytest.raises(Exception):
+        _repo(tmp_path, "badspec.db").append("enc", "a", {"x": 1})
+    assert any("unusable" in p for p in
+               _repo(tmp_path, "badspec.db").verify_chain("enc"))
+
+
+def test_the_journal_sequence_is_inside_the_seal(tmp_path):
+    """The monotonic sequence is only worth anything if it cannot be renumbered to match a
+    truncated journal, so it is part of the sealed payload."""
+    import json
+    repo = _anchored(tmp_path)
+    repo.append("enc", "a", {"x": 1})
+    repo.append("enc", "b", {"x": 2})
+    wp = repo._witness_path()
+    lines = wp.read_text().splitlines()
+    assert [json.loads(ln)["seq"] for ln in lines] == [1, 2]
+    edited = json.loads(lines[-1])
+    edited["seq"] = 99
+    wp.write_text("\n".join(lines[:-1] + [json.dumps(edited, sort_keys=True)]) + "\n")
+    assert any("seal mismatch" in p for p in _anchored(tmp_path).verify_chain("enc"))
+
+
+def test_an_emptied_store_with_a_live_checkpoint_is_detected(tmp_path):
+    """Deleting the whole store (rather than its tail) must not read as 'nothing to verify'."""
+    import sqlite3
+    repo = _anchored(tmp_path)
+    repo.append("enc", "a", {"x": 1})
+    repo._witness_path().unlink()
+    conn = sqlite3.connect(str(repo.db_path))
+    conn.execute("DROP TRIGGER audit_no_delete")
+    conn.execute("DELETE FROM audit_log")
+    conn.commit()
+    conn.close()
+    problems = _anchored(tmp_path).verify_chain("enc")
+    assert any("the journal is empty" in p for p in problems), problems
+
+
+def test_concurrent_writers_share_one_monotonic_anchor(tmp_path):
+    """Post-fix review, PROCESS BOUNDARY: the checkpoint advances inside the same
+    BEGIN IMMEDIATE section as the journal entry and the row, so racing writers must produce
+    one dense sequence and one anchor that ends exactly at it -- never a fork, a gap, or a
+    lost update that would later read as a truncation."""
+    import json
+    import threading
+    from claude_coder.checkpoint import Checkpoint, LocalFileCheckpointAnchor
+    from claude_coder.provenance import SqliteAuditRepository
+    dbp = tmp_path / "anchored-concurrent.db"
+
+    def _repo_for():
+        return SqliteAuditRepository(
+            dbp, checkpoint_anchor=LocalFileCheckpointAnchor(tmp_path / "anchor"))
+
+    _repo_for().append("enc", "seed", {"n": 0})           # schema + WAL established
+    barrier = threading.Barrier(4)
+    errors: list[Exception] = []
+
+    def worker(i):
+        repo = _repo_for()
+        try:
+            barrier.wait()
+            repo.append("enc", f"k{i}", {"n": i})
+        except Exception as exc:                          # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors
+    repo = _repo_for()
+    assert len(repo.records("enc")) == 5
+    assert repo.verify_chain("enc") == []
+    seqs = [json.loads(ln)["seq"]
+            for ln in repo._witness_path().read_text().splitlines() if ln.strip()]
+    assert seqs == [1, 2, 3, 4, 5]                        # dense, no fork, no gap
+    anchored = Checkpoint.from_record(repo._anchor().read(repo.store_id()))
+    assert anchored.seq == 5
+
+
+def test_the_anchor_is_wired_from_configuration_not_only_injection(tmp_path, monkeypatch):
+    """Post-fix review: every other case here INJECTS the backend, which would leave the way
+    production actually turns the control on -- one environment variable -- untested. This
+    drives the real resolution path end to end, including the reported reproduction."""
+    from claude_coder.provenance import SqliteAuditRepository
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_ANCHOR", f"file:{tmp_path / 'anchor'}")
+    dbp = tmp_path / "configured.db"
+    SqliteAuditRepository(dbp).append("enc", "a", {"x": 1})
+    SqliteAuditRepository(dbp).append("enc", "b", {"x": 2})
+    repo = SqliteAuditRepository(dbp)
+    assert repo.verify_chain("enc") == []
+    assert repo.witness_status()["checkpoint"]["backend"] == "local-file"
+    _truncate_both_tails(repo)
+    assert any("SHORTER than its anchored checkpoint" in p
+               for p in SqliteAuditRepository(dbp).verify_chain("enc"))

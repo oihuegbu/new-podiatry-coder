@@ -29,6 +29,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .checkpoint import (ADOPT_ENV, REQUIRED_ENV, AnchorFormatError, Checkpoint,
+                         CheckpointError, checkpoint_adoption_allowed, checkpoint_required,
+                         resolve_checkpoint_anchor)
 from .models import EvidenceSpan, RelationAssertion, RelationState
 
 
@@ -537,9 +540,13 @@ class SqliteAuditRepository(AuditRepository):
         " BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END",
     )
 
-    def __init__(self, db_path, *, strict: bool = True) -> None:
+    def __init__(self, db_path, *, strict: bool = True, checkpoint_anchor=None) -> None:
         self.db_path = Path(db_path)
         self.strict = strict
+        # Injected only by tests/callers that supply their own backend; production
+        # resolves the configured one per call so a configuration change takes effect
+        # without a restart and so a broken spec fails closed at the point of use.
+        self._injected_anchor = checkpoint_anchor
 
     def _connect(self):
         import sqlite3
@@ -584,8 +591,11 @@ class SqliteAuditRepository(AuditRepository):
                 conn.execute("BEGIN IMMEDIATE")
                 # Fail CLOSED before extending a chain whose external witness was destroyed
                 # or rewritten: a writer must never quietly continue on top of a broken
-                # anchor. O(1) -- it compares the DB's terminal row against the witness tail.
-                in_doubt_over = self._assert_witness_extendable(conn)
+                # anchor. It compares the DB's terminal row against the witness tail AND
+                # the witness tail against the externally anchored checkpoint, so a
+                # CONSISTENT truncation of both mutable sides is refused here, on the
+                # release path, rather than reported after the fact. (Codex F6-R4-A.)
+                in_doubt_over, witness_seq = self._assert_witness_extendable(conn)
                 row = conn.execute(
                     "SELECT record_sha256 FROM audit_log WHERE encounter_id=?"
                     " ORDER BY seq DESC LIMIT 1", (str(encounter_id),)).fetchone()
@@ -607,8 +617,18 @@ class SqliteAuditRepository(AuditRepository):
                 #     tolerates once and `verify_chain` reports by name.
                 # The previous order (commit, then witness) could leave a committed row with
                 # no witness at all -- indistinguishable from a truncated witness.
+                new_seq = witness_seq + 1
                 witness_sha = self._append_head_witness(
-                    encounter_id, entry["record_sha256"], in_doubt_over=in_doubt_over)
+                    encounter_id, entry["record_sha256"], in_doubt_over=in_doubt_over,
+                    expected_seq=new_seq)
+                # ...and the externally anchored checkpoint advances between the journal
+                # fsync and the commit, so the anchor is never BEHIND by more than the one
+                # entry a crash can lose, and is never AHEAD of the journal in healthy
+                # operation. "Anchor ahead of journal" therefore has exactly one meaning:
+                # journal entries were removed. A failure here aborts the append (no row is
+                # committed), which is the required posture -- an unverifiable anchor must
+                # hold the release, not be logged and ignored.
+                self._advance_checkpoint(new_seq, witness_sha, entry["record_sha256"])
                 conn.execute(
                     "INSERT INTO audit_log(encounter_id, kind, recorded_at, control_mode,"
                     " previous_record_sha256, record_json, record_sha256, witness_sha256)"
@@ -664,7 +684,18 @@ class SqliteAuditRepository(AuditRepository):
     # shorten the journal without the key. When no key is provisioned, one is generated once
     # into a 0600 sidecar so the seal is still tamper-evident against every writer that does
     # not hold it; that weaker default is recorded, not silently assumed, by `witness_status`.
-    _WITNESS_VERSION = "audit-head-witness-v2"
+    #
+    # WHAT THE KEY CANNOT DO, AND WHY THERE IS A CHECKPOINT ANCHOR (Codex F6-R4-A):
+    # removing the LAST journal entry and the LAST durable row TOGETHER leaves a prefix that
+    # is internally consistent under any key -- the seals that remain are genuine, the chain
+    # links still join, and the legitimate writer (which holds the key) extends the shortened
+    # journal without noticing. Detecting that requires an expected terminal POSITION recorded
+    # outside both mutable objects. So every journal entry now carries a monotonic `seq`
+    # inside its sealed payload, and `checkpoint.CheckpointAnchor` records (seq, seal) in a
+    # separate store. "Anchor ahead of journal" is then unambiguous evidence of removal.
+    # The anchor is only as strong as its backing store, which is why the backend declares
+    # `external` and why an unconfigured anchor is REPORTED rather than assumed benign.
+    _WITNESS_VERSION = "audit-head-witness-v3"
 
     def _witness_path(self):
         return Path(str(self.db_path) + ".heads")
@@ -734,14 +765,20 @@ class SqliteAuditRepository(AuditRepository):
         return hmac.new(self._witness_key(create=create_key), canonical.encode("utf-8"),
                         hashlib.sha256).hexdigest()
 
-    def _witness_tail(self) -> dict | None:
-        """The last witness entry, or None when the journal does not exist yet.
+    def _witness_tail(self) -> tuple[dict | None, int]:
+        """`(last entry, its sequence number)`; `(None, 0)` when the journal does not exist.
+
+        The sequence is read from the entry's SEALED payload, so it cannot be changed without
+        the key. Entries written before sequencing existed carry none; for those it falls back
+        to the entry's 1-based position, which is what the sequence would have been. That
+        fallback is derived from the journal itself and so is worth nothing on its own -- its
+        value is that the anchor recorded it, and the anchor is what a truncation cannot reach.
 
         Raises when the journal exists but its tail is unreadable/unsealed -- a corrupt tail
         must stop the writer, not be skipped."""
         wp = self._witness_path()
         if not wp.exists():
-            return None
+            return None, 0
         lines = [ln for ln in wp.read_text().splitlines() if ln.strip()]
         if not lines:
             raise OSError(f"audit head witness {wp} exists but is empty")
@@ -751,14 +788,176 @@ class SqliteAuditRepository(AuditRepository):
             raise OSError(f"audit head witness {wp} has a corrupt final entry: {exc}") from exc
         if not isinstance(tail, dict) or self._seal(_witness_payload(tail)) != tail.get("seal"):
             raise OSError(f"audit head witness {wp} final entry fails its seal")
-        return tail
+        seq = tail.get("seq")
+        if isinstance(seq, bool) or not isinstance(seq, int) or seq < 1:
+            if seq is not None:
+                raise OSError(f"audit head witness {wp} final entry has an invalid sequence")
+            seq = len(lines)                       # pre-sequencing entry: positional fallback
+        return tail, int(seq)
 
-    def _assert_witness_extendable(self, conn) -> str | None:
+    # -------------------------------------------------- externally anchored terminal head
+    def store_id(self) -> str:
+        """Stable identity of THIS store in the checkpoint anchor. Overridable so several
+        deployments can share one anchor store without colliding."""
+        override = str(os.getenv("PROVENANCE_STORE_ID") or "").strip()
+        return override or self.db_path.name
+
+    def _anchor(self):
+        """The configured checkpoint anchor. Resolution failures propagate: a misspelled or
+        unimplemented backend must stop the writer, not be read as 'no anchor configured'."""
+        if self._injected_anchor is not None:
+            return self._injected_anchor
+        return resolve_checkpoint_anchor()
+
+    def _assert_checkpoint_extendable(self, tail: dict | None, tail_seq: int) -> None:
+        """Fail closed unless the journal's terminal head still matches its EXTERNAL anchor.
+
+        This is the check the self-anchored witness structurally could not make. The anchor is
+        advanced after a journal entry is fsynced and before the row is committed, so in
+        healthy operation `anchor.seq == journal.seq`, and the only reachable divergence is
+        the anchor lagging by ONE (its write failed, which aborted that append). Therefore:
+
+          * anchor ahead of the journal            -> journal entries were REMOVED  -> refuse
+          * same sequence, different seal          -> journal rewritten/rolled back -> refuse
+          * journal more than one entry ahead      -> unanchored extension          -> refuse
+          * anchor unreachable / malformed / unsigned -> UNVERIFIABLE                -> refuse
+
+        Refusing means `append()` raises, which the pipeline turns into SYSTEM_HOLD. An
+        integrity control that cannot verify itself must hold the release, not warn.
+        """
+        anchor = self._anchor()
+        if not anchor.configured:
+            if checkpoint_required():
+                raise OSError(
+                    f"{REQUIRED_ENV} is set but no terminal-head checkpoint anchor is "
+                    f"configured; refusing to extend a self-anchored journal")
+            return          # reported by `checkpoint_status()`, never silently assumed benign
+        try:
+            stored = anchor.read(self.store_id())
+        except AnchorFormatError as exc:
+            # A record that exists but is not well-formed is a rewritten checkpoint, not an
+            # absent one -- reported precisely so the operator knows which failure they have.
+            raise OSError(f"anchored terminal-head checkpoint is malformed: {exc}") from exc
+        except CheckpointError as exc:
+            raise OSError(f"terminal-head checkpoint anchor is unverifiable: {exc}") from exc
+        if stored is None:
+            if tail is None:
+                return                       # first ever append: this establishes the anchor
+            if checkpoint_adoption_allowed():
+                return                       # explicit, reviewed one-time adoption
+            raise OSError(
+                f"the terminal-head checkpoint anchor holds no checkpoint for store "
+                f"{self.store_id()!r} although its witness journal has {tail_seq} entries -- "
+                f"the anchored checkpoint was removed, or the anchor was enabled on an "
+                f"existing store; refusing to extend (set {ADOPT_ENV}=1 for a one-time, "
+                f"reviewed adoption)")
+        try:
+            cp = Checkpoint.from_record(stored)
+        except CheckpointError as exc:
+            raise OSError(f"anchored terminal-head checkpoint is malformed: {exc}") from exc
+        import hmac
+        # Verified with the SEALING key on a read path, so `create=False`: verification must
+        # never mint a key (the same rule the journal seal follows), and a checkpoint whose
+        # signature cannot be computed is unverifiable, not acceptable.
+        if not hmac.compare_digest(self._seal(cp.payload()), str(cp.signature)):
+            raise OSError(
+                "anchored terminal-head checkpoint fails its signature (forged or rewritten "
+                "in the anchor store)")
+        if cp.store_id != self.store_id():
+            raise OSError(
+                f"anchored checkpoint belongs to store {cp.store_id!r}, not "
+                f"{self.store_id()!r}")
+        if tail is None:
+            raise OSError(
+                f"the anchor records witness journal entry {cp.seq} but the journal is empty "
+                f"-- the journal was destroyed or replaced")
+        if cp.seq > tail_seq:
+            raise OSError(
+                f"the witness journal is SHORTER than its anchored checkpoint (anchor seq "
+                f"{cp.seq}, journal seq {tail_seq}) -- the durable tail and the journal tail "
+                f"were truncated together")
+        if cp.seq == tail_seq and str(cp.seal) != str(tail.get("seal")):
+            raise OSError(
+                f"witness journal entry {tail_seq} does not match the anchored checkpoint "
+                f"-- the journal was rewritten, rolled back or replayed")
+        if cp.seq < tail_seq - 1:
+            raise OSError(
+                f"the witness journal has {tail_seq - cp.seq} entries beyond its anchored "
+                f"checkpoint (anchor seq {cp.seq}, journal seq {tail_seq}); at most one "
+                f"unanchored entry is recoverable")
+
+    def _advance_checkpoint(self, seq: int, seal: str, record_sha256: str) -> dict | None:
+        """Record the new terminal head in the external anchor, signed with the sealing key.
+
+        Called between the journal fsync and the row commit, so the anchor can only ever lag
+        by the single entry a crash can lose. Any failure raises, aborting the append."""
+        anchor = self._anchor()
+        if not anchor.configured:
+            return None
+        cp = Checkpoint(
+            store_id=self.store_id(), seq=int(seq), seal=str(seal),
+            record_sha256=str(record_sha256), witness_version=self._WITNESS_VERSION,
+            written_at=datetime.now(timezone.utc).isoformat())
+        signed = replace(cp, signature=self._seal(cp.payload(), create_key=True))
+        try:
+            anchor.write(signed.as_record())
+        except CheckpointError as exc:
+            raise OSError(f"terminal-head checkpoint could not be anchored: {exc}") from exc
+        return signed.as_record()
+
+    def checkpoint_status(self) -> dict:
+        """Observability for the anchor: which backend, whether it is a real trust boundary,
+        the anchored vs journal sequence, and any problem that would hold a release. Total --
+        it reports failures instead of raising, because it is also called from `verify_chain`.
+        """
+        status: dict[str, Any] = {"store_id": self.store_id(),
+                                  "required": checkpoint_required()}
+        problems: list[str] = []
+        try:
+            anchor = self._anchor()
+            status.update(anchor.describe())
+        except Exception as exc:
+            status.update({"backend": "unresolved", "configured": False,
+                           "external_trust_boundary": False})
+            problems.append(f"terminal-head checkpoint anchor is unusable: {exc}")
+            status["problems"] = problems
+            return status
+        tail, tail_seq, tail_readable = None, 0, True
+        try:
+            tail, tail_seq = self._witness_tail()
+        except Exception as exc:
+            tail_readable = False
+            problems.append(f"witness journal tail is unreadable: {exc}")
+        status["journal_seq"] = tail_seq
+        if status.get("configured"):
+            try:
+                stored = anchor.read(self.store_id())
+                status["anchored_seq"] = (
+                    Checkpoint.from_record(stored).seq if stored else None)
+            except Exception as exc:
+                status["anchored_seq"] = None
+                problems.append(f"anchored checkpoint could not be read: {exc}")
+        # Only compare against the anchor when the journal's own tail was READABLE. An
+        # unreadable tail is already reported above; feeding the comparison a placeholder
+        # would add a second, WRONG diagnosis ("the journal is empty") for a journal that is
+        # merely corrupt. The write path is unaffected -- there the same unreadable tail
+        # raises before any comparison happens, so nothing is skipped. (Post-fix review.)
+        if tail_readable:
+            try:
+                self._assert_checkpoint_extendable(tail, tail_seq)
+            except Exception as exc:
+                problems.append(str(exc))
+        status["problems"] = problems
+        return status
+
+    def _assert_witness_extendable(self, conn) -> tuple[str | None, int]:
         """Refuse to extend a chain whose external witness no longer matches the log.
 
-        Returns the seal of an observed IN-DOUBT tail (else None) so the next entry can record
-        that it was written over one. Compares the log's GLOBAL terminal row against the
-        witness tail, which is O(1) on both sides. Exactly two states are healthy:
+        Returns `(seal of an observed IN-DOUBT tail or None, the journal's terminal sequence)`
+        so the next entry can record that it was written over one, and so the caller knows
+        which sequence it is extending. Compares the log's GLOBAL terminal row against the
+        witness tail, and the witness tail against the EXTERNAL anchor. Exactly two states of
+        the row-vs-journal comparison are healthy:
           - aligned: the terminal row's witness seal IS the witness tail (normal), or
           - in-doubt by one: the tail's predecessor is the terminal row's seal, i.e. a write
             crashed between the witness fsync and the commit (documented, recoverable).
@@ -774,13 +973,17 @@ class SqliteAuditRepository(AuditRepository):
         row = conn.execute(
             "SELECT record_sha256, witness_sha256 FROM audit_log ORDER BY seq DESC LIMIT 1"
         ).fetchone()
-        tail = self._witness_tail()
+        tail, tail_seq = self._witness_tail()
+        # The EXTERNAL check runs first and unconditionally: the whole point is that it is the
+        # only one a consistent truncation of both local sides cannot satisfy, so it must not
+        # sit behind a branch that a truncated store can take.
+        self._assert_checkpoint_extendable(tail, tail_seq)
         if row is None:
             if tail is not None:
                 raise OSError(
                     "audit head witness records entries but the audit log is empty -- the "
                     "durable log was truncated or replaced")
-            return None
+            return None, tail_seq
         record_sha, witness_sha = row[0], row[1]
         if not witness_sha:
             # DEPLOY BOUNDARY. A store written before this control existed has rows with no
@@ -797,28 +1000,42 @@ class SqliteAuditRepository(AuditRepository):
                     "the terminal audit row carries no external witness seal although this "
                     "store is witnessed; refusing to extend a chain that was appended to "
                     "around the witness")
-            return None       # legacy pre-witness store: the journal starts with this append
+            # legacy pre-witness store: the journal starts with this append
+            return None, tail_seq
         if tail is None:
             raise OSError("audit rows exist but the external head witness is missing")
         if tail.get("seal") == witness_sha:
-            return None
+            return None, tail_seq
         if tail.get("previous_seal") == witness_sha and tail.get("record_sha256") != record_sha:
-            return str(tail.get("seal"))    # in-doubt tail: witness ahead by exactly one entry
+            # in-doubt tail: witness ahead by exactly one entry
+            return str(tail.get("seal")), tail_seq
         raise OSError(
             "external head witness does not match the audit log's terminal record "
             "(witness truncated, rewritten, or out of order)")
 
     def _append_head_witness(self, encounter_id: str, record_sha256: str,
-                             in_doubt_over: str | None = None) -> str:
+                             in_doubt_over: str | None = None,
+                             expected_seq: int | None = None) -> str:
         """Seal and durably append the new terminal head, returning its seal.
 
         Written BEFORE the row is committed and fsynced, so a witness failure aborts the
         whole append instead of leaving a committed row nothing vouches for. When it is
         written over an in-doubt tail, that fact is SEALED INTO the entry, so the anomaly is
-        permanently recorded in the journal instead of only inferable from a divergence."""
-        tail = self._witness_tail()
+        permanently recorded in the journal instead of only inferable from a divergence.
+
+        `expected_seq` is the sequence the caller's extendability check authorised. It is
+        asserted rather than assumed: if the journal moved between that check and this append
+        the two disagree, and the append aborts instead of anchoring a sequence that was never
+        verified."""
+        tail, tail_seq = self._witness_tail()
+        seq = tail_seq + 1
+        if expected_seq is not None and int(expected_seq) != seq:
+            raise OSError(
+                f"witness journal changed between the extendability check and the append "
+                f"(expected to write entry {int(expected_seq)}, would write {seq})")
         entry = {
             "version": self._WITNESS_VERSION,
+            "seq": seq,
             "encounter_id": str(encounter_id),
             "record_sha256": str(record_sha256),
             "recorded_at": datetime.now(timezone.utc).isoformat(),
@@ -851,6 +1068,7 @@ class SqliteAuditRepository(AuditRepository):
             return [], ["external head witness is empty"]
         entries: list[dict] = []
         previous_seal = ""
+        previous_seq: int | None = None
         seen_seals: set[str] = set()
         for i, line in enumerate(lines):
             try:
@@ -874,17 +1092,36 @@ class SqliteAuditRepository(AuditRepository):
                 problems.append(f"witness entry {i}: broken witness chain link")
             if w.get("seal") in seen_seals:
                 problems.append(f"witness entry {i}: duplicate witness seal")
+            # The sealed sequence must be dense and increasing. Entries predating sequencing
+            # carry none; once one appears, every later entry must continue it, so a
+            # sequenced journal cannot silently lose an interior entry or regress.
+            seq = w.get("seq")
+            if seq is None:
+                if previous_seq is not None:
+                    problems.append(
+                        f"witness entry {i}: sequence disappeared after entry {previous_seq}")
+            elif isinstance(seq, bool) or not isinstance(seq, int) or seq < 1:
+                problems.append(f"witness entry {i}: invalid sequence {seq!r}")
+            else:
+                if previous_seq is not None and seq != previous_seq + 1:
+                    problems.append(
+                        f"witness entry {i}: sequence {seq} does not follow {previous_seq}")
+                previous_seq = seq
             seen_seals.add(w.get("seal"))
             previous_seal = w.get("seal")
             entries.append(w)
         return entries, problems
 
     def witness_status(self) -> dict:
-        """Observability for the witness control: version, custody, entry count, problems."""
+        """Observability for the witness control: version, custody, entry count, problems, and
+        the state of the EXTERNAL terminal-head anchor -- including, when no anchor is
+        configured, the fact that consistent truncation is undetectable. An artifact that
+        records this can never imply a guarantee that is not actually in force."""
         entries, problems = self.read_witness()
         return {"version": self._WITNESS_VERSION, "key_custody": self.key_custody(),
                 "entries": len(entries), "problems": problems,
-                "path": str(self._witness_path())}
+                "path": str(self._witness_path()),
+                "checkpoint": self.checkpoint_status()}
 
     def verify_chain(self, encounter_id: str | None = None) -> list[str]:
         """Return a list of integrity problems (empty => intact). Detects hash tampering (a
@@ -931,6 +1168,14 @@ class SqliteAuditRepository(AuditRepository):
         # duplicated or partial witness is an integrity failure whenever durable rows exist —
         # the previous implementation returned {} for an absent witness, so deleting the
         # sidecar reopened the very tail-truncation blind spot it was added to close.
+        # ------------------------------------------ external terminal-head checkpoint anchor
+        # Checked BEFORE the "nothing durable yet" shortcut: an emptied store with a live
+        # anchored checkpoint is precisely the erasure this control exists to catch, and it
+        # would otherwise return "intact". `checkpoint_status()` is total, so a broken anchor
+        # is reported here rather than escaping a verification call.
+        checkpoint = self.checkpoint_status()
+        problems.extend(f"terminal-head checkpoint: {p}"
+                        for p in checkpoint.get("problems") or [])
         entries, witness_problems = self.read_witness()
         if not any_rows and not entries:
             return problems                     # nothing durable yet: nothing to witness
