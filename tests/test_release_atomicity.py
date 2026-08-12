@@ -698,3 +698,254 @@ def test_a_consistently_truncated_store_holds_the_whole_encounter(tmp_path):
     assert held.destination is Destination.SYSTEM_HOLD
     assert held.certificate is None
     assert not held.billable_lines
+
+
+# ---- Codex F6-R5 (round 5): the required set must be DERIVED from the runtime graph ----
+# Round 4 proved the manifest against a DECLARED set, but the declaration itself was
+# under-derived: `coverage_policy` was read at decision time while marked optional, and the
+# two claim-affecting control configs were not in the fingerprint at all. The cases below
+# pin (a) the total disposition of every registered source, (b) that silence is now an
+# error, (c) that each newly required identity's absence or byte change is provably
+# certification-invalidating, and (d) that the remaining OPTIONAL sources really cannot
+# change a released claim.
+
+# The identities this round added after tracing what the claim path actually reads. Named
+# explicitly so a future edit that quietly drops one fails here rather than in production.
+_ROUND5_REQUIRED = (
+    "coverage_policy",              # data_access._coverage_map -> governed / qualifying dx
+    "necessity_relation_control",   # gates.load_necessity_control
+    "relation_evidence_grammar",    # provenance.load_relation_grammar
+    "pfs_indicators",               # data_access._pfs -> global period / bilateral
+    "modifier_definitions",         # modifiers.load_modifier_defs
+    "instructional_notes",          # data_access._excludes1_map -> Excludes1 gate
+    "validator_rules",              # deterministic validation rule pack
+    "snomed_root_concepts",         # validator confidence cap for root-level concepts
+    "terminology_registry",         # governed interpretation source
+)
+
+
+def test_every_registered_source_is_required_or_a_reviewed_optional():
+    """Totality: a registered source may not simply be unmentioned. That silence is what
+    let `coverage_policy` be treated as optional while the necessity gate read it."""
+    from app.release import source_manifest as sm
+    required = sm.required_release_sources()
+    optional = sm.optional_release_sources()
+    assert set(sm._AUTHORITATIVE) <= (set(required) | set(optional))
+    assert not (set(required) & set(optional))
+    for source_id in _ROUND5_REQUIRED:
+        assert source_id in required, source_id
+    for source_id, spec in optional.items():
+        # "optional" is a reviewed claim with a stated reason, never a blank
+        assert str(spec["absence_justification"]).strip(), source_id
+        assert str(spec["role"]).strip(), source_id
+
+
+def test_a_registered_source_with_no_disposition_fails_loudly(monkeypatch):
+    """Failure path of the totality check: adding a source without deciding what it is must
+    raise in every consumer -- not default to optional, which is the original defect."""
+    from app.release import source_manifest as sm
+    from claude_coder.capability import build_manifest
+    from claude_coder.gates import source_manifest_gate
+    from claude_coder.models import CodingResult, Outcome
+    import claude_coder.pipeline as pl
+    registry = dict(sm._AUTHORITATIVE)
+    registry["a_newly_read_source_nobody_dispositioned"] = sm.config.CPT_FILE
+    monkeypatch.setattr(sm, "_AUTHORITATIVE", registry)
+    for fn in (sm.required_release_sources, sm.optional_release_sources, build_manifest):
+        with pytest.raises(RuntimeError):
+            fn()
+    with pytest.raises(RuntimeError):
+        sm.declared_source_path("cpt_codes")
+    g = source_manifest_gate(CodingResult("e", "2026-03-14", lines=[]))
+    assert g.outcome is Outcome.ERROR and g.retryable
+    assert pl._fingerprint_certifiable(_UNSEALED_VALID) is False
+
+
+def test_declared_source_path_rejects_an_undeclared_identity():
+    """The choke point decision-time readers resolve through: a file that is not a declared
+    source cannot be read as if it were authoritative."""
+    from app.release import source_manifest as sm
+    with pytest.raises(RuntimeError):
+        sm.declared_source_path("a_file_nobody_declared")
+    for source_id in _ROUND5_REQUIRED:
+        assert sm.declared_source_path(source_id).name, source_id
+    # the control configs ship IN the repository, so they must resolve to real bytes on any
+    # checkout -- including one without the generated authoritative data files
+    for source_id in ("necessity_relation_control", "relation_evidence_grammar"):
+        assert sm.declared_source_path(source_id).exists(), source_id
+
+
+def test_removing_any_newly_required_source_blocks_the_real_capability_manifest(monkeypatch,
+                                                                               tmp_path):
+    """End of the chain, against the REAL manifest builder (not a hand-built dict): a
+    required source that is absent produces BLOCKED / missing_required, which the
+    fingerprint validator then refuses to certify."""
+    from app.release import source_manifest as sm
+    import claude_coder.capability as cap
+    import claude_coder.pipeline as pl
+    baseline = set(cap.build_manifest()["missing_required"])
+    for source_id in _ROUND5_REQUIRED:
+        registry = dict(sm._AUTHORITATIVE)
+        registry[source_id] = tmp_path / "absent.json"
+        monkeypatch.setattr(sm, "_AUTHORITATIVE", registry)
+        manifest = cap.build_manifest()
+        assert set(manifest["missing_required"]) - baseline, source_id
+        assert manifest["status"] == "BLOCKED", source_id
+        counts = {"icd10": 1, "cpt": 1, "hcpcs": 1}
+        fp = {"counts": counts, "source_manifest": manifest,
+              "fingerprint_sha256": cap.fingerprint_digest(counts, manifest)}
+        assert pl._fingerprint_certifiable(fp) is False, source_id
+        # ...and the same REAL manifest, carried through the whole pipeline, holds the
+        # release: not certifiable at the unit level is worth nothing if `code_encounter`
+        # still emits a certificate.
+        src = _src()
+        src.data_fingerprint = lambda f=fp: f
+        r = code_encounter("e", _NOTE, "2026-03-14", source=src,
+                           extract_llm=lambda s, u: _FACTS, verify_llm=_sel,
+                           corroborate_llm=_sel, audit_repository=_CapturingAudit(),
+                           billing_context=_CTX)
+        assert r.certificate is None, source_id
+        assert _has_gate(r, "data_fingerprint"), source_id
+        monkeypatch.undo()
+
+
+def test_control_config_bytes_are_bound_into_the_release_fingerprint(monkeypatch, tmp_path):
+    """The specific round-5 hole: a control config's VERSION STRING appeared in audit data
+    while its CONTENT was outside the certified identity. Changing the bytes -- without
+    touching the declared version -- must change the fingerprint."""
+    from app.release import source_manifest as sm
+    import claude_coder.capability as cap
+    for source_id in ("necessity_relation_control", "relation_evidence_grammar"):
+        original = sm.declared_source_path(source_id).read_text()
+        copy_path = tmp_path / f"{source_id}.json"
+        copy_path.write_text(original)
+        registry = dict(sm._AUTHORITATIVE)
+        registry[source_id] = copy_path
+        monkeypatch.setattr(sm, "_AUTHORITATIVE", registry)
+
+        def _identity():
+            manifest = cap.build_manifest()
+            assert manifest["status"] == "OK"
+            return cap.fingerprint_digest({"icd10": 1, "cpt": 1, "hcpcs": 1}, manifest)
+
+        before = _identity()
+        # same declared control version, different bytes
+        payload = json.loads(original)
+        payload["description"] = str(payload.get("description", "")) + " (edited)"
+        copy_path.write_text(json.dumps(payload))
+        after = _identity()
+        assert json.loads(copy_path.read_text())["version"] == payload["version"]
+        assert before != after, source_id
+        monkeypatch.undo()
+
+
+def test_a_manifest_omitting_a_newly_required_source_holds_through_code_encounter():
+    """Not just the unit validator: an omitted required source must reach the caller as a
+    fail-closed release outcome with no certificate."""
+    for source_id in _ROUND5_REQUIRED:
+        fp = _valid_fp()
+        fp["source_manifest"]["sources"] = [
+            s for s in fp["source_manifest"]["sources"] if s["source_id"] != source_id]
+        src = _src()
+        src.data_fingerprint = lambda f=_reseal(fp): f
+        r = code_encounter("e", _NOTE, "2026-03-14", source=src,
+                           extract_llm=lambda s, u: _FACTS, verify_llm=_sel,
+                           corroborate_llm=_sel, audit_repository=_CapturingAudit(),
+                           billing_context=_CTX)
+        assert r.certificate is None, source_id
+        assert _has_gate(r, "data_fingerprint"), source_id
+
+
+def test_unreadable_coverage_policy_holds_instead_of_reporting_ungoverned(monkeypatch,
+                                                                          tmp_path):
+    """The reviewed impact statement: missing/invalid coverage data silently became an empty
+    map, and an empty map reads as 'governed by no policy' -- the LESS restrictive path. It
+    must raise, and the necessity gate must convert that into a hold."""
+    from app.release import source_manifest as sm
+    from claude_coder.data_access import AuthoritativeSource, CoverageDataUnavailable
+    corrupt = tmp_path / "coverage.json"
+    for content in ("", "{not json", "{}", '{"lcd": [], "article": []}'):
+        corrupt.write_text(content)
+        for path in (corrupt, tmp_path / "absent.json"):
+            registry = dict(sm._AUTHORITATIVE)
+            registry["coverage_policy"] = path
+            monkeypatch.setattr(sm, "_AUTHORITATIVE", registry)
+            src = AuthoritativeSource()
+            with pytest.raises(CoverageDataUnavailable):
+                src.qualifying_dx_for("SYNTHETIC_PROC", "cpt")
+            monkeypatch.undo()
+
+
+def test_an_unavailable_coverage_authority_holds_the_necessity_gate():
+    """Boundary: the raise above has to land as a HOLD in the gate that consumes it, not as
+    an exception escaping the pipeline."""
+    from claude_coder.data_access import CoverageDataUnavailable
+    from claude_coder.gates import medical_necessity_gate
+    from claude_coder.models import (CandidateCode, ClinicalFact, CodingResult, EvidenceSpan,
+                                     FactKind, Outcome, ResolutionMethod, ResolvedLine)
+
+    class _Unavailable:
+        def qualifying_dx_for(self, code, system="cpt"):
+            raise CoverageDataUnavailable("coverage authority unreadable")
+
+    def _line(kind, code, system, fid):
+        fact = ClinicalFact(kind=kind, description="x", fact_id=fid,
+                            evidence=[EvidenceSpan("x", anchored=True, span_id="s1")])
+        return ResolvedLine(fact=fact, chosen=CandidateCode(code, system, "d", 0.9),
+                            method=ResolutionMethod.DETERMINISTIC)
+
+    proc = _line(FactKind.PROCEDURE, "PROC_X", "cpt", "pf")
+    dx = _line(FactKind.DIAGNOSIS, "DX_X", "icd10", "df")
+    out = medical_necessity_gate(CodingResult("e", "2026-08-01", lines=[proc, dx]),
+                                 _Unavailable())
+    assert out.outcome is not Outcome.PASS
+
+
+def test_an_absent_drug_dose_table_holds_rather_than_changing_billed_units():
+    """The justification recorded for the OPTIONAL `hcpcs_drug_table` has to be true: with
+    the table absent, a documented dose used to fall back to a COUNT (30 mg of a per-15-mg
+    code billed as 1 unit instead of 2) -- an absent optional source changing the claim."""
+    from claude_coder.gates import drug_units_gate
+    from claude_coder.models import (CandidateCode, ClinicalFact, CodingResult, EvidenceSpan,
+                                     FactKind, Outcome, ResolutionMethod, ResolvedLine)
+
+    def _line(dose_text):
+        fact = ClinicalFact(kind=FactKind.DRUG, description=dose_text, fact_id="df",
+                            evidence=[EvidenceSpan(dose_text, anchored=True, span_id="s1")])
+        return ResolvedLine(fact=fact, chosen=CandidateCode("DRUG_X", "hcpcs", "d", 0.9),
+                            method=ResolutionMethod.DETERMINISTIC)
+
+    dosed = CodingResult("e", "2026-08-01", lines=[_line("administered 30 mg")])
+    undosed = CodingResult("e", "2026-08-01", lines=[_line("administered once")])
+    absent = MockSource()                                   # no drug table loaded
+    present = MockSource(drug_units={"DRUG_X": {"amount": 15, "unit": "mg"}})
+
+    held = drug_units_gate(dosed, absent)
+    assert held.outcome is Outcome.UNKNOWN and held.retryable   # holds, never a silent count
+    assert drug_units_gate(dosed, present).outcome is Outcome.PASS
+    # a drug line with NO documented dose is unaffected: units are the documented count
+    assert drug_units_gate(undosed, absent).outcome is Outcome.NOT_APPLICABLE
+
+
+def test_no_decision_module_composes_an_authoritative_filename_literal():
+    """Structural guard against the NEXT under-declaration: a claim-affecting module may not
+    name an authoritative file itself. Composing `DATA_DIR / "x.json"` inline is exactly how
+    `global_period.json`, `modifiers.json` and the two control configs came to be read at
+    decision time while being certified by nobody. Paths come from the declaration."""
+    import ast
+    from pathlib import Path as _Path
+    root = _Path(__file__).resolve().parent.parent / "claude_coder"
+    offenders = []
+    for module in sorted(root.glob("*.py")):
+        tree = ast.parse(module.read_text())
+        interpolated = {id(node) for parent in ast.walk(tree)
+                        if isinstance(parent, ast.JoinedStr)
+                        for node in ast.walk(parent)}
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and node.value.endswith(".json") and "*" not in node.value
+                    and id(node) not in interpolated):
+                offenders.append(f"{module.name}:{node.lineno}: {node.value!r}")
+    assert not offenders, (
+        "authoritative filename literal(s) outside the release-source declaration: "
+        + "; ".join(offenders))

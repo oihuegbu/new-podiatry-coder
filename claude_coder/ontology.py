@@ -238,6 +238,15 @@ def _to_base(amount: float, unit: str) -> tuple[float, str]:
     return amount, u
 
 
+def documented_dose_text(fact) -> str:
+    """The free text a drug line's documented dose is read from (attributes + anchored
+    evidence + description). Defined ONCE so the unit computation and the fail-closed
+    availability gate ask the same question of the same text. (Codex F6-R5.)"""
+    return " ".join([str(v) for v in (getattr(fact, "attributes", None) or {}).values()]
+                    + [s.text for s in (getattr(fact, "evidence", None) or [])]
+                    + [str(getattr(fact, "description", "") or "")])
+
+
 def drug_billing_units(documented: str, per_unit: dict | None) -> int | None:
     """Billing units for a dosed drug = documented total dose / the code's per-unit
     dose (e.g. 30 mg documented, 'per 15 mg' code -> 2 units). Unit-aware (mg/mcg/g

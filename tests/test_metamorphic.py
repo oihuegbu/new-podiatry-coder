@@ -859,22 +859,31 @@ def test_necessity_control_is_versioned_configuration_not_an_inline_constant():
     file is an ERROR (autonomy stops) -- never a silent built-in default."""
     import claude_coder.gates as g
     from claude_coder.models import CodingResult, Outcome
+    from app.release import source_manifest as sm
     cfg = g.load_necessity_control()
     assert cfg["control_mode"] == "ENFORCED_FAIL_CLOSED" and cfg["authority"]
-    assert g._NECESSITY_CONTROL_FILE.exists()
+    # The control is a DECLARED release source, so the file the gate loads is the file the
+    # release fingerprint content-addresses -- not a path composed inside the gate.
+    control_path = sm.declared_source_path(g._NECESSITY_CONTROL_ID)
+    assert control_path.exists()
+    assert g._NECESSITY_CONTROL_ID in sm.required_release_sources()
     assert g.medical_necessity_gate(
         CodingResult("e", "2026-08-01", lines=list(_nec_lines()),
                      relations=[_reason(0.99)])).authority.endswith(f"[{cfg['version']}]")
     proc, dx = _nec_lines()
-    saved_cache, saved_path = g._NECESSITY_CONTROL_CACHE, g._NECESSITY_CONTROL_FILE
+    saved_cache = g._NECESSITY_CONTROL_CACHE
+    saved_registry = dict(sm._AUTHORITATIVE)
     try:
         g._NECESSITY_CONTROL_CACHE = None
-        g._NECESSITY_CONTROL_FILE = saved_path.parent / "does-not-exist.json"
+        sm._AUTHORITATIVE[g._NECESSITY_CONTROL_ID] = (control_path.parent
+                                                      / "does-not-exist.json")
         out = g.medical_necessity_gate(
             CodingResult("e", "2026-08-01", lines=[proc, dx], relations=[_reason(0.99)]))
         assert out.outcome is Outcome.ERROR           # fail closed, no default floor
     finally:
-        g._NECESSITY_CONTROL_CACHE, g._NECESSITY_CONTROL_FILE = saved_cache, saved_path
+        g._NECESSITY_CONTROL_CACHE = saved_cache
+        sm._AUTHORITATIVE.clear()
+        sm._AUTHORITATIVE.update(saved_registry)
 
 
 def test_reconciliation_status_is_written_only_by_the_deterministic_layer():
@@ -1151,8 +1160,11 @@ def test_relation_grammar_is_versioned_configuration_and_fails_closed():
     cfg = provenance.load_relation_grammar()
     assert cfg["control_mode"] == "ENFORCED_FAIL_CLOSED" and cfg["authority"]
     assert cfg["predicates"]["reason_for"]["object_first_cues"]
-    saved_cache, saved_path = (provenance._RELATION_GRAMMAR_CACHE,
-                               provenance._RELATION_GRAMMAR_FILE)
+    from app.release import source_manifest as sm
+    assert provenance._RELATION_GRAMMAR_ID in sm.required_release_sources()
+    saved_cache = provenance._RELATION_GRAMMAR_CACHE
+    saved_registry = dict(sm._AUTHORITATIVE)
+    saved_path = sm.declared_source_path(provenance._RELATION_GRAMMAR_ID)
     span = EvidenceSpan("q", anchored=True, span_id="s1")
     dxf = ClinicalFact(FactKind.DIAGNOSIS, "dx", fact_id="df", evidence=[span])
     prf = ClinicalFact(FactKind.PROCEDURE, "pr", fact_id="pf", evidence=[span])
@@ -1160,9 +1172,11 @@ def test_relation_grammar_is_versioned_configuration_and_fails_closed():
                             confidence=0.9, evidence_span_ids=["s1"])
     try:
         provenance._RELATION_GRAMMAR_CACHE = None
-        provenance._RELATION_GRAMMAR_FILE = saved_path.parent / "does-not-exist.json"
+        sm._AUTHORITATIVE[provenance._RELATION_GRAMMAR_ID] = (saved_path.parent
+                                                              / "does-not-exist.json")
         with pytest.raises(provenance.RelationGrammarError):
             provenance.validate_relations([rel], [dxf, prf], "q")
     finally:
-        (provenance._RELATION_GRAMMAR_CACHE,
-         provenance._RELATION_GRAMMAR_FILE) = saved_cache, saved_path
+        provenance._RELATION_GRAMMAR_CACHE = saved_cache
+        sm._AUTHORITATIVE.clear()
+        sm._AUTHORITATIVE.update(saved_registry)

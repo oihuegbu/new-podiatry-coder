@@ -324,11 +324,9 @@ def code_encounter(
                 # = 2 units). Falls back to the count-based units above when the
                 # dose or per-unit is unavailable.
                 if line.fact.kind is FactKind.DRUG:
-                    documented = " ".join(
-                        [str(v) for v in line.fact.attributes.values()]
-                        + [s.text for s in line.fact.evidence] + [line.fact.description])
                     du = ontology.drug_billing_units(
-                        documented, source.drug_unit(line.chosen.code))
+                        ontology.documented_dose_text(line.fact),
+                        source.drug_unit(line.chosen.code))
                     if du is not None:
                         line.units = du
         lines.append(line)

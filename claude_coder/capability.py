@@ -158,12 +158,10 @@ def build_manifest() -> dict[str, Any]:
     release (fail closed); optional sources are recorded so their absence is visible
     rather than silently degrading retrieval. Every present source is content-addressed
     and version-aware so the release certificate identifies the exact bytes used."""
-    from app.core import config
-
     from app.release.source_manifest import (
-        REQUIRED_SOURCE_SCHEMA_VERSION, required_release_sources)
+        REQUIRED_SOURCE_SCHEMA_VERSION, optional_release_sources,
+        required_release_sources)
 
-    codes = config.CODES_DIR
     # REQUIRED sources are NOT enumerated here. They are the versioned release-source
     # declaration (identity + role + release-metadata expectation) in
     # `app.release.source_manifest`, resolved to that registry's own paths, so the
@@ -176,22 +174,13 @@ def build_manifest() -> dict[str, Any]:
         (spec["path"], True, spec["role"], source_id)
         for source_id, spec in required_spec.items()
     ]
-    # OPTIONAL recall/precision aids: their absence degrades quality, not correctness,
-    # so they are recorded (visible) but never gate release. Identity comes from the
-    # registry path map, falling back to the filename stem.
-    optional: list[tuple[Any, str]] = [
-        (config.LCD_FILE, "local coverage policy"),
-        (codes / "icd10cm_index_terms.json", "official alphabetic index terms"),
-        (codes / "icd10cm_instructional_notes.json", "tabular exclusion notes"),
-        (codes / "cpt_synonyms.json", "synonym recall aid"),
-        (codes / "hcpcs_synonyms.json", "synonym recall aid"),
-        (codes / "icd10_synonyms.json", "synonym recall aid"),
-        (codes / "snomed_icd10_map.json", "concept crosswalk"),
-        (codes / "cpt_index_terms.json", "procedure descriptor index"),
-        (codes / "learned_cpt_index.json", "learned resolution index"),
-        (codes / "hcpcs_drug_table.json", "drug dosing table"),
-    ]
-    checks += [(path, False, role, None) for path, role in optional]
+    # OPTIONAL recall/precision aids come from the SAME declaration, where each one records
+    # WHY its absence cannot make an ineligible claim releasable. Enumerating them here was
+    # how `coverage_policy` -- read at decision time to decide whether a service is governed
+    # -- ended up marked optional by a hand-maintained list nobody re-derived. A source is
+    # now required or exempted-with-a-reason, and neither list lives here. (Codex F6-R5.)
+    checks += [(spec["path"], False, spec["role"], source_id)
+               for source_id, spec in optional_release_sources().items()]
 
     registry = _registry()
     locks = _source_locks()
@@ -202,8 +191,13 @@ def build_manifest() -> dict[str, Any]:
         record, errors = _probe(p, req, role, registry, locks, sid)
         sources.append(record)
         integrity_errors.extend(errors)
-    missing_required = [s["source"] for s in sources if s["required"] and not s["present"]]
-    degraded_optional = [s["source"] for s in sources
+    # Reported by DECLARED IDENTITY, not by filename stem: the hold message names the same
+    # identity the declaration, the fingerprint validator and the audit trail use, so
+    # "required source(s) missing: coverage_policy" is actionable where "podiatry_lcd" was
+    # a filename the reader had to map back by hand.
+    missing_required = [s["source_id"] for s in sources
+                        if s["required"] and not s["present"]]
+    degraded_optional = [s["source_id"] for s in sources
                          if not s["required"] and not s["present"]]
     # Deliberately NO build timestamp: the manifest is a pure function of the authoritative
     # content, so two runs over unchanged data produce the same manifest and therefore the

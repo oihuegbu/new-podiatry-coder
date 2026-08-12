@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 
 from .data_access import AUTHORITY_UNAVAILABLE, CodeSource
 from .models import (CodingResult, FactKind, GateResult, Outcome, RelationPredicate,
@@ -142,13 +141,61 @@ def mue_gate(result: CodingResult, source: CodeSource) -> GateResult:
                       "units within MUE" if not detail else "; ".join(detail), "MUE (data)")
 
 
+def drug_units_gate(result: CodingResult, source: CodeSource) -> GateResult:
+    """A documented drug DOSE may only become billing units from the authoritative
+    per-unit dose table.
+
+    Without this gate, an absent dose table made `drug_unit` return None — the same
+    answer as "this code is not a dosed drug" — and the units silently fell back to the
+    documented COUNT (30 mg of a 'per 15 mg' code billed as 1 unit instead of 2). That is
+    an absent optional source changing a released claim, which is precisely what
+    "optional" may never mean. Unavailable authority now HOLDS (retryable) instead.
+    (Codex F6-R5, round 5.)
+    """
+    from . import ontology
+    dosed = []
+    for ln in result.billable_lines:
+        fact = getattr(ln, "fact", None)
+        if fact is None or getattr(fact, "kind", None) is not FactKind.DRUG:
+            continue
+        if ontology.parse_dose(ontology.documented_dose_text(fact)) is None:
+            continue                            # no dose documented -> count-based units
+        dosed.append(ln)
+    if not dosed:
+        return GateResult("drug_units", Outcome.NOT_APPLICABLE,
+                          "no drug line with a documented dose", "drug dosing (data)")
+    # Authority availability is asked ONCE: "the table did not load" is a different
+    # answer from "this code carries no per-unit dose", and only the first one holds.
+    available = getattr(source, "drug_dose_table_available", None)
+    if not (callable(available) and available()):
+        return GateResult(
+            "drug_units", Outcome.UNKNOWN,
+            "authoritative drug per-unit dose table unavailable — a documented dose "
+            "cannot be converted into billing units",
+            "drug dosing (data)", retryable=True)
+    unresolved = [ln.chosen.code for ln in dosed
+                  if ln.chosen is not None and source.drug_unit(ln.chosen.code) is None]
+    if unresolved:
+        return GateResult(
+            "drug_units", Outcome.PASS,
+            "dose documented but no per-unit dose is published for: "
+            + ", ".join(sorted(unresolved)) + "; units stay count-based",
+            "drug dosing (data)")
+    return GateResult("drug_units", Outcome.PASS,
+                      "documented doses converted from the authoritative per-unit dose",
+                      "drug dosing (data)")
+
+
 # The necessity relation control lives in REVIEWED VERSIONED CONFIGURATION, not as an inline
 # Python constant: confidence floor, required relation properties, and which reconciliation
 # statuses count as independent support are all control decisions that must be diffable and
 # citable to an authority. Loading is fail-closed -- there is no built-in default to fall back
 # to, because a silently-defaulted control is exactly the thing being fixed. (Codex F6-R3.)
-_NECESSITY_CONTROL_FILE = (Path(__file__).resolve().parent / "controls"
-                           / "necessity_relation_control.json")
+# The path is resolved from the RELEASE-SOURCE DECLARATION, not from __file__: the control's
+# bytes are part of what the release certificate attests, so the file the gate loads and the
+# file the manifest content-addresses must be the same object by construction, and an
+# undeclared control raises here instead of releasing claims unattested. (Codex F6-R5.)
+_NECESSITY_CONTROL_ID = "necessity_relation_control"
 _NECESSITY_CONTROL_CACHE: dict | None = None
 
 _REQUIRED_CONTROL_KEYS = ("version", "control_mode", "authority", "min_relation_confidence",
@@ -168,10 +215,12 @@ def load_necessity_control() -> dict:
     if _NECESSITY_CONTROL_CACHE is not None:
         return _NECESSITY_CONTROL_CACHE
     try:
-        cfg = json.loads(_NECESSITY_CONTROL_FILE.read_text())
+        from app.release.source_manifest import declared_source_path
+        path = declared_source_path(_NECESSITY_CONTROL_ID)
+        cfg = json.loads(path.read_text())
     except Exception as exc:
         raise NecessityControlError(
-            f"necessity relation control unreadable at {_NECESSITY_CONTROL_FILE}: {exc}") from exc
+            f"necessity relation control unreadable ({_NECESSITY_CONTROL_ID}): {exc}") from exc
     if not isinstance(cfg, dict):
         raise NecessityControlError("necessity relation control must be a JSON object")
     missing = [k for k in _REQUIRED_CONTROL_KEYS if k not in cfg]
@@ -482,6 +531,7 @@ def run_gates(result: CodingResult, note_text: str, source: CodeSource) -> list[
             medical_necessity_gate(result, source),
             ncci_gate(result, source),
             mue_gate(result, source),
+            drug_units_gate(result, source),
             icd_excludes_gate(result, source),
         ]
     except Exception as exc:  # a gate that crashes is ERROR, never a silent pass

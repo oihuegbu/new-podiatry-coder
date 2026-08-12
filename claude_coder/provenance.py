@@ -184,8 +184,10 @@ def merge_relations(relations: list[RelationAssertion]) -> list[RelationAssertio
 
 
 # ------------------------------------------- directional relation-evidence grammar (config)
-_RELATION_GRAMMAR_FILE = (Path(__file__).resolve().parent / "controls"
-                          / "relation_evidence_grammar.json")
+# Path from the RELEASE-SOURCE DECLARATION (see gates._NECESSITY_CONTROL_ID): the grammar's
+# bytes decide which relations release a claim, so they are content-addressed by the same
+# manifest that identifies the authoritative data. (Codex F6-R5.)
+_RELATION_GRAMMAR_ID = "relation_evidence_grammar"
 _RELATION_GRAMMAR_CACHE: dict | None = None
 # Compiled matchers, keyed by grammar version. Deliberately NOT stored inside the config
 # object: a config dict must stay JSON-serialisable, or any audit record that records it
@@ -209,10 +211,11 @@ def load_relation_grammar() -> dict:
     if _RELATION_GRAMMAR_CACHE is not None:
         return _RELATION_GRAMMAR_CACHE
     try:
-        cfg = json.loads(_RELATION_GRAMMAR_FILE.read_text())
+        from app.release.source_manifest import declared_source_path
+        cfg = json.loads(declared_source_path(_RELATION_GRAMMAR_ID).read_text())
     except Exception as exc:
         raise RelationGrammarError(
-            f"relation evidence grammar unreadable at {_RELATION_GRAMMAR_FILE}: {exc}") from exc
+            f"relation evidence grammar unreadable ({_RELATION_GRAMMAR_ID}): {exc}") from exc
     if not isinstance(cfg, dict):
         raise RelationGrammarError("relation evidence grammar must be a JSON object")
     missing = [k for k in _REQUIRED_GRAMMAR_KEYS if k not in cfg]

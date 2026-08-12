@@ -30,7 +30,9 @@ from collections import defaultdict
 from pathlib import Path
 
 OBS_FILE = "learned_observations.jsonl"
-INDEX_FILE = "learned_cpt_index.json"
+# The promoted-index identity in the release-source declaration (its PATH lives there,
+# not here, so the file the coder reads is the file the manifest content-addresses).
+INDEX_ID = "learned_cpt_index"
 # Distinct encounters that must agree before a mapping earns deterministic trust.
 # Cross-encounter agreement is the only automated guard against caching a
 # systematic LLM error; tune down for faster learning, up for more caution.
@@ -134,5 +136,8 @@ def build_index(promote_at: int = PROMOTE_AT, out: Path | None = None) -> dict:
         "promote_at": promote_at,
         "entries": entries,
     }
-    (out or (_codes_dir() / INDEX_FILE)).write_text(json.dumps(payload, indent=1))
+    # The promoted index is a DECLARED release source, so the writer resolves the same
+    # path the reader and the manifest do, instead of composing the filename twice.
+    from app.release.source_manifest import declared_source_path
+    (out or declared_source_path(INDEX_ID)).write_text(json.dumps(payload, indent=1))
     return payload

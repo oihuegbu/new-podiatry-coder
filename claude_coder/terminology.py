@@ -80,7 +80,7 @@ class TerminologyIndex:
     @classmethod
     def load(cls) -> "TerminologyIndex":
         import json
-        from app.core.config import DATA_DIR
-        with open(DATA_DIR / "codes" / "icd10cm_index_terms.json") as fh:
+        from app.release.source_manifest import declared_source_path
+        with open(declared_source_path("index_terms")) as fh:
             terms = json.load(fh).get("terms", {})
         return cls(terms)

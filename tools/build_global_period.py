@@ -26,7 +26,7 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from app.core.config import DATA_DIR
+from app.release.source_manifest import declared_source_path
 
 DEFAULT_URL = "https://www.cms.gov/files/zip/rvu26b.zip"
 GLOBAL_VALUES = {"000", "010", "090", "XXX", "YYY", "ZZZ", "MMM"}
@@ -92,7 +92,9 @@ def main() -> int:
         codes[code] = {"global": gval,
                        "bilat": bval if bval in bilat_values else "9"}
 
-    out = DATA_DIR / "codes" / "global_period.json"
+    # The PRODUCER writes exactly where the declaration says the coder reads and the
+    # release manifest content-addresses -- one path, three consumers. (Codex F6-R5.)
+    out = declared_source_path("pfs_indicators")
     payload = {
         "source": "CMS Medicare PFS Relative Value File (PPRRVU): GLOB DAYS + BILAT SURG columns",
         "url": args.url,

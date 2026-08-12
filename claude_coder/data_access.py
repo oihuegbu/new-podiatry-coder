@@ -31,6 +31,24 @@ from .models import CandidateCode, Outcome
 AUTHORITY_UNAVAILABLE = "__unavailable__"
 
 
+class CoverageDataUnavailable(RuntimeError):
+    """The authoritative coverage policy could not be read. Raised (never degraded to an
+    empty map) because "no coverage data" and "this service is governed by no policy" are
+    opposite conclusions: the second releases a claim the first must hold."""
+
+
+def _source_path(source_id: str):
+    """The declared path of an authoritative source the decision path reads.
+
+    Resolving through the release-source declaration -- instead of composing a filename
+    literal here -- is what keeps "the bytes the certificate attests" and "the bytes the
+    coder reads" the same object: an identity that is not registered and dispositioned
+    raises rather than becoming a file nobody certifies. (Codex F6-R5, round 5.)
+    """
+    from app.release.source_manifest import declared_source_path
+    return declared_source_path(source_id)
+
+
 @runtime_checkable
 class CodeSource(Protocol):
     def retrieve(self, description: str, system: str,
@@ -59,6 +77,8 @@ class CodeSource(Protocol):
     def drug_index_codes(self, description: str, system: str) -> set[str]: ...
 
     def drug_unit(self, code: str) -> dict | None: ...
+
+    def drug_dose_table_available(self) -> bool: ...
 
     def procedure_index_codes(self, description: str, system: str) -> set[str]: ...
 
@@ -168,11 +188,11 @@ class AuthoritativeSource:
         if system != "icd10":
             return set()
         if self._snomed is None:
+            path = _source_path("snomed_crosswalk")
             try:
                 import json
-                from app.core.config import DATA_DIR
                 from .terminology import TerminologyIndex
-                with open(DATA_DIR / "codes" / "snomed_icd10_map.json") as fh:
+                with open(path) as fh:
                     term_to_codes = json.load(fh).get("terms", {})
                 # Invert term->codes into code->terms and reuse the SAME robust
                 # matcher as the ICD Index (exact / compound / token-set + plural)
@@ -204,11 +224,11 @@ class AuthoritativeSource:
         if system != "cpt":
             return set()
         if getattr(self, "_cptidx", None) is None:
+            path = _source_path("cpt_index_terms")
             try:
                 import json
-                from app.core.config import DATA_DIR
                 from .terminology import TerminologyIndex
-                with open(DATA_DIR / "codes" / "cpt_index_terms.json") as fh:
+                with open(path) as fh:
                     terms = json.load(fh).get("terms", {})   # {code: [index phrases]}
                 self._cptidx = TerminologyIndex(terms) if terms else False
             except Exception:
@@ -225,11 +245,11 @@ class AuthoritativeSource:
     def _load_drug_table(self) -> None:
         if self._drug is not None:
             return
+        path = _source_path("hcpcs_drug_table")
         try:
             import json
-            from app.core.config import DATA_DIR
             from .terminology import TerminologyIndex
-            data = json.loads((DATA_DIR / "codes" / "hcpcs_drug_table.json").read_text())
+            data = json.loads(path.read_text())
             terms = data.get("terms", {})       # {code: [drug names]}
             self._drug = TerminologyIndex(terms) if terms else False
             self._drug_units = data.get("units", {}) or {}
@@ -246,10 +266,10 @@ class AuthoritativeSource:
         revised code silently falls back to re-verification instead of resolving to
         a stale mapping. Empty until mappings are promoted."""
         if getattr(self, "_learned", None) is None:
+            path = _source_path("learned_cpt_index")
             try:
                 import json
-                from app.core.config import DATA_DIR
-                with open(DATA_DIR / "codes" / "learned_cpt_index.json") as fh:
+                with open(path) as fh:
                     self._learned = json.load(fh).get("entries", {}) or {}
             except Exception:
                 self._learned = {}
@@ -295,6 +315,16 @@ class AuthoritativeSource:
             return None
         rec = self._drug_units.get(code) or self._drug_units.get(code.replace(".", ""))
         return rec if isinstance(rec, dict) else None
+
+    def drug_dose_table_available(self) -> bool:
+        """Whether the authoritative per-unit dose table LOADED — the difference between
+        'this code is not a dosed drug' and 'nobody could tell us the per-unit dose'.
+        Without it, `drug_unit` returning None is ambiguous and the unit computation
+        silently falls back to a count, which changes billed units. The dose table is a
+        reviewed-optional source precisely BECAUSE this distinction is available and the
+        gate holds on it. (Codex F6-R5, round 5.)"""
+        self._load_drug_table()
+        return bool(self._drug_units)
 
     def procedure_index_codes(self, description: str, system: str) -> set[str]:
         """Deterministic CPT/HCPCS grounding, the procedure-axis analog of the ICD
@@ -382,10 +412,14 @@ class AuthoritativeSource:
     def _pfs(self, code: str) -> dict:
         """The CMS PFS indicator record for a code ({'global':…, 'bilat':…})."""
         if self._gp is None:
+            # REQUIRED source: its absence is caught by the capability gate before any
+            # certificate exists, so the empty fallback here can never certify a claim
+            # coded without it. The path comes from the declaration so the bytes the
+            # release fingerprint attests are provably the bytes read here.
+            path = _source_path("pfs_indicators")
             try:
                 import json
-                from app.core.config import DATA_DIR
-                with open(DATA_DIR / "codes" / "global_period.json") as fh:
+                with open(path) as fh:
                     self._gp = json.load(fh).get("codes", {})
             except Exception:
                 self._gp = {}
@@ -609,10 +643,10 @@ class AuthoritativeSource:
         if cache is not None:
             return cache
         cache = {}
+        path = _source_path("instructional_notes")
         try:
             import json
-            from app.core.config import DATA_DIR
-            with open(DATA_DIR / "codes" / "icd10cm_instructional_notes.json") as fh:
+            with open(path) as fh:
                 entries = json.load(fh).get("codes", {})
             for key, rec in entries.items():
                 if not isinstance(rec, dict):
@@ -628,17 +662,24 @@ class AuthoritativeSource:
 
     def _coverage_map(self) -> dict[str, set[str]]:
         """{governed CPT/HCPCS code -> set of qualifying ICD-10 codes} from the CMS
-        LCD/Article coverage data (podiatry_lcd.json: governed_cpts x qualifying_dx) —
-        the authoritative dx->procedure MEDICAL-NECESSITY linkage. Cached; {} if the
-        file is absent (necessity then falls back to the structural check)."""
+        LCD/Article coverage data (governed_cpts x qualifying_dx) — the authoritative
+        dx->procedure MEDICAL-NECESSITY linkage. Cached.
+
+        FAIL-CLOSED: unreadable, unparseable or structurally empty coverage data RAISES.
+        It used to degrade to {}, which `qualifying_dx_for` reports as "this service is
+        governed by no policy" — moving every service onto the LESS restrictive
+        ungoverned path exactly when the coverage authority was unavailable. The caller
+        (the necessity gate) converts the raise into a HOLD. (Codex F6-R5, round 5.)
+        """
         cache = getattr(self, "_cov", None)
         if cache is not None:
             return cache
         cache = {}
+        path = _source_path("coverage_policy")
         try:
             import json
-            from app.core.config import DATA_DIR
-            d = json.load(open(DATA_DIR / "codes" / "podiatry_lcd.json"))
+            with open(path) as fh:
+                d = json.load(fh)
             for row in (d.get("lcd") or []) + (d.get("article") or []):
                 qd = {str(x).replace(".", "").upper()
                       for x in (row.get("qualifying_dx") or [])}
@@ -646,8 +687,13 @@ class AuthoritativeSource:
                     continue
                 for c in (row.get("governed_cpts") or []):
                     cache.setdefault(str(c).replace(".", "").upper(), set()).update(qd)
-        except Exception:
-            cache = {}
+        except Exception as exc:
+            raise CoverageDataUnavailable(
+                f"authoritative coverage policy unreadable at {path}: {exc}") from exc
+        if not cache:
+            raise CoverageDataUnavailable(
+                f"authoritative coverage policy at {path} declares no governed "
+                f"procedure/qualifying-diagnosis linkage")
         self._cov = cache
         return cache
 
@@ -656,9 +702,10 @@ class AuthoritativeSource:
         per CMS LCD/Article coverage — the dx->procedure necessity linkage, undotted.
         None when the procedure is governed by NO coverage policy (its necessity
         cannot be confirmed from this source -> callers fail closed); a set when it is
-        governed."""
+        governed. Raises `CoverageDataUnavailable` when the coverage authority itself
+        could not be read -- "unavailable" must never be reported as "ungoverned"."""
         cov = self._coverage_map()
-        return cov.get(str(code).replace(".", "").upper()) if cov else None
+        return cov.get(str(code).replace(".", "").upper())
 
     def excludes1_refs(self, code: str, system: str) -> set[str]:
         """The Excludes1 target code-prefixes that apply to a diagnosis — gathered
@@ -744,6 +791,9 @@ class MockSource:
 
     def drug_unit(self, code):
         return self._drug_units.get(code)
+
+    def drug_dose_table_available(self) -> bool:
+        return bool(self._drug_units)
 
     def procedure_index_codes(self, description, system):
         return set(self._proc_index.get(description, set())) if system in ("cpt", "hcpcs") else set()

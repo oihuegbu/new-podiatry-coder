@@ -26,19 +26,125 @@ _AUTHORITATIVE = {
     # probe) -- the required-source declaration below resolves its path from THIS
     # registry, so the two can never drift apart.  (Codex F6-R5.)
     "global_periods": config.GLOBAL_PERIODS_FILE,
-    "validator_rules": config.DATA_DIR / "rules" / "validator_rules.json",
+    # The SECOND PFS extract: the one the coder itself reads for global-period and
+    # bilateral indicators.  It is a different file from `global_periods` above (a
+    # different quarterly RVU release, parsed for different columns), and it was read at
+    # decision time while being certified by nobody.  (Codex F6-R5, round 5.)
+    "pfs_indicators": config.PFS_INDICATOR_FILE,
+    # Modifier definitions: the coder's modifier engine resolves every modifier it emits
+    # out of these bytes, so they decide what appears on the claim.
+    "modifier_definitions": config.MODIFIER_FILE,
+    # ICD-10-CM Tabular instructional notes: the Excludes1 conflict gate is evaluated
+    # from them and degrades to NOT_APPLICABLE without them, so their absence RELAXES a
+    # validation gate.
+    "instructional_notes": config.INSTRUCTIONAL_NOTES_FILE,
+    "validator_rules": config.VALIDATOR_RULES_FILE,
+    # SNOMED root concepts + the confidence CAP applied to a root-level concept. Absence
+    # leaves the root set empty, so the cap is never applied and a root-level match keeps
+    # its full confidence -- absence RELAXES a validation restriction.
+    "snomed_root_concepts": config.SNOMED_ROOTS_FILE,
     # Governed terminology is not code authority, but it is a release-bearing
     # interpretation source and must be bound into the same immutable manifest.
     "terminology_registry": config.TERMINOLOGY_REGISTRY_FILE,
+    # Reviewed claim-affecting CONTROL CONFIGURATION.  These are not medical-code data,
+    # but their bytes decide which diagnosis->service relations may release a claim, so
+    # their content identity belongs in the same certifiable manifest as the data.  A
+    # version string in an audit record is not an identity: the file can change without
+    # it changing.  (Codex F6-R5, round 5.)
+    "necessity_relation_control": config.NECESSITY_RELATION_CONTROL_FILE,
+    "relation_evidence_grammar": config.RELATION_EVIDENCE_GRAMMAR_FILE,
+}
+
+# Sources the claim-affecting path reads whose ABSENCE is reviewed and accepted, each with
+# the justification for why absence cannot make an ineligible/unsupported claim releasable.
+# This is the other half of the disposition: every registered identity is either REQUIRED
+# below or exempted HERE, with a stated reason -- "optional" is never an omission nobody
+# looked at.  (Codex F6-R5, round 5.)
+#
+# The shared bar for every entry: absence may only SHRINK what the coder can propose, and
+# every proposed code still has to clear the same deterministic eligibility, entailment,
+# necessity, NCCI, MUE and Excludes1 gates.  Absence is additionally recorded in the
+# capability manifest (`degraded_optional`) and bound into the release fingerprint, so a
+# release produced without an aid is identifiable rather than indistinguishable.
+_OPTIONAL_SOURCES: dict[str, dict] = {
+    "index_terms": {
+        "path": config.CODES_DIR / "icd10cm_index_terms.json",
+        "role": "official alphabetic index terms",
+        "absence_justification":
+            "term->code recall aid; absence can only remove candidates from retrieval, "
+            "never admit a code that failed eligibility, entailment or validation",
+    },
+    "cpt_synonyms": {
+        "path": config.CODES_DIR / "cpt_synonyms.json",
+        "role": "synonym recall aid",
+        "absence_justification":
+            "retrieval-recall aid only; every candidate it can surface still has to be "
+            "entailed by the note and clear every deterministic gate",
+    },
+    "hcpcs_synonyms": {
+        "path": config.CODES_DIR / "hcpcs_synonyms.json",
+        "role": "synonym recall aid",
+        "absence_justification":
+            "retrieval-recall aid only; every candidate it can surface still has to be "
+            "entailed by the note and clear every deterministic gate",
+    },
+    "icd10_synonyms": {
+        "path": config.CODES_DIR / "icd10_synonyms.json",
+        "role": "synonym recall aid",
+        "absence_justification":
+            "retrieval-recall aid only; every candidate it can surface still has to be "
+            "entailed by the note and clear every deterministic gate",
+    },
+    "snomed_crosswalk": {
+        "path": config.CODES_DIR / "snomed_icd10_map.json",
+        "role": "concept crosswalk",
+        "absence_justification":
+            "long-tail synonym/eponym recall aid requiring a UMLS licence; absence "
+            "removes candidates only, and each surviving candidate is still validated",
+    },
+    "cpt_index_terms": {
+        "path": config.CODES_DIR / "cpt_index_terms.json",
+        "role": "procedure descriptor index",
+        "absence_justification":
+            "AMA-licensed recall aid that cannot be redistributed; absence removes "
+            "candidates only and the coder falls back to descriptor/embedding retrieval",
+    },
+    "learned_cpt_index": {
+        "path": config.CODES_DIR / "learned_cpt_index.json",
+        "role": "learned resolution index",
+        "absence_justification":
+            "cache of previously VERIFIED resolutions; absence only forces the same "
+            "resolution to be re-verified from authoritative data",
+    },
+    "hcpcs_drug_table": {
+        "path": config.CODES_DIR / "hcpcs_drug_table.json",
+        "role": "drug dosing table",
+        "absence_justification":
+            "drug-name recall aid and per-unit dose table; absence cannot change billed "
+            "units because a documented dose with no authoritative per-unit dose HOLDS "
+            "the claim (gates.drug_units_gate) instead of falling back to a count",
+    },
 }
 
 
 def _authoritative_paths() -> dict[str, Path]:
+    # REVIEWED-OPTIONAL sources are deliberately NOT added here. This registry is the
+    # release manifest's "every one of these files must be hashable" set -- an absent path
+    # is recorded as an ERROR -- whereas a reviewed-optional aid is allowed to be absent.
+    # Their presence, bytes and absence are carried by the CAPABILITY manifest (which the
+    # release certificate binds) as `absent-optional` / `degraded_optional`, and when they
+    # are present the codes/ sweep below still content-addresses them here.
     paths = dict(_AUTHORITATIVE)
+    # Bulk discovery is a BACKSTOP for files nobody declared: skip any path an explicit
+    # identity above already owns, so one file is never hashed twice under two identities
+    # (which would make "which record is this file" ambiguous in the manifest).
+    declared = {str(p) for p in paths.values()}
     for path in sorted(config.CODES_DIR.glob("*.json")):
-        paths.setdefault(f"codes/{path.name}", path)
+        if str(path) not in declared:
+            paths.setdefault(f"codes/{path.name}", path)
     for path in sorted((config.DATA_DIR / "rules").glob("*.json")):
-        paths.setdefault(f"rules/{path.name}", path)
+        if str(path) not in declared:
+            paths.setdefault(f"rules/{path.name}", path)
     runtime = {
         "compliance_database": config.DATA_DIR / "compliance.db",
         "validator_implementation": config.BASE_DIR / "app" / "validation" /
@@ -83,7 +189,7 @@ RELEASE_METADATA_SOURCES = frozenset({
 # Version of the required-source SCHEMA below.  A release attestation records it, so a
 # certificate built against an older/other required-source definition is identifiable
 # rather than silently comparable.  Bump it whenever the required set or a role changes.
-REQUIRED_SOURCE_SCHEMA_VERSION = "release-required-sources-v1"
+REQUIRED_SOURCE_SCHEMA_VERSION = "release-required-sources-v2"
 
 # The COMPLETE set of release-bearing source identities a certifiable release must
 # account for, each with the ROLE it plays.  Absence of any one of these means a claim
@@ -111,7 +217,127 @@ _REQUIRED_RELEASE_SOURCES: dict[str, dict[str, str]] = {
             "window is published for this extract, so identity rests on the content "
             "digest alone",
     },
+    # --- added in round 5 after deriving the set from the RUNTIME dependency graph ---
+    "coverage_policy": {
+        # Read at decision time by `data_access._coverage_map` to decide whether a service
+        # is GOVERNED and which diagnoses qualify.  Absent/invalid, it silently became an
+        # empty map, moving every service onto the less restrictive ungoverned path.
+        "role": "coverage policy (medical-necessity linkage)",
+    },
+    "pfs_indicators": {
+        "role": "PFS global-period / bilateral indicators",
+        "release_metadata_exemption":
+            "parsed extract of a CMS quarterly RVU file; it is not ingested into a "
+            "versioned effective-window table, so no upstream window is queryable and "
+            "identity rests on the content digest alone",
+    },
+    "modifier_definitions": {
+        "role": "modifier definitions",
+        "release_metadata_exemption":
+            "not ingested into a versioned effective-window table; the file carries no "
+            "queryable upstream release window, so identity rests on the content digest",
+    },
+    "instructional_notes": {
+        "role": "tabular exclusion notes",
+        "release_metadata_exemption":
+            "ICD-10-CM Tabular notes ship with the code edition rather than a separate "
+            "release window of their own; identity rests on the content digest",
+    },
+    "validator_rules": {
+        "role": "deterministic validation rule pack",
+        "release_metadata_exemption":
+            "reviewed in-repo rule pack, not an ingested upstream publication; it carries "
+            "its own pack version and its identity rests on the content digest",
+    },
+    "snomed_root_concepts": {
+        "role": "SNOMED root concepts / confidence cap",
+        "release_metadata_exemption":
+            "reviewed in-repo control table, not an ingested upstream publication with an "
+            "effective window; identity rests on the content digest",
+    },
+    "terminology_registry": {
+        "role": "governed clinical terminology registry",
+        "release_metadata_exemption":
+            "reviewed in-repo interpretation source, not an ingested upstream publication "
+            "with an effective window; identity rests on the content digest",
+    },
+    "necessity_relation_control": {
+        "role": "necessity relation control configuration",
+        "release_metadata_exemption":
+            "reviewed in-repo control configuration; no external authority publishes an "
+            "effective window for it, so identity rests on the content digest (its own "
+            "declared control version is recorded in the audit trail, not as provenance)",
+    },
+    "relation_evidence_grammar": {
+        "role": "directional relation-evidence grammar",
+        "release_metadata_exemption":
+            "reviewed in-repo control configuration; no external authority publishes an "
+            "effective window for it, so identity rests on the content digest (its own "
+            "declared control version is recorded in the audit trail, not as provenance)",
+    },
 }
+
+
+def _assert_registry_dispositioned() -> None:
+    """Every EXPLICITLY registered source must be dispositioned: required, or optional
+    with a written justification for why its absence cannot change a released claim.
+
+    This is the structural half of the fix.  Round 4's required set was under-declared
+    because a source could be registered and then simply not mentioned anywhere -- silence
+    read as "optional".  Silence is now an error: adding a source to `_AUTHORITATIVE`
+    without deciding what it is fails loudly at the first call, in every consumer.
+    """
+    dispositioned = set(_REQUIRED_RELEASE_SOURCES) | set(_OPTIONAL_SOURCES)
+    undeclared = sorted(set(_AUTHORITATIVE) - dispositioned)
+    if undeclared:
+        raise RuntimeError(
+            "registered authoritative source(s) with no reviewed disposition (neither "
+            f"required nor exempted with a justification): {undeclared}")
+    both = sorted(set(_REQUIRED_RELEASE_SOURCES) & set(_OPTIONAL_SOURCES))
+    if both:
+        raise RuntimeError(
+            f"source(s) declared both required and optional: {both}")
+    for source_id, entry in _OPTIONAL_SOURCES.items():
+        if not str(entry.get("role") or "").strip():
+            raise RuntimeError(f"optional source {source_id!r} declares no role")
+        if not str(entry.get("absence_justification") or "").strip():
+            raise RuntimeError(
+                f"optional source {source_id!r} records no justification for why its "
+                f"absence cannot change a released claim")
+        if not entry.get("path"):
+            raise RuntimeError(f"optional source {source_id!r} declares no path")
+
+
+def optional_release_sources() -> dict[str, dict]:
+    """{source_id -> {source_id, role, path, absence_justification}} for every source whose
+    absence has been reviewed and accepted.  Raises (never returns a partial set) when the
+    registry is not fully dispositioned."""
+    _assert_registry_dispositioned()
+    return {source_id: {"source_id": source_id,
+                        "role": str(entry["role"]),
+                        "path": entry["path"],
+                        "absence_justification": str(entry["absence_justification"])}
+            for source_id, entry in _OPTIONAL_SOURCES.items()}
+
+
+def declared_source_path(source_id: str) -> Path:
+    """The path of a DECLARED source, for the decision-time code that reads it.
+
+    Readers resolve their file through this function instead of composing a filename
+    literal, so a source that a claim-affecting decision depends on cannot exist outside
+    the manifest: an undeclared identity raises here the first time it is read, rather
+    than quietly producing a file nobody certifies.  (Codex F6-R5, round 5.)
+    """
+    _assert_registry_dispositioned()
+    path = _AUTHORITATIVE.get(source_id)
+    if path is None:
+        entry = _OPTIONAL_SOURCES.get(source_id)
+        path = entry["path"] if entry else None
+    if path is None:
+        raise RuntimeError(
+            f"{source_id!r} is not a declared release source; a file read at decision "
+            f"time must be registered and dispositioned in app.release.source_manifest")
+    return Path(path)
 
 
 def required_release_sources() -> dict[str, dict]:
@@ -124,9 +350,11 @@ def required_release_sources() -> dict[str, dict]:
       - a source the authority publishes release metadata for that nonetheless carries a
         (now stale) reviewed exemption;
       - a source the authority publishes NO release metadata for that carries no reviewed
-        exemption -- silence is not an exemption.
+        exemption -- silence is not an exemption;
+      - a registered source that is neither required nor exempted with a justification.
     Callers treat a raise as "not certifiable" / manifest unavailable, never as "empty".
     """
+    _assert_registry_dispositioned()
     spec: dict[str, dict] = {}
     for source_id, declared in _REQUIRED_RELEASE_SOURCES.items():
         path = _AUTHORITATIVE.get(source_id)
@@ -314,6 +542,13 @@ def _release_metadata(source_id: str) -> dict:
             row = conn.execute(
                 "SELECT MIN(effective_from), MAX(effective_to) FROM mue"
             ).fetchone()
+        elif source_id == "coverage_policy":
+            # The LCD/Article coverage window, from the policies whose dates came from the
+            # authority itself (temporal_authority=1) -- policies with no published dates
+            # carry placeholders and would report a vacuous window.
+            row = conn.execute(
+                "SELECT MIN(effective_from), MAX(effective_to) FROM coverage_policy "
+                "WHERE temporal_authority=1 AND effective_from != ''").fetchone()
         elif source_id in {"icd10_codes", "cpt_codes", "hcpcs_codes"}:
             system = {"icd10_codes": "ICD10", "cpt_codes": "CPT",
                       "hcpcs_codes": "HCPCS"}[source_id]

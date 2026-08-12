@@ -88,10 +88,30 @@ NOTES_DIR = Path(os.getenv("NOTES_DIR", str(ATTACHMENTS_DIR)))
 
 # --- Supplementary rule tables (bundled with system) ---
 GLOBAL_PERIODS_FILE = DATA_DIR / "global_periods.json"
+# CMS PFS payment-policy indicator extract (GLOB DAYS + BILAT SURG) the CODER reads for
+# global-surgical-period and bilateral-surgery decisions, built by
+# tools/build_global_period.py.  This is a DIFFERENT extract from GLOBAL_PERIODS_FILE
+# above (which the compliance datastore ingests): both are release-bearing, both are
+# declared in app/release/source_manifest, and the path lives here -- not as a literal in
+# the reader -- so the bytes that are certified are provably the bytes that are read.
+PFS_INDICATOR_FILE = CODES_DIR / os.getenv("PFS_INDICATOR_FILENAME", "global_period.json")
+# Authoritative modifier definitions the coder's modifier engine resolves against.
+MODIFIER_FILE = CODES_DIR / os.getenv("MODIFIER_FILENAME", "modifiers.json")
+# ICD-10-CM Tabular instructional (Excludes1/Excludes2) notes -- gate-bearing: the
+# Excludes1 conflict check degrades to NOT_APPLICABLE without them.
+INSTRUCTIONAL_NOTES_FILE = CODES_DIR / os.getenv(
+    "INSTRUCTIONAL_NOTES_FILENAME", "icd10cm_instructional_notes.json")
+VALIDATOR_RULES_FILE = DATA_DIR / "rules" / "validator_rules.json"
 SNOMED_ROOTS_FILE = DATA_DIR / "snomed_root_concepts.json"
 TERMINOLOGY_REGISTRY_FILE = (
     DATA_DIR / "terminology" / "clinical_abbreviations.json"
 )
+# Reviewed, versioned claim-affecting control configuration shipped with the coder.
+# Registered here so the release manifest content-addresses the exact bytes the
+# fail-closed controls load at decision time.
+CODER_CONTROLS_DIR = BASE_DIR / "claude_coder" / "controls"
+NECESSITY_RELATION_CONTROL_FILE = CODER_CONTROLS_DIR / "necessity_relation_control.json"
+RELATION_EVIDENCE_GRAMMAR_FILE = CODER_CONTROLS_DIR / "relation_evidence_grammar.json"
 
 # --- RAG settings ---
 # top_k feeds the coder's candidate list; 20 gives recall headroom for a

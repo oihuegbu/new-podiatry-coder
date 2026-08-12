@@ -19,11 +19,13 @@ from .models import ClinicalFact
 def load_modifier_defs() -> dict:
     """{modifier_code: {description: ...}} from the authoritative modifier file.
     Fail-safe: any problem (no app config, missing file) yields {} so the engine
-    simply assigns no modifiers rather than erroring."""
+    simply assigns no modifiers rather than erroring — safe only because the file is a
+    REQUIRED release source, so its absence blocks certification upstream rather than
+    quietly producing a claim with no modifiers."""
     try:
         import json
-        from app.core.config import DATA_DIR
-        with open(DATA_DIR / "codes" / "modifiers.json") as fh:
+        from app.release.source_manifest import declared_source_path
+        with open(declared_source_path("modifier_definitions")) as fh:
             data = json.load(fh)
         return data.get("modifiers", {}) or {}
     except Exception:
