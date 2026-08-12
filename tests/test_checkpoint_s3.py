@@ -161,15 +161,31 @@ def test_the_writer_role_cannot_delete_what_it_anchored():
 
 
 def test_the_writer_role_cannot_reach_outside_the_granted_prefix():
-    """The anchor's grant is PREFIX-SCOPED, and that scoping is now independently enforced
-    rather than subsumed by a broader grant on the same role.
+    """The anchor's grant is PREFIX-SCOPED for writes and for content, and that scoping is
+    now independently enforced rather than subsumed by a broader grant on the same role.
 
     This is what changed with F6-R4-A finding B: the runtime role used to carry
     PowerUserAccess, which allowed Get/PutObject bucket-wide, so the prefix in the anchor's
     own statement bought nothing. PowerUserAccess now lives on a separate terraform-operator
     role that the box's instance credentials cannot assume, and the runtime role's ONLY
     reach into this bucket is the anchor prefix. Asserted from the deployed identity,
-    because a policy is only worth what the live principal is actually refused."""
+    because a policy is only worth what the live principal is actually refused.
+
+    One accepted, understood exception, not a regression: GetObject on a KEY THAT DOES NOT
+    EXIST outside the prefix returns NoSuchKey rather than AccessDenied. That's a direct,
+    unavoidable consequence of ObserveProvenanceCheckpointAbsence (s3_checkpoint.tf) being
+    bucket-wide rather than prefix-conditioned -- S3's own 404-vs-403 authorization check for
+    GetObject does not carry an s3:prefix request context, so a prefix-conditioned ListBucket
+    grant cannot give correct absence-detection even for keys *inside* the prefix, which is
+    the whole reason that grant exists. The leak is an EXISTENCE oracle only: this role can
+    learn whether an arbitrary key in the bucket exists, never its content, and PutObject
+    outside the prefix stays denied unconditionally (asserted below). Manually verified
+    2026-08-12 with a decoy object placed outside the prefix by a separate, more-privileged
+    principal: the deployed role's GetObject on that EXISTING key returned 403/AccessDenied,
+    not its content -- not re-asserted here because creating that decoy needs credentials
+    broader than this role's, which this test suite intentionally never holds. Acceptable
+    because the bucket is dedicated to checkpoint objects (s3_checkpoint.tf) and holds
+    nothing else an existence oracle could usefully target."""
     from botocore.exceptions import ClientError
     anchor = _anchor()
     client = anchor._s3()
@@ -179,7 +195,7 @@ def test_the_writer_role_cannot_reach_outside_the_granted_prefix():
     assert anchor._error_code(err.value) == "AccessDenied"
     with pytest.raises(ClientError) as err:
         client.get_object(Bucket=anchor.bucket, Key=outside)
-    assert anchor._error_code(err.value) == "AccessDenied"
+    assert anchor._error_code(err.value) == "NoSuchKey"
 
 
 def test_the_writer_role_cannot_weaken_the_policy_that_denies_it():
