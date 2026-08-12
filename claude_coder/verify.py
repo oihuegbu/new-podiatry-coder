@@ -35,13 +35,20 @@ from .models import CandidateCode, ClinicalFact
 
 LLMFn = Callable[[str, str], str]
 
+# The providers the two default judgement calls are PINNED to. They are named once, here,
+# and both the call itself and its declared identity below read them — so the identity can
+# never drift away from the provider actually contacted (which is what a downstream
+# independence check is entitled to rely on).
+VERIFY_PROVIDER = "openai"
+CORROBORATE_PROVIDER = "claude"
+
 
 def default_verify_llm(system: str, user: str) -> str:
     # use_batch=False: propose/verify are interactive, latency-sensitive calls; the
     # Batches API (~minutes/call) would make the loop unusable.
     from app.core.llm_client import chat_completion
     from app.core.config import OPENAI_MODEL
-    out, _ = chat_completion(system, user, model=OPENAI_MODEL, provider="openai",
+    out, _ = chat_completion(system, user, model=OPENAI_MODEL, provider=VERIFY_PROVIDER,
                              temperature=0.0, json_mode=True, use_batch=False)
     return out
 
@@ -60,9 +67,75 @@ def default_corroborate_llm(system: str, user: str) -> str:
         effort = getattr(config, "CLAUDE_VERIFY_EFFORT", "") or None
     except Exception:
         pass
-    out, _ = chat_completion(system, user, model=model, effort=effort, provider="claude",
+    out, _ = chat_completion(system, user, model=model, effort=effort,
+                             provider=CORROBORATE_PROVIDER,
                              temperature=0.0, json_mode=True, use_batch=False)
     return out
+
+
+# ---- assertion-origin independence of the corroborating call ----------------------------
+# `select_entailed` and `corroborate` make two judgements about the SAME candidate code.
+# Their AGREEMENT is only worth something when the two judgements come from DISTINCT
+# ORIGINS. Two calls into one vendor's model family are one opinion sampled twice — they
+# share training data, tokeniser, alignment and failure modes — so their agreeing is model
+# self-confidence, not confirmation, and a `profile_id` (or a second model tier from the
+# same vendor) is a LABEL, not an origin.
+#
+# The identity therefore travels ON the callable as the reviewed provider/model profile,
+# and is read through the SAME provider-identity primitive the relation graph uses
+# (`extraction.profile_identity`, established with `ExtractionOrigin` in round 4) rather
+# than a second, parallel id scheme that could disagree with it.
+#
+# FAIL-CLOSED: only a POSITIVELY ESTABLISHED difference of provider counts as independent.
+# An absent corroborator, the same callable object, and an undeclared identity are all
+# "not independent" — "we cannot tell" must never be read as "confirmed".
+DISTINCT_ORIGIN = "distinct_origin"        # different declared providers — genuinely independent
+SHARED_ORIGIN = "shared_origin"            # one vendor answering twice
+UNDECLARED_ORIGIN = "undeclared_origin"    # no declared identity — independence unestablished
+NO_CORROBORATION = "no_corroboration"      # no second judgement was made at all
+CORROBORATION_ORIGINS = frozenset({DISTINCT_ORIGIN, SHARED_ORIGIN, UNDECLARED_ORIGIN,
+                                   NO_CORROBORATION})
+# The single place that answers "may this agreement be credited as independent
+# confirmation?". A control reads THIS set instead of listing safe values itself.
+INDEPENDENT_CORROBORATION_ORIGINS = frozenset({DISTINCT_ORIGIN})
+
+
+def declare_model_profile(fn: LLMFn, **profile) -> LLMFn:
+    """Stamp an LLM callable with the reviewed provider/model identity of the calls it
+    makes, so an independence check reads a DECLARED fact rather than guessing from the
+    callable's name. Returns the callable, so it can wrap a definition."""
+    fn.model_profile = dict(profile)
+    return fn
+
+
+def model_profile_of(fn) -> dict:
+    """The declared provider/model identity of an LLM callable ({} when undeclared)."""
+    profile = getattr(fn, "model_profile", None) if fn is not None else None
+    return dict(profile) if isinstance(profile, dict) else {}
+
+
+def corroboration_origin(primary: LLMFn | None, corroborator: LLMFn | None) -> str:
+    """Which `CORROBORATION_ORIGINS` value describes `corroborator` relative to `primary`.
+
+    `primary` is the call that made the assertion being checked (the entailment selection);
+    `corroborator` is the second opinion on it. Only a different DECLARED provider yields
+    `DISTINCT_ORIGIN`."""
+    if corroborator is None:
+        return NO_CORROBORATION
+    if corroborator is primary:
+        return SHARED_ORIGIN
+    from .extraction import profile_identity
+    primary_provider, _ = profile_identity(model_profile_of(primary))
+    second_provider, _ = profile_identity(model_profile_of(corroborator))
+    primary_provider = primary_provider.strip().lower()
+    second_provider = second_provider.strip().lower()
+    if not primary_provider or not second_provider:
+        return UNDECLARED_ORIGIN
+    return SHARED_ORIGIN if primary_provider == second_provider else DISTINCT_ORIGIN
+
+
+declare_model_profile(default_verify_llm, provider=VERIFY_PROVIDER)
+declare_model_profile(default_corroborate_llm, provider=CORROBORATE_PROVIDER)
 
 
 def _json(text: str) -> dict:

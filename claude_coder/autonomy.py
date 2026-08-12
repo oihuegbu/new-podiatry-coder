@@ -86,6 +86,10 @@ def _line_confidence(line: ResolvedLine) -> float:
     # are high-trust groundings of the code itself, so both are gated only by how
     # well the underlying fact is documented (fact.confidence) — a cross-model-
     # confirmed line is not penalized to 0 just because an LLM was in the loop.
+    # "INDEPENDENT" is a checked precondition, not a naming convention: `resolution`
+    # mints VERIFIED only when the corroborating judgement came from a different declared
+    # model provider (`verify.corroboration_origin`), so this branch cannot be reached by
+    # one vendor agreeing with itself. Everything short of that lands on ARBITRATED below.
     if line.method in (ResolutionMethod.DETERMINISTIC, ResolutionMethod.VERIFIED):
         return line.fact.confidence
     if line.method is ResolutionMethod.ARBITRATED:      # single-model tie-break

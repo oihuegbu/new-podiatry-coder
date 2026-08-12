@@ -148,9 +148,15 @@ class CandidateCode:
 
 class ResolutionMethod(str, Enum):
     DETERMINISTIC = "deterministic"   # one candidate whose descriptor entails the fact
-    ARBITRATED = "llm_arbitrated"     # model picked among retrieved candidates
+    ARBITRATED = "llm_arbitrated"     # model picked among retrieved candidates -- including
+                                      # an entailment whose corroborating second opinion did
+                                      # not come from an INDEPENDENT origin (see below)
     VERIFIED = "verified_entailment"  # candidate whose authoritative descriptor the
-                                      # documentation entails (propose-then-verify)
+                                      # documentation entails (propose-then-verify) AND
+                                      # which an INDEPENDENT second model confirmed. Both
+                                      # halves are enforced in `resolution._entailed_line`;
+                                      # `autonomy` treats this as grounded, so agreement
+                                      # between two calls to ONE provider must never mint it.
     ABSTAINED = "abstained"           # genuine ambiguity / no candidate -> review
 
 

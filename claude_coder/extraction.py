@@ -142,10 +142,17 @@ class ExtractionOrigin:
                 "schema_version": self.schema_version}
 
 
-def _profile_identity(model_profile: Any) -> tuple[str, str]:
+def profile_identity(model_profile: Any) -> tuple[str, str]:
     """(provider, canonical profile identity) from the recorded call metadata. Never
     includes a credential value — the pipeline's profile dict carries provider/model/
-    callable identity only."""
+    callable identity only.
+
+    This is the ONE primitive that answers "whose model answered this call?". It is public
+    because independence is not an extraction-only question: every place that decides
+    whether two assertions came from distinct origins — the relation graph here, and the
+    code-corroboration check in `verify.corroboration_origin` — must read the provider the
+    same way, from the same declared metadata, rather than growing its own notion of
+    identity that can drift out of agreement with this one."""
     if not isinstance(model_profile, dict):
         return "", ""
     provider = str(model_profile.get("provider", "") or "")
@@ -153,6 +160,9 @@ def _profile_identity(model_profile: Any) -> tuple[str, str]:
                             for k, v in model_profile.items()},
                            sort_keys=True, separators=(",", ":"))
     return provider, canonical
+
+
+_profile_identity = profile_identity          # historical private name, kept for callers
 
 
 def call_origin(note_text: str, raw_response: str, *, run_id: str | None = None,
@@ -168,7 +178,7 @@ def call_origin(note_text: str, raw_response: str, *, run_id: str | None = None,
     the exact response — so a single pass is reproducible (certificates stay stable) and a
     response cannot be counted twice by being replayed into the same graph."""
     prompt_sha = hashlib.sha256(_SYSTEM.encode("utf-8")).hexdigest()
-    provider, profile = _profile_identity(model_profile)
+    provider, profile = profile_identity(model_profile)
     rid = str(run_id).strip() if run_id is not None and str(run_id).strip() else ""
     if not rid:
         seed = "|".join((hashlib.sha256((note_text or "").encode("utf-8")).hexdigest(),

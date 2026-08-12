@@ -507,30 +507,57 @@ def _system_hold_result(encounter_id: str, date_of_service: str | None,
 
 
 def _model_profile_identity(extract_llm, verify_llm, corroborate_llm) -> dict:
-    """Auditable provider/profile identity; no credential values are ever included."""
+    """Auditable provider/profile identity; no credential values are ever included.
+
+    The verification/corroboration providers are read from what each CALLABLE declares
+    (`verify.model_profile_of`), not restated here: a caller-supplied pair used to be
+    recorded as openai/claude regardless of who it actually was, which made
+    `independent_providers` a statement about this function rather than about the run.
+    (Round 5, phase 5.)"""
+    from . import verify as _verify
+
     def callable_name(fn):
         return None if fn is None else f"{getattr(fn, '__module__', '')}.{getattr(fn, '__qualname__', type(fn).__name__)}"
 
     profiles = {
         "extraction": {"callable": callable_name(extract_llm)},
-        "verification": {"callable": callable_name(verify_llm)},
-        "corroboration": {"callable": callable_name(corroborate_llm)},
+        "verification": {"callable": callable_name(verify_llm),
+                         **_verify.model_profile_of(verify_llm)},
+        "corroboration": {"callable": callable_name(corroborate_llm),
+                          **_verify.model_profile_of(corroborate_llm)},
     }
     try:
         from app.core import config
         profiles["extraction"].update({"provider": config.LLM_PROVIDER,
                                        "model": (config.CLAUDE_MODEL if config.LLM_PROVIDER == "claude"
                                                  else config.OPENAI_MODEL)})
-        profiles["verification"].update({"provider": "openai", "model": config.OPENAI_MODEL})
-        profiles["corroboration"].update({
-            "provider": "claude",
-            "model": config.CLAUDE_VERIFY_MODEL or config.CLAUDE_MODEL,
-            "effort": config.CLAUDE_VERIFY_EFFORT or config.CLAUDE_EFFORT})
+        # Model/effort detail only for the DEFAULT callables — the only ones whose runtime
+        # model this configuration actually selects.
+        if verify_llm is _verify.default_verify_llm:
+            profiles["verification"]["model"] = config.OPENAI_MODEL
+        if corroborate_llm is _verify.default_corroborate_llm:
+            profiles["corroboration"].update({
+                "model": config.CLAUDE_VERIFY_MODEL or config.CLAUDE_MODEL,
+                "effort": config.CLAUDE_VERIFY_EFFORT or config.CLAUDE_EFFORT})
     except Exception:
         profiles["identity_status"] = "configuration_unavailable"
-    profiles["independent_providers"] = (
-        profiles["verification"].get("provider") !=
-        profiles["corroboration"].get("provider"))
+    # The DECIDING fact, recorded exactly as resolution computes it: whether an agreement
+    # between the two judgement calls may be credited as independent confirmation at all.
+    origin = _verify.corroboration_origin(verify_llm, corroborate_llm)
+    profiles["corroboration_origin"] = origin
+    profiles["independent_providers"] = origin in _verify.INDEPENDENT_CORROBORATION_ORIGINS
+    # OBSERVATIONAL, and deliberately not a control input. The assertion the corroborator
+    # checks is the entailment SELECTION, so independence is measured against the verifier;
+    # but the corroborator sharing a vendor with the EXTRACTOR is a weaker correlation worth
+    # seeing in the record (in the current default deployment it does). Promoting it to a
+    # control would be a product decision, not a silent code change -- it would make every
+    # propose-then-verify line non-independent under that same default.
+    _extraction_provider = str(profiles["extraction"].get("provider") or "").strip().lower()
+    _corroboration_provider = str(
+        profiles["corroboration"].get("provider") or "").strip().lower()
+    profiles["corroborator_shares_extraction_provider"] = bool(
+        _extraction_provider and _corroboration_provider
+        and _extraction_provider == _corroboration_provider)
     return profiles
 
 

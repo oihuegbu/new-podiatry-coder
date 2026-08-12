@@ -15,6 +15,17 @@ from claude_coder.models import CandidateCode, Outcome, ResolutionMethod, Verdic
 from claude_coder.pipeline import code_encounter
 
 
+def _from(fn, provider):
+    """Declare which model provider a stub LLM stands in for.
+
+    Corroboration only counts as INDEPENDENT when the second judgement comes from a
+    declared, DIFFERENT provider, so a test that wants to exercise the corroborated path
+    has to say who its two stubs are — the same way the deployment declares it for the
+    real callables. (Round 5, phase 5.)"""
+    from claude_coder.verify import declare_model_profile
+    return declare_model_profile(fn, provider=provider)
+
+
 def _request(fact):
     from claude_coder.eligibility import (ClaimComponent, ClaimLineIntent,
                                           EligibilityState, RetrievalRequest,
@@ -947,8 +958,11 @@ class ProposeVerifyTest(unittest.TestCase):
         from claude_coder.models import ResolutionMethod
         from claude_coder.resolution import resolve
         line = resolve(_request(self._fact()), self._src(), llm=self._llm())
-        self.assertEqual(line.method, ResolutionMethod.VERIFIED)
         self.assertEqual(line.chosen.code, "CODEALPHA")   # not the higher-recall near-synonym
+        # ... but with NO second opinion configured at all there is nothing independent to
+        # confirm it, so the entailment cannot carry the grounded VERIFIED method.
+        self.assertEqual(line.method, ResolutionMethod.ARBITRATED)
+        self.assertIn("not independently corroborated", line.rationale.lower())
 
     def test_proposal_surfaces_missed_code(self):
         from claude_coder.data_access import MockSource
@@ -960,7 +974,9 @@ class ProposeVerifyTest(unittest.TestCase):
             records={("CODEALPHA", "cpt"): {"long_description": self.ALPHA, "active": True},
                      ("CODEBETA", "cpt"): {"long_description": self.BETA, "active": True}},
             retrieval={("*", "cpt"): [CandidateCode("CODEBETA", "cpt", self.BETA, 0.95)]})
-        line = resolve(_request(self._fact()), src, llm=self._llm(propose=["CODEALPHA"]))
+        line = resolve(_request(self._fact()), src,
+                       llm=_from(self._llm(propose=["CODEALPHA"]), "provider-a"),
+                       corroborate=_from(self._corroborator(confirm=True), "provider-b"))
         self.assertEqual(line.method, ResolutionMethod.VERIFIED)
         self.assertEqual(line.chosen.code, "CODEALPHA")
 
@@ -989,10 +1005,13 @@ class ProposeVerifyTest(unittest.TestCase):
         return stub
 
     def test_corroboration_agreement_accepts(self):
+        """CROSS-PROVIDER agreement still works exactly as intended: two DECLARED, distinct
+        origins both find the authoritative descriptor entailed -> grounded VERIFIED."""
         from claude_coder.models import ResolutionMethod
         from claude_coder.resolution import resolve
-        line = resolve(_request(self._fact()), self._src(), llm=self._llm(),
-                       corroborate=self._corroborator(confirm=True))
+        line = resolve(_request(self._fact()), self._src(),
+                       llm=_from(self._llm(), "provider-a"),
+                       corroborate=_from(self._corroborator(confirm=True), "provider-b"))
         self.assertEqual(line.method, ResolutionMethod.VERIFIED)
         self.assertEqual(line.chosen.code, "CODEALPHA")
         self.assertIn("independently confirmed", line.rationale)
@@ -1041,9 +1060,381 @@ class ProposeVerifyTest(unittest.TestCase):
 
         fact = ClinicalFact(kind=FactKind.PROCEDURE, description="act alpha",
                             evidence=[EvidenceSpan("act alpha performed")], confidence=0.9)
-        line = resolve(_request(fact), src, llm=sel, corroborate=corr)
+        line = resolve(_request(fact), src, llm=_from(sel, "provider-a"),
+                       corroborate=_from(corr, "provider-b"))
         self.assertEqual(line.method, ResolutionMethod.VERIFIED)
         self.assertEqual(line.chosen.code, "A2")     # re-selected past the rejected A1
+
+
+class CorroborationIndependenceTest(unittest.TestCase):
+    """Round 5, phase 5 — agreement between two calls to the SAME model provider is not
+    corroboration, so it cannot buy the grounded VERIFIED method or the autonomy that rides
+    on it.
+
+    This is the milder, CONJUNCTIVE sibling of the F6-R3 necessity defect: a corroborator
+    can only ever subtract (a disagreeing one abstains), never manufacture a code that was
+    not already an authoritative-table candidate. What it could wrongly do is CERTIFY —
+    turn one vendor's opinion, sampled twice, into the 'independently confirmed' status
+    `autonomy` treats as grounded and releases without a human. Synthetic codes throughout;
+    the mechanic is about assertion origins, not about any medical term."""
+
+    ALPHA = "Act alpha of the structure, unspecified approach"
+
+    def _src(self):
+        from claude_coder.data_access import MockSource
+        return MockSource(
+            records={("CODEALPHA", "cpt"): {"long_description": self.ALPHA, "active": True}},
+            retrieval={("*", "cpt"): [CandidateCode("CODEALPHA", "cpt", self.ALPHA, 0.9)]})
+
+    def _fact(self):
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        return ClinicalFact(kind=FactKind.PROCEDURE,
+                            description="act alpha of the structure",
+                            evidence=[EvidenceSpan("act alpha performed on the structure")],
+                            confidence=0.95)
+
+    def _select(self):
+        def sel(system, user):
+            if "propose" in system.lower():
+                return json.dumps({"codes": []})
+            return json.dumps({"choice": 1, "reason": "documented act matches"})
+        return sel
+
+    def _corroborator(self, confirm=True):
+        def corr(system, user):
+            return json.dumps({"entailed": bool(confirm), "missing_element": False,
+                               "reason": "second opinion"})
+        return corr
+
+    def _resolve(self, primary_provider, second_provider, confirm=True):
+        from claude_coder.resolution import resolve
+        llm = self._select()
+        corr = self._corroborator(confirm)
+        if primary_provider:
+            llm = _from(llm, primary_provider)
+        if second_provider:
+            corr = _from(corr, second_provider)
+        return resolve(_request(self._fact()), self._src(), llm=llm, corroborate=corr)
+
+    # ---- the defect ---------------------------------------------------------------
+    def test_same_provider_agreement_is_not_verified(self):
+        """The deployed shape the finding named: a 'corroborator' that is a second profile
+        of the SAME vendor. The code is still offered (it is an authoritative candidate the
+        documentation entails, and dropping it would under-code), but it is ARBITRATED."""
+        line = self._resolve("claude", "claude")
+        self.assertTrue(line.resolved)
+        self.assertEqual(line.chosen.code, "CODEALPHA")
+        self.assertEqual(line.method, ResolutionMethod.ARBITRATED)
+        # and it must not CLAIM independence anywhere a human or an auditor would read it
+        self.assertNotIn("independently confirmed", line.rationale)
+        self.assertIn("same model provider", line.rationale.lower())
+
+    def test_same_provider_agreement_is_recorded_not_erased(self):
+        """Suppressing the CREDIT must not suppress the RECORD: the audit trail still says
+        a second opinion agreed, and says why that earned nothing."""
+        line = self._resolve("claude", "claude")
+        self.assertIn("a second opinion agreed", line.rationale)
+        self.assertIn("not independently corroborated", line.rationale.lower())
+
+    def test_undeclared_origins_fail_closed(self):
+        """Two callables that declare no identity prove nothing about independence, and
+        'we cannot tell' must never read as 'confirmed'."""
+        line = self._resolve(None, None)
+        self.assertTrue(line.resolved)
+        self.assertEqual(line.method, ResolutionMethod.ARBITRATED)
+        self.assertIn("declare no provider identity", line.rationale)
+
+    def test_same_callable_for_both_roles_is_not_independent(self):
+        """Passing ONE callable as both the verifier and the corroborator is the most
+        literal form of self-agreement."""
+        from claude_coder.resolution import resolve
+
+        def both(system, user):
+            sl = system.lower()
+            if "propose" in sl:
+                return json.dumps({"codes": []})
+            if "independently" in sl:
+                return json.dumps({"entailed": True, "missing_element": False, "reason": "x"})
+            return json.dumps({"choice": 1, "reason": "x"})
+        both = _from(both, "provider-a")
+        line = resolve(_request(self._fact()), self._src(), llm=both, corroborate=both)
+        self.assertEqual(line.method, ResolutionMethod.ARBITRATED)
+
+    # ---- the intended path still works --------------------------------------------
+    def test_cross_provider_agreement_is_verified(self):
+        line = self._resolve("provider-a", "provider-b")
+        self.assertTrue(line.resolved)
+        self.assertEqual(line.method, ResolutionMethod.VERIFIED)
+        self.assertIn("independently confirmed", line.rationale)
+
+    def test_declared_providers_compare_case_and_space_insensitively(self):
+        """'Claude' and ' claude ' are one vendor; a formatting difference must not be
+        mistaken for an independence difference."""
+        line = self._resolve("Claude", "  claude ")
+        self.assertEqual(line.method, ResolutionMethod.ARBITRATED)
+
+    # ---- the direction that was already safe stays safe ----------------------------
+    def test_disagreement_abstains_whatever_the_providers_are(self):
+        """A corroborator can only ever SUBTRACT. Disagreement abstains — and it does so
+        identically for a same-provider and a cross-provider second opinion, so nothing in
+        this change made the conjunctive direction weaker."""
+        for primary, second in (("claude", "claude"), ("provider-a", "provider-b"),
+                                (None, None)):
+            with self.subTest(primary=primary, second=second):
+                line = self._resolve(primary, second, confirm=False)
+                self.assertFalse(line.resolved)
+                self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
+                self.assertIsNone(line.chosen)
+
+    # ---- the consequence the finding is actually about: autonomy -------------------
+    def test_same_provider_line_is_discounted_and_always_reviewed(self):
+        """The end of the chain. A same-provider 'corroborated' line must lose BOTH things
+        VERIFIED buys it: the undiscounted confidence and eligibility for auto-release."""
+        from claude_coder.autonomy import _ARBITRATED_DISCOUNT, _line_confidence, decide
+        from claude_coder.models import CodingResult, Destination, Verdict
+
+        same = self._resolve("claude", "claude")
+        cross = self._resolve("provider-a", "provider-b")
+        self.assertAlmostEqual(_line_confidence(cross), cross.fact.confidence)
+        self.assertAlmostEqual(_line_confidence(same),
+                               same.fact.confidence * _ARBITRATED_DISCOUNT)
+        self.assertLess(_line_confidence(same), _line_confidence(cross))
+
+        result = CodingResult(encounter_id="e", date_of_service="2026-03-14")
+        result.lines = [same]
+        self.assertIs(decide(result), Verdict.REVIEW_REQUIRED)
+        self.assertIs(result.destination, Destination.REVIEW)
+        self.assertTrue(any(r["destination"] == Destination.REVIEW.value and r["blocking"]
+                            for r in result.routing))
+
+    # ---- the same rule on the OTHER path that mints VERIFIED -----------------------
+    def test_specificity_upgrade_needs_an_independent_origin_too(self):
+        """`refine_diagnosis_specificity` is the second place a VERIFIED line is minted —
+        it swaps the resolved code for a more specific one a model selected. Adjacent
+        instance of the same bug class, so it obeys the same rule: the sharper code is
+        still adopted (billing the unspecified one when the record supports a specific one
+        is the error the function exists to prevent), but without an independent origin the
+        line is ARBITRATED and gets a coder."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (CandidateCode, ClinicalFact, EvidenceSpan,
+                                         FactKind, ResolvedLine)
+        from claude_coder.resolution import refine_diagnosis_specificity
+        broad = "Condition alpha, unspecified"
+        specific = "Condition alpha of right structure"
+        # same 3-character category, so the specific one is a RELATIVE of the broad one
+        src = MockSource(
+            records={("QQ000", "icd10"): {"long_description": broad, "active": True},
+                     ("QQ011", "icd10"): {"long_description": specific, "active": True}})
+
+        def sel(system, user):
+            if "propose" in system.lower():
+                return json.dumps({"codes": []})
+            import re as _re
+            block = user.split("CANDIDATE OFFICIAL DESCRIPTORS:", 1)[-1]
+            for num, desc in _re.findall(r"(?m)^(\d+)\.\s+(.*)$", block):
+                if "right" in desc.lower():
+                    return json.dumps({"choice": int(num), "reason": "documented side"})
+            return json.dumps({"choice": 0})
+
+        def line():
+            fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="condition alpha",
+                                attributes={"laterality": "right"},
+                                evidence=[EvidenceSpan("condition alpha, right")],
+                                confidence=0.95)
+            return ResolvedLine(fact=fact,
+                                chosen=CandidateCode("QQ000", "icd10", broad, 1.0),
+                                method=ResolutionMethod.DETERMINISTIC, rationale="r")
+
+        undot = lambda c: c.replace(".", "")
+        same = refine_diagnosis_specificity(
+            line(), src, _from(sel, "claude"), _from(self._corroborator(True), "claude"))
+        self.assertEqual(undot(same.chosen.code), "QQ011")        # still sharpened
+        self.assertEqual(same.method, ResolutionMethod.ARBITRATED)
+        self.assertIn("not independently corroborated", same.rationale.lower())
+
+        cross = refine_diagnosis_specificity(
+            line(), src, _from(sel, "provider-a"),
+            _from(self._corroborator(True), "provider-b"))
+        self.assertEqual(undot(cross.chosen.code), "QQ011")
+        self.assertEqual(cross.method, ResolutionMethod.VERIFIED)
+
+
+class CorroborationIndependenceEndToEndTest(unittest.TestCase):
+    """The unit rule has to SURVIVE the pipeline. `code_encounter` is where the two
+    judgement callables are chosen, where the resolved line is post-processed (bundling,
+    the learned index, global package) and where the released verdict is decided — so a
+    same-provider 'corroboration' is proven non-grounding by driving the whole flow, not by
+    inspecting `resolution` in isolation."""
+
+    def _run(self, primary_provider, second_provider):
+        """The suite's OWN auto-releasable encounter (`NOTE` + `_source`), driven through
+        propose-then-verify instead of the deterministic path, so the corroborating call's
+        ORIGIN is the only variable between the two runs below."""
+        seen = []
+
+        class _Capture:
+            def append(self, encounter_id, kind, record):
+                seen.append((kind, record))
+                return "sha256:" + "0" * 64
+
+        def sel(system, user):
+            if "propose" in system.lower():
+                return json.dumps({"codes": []})
+            return json.dumps({"choice": 1, "reason": "documented act"})
+
+        def corr(system, user):
+            return json.dumps({"entailed": True, "missing_element": False,
+                               "reason": "second opinion"})
+
+        result = code_encounter(
+            "enc-independence", NOTE, "2026-03-14", source=_source(),
+            extract_llm=_extract_stub,
+            verify_llm=_from(sel, primary_provider),
+            corroborate_llm=_from(corr, second_provider),
+            audit_repository=_Capture(),
+            billing_context={"billing_entity_id": "actor-1",
+                             "participants": [{"id": "actor-1", "type": "person",
+                                               "roles": ["performer"]}]})
+        profiles = next(rec["model_profiles"] for kind, rec in seen
+                        if kind == "eligibility_enforced")
+        return result, profiles
+
+    def _arbitrated_routes(self, result):
+        from claude_coder.models import Destination
+        return [r for r in result.routing
+                if r["destination"] == Destination.REVIEW.value
+                and "arbitrated" in r["reason"]]
+
+    def test_cross_provider_corroboration_still_releases(self):
+        """Control for the test below: with two DECLARED, distinct origins this exact
+        encounter resolves VERIFIED and auto-releases, as it always has."""
+        from claude_coder import verify
+        result, profiles = self._run("provider-a", "provider-b")
+        self.assertEqual({ln.chosen.code for ln in result.billable_lines},
+                         {"PROC_ALPHA_EXC", "DX_ALPHA_RIGHT"})
+        self.assertTrue(all(ln.method is ResolutionMethod.VERIFIED
+                            for ln in result.billable_lines))
+        self.assertEqual(result.verdict, Verdict.AUTO_READY, result.notes)
+        self.assertFalse(self._arbitrated_routes(result))
+        self.assertEqual(profiles["corroboration_origin"], verify.DISTINCT_ORIGIN)
+        self.assertIs(profiles["independent_providers"], True)
+        self.assertEqual(result.certificate["source_identity"]["models"]["corroboration_origin"],
+                         verify.DISTINCT_ORIGIN)
+
+    def test_same_provider_corroboration_never_reaches_verified_or_autonomy(self):
+        """The same encounter, the same agreeing second opinion — but from the SAME
+        provider. The codes are unchanged (a corroborator can only ever subtract), and
+        every one of them now needs a coder instead of releasing."""
+        from claude_coder import verify
+        from claude_coder.models import Destination
+        result, profiles = self._run("claude", "claude")
+        self.assertEqual({ln.chosen.code for ln in result.billable_lines},
+                         {"PROC_ALPHA_EXC", "DX_ALPHA_RIGHT"})
+        self.assertTrue(all(ln.method is ResolutionMethod.ARBITRATED
+                            for ln in result.billable_lines))
+        self.assertIsNot(result.verdict, Verdict.AUTO_READY)
+        self.assertIs(result.destination, Destination.REVIEW)
+        routes = self._arbitrated_routes(result)
+        self.assertEqual(len(routes), len(result.billable_lines))
+        self.assertTrue(all(r["blocking"] for r in routes))
+        # ... and the durable audit says why, from the run's own recorded identity
+        self.assertEqual(profiles["corroboration_origin"], verify.SHARED_ORIGIN)
+        self.assertIs(profiles["independent_providers"], False)
+        # the certificate carries the same story, so the record cannot claim more than the
+        # run earned: no line is certified as a verified entailment, and the recorded model
+        # identity states the origins were shared
+        cert = result.certificate
+        self.assertEqual(cert["verdict"], Verdict.REVIEW_REQUIRED.value)
+        self.assertTrue(all(ln["method"] == ResolutionMethod.ARBITRATED.value
+                            for ln in cert["lines"]))
+        models = cert["source_identity"]["models"]
+        self.assertEqual(models["corroboration_origin"], verify.SHARED_ORIGIN)
+        self.assertIs(models["independent_providers"], False)
+
+    def test_learned_index_is_not_fed_by_non_independent_agreement(self):
+        """The learned verified-resolution index promotes a phrase->code mapping toward
+        DETERMINISTIC trust, and the pipeline feeds it only from VERIFIED lines. It must
+        therefore not be fed by an agreement that was not independent — otherwise the
+        defect would launder itself into determinism a few encounters later."""
+        import claude_coder.learned as learned
+        observed = []
+        real = learned.observe
+        try:
+            learned.observe = lambda *a, **k: observed.append(a)
+            self._run("claude", "claude")
+            self.assertEqual(observed, [])
+            self._run("provider-a", "provider-b")
+            self.assertTrue(observed)
+        finally:
+            learned.observe = real
+
+
+class ModelProfileIdentityTest(unittest.TestCase):
+    """The recorded model identity must describe the RUN, not this function's assumptions —
+    it is what an auditor reads to check the independence claim."""
+
+    def test_default_callables_are_declared_cross_provider(self):
+        from claude_coder import verify
+        self.assertEqual(verify.model_profile_of(verify.default_verify_llm)["provider"],
+                         verify.VERIFY_PROVIDER)
+        self.assertEqual(verify.model_profile_of(verify.default_corroborate_llm)["provider"],
+                         verify.CORROBORATE_PROVIDER)
+        self.assertEqual(
+            verify.corroboration_origin(verify.default_verify_llm,
+                                        verify.default_corroborate_llm),
+            verify.DISTINCT_ORIGIN)
+
+    def test_identity_reports_the_actual_callables_not_a_fixed_pair(self):
+        from claude_coder import verify
+        from claude_coder.pipeline import _model_profile_identity
+        same = _model_profile_identity(None, _from(lambda s, u: "", "claude"),
+                                       _from(lambda s, u: "", "claude"))
+        self.assertIs(same["independent_providers"], False)
+        self.assertEqual(same["corroboration_origin"], verify.SHARED_ORIGIN)
+
+        cross = _model_profile_identity(None, _from(lambda s, u: "", "provider-a"),
+                                        _from(lambda s, u: "", "provider-b"))
+        self.assertIs(cross["independent_providers"], True)
+        self.assertEqual(cross["corroboration_origin"], verify.DISTINCT_ORIGIN)
+
+    def test_absent_corroborator_is_not_independent(self):
+        from claude_coder import verify
+        from claude_coder.pipeline import _model_profile_identity
+        p = _model_profile_identity(None, _from(lambda s, u: "", "provider-a"), None)
+        self.assertIs(p["independent_providers"], False)
+        self.assertEqual(p["corroboration_origin"], verify.NO_CORROBORATION)
+
+    def test_every_pairing_maps_to_a_known_origin_and_only_one_releases(self):
+        """The status vocabulary is closed and exactly one member is creditable, so a new
+        value can never be added without a reviewer deciding which side of the line it is
+        on."""
+        from claude_coder import verify
+        undeclared = lambda s, u: ""
+        pairs = [(None, None), (undeclared, None), (undeclared, undeclared),
+                 (_from(lambda s, u: "", "x"), _from(lambda s, u: "", "x")),
+                 (_from(lambda s, u: "", "x"), _from(lambda s, u: "", "y")),
+                 (_from(lambda s, u: "", "x"), undeclared)]
+        creditable = set()
+        for primary, second in pairs:
+            origin = verify.corroboration_origin(primary, second)
+            self.assertIn(origin, verify.CORROBORATION_ORIGINS)
+            if origin in verify.INDEPENDENT_CORROBORATION_ORIGINS:
+                creditable.add(origin)
+        self.assertEqual(creditable, {verify.DISTINCT_ORIGIN})
+        self.assertEqual(verify.INDEPENDENT_CORROBORATION_ORIGINS,
+                         frozenset({verify.DISTINCT_ORIGIN}))
+
+    def test_extraction_provider_overlap_is_recorded_observationally(self):
+        """Recorded so the weaker correlation is visible in the artifact, but it is NOT a
+        control input — a shared extraction provider alone still leaves the corroboration
+        independent."""
+        from claude_coder import verify
+        from claude_coder.pipeline import _model_profile_identity
+        p = _model_profile_identity(None, _from(lambda s, u: "", "provider-a"),
+                                    _from(lambda s, u: "", "provider-b"))
+        self.assertIn("corroborator_shares_extraction_provider", p)
+        self.assertEqual(p["corroboration_origin"], verify.DISTINCT_ORIGIN)
+        self.assertIs(p["independent_providers"], True)
 
 
 class LearnedIndexTest(unittest.TestCase):
@@ -1385,7 +1776,8 @@ class DiagnosisVerifyTest(unittest.TestCase):
         fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="condition alpha",
                             evidence=[EvidenceSpan("condition alpha documented")],
                             confidence=0.95)
-        line = resolve(_request(fact), src, llm=sel, corroborate=corr)
+        line = resolve(_request(fact), src, llm=_from(sel, "provider-a"),
+                       corroborate=_from(corr, "provider-b"))
         self.assertEqual(line.method, ResolutionMethod.VERIFIED)
         self.assertEqual(line.chosen.code, "DXR")   # not the higher-recall wrong code
 

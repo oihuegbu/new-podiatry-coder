@@ -535,6 +535,7 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
     picked, why = _verify.select_entailed(fact, shortlist, source, llm)
     if picked is None or picked.code == line.chosen.code:
         return line                                # verifier keeps the unspecified code -> respect it
+    corroboration = _verify.corroboration_origin(llm, corroborate)
     if corroborate is not None:
         ok, why2, _missing = _verify.corroborate(fact, picked, source, corroborate)
         if not ok:
@@ -551,9 +552,20 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
                 f"did not confirm the specific candidate — escalate")
             return line
     line.chosen = picked
-    line.method = ResolutionMethod.VERIFIED
+    # The SAME independence rule as the propose-then-verify path: this upgrade replaced the
+    # resolved code with one a model selected, so it can only carry the grounded VERIFIED
+    # method when an INDEPENDENT origin confirmed it. Otherwise the sharper code is adopted
+    # (billing the unspecified one when the record supports a specific one is the error this
+    # function exists to prevent) but the line is ARBITRATED, so a coder confirms it instead
+    # of it auto-releasing on one vendor's say-so. (Round 5, phase 5.)
+    _independent = _independently_corroborated(corroboration)
+    line.method = (ResolutionMethod.VERIFIED if _independent
+                   else ResolutionMethod.ARBITRATED)
     line.rationale = (f"{line.rationale}; upgraded to the most specific entailed code "
                       f"({why})" if why else f"{line.rationale}; upgraded to most specific entailed code")
+    if not _independent:
+        line.rationale = (f"{line.rationale}; NOT independently corroborated — "
+                          f"{_origin_caveat(corroboration)} — needs a coder")
     return line
 
 
@@ -622,6 +634,11 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     selection finds nothing OR the second model disagrees. Nothing bills on recall
     alone, and nothing bills on a single model's say-so."""
     from . import verify as _verify
+    # WHOSE second opinion this run has, decided once from the two callables' declared
+    # identities: it governs whether an agreement may be credited as independent
+    # confirmation below (and it must be computed even when `corroborate` is None, since
+    # "no second opinion" is itself one of the non-independent origins).
+    corroboration = _verify.corroboration_origin(llm, corroborate)
     proposed_matches = [_evaluate(fact, c, source)
                         for c in _verify.propose_codes(fact, source, llm)]
     retrieved_matches = _ranked(fact, pool, source)
@@ -678,11 +695,13 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
                 rationale="selected code requires a bounded measurement the documentation "
                           "does not support -- not billed regardless of model agreement")
         if corroborate is None:                      # no second model configured
-            return _verified_line(fact, chosen, shortlist, why)
+            return _entailed_line(fact, chosen, shortlist, why, corroboration)
         ok, why2, missing = _verify.corroborate(fact, chosen, source, corroborate)
         if ok:
-            why = f"{why}; independently confirmed" if why else "independently confirmed"
-            return _verified_line(fact, chosen, shortlist, why)
+            note = ("independently confirmed" if _independently_corroborated(corroboration)
+                    else "a second opinion agreed, but not from an independent origin")
+            why = f"{why}; {note}" if why else note
+            return _entailed_line(fact, chosen, shortlist, why, corroboration)
         last_reason = why2
         if missing:
             # The code is the right KIND of service but its descriptor requires an
@@ -718,14 +737,60 @@ def _bounded_interval_hold(fact: ClinicalFact,
                   "verified paths must abstain")
 
 
-def _verified_line(fact: ClinicalFact, chosen: CandidateCode,
-                   shortlist: list[CandidateCode], why: str) -> ResolvedLine:
+def _origin_caveat(corroboration: str) -> str:
+    """Why this entailment did NOT earn independent status — the audit sentence that has to
+    accompany a code the system is keeping but cannot call independently confirmed."""
+    from . import verify as _verify
+    return {
+        _verify.NO_CORROBORATION:
+            "no independent second opinion was configured, so the entailment rests on a "
+            "single model judgement",
+        _verify.SHARED_ORIGIN:
+            "the second opinion came from the SAME model provider as the primary "
+            "verification — one vendor's judgement sampled twice is model self-confidence, "
+            "not independent confirmation",
+        _verify.UNDECLARED_ORIGIN:
+            "the verification and corroboration calls declare no provider identity, so "
+            "their independence could not be established",
+    }.get(corroboration, "independent corroboration was not established")
+
+
+def _independently_corroborated(corroboration: str) -> bool:
+    from . import verify as _verify
+    return corroboration in _verify.INDEPENDENT_CORROBORATION_ORIGINS
+
+
+def _entailed_line(fact: ClinicalFact, chosen: CandidateCode,
+                   shortlist: list[CandidateCode], why: str,
+                   corroboration: str) -> ResolvedLine:
+    """The line for a candidate whose AUTHORITATIVE descriptor the verifier found entailed.
+
+    VERIFIED is the GROUNDED, autonomy-eligible method, and `autonomy` reads it as "the
+    documentation entails this descriptor and an INDEPENDENT second model confirmed it".
+    That second half is a claim about the corroborating assertion's ORIGIN, so it is
+    checked here rather than assumed from the fact that a corroborator was configured:
+    unless the corroborating judgement came from a genuinely distinct origin, the two
+    agreeing calls are one vendor's opinion sampled twice.
+
+    When independence is not established the code is still KEPT and offered — it is a
+    candidate from the authoritative tables whose official descriptor the documentation
+    entails, and dropping it would under-code — but the method is ARBITRATED, which is
+    exactly "a model picked among candidates": `autonomy` discounts its confidence and
+    always routes it to a coder. The agreement itself stays visible in the rationale, so
+    the audit trail records that it happened and why it earned nothing. (Round 5, phase 5;
+    the milder, conjunctive sibling of the F6-R3 necessity defect.)"""
+    independent = _independently_corroborated(corroboration)
+    base = (f"authoritative descriptor entailed by documentation: {why}"
+            if why else "authoritative descriptor entailed by documentation")
+    if not independent:
+        base = (f"{base}; NOT independently corroborated — {_origin_caveat(corroboration)}"
+                f" — needs a coder")
     return ResolvedLine(
         fact=fact, chosen=chosen,
         alternatives=[c for c in shortlist if c.code != chosen.code][:4],
-        method=ResolutionMethod.VERIFIED,
-        rationale=f"authoritative descriptor entailed by documentation: {why}"
-                  if why else "authoritative descriptor entailed by documentation")
+        method=(ResolutionMethod.VERIFIED if independent
+                else ResolutionMethod.ARBITRATED),
+        rationale=base)
 
 
 def _decide(fact: ClinicalFact, pool: list[CandidateCode],
