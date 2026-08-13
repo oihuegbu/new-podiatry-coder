@@ -90,6 +90,22 @@ Commands:
                             from verified truth instead of ad-hoc snapshots.
 
 Registry file: data/registry/claims_registry.jsonl (append-only JSONL).
+
+TWO PRODUCER SHAPES (issue #6, F6-R4-A1)
+----------------------------------------
+The deployed entrypoint now writes one canonical `ClaimBundle`
+(`app/contracts/claim_bundle.py`). This module reads that contract directly:
+`extract_claim`, `eligible_for_auto` and `make_finalized_event` all dispatch on
+the artifact's DECLARED schema, never on which keys happen to be present.
+
+  bundle artifact  -> the bundle's own claim content is recorded verbatim, and
+                      eligibility is `verify_bundle_readiness()`.
+  legacy artifact  -> the pre-existing `app.pipeline` battery, untouched.
+
+The dispatch is on `schema_id`, so a bundle that fails validation raises rather
+than falling through to the legacy reader — the failure mode this finding was
+about was precisely a new artifact being read under old rules and silently
+producing an empty claim.
 """
 
 from __future__ import annotations
@@ -101,11 +117,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 REGISTRY_PATH = ROOT / "data" / "registry" / "claims_registry.jsonl"
 DEFAULT_RESULTS = ROOT / "output" / "results"
 DEFAULT_GOLD = ROOT / "benchmark" / "gold"
 
+#: 1 = legacy `app.pipeline` claim arrays. 2 = canonical ClaimBundle. Both
+#: remain readable; only 2 is written for new artifacts.
 REGISTRY_VERSION = 1
+BUNDLE_REGISTRY_VERSION = 2
 
 # Verification precedence: a finalized event only displaces the current
 # view when its tier is at least as high. Unknown tiers rank lowest.
@@ -171,10 +193,50 @@ def _slim(entry: dict, fields: tuple) -> dict:
     return out
 
 
+def is_bundle_artifact(result: dict) -> bool:
+    """Does this artifact declare the canonical claim contract?"""
+    from app.contracts.claim_bundle import is_claim_bundle
+    return is_claim_bundle(result)
+
+
+def as_bundle(result: dict):
+    """Parse a canonical artifact, or raise. Never returns a legacy artifact."""
+    from app.contracts.claim_bundle import load_bundle
+    return load_bundle(result)
+
+
+def document_id_of(result: dict) -> str:
+    """The note identity, from whichever contract the artifact declares.
+
+    A bundle keeps it under `encounter.document_id`; reading the legacy
+    top-level `document_id` off a bundle would return "" and every bundle would
+    be filed under its filename instead of its encounter.
+    """
+    if is_bundle_artifact(result):
+        encounter = result.get("encounter") or {}
+        return str(encounter.get("document_id")
+                   or encounter.get("encounter_id") or "")
+    return str(result.get("document_id") or "")
+
+
 def extract_claim(result: dict) -> dict:
-    """The billable payload of a result: the three code arrays reduced to
-    claim-relevant fields, plus disposition. (Suppressed lines never appear
-    here — the validator removes them from the arrays before saving.)"""
+    """The billable payload of a result.
+
+    For a canonical `ClaimBundle` this is the contract's own `claim_content()`
+    — ordered diagnoses, service lines with units/modifiers/diagnosis pointers,
+    the source-document identity and the encounter-context fingerprint. Defined
+    by the contract, not restated here, so the registry cannot develop its own
+    opinion about what is claim-affecting (which is how the old slimming lists
+    silently dropped everything a bundle carries).
+
+    For a legacy `app.pipeline` result it is the historical projection: the
+    three code arrays reduced to claim-relevant fields plus disposition.
+    (Suppressed lines never appear there — the validator removes them from the
+    arrays before saving.)
+    """
+    if is_bundle_artifact(result):
+        return as_bundle(result).claim_content()
+
     def _lines(key: str, fields: tuple) -> list[dict]:
         out = []
         for e in result.get(key) or []:
@@ -196,7 +258,35 @@ def _claim_key(claim: dict) -> str:
     return json.dumps(claim, sort_keys=True, default=str)
 
 
+def _verification_key(event: dict) -> str:
+    """What must be identical for a re-ingest to be a no-op.
+
+    For a legacy event this is the claim arrays, as it always was.
+
+    For a canonical event it is the claim AND the certificate identity AND the
+    context fingerprint. The certificate is part of the key deliberately: a
+    re-coded note produces a byte-identical claim but a NEW certificate (it
+    binds that run's durable audit records), and the submitter requires the
+    registry and the live artifact to carry the SAME certificate. Keying on the
+    claim alone would call the re-ingest "unchanged", leave the old certificate
+    recorded, and deadlock the note — permanently unsubmittable, with no event
+    a re-ingest could ever add. Re-attesting a claim is a new verification, and
+    the append-only log should say so.
+    """
+    if event.get("registry_version") == BUNDLE_REGISTRY_VERSION:
+        return _claim_key({
+            "claim": event.get("claim") or {},
+            "certificate_sha256": event.get("certificate_sha256") or "",
+            "encounter_context_fingerprint": event.get(
+                "encounter_context_fingerprint") or "",
+        })
+    return _claim_key(event.get("claim") or {})
+
+
 def _payer_of(result: dict) -> str:
+    if is_bundle_artifact(result):
+        payer = as_bundle(result).context.payer
+        return payer.name or payer.payer_id or ""
     meta = result.get("patient_metadata") or {}
     for k in ("insurance", "payer", "insurance_provider", "insurance_payer"):
         v = meta.get(k)
@@ -213,6 +303,20 @@ def make_fingerprint(result: dict) -> dict:
     """Compact clinical fingerprint of the encounter behind a claim — what
     exemplar retrieval (app/coding/exemplars.py) matches new notes against.
     Only note-level facts, never patient identity."""
+    if is_bundle_artifact(result):
+        bundle = as_bundle(result)
+        # A bundle carries no note SECTIONS (the canonical contract binds
+        # evidence spans, not the retired pipeline's section split), so the
+        # section-derived fields stay empty rather than being approximated from
+        # a rationale string. The procedure descriptors are real authoritative
+        # descriptors and are the part exemplar retrieval actually matches on.
+        return {
+            "note_category": "",
+            "chief_complaint": "",
+            "assessment": "",
+            "procedures": [line.descriptor for line in bundle.service_lines
+                           if line.descriptor],
+        }
     sections = result.get("note_sections") or {}
     vc = (result.get("rag_context") or {}).get("vision_context") or {}
     return {
@@ -225,6 +329,9 @@ def make_fingerprint(result: dict) -> dict:
 
 def make_finalized_event(document_id: str, result: dict, verification: str,
                          verified_by: str, source: str) -> dict:
+    if is_bundle_artifact(result):
+        return _make_bundle_event(document_id, as_bundle(result), verification,
+                                  verified_by, source)
     from app.release.claim_readiness import encounter_context_fingerprint
     return {
         "registry_version": REGISTRY_VERSION,
@@ -245,6 +352,52 @@ def make_finalized_event(document_id: str, result: dict, verification: str,
         "claim_readiness_certificate": (
             result.get("claim_readiness_certificate") or {}),
     }
+
+
+def _make_bundle_event(document_id: str, bundle, verification: str,
+                       verified_by: str, source: str) -> dict:
+    """A finalized event recording one canonical `ClaimBundle`.
+
+    The WHOLE bundle is recorded, not a projection of it. The registry is the
+    submitter's sole source of billable content, so anything the bundle carries
+    that the event drops is content the 837P can never see — the mechanism by
+    which diagnosis and service lines disappeared in the first place.
+    `claim` is the contract's own `claim_content()`, retained as the
+    change-detection key (`_claim_key`) that ingest idempotence and the
+    submitter's ledger both hash.
+    """
+    from app.release.claim_readiness import bundle_encounter_context_fingerprint
+    certificate = bundle.certificate
+    return {
+        "registry_version": BUNDLE_REGISTRY_VERSION,
+        "event": "finalized",
+        "document_id": document_id,
+        "recorded_at": _now(),
+        "verification": verification,
+        "verified_by": verified_by,
+        "source": source,
+        "payer": bundle.context.payer.name or bundle.context.payer.payer_id or "",
+        "fingerprint": make_fingerprint(bundle.to_payload()),
+        "claim": bundle.claim_content(),
+        "claim_bundle": bundle.to_payload(),
+        "encounter_context_fingerprint": bundle_encounter_context_fingerprint(bundle),
+        "certificate_sha256": (certificate.certificate_sha256
+                               if certificate else ""),
+    }
+
+
+def bundle_of_event(event: dict):
+    """The `ClaimBundle` a registry event recorded, or None for a legacy event.
+
+    Returns None ONLY when the event carries no bundle at all. A bundle that is
+    present but unreadable raises: a corrupt canonical event must not read as
+    "this is a legacy event", which would silently authorize it under the wrong
+    battery.
+    """
+    payload = event.get("claim_bundle")
+    if payload is None:
+        return None
+    return as_bundle(payload)
 
 
 # --------------------------------------------------------------------------
@@ -279,7 +432,28 @@ def current_view(events: list[dict]) -> dict[str, dict]:
 # --------------------------------------------------------------------------
 
 def eligible_for_auto(result: dict) -> tuple[bool, str]:
-    """The production operating model's auto-submission bar: the pipeline
+    """The auto-submission bar for whichever contract this artifact declares.
+
+    CANONICAL `ClaimBundle`: the bar is `verify_bundle_readiness()`, which
+    requires an AUTO_READY destination with a certificate that self-addresses
+    and attests THIS encounter's codes, a reproducing claim fingerprint, an
+    encounter context that an authoritative provider RESOLVED (complete and
+    conflict-free), every service line linked to a diagnosis that exists, and a
+    bound authoritative-data/source-manifest identity.
+
+    It deliberately does NOT require the legacy battery's N-run consistency,
+    compliance scrub, mutation ledger or clinical-audit fields. Those are
+    artifacts of the retired `app.pipeline` and the coder that produces bundles
+    has none of them: it replaces repeatability-by-re-running with
+    eligibility-before-retrieval, propose-then-verify against authoritative
+    descriptors, and independent cross-model corroboration, all of which must
+    already have cleared inside the pipeline for an AUTO_READY verdict to exist
+    at all, and all of which the certificate binds. Demanding the legacy fields
+    of a bundle would not make it safer — it would make every bundle
+    permanently ineligible for a reason unrelated to its correctness, which is
+    the bug being fixed, not a stricter version of it.
+
+    LEGACY `app.pipeline` result: unchanged below — the pipeline
     succeeded, every billing array was unanimous across the consistency
     runs (>= 2 — a single run proves nothing about repeatability), the
     scrub disposition is CLEAN, and the clinical-correctness review — a
@@ -290,6 +464,9 @@ def eligible_for_auto(result: dict) -> tuple[bool, str]:
     review is the gate that can catch it, and it is required for EVERY
     claim (the absence of recorded corrections is exactly what an
     unreported mutation looks like — measured live, routine_00003)."""
+    if is_bundle_artifact(result):
+        from app.release.claim_readiness import verify_bundle_artifact
+        return verify_bundle_artifact(result)
     if not result.get("success"):
         return False, "pipeline did not succeed"
     cons = result.get("consistency") or {}
@@ -351,10 +528,15 @@ def ingest(results_dir: Path, registry_path: Path = REGISTRY_PATH) -> dict:
         if f.name == "all_results.json":
             continue
         result = json.loads(f.read_text())
-        doc = str(result.get("document_id")
-                  or f.stem.removesuffix("_results"))
+        doc = str(document_id_of(result) or f.stem.removesuffix("_results"))
 
-        ok, why = eligible_for_auto(result)
+        try:
+            ok, why = eligible_for_auto(result)
+        except Exception as exc:
+            # A malformed artifact is ONE note's problem, recorded with its
+            # reason — never a crash that silently ends the scan and leaves the
+            # remaining notes un-ingested.
+            ok, why = False, f"{type(exc).__name__}: {exc}"
         if not ok:
             stats["skipped"] += 1
             stats["skip_reasons"][doc] = why
@@ -371,7 +553,7 @@ def ingest(results_dir: Path, registry_path: Path = REGISTRY_PATH) -> dict:
         ev = make_finalized_event(doc, result, verification="auto",
                                   verified_by="pipeline/consistency-gate",
                                   source=f.name)
-        if cur and _claim_key(cur["claim"]) == _claim_key(ev["claim"]):
+        if cur and _verification_key(cur) == _verification_key(ev):
             stats["unchanged"] += 1
             continue
         new_events.append(ev)
@@ -403,7 +585,7 @@ def record_adjudicated(document_id: str, result: dict, source: str,
     ev["adjudication"] = {k: adj.get(k) for k in
                           ("at", "model", "passes", "protocol") if k in adj}
     if cur and cur["verification"] == "adjudicated" \
-            and _claim_key(cur["claim"]) == _claim_key(ev["claim"]):
+            and _verification_key(cur) == _verification_key(ev):
         return None
     append_events([ev], registry_path)
     return ev
@@ -682,6 +864,15 @@ def export_gold(gold_dir: Path, registry_path: Path = REGISTRY_PATH) -> int:
                 or not review.get("reviewed_by") \
                 or review.get("reviewed_by") == e.get("verified_by"):
             continue
+        if e.get("registry_version") == BUNDLE_REGISTRY_VERSION:
+            # `tools/benchmark_ab.py` scores the legacy code-array shape. A
+            # bundle claim is NOT that shape, and emitting it under the same
+            # filename would give the scorer a file it reads as a claim with
+            # zero codes — a silent zero, which is worse than an absent file.
+            # Skipped loudly until the benchmark speaks the contract.
+            print(f"  [skip] {doc}: canonical ClaimBundle claims are not yet "
+                  f"scoreable by the benchmark gold format")
+            continue
         payload = {
             "document_id": doc,
             **e["claim"],
@@ -748,7 +939,7 @@ def main() -> None:
 
     if args.cmd == "record":
         result = json.loads(Path(args.result_file).read_text())
-        doc = str(result.get("document_id")
+        doc = str(document_id_of(result)
                   or Path(args.result_file).stem.removesuffix("_results"))
         ev = make_finalized_event(doc, result, verification="human",
                                   verified_by=args.by,
@@ -798,11 +989,17 @@ def main() -> None:
         for doc, e in sorted(view.items()):
             c = e["claim"]
             outcome = e.get("outcome", {}).get("status", "-")
+            if e.get("registry_version") == BUNDLE_REGISTRY_VERSION:
+                shape = (f"dx={len(c.get('diagnoses') or [])} "
+                         f"svc={len(c.get('service_lines') or [])} "
+                         f"contract=claim_bundle")
+            else:
+                shape = (f"icd={len(c['icd_codes'])} cpt={len(c['cpt_codes'])} "
+                         f"hcpcs={len(c['hcpcs_codes'])} "
+                         f"disp={c['final_disposition']}")
             print(f"  {doc:45s} {e['verification']:11s} "
                   f"by {e['verified_by'][:28]:28s} "
-                  f"icd={len(c['icd_codes'])} cpt={len(c['cpt_codes'])} "
-                  f"hcpcs={len(c['hcpcs_codes'])} "
-                  f"disp={c['final_disposition']:6s} outcome={outcome}")
+                  f"{shape} outcome={outcome}")
         print(f"\n{len(view)} finalized claim(s)")
         return
 

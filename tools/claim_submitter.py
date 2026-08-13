@@ -2,7 +2,7 @@
 """Claim submission: registry-verified claims -> clearinghouse 837P (Stedi).
 
 The pipeline's output stops being a JSON artifact here and becomes a real
-professional claim. Three principles govern this module:
+professional claim. Four principles govern this module:
 
   1. ONLY VERIFIED CLAIMS TRANSMIT. The claims registry
      (data/registry/claims_registry.jsonl) is the sole source of billable
@@ -17,10 +17,13 @@ professional claim. Three principles govern this module:
      (mtime-cached) on every run, so an edit takes effect immediately with
      no code change. Payer trading-partner IDs come from
      data/codes/payers.json via the existing payer registry (same
-     hot-reload behavior). Patient demographics and subscriber identifiers
-     come from the note's own extracted metadata. A missing variable BLOCKS
-     that one claim with a precise reason (fail closed); it never crashes
-     the batch and the system never invents a value.
+     hot-reload behavior). Patient demographics, subscriber identifiers,
+     rendering-provider identity and place of service come from the
+     ClaimBundle's ENCOUNTER CONTEXT — resolved by an authoritative
+     `EncounterContextProvider`, not read off the note by a model. A
+     missing variable BLOCKS that one claim with a precise reason (fail
+     closed); it never crashes the batch and the system never invents a
+     value.
 
   3. SUBMISSION IS IDEMPOTENT AND AUDITED. Every attempt is appended to
      data/registry/submissions.jsonl. A claim (document + exact claim
@@ -29,6 +32,14 @@ professional claim. Three principles govern this module:
      "requires replacement claim" reason — corrected/void resubmission
      (frequency codes 7/8) is a deliberate human decision, not an
      automatic one.
+
+  4. ONE CLAIM CONTRACT. Every payload is assembled from a `ClaimBundle`
+     (app/contracts/claim_bundle.py). A canonical registry event carries
+     the bundle itself; a legacy event is VIEWED as one through
+     app/contracts/legacy_adapter.py. There is exactly one 837P builder,
+     so a field the producer carries can no longer be lost because this
+     module was written against a different result shape (issue #6,
+     F6-R4-A1).
 
 CLI (inside the app container):
   python tools/claim_submitter.py [--docs stem1,stem2] [--dry-run]
@@ -75,6 +86,12 @@ DRYRUN_DIR = ROOT / "output" / "submissions"
 
 _NPI_RE = re.compile(r"^\d{10}$")
 _pos_cache: tuple[int, frozenset[str]] | None = None
+
+#: X12 837P transaction cardinalities: at most four diagnosis pointers on a
+#: service line, at most twelve diagnoses on a claim. Envelope structure from
+#: the professional-claim implementation guide — not medical-code facts.
+_MAX_DX_POINTERS = 4
+_MAX_CLAIM_DIAGNOSES = 12
 
 
 def _valid_npi(value) -> bool:
@@ -229,32 +246,48 @@ def _split_provider_name(full: str) -> tuple[str, str] | None:
     return parts[0], parts[-1]
 
 
-def resolve_rendering_provider(cfg: dict, meta: dict) -> tuple[dict | None, str]:
-    """Rendering provider, resolved dynamically: config roster match on the
-    note's provider name first, then the note's own extracted NPI (when
-    trusted), then the configured default. Returns (provider, reason)."""
+def resolve_rendering_provider(cfg: dict, provider) -> tuple[dict | None, str]:
+    """Rendering provider, resolved dynamically from the bundle's provider identity.
+
+    Fidelity order, unchanged: config roster match on the encounter's provider
+    name first, then the encounter's own NPI (when the config trusts it), then
+    the configured default.
+
+    `provider` is the bundle's `ProviderIdentity`. When the encounter context
+    was RESOLVED by an authoritative provider, that NPI is an authoritative
+    identity rather than something a model read off a letterhead — and
+    `trust_note_npi` then means what its name always claimed. When the context
+    is UNRESOLVED the bundle cannot release at all, so this path is only
+    reachable for legacy artifacts, where the flag retains its original
+    (weaker) meaning.
+    """
     rp_cfg = cfg.get("rendering_providers") or {}
-    note_provider = str(meta.get("provider") or "").lower()
+    display_name = str(getattr(provider, "display_name", "") or "").lower()
     for entry in rp_cfg.get("providers") or []:
         for pattern in entry.get("match") or []:
-            if pattern and str(pattern).lower() in note_provider:
+            if pattern and str(pattern).lower() in display_name:
                 if _valid_npi(entry.get("npi")):
                     return entry, ""
                 return None, (f"roster entry for '{pattern}' has an invalid "
                               f"NPI — fix rendering_providers in the "
                               f"practice config")
-    note_npi = str(meta.get("provider_npi") or meta.get("npi") or "").strip()
-    if rp_cfg.get("trust_note_npi") and _valid_npi(note_npi):
-        name = _split_provider_name(meta.get("provider") or "")
-        return {"first_name": name[0] if name else "",
-                "last_name": name[1] if name else "",
-                "npi": note_npi,
-                "taxonomy_code": rp_cfg.get("default_taxonomy_code")}, ""
+    npi = str(getattr(provider, "npi", "") or "").strip()
+    if rp_cfg.get("trust_note_npi") and _valid_npi(npi):
+        first = str(getattr(provider, "first_name", "") or "")
+        last = str(getattr(provider, "last_name", "") or "")
+        if not (first and last):
+            split = _split_provider_name(
+                str(getattr(provider, "display_name", "") or ""))
+            first, last = split if split else ("", "")
+        return {"first_name": first, "last_name": last, "npi": npi,
+                "taxonomy_code": (str(getattr(provider, "taxonomy_code", "") or "")
+                                  or rp_cfg.get("default_taxonomy_code"))}, ""
     default = rp_cfg.get("default")
     if default and _valid_npi(default.get("npi")):
         return default, ""
     return None, ("rendering provider unresolvable: no roster match for "
-                  f"'{meta.get('provider')}', no valid note NPI, no default")
+                  f"'{getattr(provider, 'display_name', '')}', no valid "
+                  f"encounter NPI, no default")
 
 
 def line_charge(cfg: dict, code: str, units: int) -> tuple[float | None, str]:
@@ -285,41 +318,6 @@ def claim_filing_code(cfg: dict, parsed) -> str:
 # 837P builder
 # --------------------------------------------------------------------------
 
-def _dx_pointers(entry: dict, n_dx: int,
-                 dx_codes: list[str] | None = None) -> list[int]:
-    """Diagnosis pointers for a service line, in fidelity order: numeric
-    pointers the pipeline produced; else the line's own linked_diagnoses
-    (code strings) translated to 1-based positions in the claim's diagnosis
-    order; else every documented diagnosis (primary first). Capped at the
-    837P maximum of 4."""
-    raw = entry.get("dx_pointers") or entry.get("diagnosis_pointers")
-    if isinstance(raw, list) and raw:
-        ptrs = []
-        for p in raw:
-            try:
-                p = int(p)
-            except (TypeError, ValueError):
-                continue
-            if 1 <= p <= min(n_dx, 12) and p not in ptrs:
-                ptrs.append(p)
-        if ptrs:
-            return ptrs[:4]
-    linked = entry.get("linked_diagnoses")
-    if isinstance(linked, list) and linked and dx_codes:
-        norm_order = [str(c or "").replace(".", "").upper()
-                      for c in dx_codes]
-        ptrs = []
-        for code in linked:
-            n = str(code or "").replace(".", "").upper()
-            if n in norm_order:
-                p = norm_order.index(n) + 1
-                if p not in ptrs:
-                    ptrs.append(p)
-        if ptrs:
-            return ptrs[:4]
-    return list(range(1, min(n_dx, 4) + 1))
-
-
 def _control_number(doc: str) -> str:
     """Deterministic 9-digit control number derived from the document id —
     stable across retries of the same claim, distinct across notes."""
@@ -328,17 +326,58 @@ def _control_number(doc: str) -> str:
     return str(int(h[:12], 16) % 900000000 + 100000000)
 
 
+def bundle_for(reg_event: dict, result: dict):
+    """The `ClaimBundle` this registry event's claim is built from.
+
+    ONE 837P builder, two sources — never two builders:
+
+      * a canonical event carries the whole bundle (`claim_bundle`), which IS
+        the verified claim;
+      * a legacy event carries the retired code arrays, which
+        `app/contracts/legacy_adapter.py` VIEWS as a bundle, using the exact
+        arrays the registry verified plus the result file's demographics.
+
+    The legacy view keeps `tools/claim_submitter`'s founding principle intact:
+    billable content still comes from the registry's verified claim, never from
+    whatever the result file happens to say now.
+    """
+    from tools.claims_registry import bundle_of_event, is_bundle_artifact
+    bundle = bundle_of_event(reg_event)
+    if bundle is not None:
+        return bundle
+    if is_bundle_artifact(result):
+        # Legacy event, canonical artifact. The legacy reader would find none of
+        # the keys it needs on a bundle and return a bundle with no demographics
+        # and no claim — an empty claim that LOOKS like a complete one. Refuse.
+        # `_policy_gate` already blocks this pairing; raising here means the
+        # refusal does not depend on being called in the right order.
+        from app.contracts.claim_bundle import InvalidClaimBundle
+        raise InvalidClaimBundle(
+            "registry event carries a legacy claim but the result artifact is a "
+            "ClaimBundle; re-ingest this note before building a claim from it")
+    from app.contracts.legacy_adapter import bundle_from_legacy
+    return bundle_from_legacy(result, reg_event.get("claim") or {})
+
+
 def build_claim(doc: str, reg_event: dict, result: dict,
                 cfg: dict) -> tuple[dict | None, list[str]]:
-    """Assemble the clearinghouse professional-claim JSON from the registry's
-    verified claim + the note's demographics + the practice config. Returns
-    (payload, blocks); any block -> no payload."""
+    """Assemble the clearinghouse professional-claim JSON from the verified
+    `ClaimBundle` + the practice config. Returns (payload, blocks); any block
+    -> no payload.
+
+    The bundle is the authority for ENCOUNTER-level content (who the patient,
+    subscriber, payer, rendering provider and place of service are; which codes,
+    units, modifiers and diagnosis pointers). The practice config remains the
+    authority for PRACTICE-level content (billing provider, submitter, fee
+    schedule, claim defaults). Neither invents the other's fields, and a missing
+    value on either side blocks this one claim with a precise reason.
+    """
     from app.compliance.payer_registry import (PayerRegistryUnavailable,
                                                 parse_insurance_text)
 
     blocks: list[str] = []
-    claim = reg_event.get("claim") or {}
-    meta = result.get("patient_metadata") or {}
+    bundle = bundle_for(reg_event, result)
+    context = bundle.context
     defaults = cfg.get("claim_defaults") or {}
 
     # -- payer ------------------------------------------------------------
@@ -348,19 +387,18 @@ def build_claim(doc: str, reg_event: dict, result: dict,
     # of a submission run and never a claim built against a payer nobody can name.
     # (Codex F6-R5-A, round 6.)
     try:
-        parsed = parse_insurance_text(str(meta.get("insurance") or ""))
+        parsed = parse_insurance_text(context.payer.name)
     except PayerRegistryUnavailable as exc:
         return None, [f"payer registry unavailable: {exc}"]
     if not parsed.stedi_trading_partner_id:
         blocks.append(f"payer '{parsed.payer_name or 'unknown'}' has no "
                       f"stedi_trading_partner_id in the declared payer registry")
-    structured_member = str(meta.get("member_id") or
-                            meta.get("insurance_id") or "").strip()
+    structured_member = context.subscriber.member_id.strip()
     parsed_member = str(parsed.member_id or "").strip()
     if structured_member and parsed_member and structured_member != parsed_member:
         blocks.append("structured and insurance-text Member/Policy IDs disagree")
     member_id = structured_member or parsed_member
-    structured_group = str(meta.get("group_number") or "").strip()
+    structured_group = context.subscriber.group_number.strip()
     parsed_group = str(parsed.group_number or "").strip()
     if structured_group and parsed_group and structured_group != parsed_group:
         blocks.append("structured and insurance-text group identifiers disagree")
@@ -370,23 +408,25 @@ def build_claim(doc: str, reg_event: dict, result: dict,
                       "metadata or the insurance text")
 
     # -- patient / subscriber ----------------------------------------------
-    name = _split_name(meta.get("patient_name") or "")
+    name = ((context.patient.first_name, context.patient.last_name)
+            if context.patient.first_name and context.patient.last_name
+            else None)
     if not name:
         blocks.append("patient name missing or not splittable into "
                       "first/last")
-    dob = _to_ccyymmdd(meta.get("date_of_birth") or "")
+    dob = _to_ccyymmdd(context.patient.date_of_birth)
     if not dob:
         blocks.append(f"patient DOB unparseable: "
-                      f"{meta.get('date_of_birth')!r}")
-    dos = _to_ccyymmdd(meta.get("date_of_service") or "")
+                      f"{context.patient.date_of_birth!r}")
+    dos = _to_ccyymmdd(bundle.encounter.date_of_service or "")
     if not dos:
         blocks.append(f"date of service unparseable: "
-                      f"{meta.get('date_of_service')!r}")
-    gender = str(meta.get("gender") or meta.get("sex") or "").strip()[:1].upper()
+                      f"{bundle.encounter.date_of_service!r}")
+    gender = context.patient.gender.strip()[:1].upper()
     if gender not in {"F", "M", "U"}:
         blocks.append("patient gender/sex is missing or not valid for the claim "
                       "transaction")
-    pos = str(meta.get("place_of_service") or "").strip()
+    pos = context.place_of_service.strip()
     if not _valid_pos(pos):
         blocks.append("place of service is missing or absent from the authoritative "
                       "CMS POS set; autonomous submission cannot infer it")
@@ -403,38 +443,45 @@ def build_claim(doc: str, reg_event: dict, result: dict,
             blocks.append(f"claim_defaults.{field} missing")
 
     # -- providers ----------------------------------------------------------
-    rendering, why = resolve_rendering_provider(cfg, meta)
+    rendering, why = resolve_rendering_provider(cfg, context.rendering_provider)
     if rendering is None:
         blocks.append(why)
 
     # -- diagnoses ------------------------------------------------------------
-    icds = claim.get("icd_codes") or []
-    if not icds:
+    # Already ordered by the contract (`sequence`, primary first) and verified
+    # in-sequence by `ClaimBundle.integrity_problems()`. Re-sorting here would
+    # be a second, competing opinion about the claim's diagnosis order — the
+    # order the pointers below are relative to.
+    ordered_dx = list(bundle.diagnoses)
+    if not ordered_dx:
         blocks.append("verified claim has no diagnoses")
-    primaries = [e for e in icds if e.get("type") == "primary"]
-    ordered_dx = primaries + [e for e in icds if e.get("type") != "primary"]
-    if not primaries and icds:
-        ordered_dx = list(icds)  # first-listed stands in for principal
 
     # -- service lines --------------------------------------------------------
-    lines = (claim.get("cpt_codes") or []) + (claim.get("hcpcs_codes") or [])
-    if not lines:
+    if not bundle.service_lines:
         blocks.append("verified claim has no billable service lines")
     service_lines, total = [], 0.0
-    for e in lines:
-        code = str(e.get("code") or "").upper()
-        try:
-            units = max(1, int(e.get("units") or 1))
-        except (TypeError, ValueError):
-            blocks.append(f"units for {code} not numeric: "
-                          f"{e.get('units')!r}")
+    for line in bundle.service_lines:
+        code = line.code.upper()
+        units = line.units
+        # Linkage is checked BEFORE price, deliberately: a line the record never
+        # justified is a claim-integrity failure whether or not the practice has
+        # a fee for it, and reporting the fee gap first would bury it.
+        pointers = [p for p in line.diagnosis_pointers if 1 <= p <= len(ordered_dx)]
+        if not pointers:
+            # No fallback to "every documented diagnosis". A service line whose
+            # diagnosis linkage the record never established must not acquire
+            # one at the moment of submission; that is a fabricated medical
+            # necessity assertion on a transmitted claim.
+            blocks.append(
+                f"service line {code} has no diagnosis pointer into this "
+                f"claim's diagnoses; the record established no linkage")
             continue
         charge, why = line_charge(cfg, code, units)
         if charge is None:
             blocks.append(why)
             continue
         total += charge
-        mods = [str(m).upper() for m in (e.get("modifiers") or [])][:4]
+        mods = [m.upper() for m in line.modifiers][:4]
         svc = {
             "serviceDate": dos or "",
             "professionalService": {
@@ -444,9 +491,7 @@ def build_claim(doc: str, reg_event: dict, result: dict,
                 "measurementUnit": "UN",
                 "serviceUnitCount": str(units),
                 "compositeDiagnosisCodePointers": {
-                    "diagnosisCodePointers": _dx_pointers(
-                        e, len(ordered_dx),
-                        [d.get("code", "") for d in ordered_dx]),
+                    "diagnosisCodePointers": pointers[:_MAX_DX_POINTERS],
                 },
             },
         }
@@ -460,10 +505,10 @@ def build_claim(doc: str, reg_event: dict, result: dict,
     bp = cfg["billing_provider"]
     sub = cfg["submitter"]
     health_codes = []
-    for i, e in enumerate(ordered_dx[:12]):
+    for i, diagnosis in enumerate(ordered_dx[:_MAX_CLAIM_DIAGNOSES]):
         health_codes.append({
             "diagnosisTypeCode": "ABK" if i == 0 else "ABF",
-            "diagnosisCode": str(e["code"]).replace(".", "").upper(),
+            "diagnosisCode": diagnosis.code.replace(".", "").upper(),
         })
 
     payload = {
@@ -517,7 +562,7 @@ def build_claim(doc: str, reg_event: dict, result: dict,
         },
         "claimInformation": {
             "claimFilingCode": filing_code,
-            "patientControlNumber": str(meta.get("mrn") or doc)[:20],
+            "patientControlNumber": str(context.patient.record_number or doc)[:20],
             "claimChargeAmount": f"{total:.2f}",
             "placeOfServiceCode": pos,
             "claimFrequencyCode": str(defaults["claim_frequency_code"]),
@@ -604,6 +649,13 @@ def _last_block(events: list[dict]) -> dict[str, tuple[str, str]]:
 # --------------------------------------------------------------------------
 
 def _policy_gate(cfg: dict, reg_event: dict, result: dict) -> str | None:
+    """May this verified claim transmit? The FIRST reason it may not, or None.
+
+    Dispatches on the contract the registry event recorded. Both branches
+    answer the same three questions — is the verification tier allowed, is the
+    claim still the one that was verified, and does its release authorization
+    still hold — but they answer them with the controls their own shape has.
+    """
     policy = cfg.get("submission_policy") or {}
     tiers = [str(t).lower() for t in
              (policy.get("verification_tiers")
@@ -612,6 +664,21 @@ def _policy_gate(cfg: dict, reg_event: dict, result: dict) -> str | None:
     if tier not in tiers:
         return (f"verification tier '{tier}' not in submission policy "
                 f"{tiers}")
+
+    from tools.claims_registry import bundle_of_event, is_bundle_artifact
+    verified_bundle = bundle_of_event(reg_event)
+    if verified_bundle is not None:
+        return _bundle_policy_gate(verified_bundle, result, tier)
+    if is_bundle_artifact(result):
+        # A canonical artifact on disk under a LEGACY registry event: the two
+        # do not describe the same contract, and the legacy battery below would
+        # read `success`/`final_disposition`/`patient_metadata` off a bundle,
+        # find none of them, and produce a confident answer about controls that
+        # never ran. Refuse instead; re-ingest records the note canonically.
+        return ("registry event predates the canonical ClaimBundle contract "
+                "but the result artifact is a ClaimBundle — re-ingest this "
+                "note before submitting it")
+
     if policy.get("require_clean_disposition", True):
         disp = str((reg_event.get("claim") or {})
                    .get("final_disposition") or "").upper()
@@ -632,6 +699,69 @@ def _policy_gate(cfg: dict, reg_event: dict, result: dict) -> str | None:
         ok, reason = verify_readiness_certificate(result, cert)
         if not ok:
             return f"claim readiness authorization failed: {reason}"
+    return None
+
+
+def _bundle_policy_gate(verified, result: dict, tier: str) -> str | None:
+    """The canonical branch: the verified bundle must still be the live one.
+
+    Three distinct failures are checked separately, because they mean different
+    things and a single combined comparison would report the wrong one:
+
+      TAMPERED   the verified bundle no longer verifies on its own terms — its
+                 claim fingerprint or its certificate's content address does
+                 not reproduce, its context is unresolved, its pointers dangle.
+      STALE      the note has been re-coded since it was verified: the live
+                 artifact's claim, context or certificate differs from the one
+                 the registry recorded.
+      UNREADABLE the live artifact cannot be parsed as the contract it declares
+                 — never treated as "no live artifact to compare against".
+
+    A missing live artifact is NOT fatal here: `submit_all` already blocks a
+    document whose result file is absent, and the registry's recorded bundle is
+    the verified claim. What must never happen is a DIFFERENT live artifact
+    passing unnoticed.
+
+    The `human` tier skips the AUTOMATED release authorization — a coder
+    recorded that claim, which is what the tier means, and the legacy branch
+    has always worked this way. It is not an unguarded path: the integrity and
+    staleness checks below still run, and `build_claim` still refuses to
+    assemble a claim whose encounter context is missing any field the
+    professional transaction requires.
+    """
+    from app.contracts.claim_bundle import ClaimBundleError, load_bundle
+    from app.release.claim_readiness import verify_bundle_readiness
+
+    if tier in {"auto", "adjudicated"}:
+        ok, reason = verify_bundle_readiness(verified)
+        if not ok:
+            return f"claim readiness authorization failed: {reason}"
+    try:
+        live = load_bundle(result)
+    except ClaimBundleError as exc:
+        return f"live result artifact is not a readable ClaimBundle: {exc}"
+    # The live artifact's OWN coherence, re-derived — not just compared. A hand
+    # edit to a code, a unit, a modifier or the certificate body leaves the
+    # STORED fingerprints untouched, so every comparison below would still
+    # match while the artifact no longer describes the claim it was verified
+    # for. Re-deriving is the only check that sees it. (Found by the
+    # tampering case in tests/test_claim_bundle_e2e.py, not by review.)
+    live_problems = live.integrity_problems()
+    if live_problems:
+        return f"live result artifact is not internally coherent: {live_problems[0]}"
+    if live.context.compute_fingerprint() != verified.context.compute_fingerprint():
+        return "encounter context changed after registry verification"
+    if live.claim_fingerprint != verified.claim_fingerprint:
+        return "claim changed after registry verification"
+    live_certificate = (live.certificate.certificate_sha256
+                        if live.certificate else "")
+    verified_certificate = (verified.certificate.certificate_sha256
+                            if verified.certificate else "")
+    if live_certificate != verified_certificate:
+        return "registry and result do not carry the same release certificate"
+    if live.authority.data_fingerprint != verified.authority.data_fingerprint:
+        return ("the authoritative data behind this claim changed after "
+                "registry verification")
     return None
 
 
@@ -687,9 +817,17 @@ def submit_all(results_dir: Path = DEFAULT_RESULTS,
             result = json.loads(result_file.read_text())
         except OSError:
             stats["blocked"] += 1
-            stats["docs"][doc] = ("blocked: result file with patient "
-                                  "demographics not found "
+            stats["docs"][doc] = ("blocked: result file with the encounter "
+                                  "context not found "
                                   f"({result_file.name})")
+            continue
+        except ValueError as exc:
+            # Corrupt JSON is ONE document's problem. Letting it raise would
+            # abort the whole submission run at whichever note happened to sort
+            # first, leaving every later claim unexamined and unexplained.
+            stats["blocked"] += 1
+            stats["docs"][doc] = (f"blocked: result artifact is not readable "
+                                  f"JSON ({exc})")
             continue
 
         registry_key = _claim_key({
@@ -697,7 +835,13 @@ def submit_all(results_dir: Path = DEFAULT_RESULTS,
             "encounter_context_fingerprint": reg_event.get(
                 "encounter_context_fingerprint") or "",
         })
-        why = _policy_gate(cfg, reg_event, result)
+        try:
+            why = _policy_gate(cfg, reg_event, result)
+        except Exception as exc:
+            # Same rule for a malformed REGISTRY event: fail this claim closed,
+            # with its reason, and keep examining the rest.
+            why = (f"submission policy could not be evaluated "
+                   f"({type(exc).__name__}: {exc})")
         if why:
             stats["blocked"] += 1
             stats["docs"][doc] = f"blocked: {why}"
@@ -705,7 +849,11 @@ def submit_all(results_dir: Path = DEFAULT_RESULTS,
                 _record_block(doc, registry_key, why)
             continue
 
-        payload, blocks = build_claim(doc, reg_event, result, cfg)
+        try:
+            payload, blocks = build_claim(doc, reg_event, result, cfg)
+        except Exception as exc:
+            payload, blocks = None, [f"claim could not be assembled "
+                                     f"({type(exc).__name__}: {exc})"]
         if blocks:
             stats["blocked"] += 1
             stats["docs"][doc] = "blocked: " + "; ".join(blocks)

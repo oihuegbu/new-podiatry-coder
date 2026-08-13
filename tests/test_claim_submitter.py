@@ -457,30 +457,86 @@ class AdapterDegradationTest(unittest.TestCase):
 
 
 class DxPointerTest(unittest.TestCase):
+    """Diagnosis-pointer resolution for LEGACY artifacts.
+
+    The submitter no longer owns this: it reads `ServiceLine.diagnosis_pointers`
+    off the ClaimBundle. The legacy fidelity order (numeric pointers ->
+    linked_diagnoses -> every documented diagnosis) moved verbatim into
+    `app/contracts/legacy_adapter._legacy_pointers`, where it applies ONLY to
+    retired artifacts. These tests moved with it, unchanged in meaning, so the
+    legacy behaviour stays pinned; `test_native_lines_never_backfill_pointers`
+    below pins the opposite rule for the canonical path.
+    """
+
+    @staticmethod
+    def _dx(*codes) -> list:
+        from app.contracts.claim_bundle import DiagnosisLine
+        return [DiagnosisLine(sequence=i, system="icd10", code=c,
+                              primary=(i == 1))
+                for i, c in enumerate(codes, start=1)]
+
+    def _pointers(self, entry, codes):
+        from app.contracts.legacy_adapter import _legacy_pointers
+        return list(_legacy_pointers(entry, self._dx(*codes)))
+
     def test_pipeline_pointers_honored(self):
         e = {"dx_pointers": [2, 1, 2, 99]}
-        self.assertEqual(cs._dx_pointers(e, 3), [2, 1])
+        self.assertEqual(self._pointers(e, ["a", "b", "c"]), [2, 1])
 
     def test_default_points_at_documented_dx_capped_at_four(self):
-        self.assertEqual(cs._dx_pointers({}, 6), [1, 2, 3, 4])
-        self.assertEqual(cs._dx_pointers({}, 1), [1])
+        self.assertEqual(self._pointers({}, list("abcdef")), [1, 2, 3, 4])
+        self.assertEqual(self._pointers({}, ["a"]), [1])
 
     def test_linked_diagnoses_translate_to_positions(self):
         dx = ["M77.31", "M76.61", "M71.571"]
-        e = {"linked_diagnoses": ["M76.61"]}
-        self.assertEqual(cs._dx_pointers(e, 3, dx), [2])
-        e = {"linked_diagnoses": ["M77.31", "M71.571"]}
-        self.assertEqual(cs._dx_pointers(e, 3, dx), [1, 3])
+        self.assertEqual(self._pointers({"linked_diagnoses": ["M76.61"]}, dx),
+                         [2])
+        self.assertEqual(
+            self._pointers({"linked_diagnoses": ["M77.31", "M71.571"]}, dx),
+            [1, 3])
 
     def test_linked_diagnoses_off_claim_fall_back(self):
-        dx = ["M77.31"]
         e = {"linked_diagnoses": ["L60.0"]}
-        self.assertEqual(cs._dx_pointers(e, 1, dx), [1])
+        self.assertEqual(self._pointers(e, ["M77.31"]), [1])
 
     def test_numeric_pointers_outrank_linked(self):
         dx = ["M77.31", "M76.61"]
         e = {"dx_pointers": [2], "linked_diagnoses": ["M77.31"]}
-        self.assertEqual(cs._dx_pointers(e, 2, dx), [2])
+        self.assertEqual(self._pointers(e, dx), [2])
+
+    def test_native_lines_never_backfill_pointers(self):
+        """The canonical path has no fallback, and the builder blocks instead.
+
+        The legacy backfill above asserts a medical-necessity linkage the record
+        never made. That was tolerable while it only reproduced already-verified
+        legacy claims; it must never apply to a natively produced bundle, and a
+        service line that arrives with no pointers has to stop the claim rather
+        than acquire one at submission time.
+        """
+        from app.contracts.claim_bundle import (
+            BundleOrigin, ClaimBundle, DiagnosisLine, EncounterIdentity,
+            ReleaseDestination, ReleaseStatus, ServiceLine, finalize,
+        )
+        bundle = finalize(ClaimBundle(
+            produced_by=BundleOrigin.CLAUDE_CODER,
+            encounter=EncounterIdentity(encounter_id="n", document_id="n",
+                                        date_of_service="2026-01-05"),
+            diagnoses=(DiagnosisLine(sequence=1, system="icd10", code="X",
+                                     primary=True),),
+            service_lines=(ServiceLine(sequence=1, system="cpt", code="Y",
+                                       units=1, diagnosis_pointers=()),),
+            release=ReleaseStatus(destination=ReleaseDestination.AUTO_READY),
+        ))
+        self.assertEqual(bundle.service_lines[0].diagnosis_pointers, ())
+        self.assertIn("service line Y has no diagnosis linkage",
+                      bundle.release_blockers())
+
+        event = {"registry_version": 2, "verification": "auto",
+                 "claim_bundle": bundle.to_payload()}
+        payload, blocks = cs.build_claim("n", event, bundle.to_payload(),
+                                         _practice_config())
+        self.assertIsNone(payload)
+        self.assertTrue(any("no diagnosis pointer" in b for b in blocks), blocks)
 
 
 if __name__ == "__main__":

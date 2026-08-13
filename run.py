@@ -3,7 +3,26 @@
 
     PDF ─► verbatim note text (app.ingestion.pdf_parser — a text-extraction utility)
         ─► claude_coder.pipeline.code_encounter   ◄── THE note→code decision engine
+        ─► ClaimBundle (app.contracts.claim_bundle) ◄── THE claim contract
         ─► {stem}_results.json + all_results.json in OUTPUT_DIR
+
+================================================================================
+THE ARTIFACT THIS WRITES — issue #6 F6-R4-A1, product directive §5
+================================================================================
+Every per-note file is one canonical `ClaimBundle`: a strict, versioned schema
+owned by NEITHER pipeline implementation (`app/contracts/`), read by the claims
+registry, by release-readiness verification and by the 837P builder. Round 6's
+`claude_coder.run/1` shape is no longer written — this entrypoint emitted it
+while the retained claim path read the retired `app.pipeline` shape, so an
+AUTO_READY encounter arrived at the registry with no diagnosis and no service
+lines and was refused as "pipeline did not succeed". One producer, one contract,
+one consumer vocabulary is the fix; a translation shim on either side is not.
+
+The bundle also carries the encounter's billing CONTEXT, which this file used to
+obtain (`read_note` extracts patient metadata) and then discard. It is resolved
+through an `EncounterContextProvider` (`--encounter-context`), never inferred
+from the note: without a configured provider the context is UNRESOLVED and every
+bundle holds, visibly, in the artifact itself.
 
 Usage:
     python run.py                     # process every PDF in NOTES_DIR
@@ -55,7 +74,16 @@ paradigm is out of scope for this cutover.
 
 The tool modules themselves are INTENTIONALLY LEFT IN PLACE and untouched — they
 remain independently runnable and may be revisited — they are simply no longer
-invoked from the deployed entrypoint:
+invoked from the deployed entrypoint.
+
+CAVEAT, stated rather than left to be rediscovered: most of them still read a
+result file in the retired `app.pipeline` claim shape, so run by hand against a
+`ClaimBundle` artifact they will see an EMPTY claim rather than an error. That is
+the same defect class as F6-R4-A1 and it is not fixed here — none of them is on
+the path from a certified result to an 837P. The exact set is frozen by
+`tests/test_claim_bundle_e2e.test_no_new_module_reads_a_result_in_the_retired_claim_shape`
+so it can only shrink. `tools/claims_registry.py` and `tools/claim_submitter.py`
+— the retained claim path — ARE migrated.
 
     app/validation/consistency.py     N-run comparison / canonical selection
     tools/flip_triage.py              flip triage queue
@@ -97,26 +125,38 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from app.contracts.claim_bundle import (
+    SCHEMA_ID, SCHEMA_VERSION, AuthorityBinding, SourceDocument,
+    bundle_from_coding_result, failure_bundle,
+)
+from app.contracts.encounter_context import build_provider
 from app.core.config import NOTES_DIR, OUTPUT_DIR
 from app.core.dates import parse_date_of_service
 from app.core.logger import get_logger
 from app.ingestion.pdf_parser import extract_from_pdf
 from claude_coder.data_access import AuthoritativeSource
-from claude_coder.models import Verdict
 from claude_coder.pipeline import code_encounter, render
 
 logger = get_logger("main")
 
-#: Identity of the per-note JSON shape written below. It is deliberately NOT
-#: `app.pipeline.CodingResult.model_dump()`'s shape — that model belongs to the
-#: retired pipeline. Bump this when the payload changes so a reader can tell which
-#: producer wrote a file.
-RESULTS_SCHEMA = "claude_coder.run/1"
+#: Identity of the per-note JSON shape written below — the CANONICAL claim
+#: contract (`app/contracts/claim_bundle.py`), shared with the claims registry,
+#: readiness verification and the 837P builder.
+#:
+#: It replaces round 6's `claude_coder.run/1`, which this entrypoint no longer
+#: writes. That artifact's independent value was its audit surface (rendered
+#: trail, non-billed lines, routing, recommendations); all of it is now a
+#: section of the bundle (`ClaimBundle.audit`). Emitting BOTH would put two
+#: shapes of the same note on disk — which is the defect finding F6-R4-A1 was
+#: about, reintroduced one directory later. Old `claude_coder.run/1` and
+#: `app.pipeline` files already on disk stay readable through
+#: `app/contracts/legacy_adapter.py`.
+RESULTS_SCHEMA = f"{SCHEMA_ID}/{SCHEMA_VERSION}"
 
 #: Retired-flag exit code: distinct from argparse's own 2 so a driver can tell
 #: "you asked for something this entrypoint no longer does" from "bad usage".
@@ -158,10 +198,20 @@ def read_note(pdf_path: Path) -> dict:
     dos = parse_date_of_service(metadata)
     integrity = extraction.get("note_integrity") or {}
     document_version = str(integrity.get("source_pdf_sha256") or "").strip() or None
+    page_count = integrity.get("page_count")
     return {
         "note_text": note_text,
         "date_of_service": dos.isoformat() if dos else None,
         "document_version": document_version,
+        # Source-document identity carried through to the ClaimBundle. The
+        # finding F6-R4-A1 named this function specifically: it obtained the
+        # patient metadata and the result payload then discarded it, so the
+        # retained claim path had no demographics to build a claim from. It is
+        # now carried into the bundle's encounter context (as CORROBORATION —
+        # see app/contracts/encounter_context.py) instead of being dropped.
+        "extracted_text_sha256": str(
+            integrity.get("extracted_text_sha256") or "").strip() or None,
+        "page_count": int(page_count) if isinstance(page_count, int) else None,
         "patient_metadata": metadata,
     }
 
@@ -186,74 +236,66 @@ def load_billing_context(path: str | None) -> dict | None:
 
 
 # ---------------------------------------------------------------- note outputs
-def _line_payload(line) -> dict:
-    chosen = line.chosen
-    return {
-        "system": chosen.system if chosen else None,
-        "code": chosen.code if chosen else None,
-        "descriptor": chosen.descriptor if chosen else None,
-        "modifiers": list(line.modifiers),
-        "units": line.units,
-        "kind": line.fact.kind.value,
-        "subject": line.fact.description,
-        "method": line.method.value,
-        "rationale": line.rationale,
-        "excluded_reason": line.excluded_reason,
-        "authority": chosen.authority if chosen else {},
-        "evidence": [s.text for s in line.fact.evidence],
-    }
+def authority_binding(result, source) -> AuthorityBinding:
+    """Which authoritative data and index the coder actually queried.
 
-
-def result_payload(result, *, pdf_path: Path, document_version: str | None) -> dict:
-    """The per-note artifact.
-
-    Deliberately explicit about the two things a reader most needs and most
-    easily gets wrong:
-
-      `releasable` is the ONLY field that says a claim may be billed without a
-      human. It requires BOTH an AUTO_READY verdict AND a certificate — a
-      certificate is never built when the data fingerprint, the release
-      evidence, or the terminal durable write failed, so an AUTO_READY verdict
-      with no certificate is not a release.
-
-      `claim_lines` holds only lines that are actually billable (resolved,
-      billable, not excluded); everything else stays under `other_lines` for the
-      audit trail instead of being dropped.
+    Read from the CERTIFICATE first, deliberately: `source_identity.data` is the
+    fingerprint the certificate was built over, so binding it here means the
+    artifact and the certificate can never attest to different editions. Only
+    when there is no certificate (a held encounter) is the live source asked
+    directly, and a failure there stays empty rather than guessing — an empty
+    authority binding is itself a release blocker in the contract.
     """
-    # Identity, not equality: ResolvedLine is a dataclass, so two genuinely
-    # distinct lines that happen to carry equal field values would compare equal
-    # and silently disappear from `other_lines` under an `in` test.
-    billable_ids = {id(ln) for ln in result.billable_lines}
-    return {
-        "schema": RESULTS_SCHEMA,
-        "produced_by": "claude_coder.pipeline.code_encounter",
-        "document_id": result.encounter_id,
-        "source_pdf": pdf_path.name,
-        "document_version": document_version,
-        "date_of_service": result.date_of_service,
-        "processed": True,
-        "error": None,
-        "verdict": result.verdict.value,
-        "destination": result.destination.value if result.destination else None,
-        "control_mode": result.control_mode,
-        "releasable": bool(result.verdict is Verdict.AUTO_READY and result.certificate),
-        "claim_lines": [_line_payload(ln) for ln in result.billable_lines],
-        "other_lines": [_line_payload(ln) for ln in result.lines
-                        if id(ln) not in billable_ids],
-        "gates": [{"name": g.name, "outcome": g.outcome.value, "detail": g.detail,
-                   "authority": g.authority, "retryable": g.retryable}
-                  for g in result.gates],
-        "notes": list(result.notes),
-        "routing": list(result.routing),
-        "recommendations": list(result.recommendations),
-        "necessity_support": list(result.necessity_support),
-        "audit_record_hashes": list(result.audit_record_hashes),
-        "certificate": result.certificate,
-        "certificate_sha256": (result.certificate or {}).get("certificate_sha256"),
+    identity = ((result.certificate or {}).get("source_identity") or {})
+    fingerprint = identity.get("data") or {}
+    if not fingerprint:
+        try:
+            fingerprint = source.data_fingerprint()
+        except Exception as exc:
+            logger.warning(f"  authoritative-data fingerprint unavailable "
+                           f"({type(exc).__name__}: {exc}); the bundle will "
+                           f"record no authority binding and cannot release")
+            fingerprint = {}
+    manifest = fingerprint.get("source_manifest") or {}
+    return AuthorityBinding(
+        data_fingerprint=str(fingerprint.get("fingerprint_sha256") or ""),
+        source_manifest_fingerprint=str(manifest.get("manifest_sha256") or ""),
+        source_manifest=manifest,
+        index_checksum=str(fingerprint.get("codes_checksum") or ""),
+        code_counts={k: int(v) for k, v in
+                     (fingerprint.get("counts") or {}).items()},
+        model_profiles=identity.get("models") or {},
+    )
+
+
+def build_bundle(result, *, pdf_path: Path, note: dict, context, source) -> dict:
+    """The per-note artifact: one canonical `ClaimBundle`, serialized.
+
+    Everything a downstream consumer needs travels here — ordered diagnoses,
+    service lines with their units/modifiers/diagnosis pointers, the resolved
+    (or explicitly unresolved) encounter context, every gate outcome, the
+    authoritative-source identity, the certificate and the audit surface.
+    `ClaimBundle.finalize()` stamps the claim/context fingerprints and writes
+    the independently derived release blockers into the artifact, so the file
+    itself says why a claim is not releasable instead of leaving a reader to
+    infer it from an empty field.
+    """
+    bundle = bundle_from_coding_result(
+        result,
+        source_document=SourceDocument(
+            filename=pdf_path.name,
+            document_version=note["document_version"] or "",
+            extracted_text_sha256=note["extracted_text_sha256"] or "",
+            page_count=note["page_count"],
+        ),
+        context=context,
+        authority=authority_binding(result, source),
         # The explainability surface, verbatim, so the JSON artifact is readable
         # without re-running anything.
-        "audit_trail": render(result),
-    }
+        audit_trail=render(result),
+        produced_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    )
+    return bundle.to_payload()
 
 
 def failure_payload(pdf_path: Path, exc: Exception) -> dict:
@@ -261,19 +303,16 @@ def failure_payload(pdf_path: Path, exc: Exception) -> dict:
 
     Writing nothing would leave a stale success from an earlier run in place and
     make a failed note invisible in OUTPUT_DIR — an empty success by omission.
+    It is the SAME contract as a successful note (one shape per note, always),
+    routed to SYSTEM_RETRY: a note that failed to process produced no coding
+    judgement, so there is nothing for a human coder to review.
     """
-    return {
-        "schema": RESULTS_SCHEMA,
-        "produced_by": "claude_coder.pipeline.code_encounter",
-        "document_id": pdf_path.stem,
-        "source_pdf": pdf_path.name,
-        "processed": False,
-        "error": f"{type(exc).__name__}: {exc}",
-        "verdict": None,
-        "destination": None,
-        "releasable": False,
-        "claim_lines": [],
-    }
+    return failure_bundle(
+        document_id=pdf_path.stem,
+        filename=pdf_path.name,
+        error=f"{type(exc).__name__}: {exc}",
+        produced_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    ).to_payload()
 
 
 def write_result(payload: dict, pdf_path: Path) -> Path:
@@ -360,6 +399,15 @@ def build_parser() -> argparse.ArgumentParser:
                              "encounter's participant roster (env: BILLING_CONTEXT_FILE). "
                              "Without it, actor ownership is UNKNOWN and every claim "
                              "line holds.")
+    parser.add_argument("--encounter-context", type=str,
+                        default=os.getenv("ENCOUNTER_CONTEXT_FILE", ""),
+                        help="Path to a versioned encounter-context source "
+                             "(schema encounter_context/1) resolving each encounter's "
+                             "patient/subscriber/payer/rendering-provider/facility/POS "
+                             "by stable identifier (env: ENCOUNTER_CONTEXT_FILE). "
+                             "Without it, no encounter context is AUTHORITATIVELY "
+                             "resolved: the note's own metadata travels with the claim "
+                             "as corroboration only, and every bundle holds.")
     parser.add_argument("--start-at", type=str, default="",
                         help="Skip notes sorting before this stem/filename prefix — "
                              "resume a batch without redoing completed notes")
@@ -436,6 +484,26 @@ def main(argv: list[str] | None = None) -> int:
             "every claim line will HOLD before retrieval. This is fail-closed by "
             "design — supply the reviewed participant roster to release claims.")
 
+    # The encounter-context provider is built (and its source READ) before any
+    # note is processed: a malformed context file must stop the batch here,
+    # loudly, rather than resolve UNRESOLVED on every note and look like a
+    # deployment that simply has no roster. (Directive §2.)
+    context_provider = build_provider(args.encounter_context or None)
+    if not args.encounter_context:
+        logger.warning(
+            "No --encounter-context supplied: no encounter's patient/subscriber/"
+            "payer/rendering-provider/POS is AUTHORITATIVELY resolved, so every "
+            "ClaimBundle holds with an UNRESOLVED context. The note's own extracted "
+            "metadata still travels with the claim, as corroboration only.")
+    else:
+        try:
+            context_provider.resolve(encounter_id="", document_id="",
+                                     date_of_service=None, note_metadata=None)
+        except Exception as exc:
+            logger.error(f"--encounter-context could not be read: "
+                         f"{type(exc).__name__}: {exc}")
+            return 1
+
     if args.setup_only:
         AuthoritativeSource().prepare(force_rebuild_index=args.rebuild_index)
         logger.info("\n--setup-only: dependencies loaded, no notes processed. Exiting.")
@@ -471,6 +539,16 @@ def main(argv: list[str] | None = None) -> int:
                     f"date-dependent gates will hold this encounter")
             logger.info(f"  DOS: {note['date_of_service']} | "
                         f"document_version: {note['document_version']}")
+            context = context_provider.resolve(
+                encounter_id=pdf_path.stem,
+                document_id=pdf_path.stem,
+                date_of_service=note["date_of_service"],
+                note_metadata=note["patient_metadata"],
+            )
+            logger.info(f"  Encounter context: {context.resolution.value} "
+                        f"[{context.provider_id}"
+                        + (f" {context.context_version}" if context.context_version
+                           else "") + "]")
             result = code_encounter(
                 pdf_path.stem,
                 note["note_text"],
@@ -479,11 +557,19 @@ def main(argv: list[str] | None = None) -> int:
                 billing_context=billing_context,
                 document_version=note["document_version"],
             )
-            payload = result_payload(result, pdf_path=pdf_path,
-                                     document_version=note["document_version"])
-            logger.info(f"  VERDICT: {payload['verdict']} → {payload['destination']} "
-                        f"| {len(payload['claim_lines'])} claim line(s) "
-                        f"| releasable={payload['releasable']}")
+            payload = build_bundle(result, pdf_path=pdf_path, note=note,
+                                   context=context, source=source)
+            release = payload["release"]
+            # `holds` is the CONSUMER-side re-derivation the contract stamps into
+            # the artifact, not the producer's own flag: an empty holds list is
+            # the only thing that means "billable without a human".
+            logger.info(f"  VERDICT: {release['producer_verdict']} → "
+                        f"{release['destination']} "
+                        f"| {len(payload['diagnoses'])} diagnosis line(s) "
+                        f"| {len(payload['service_lines'])} service line(s) "
+                        f"| releasable={not release['holds']}")
+            for hold in release["holds"]:
+                logger.info(f"    hold: {hold}")
         except Exception as exc:
             failures += 1
             logger.error(f"FAILED: {pdf_path.name} — {type(exc).__name__}: {exc}")
@@ -497,7 +583,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             logger.info(f"  Saved → {write_result(payload, pdf_path).name}")
         except Exception as exc:
-            if payload.get("processed"):
+            if not payload.get("processing_error"):
                 failures += 1
             logger.error(f"FAILED to write results for {pdf_path.name} — "
                          f"{type(exc).__name__}: {exc}")
@@ -515,13 +601,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"| Failed: {failures}")
     destinations: dict[str, int] = {}
     for payload in payloads:
-        key = payload.get("destination") or ("PROCESSING_FAILURE"
-                                             if not payload.get("processed") else "UNKNOWN")
+        key = (payload.get("release") or {}).get("destination") or "UNKNOWN"
         destinations[key] = destinations.get(key, 0) + 1
     logger.info("Destinations: " + " | ".join(
         f"{name}: {count}" for name, count in sorted(destinations.items())))
-    logger.info(f"Releasable (AUTO_READY + certificate): "
-                f"{sum(1 for p in payloads if p.get('releasable'))}")
+    logger.info(f"Releasable (no ClaimBundle release blocker): "
+                f"{sum(1 for p in payloads if not (p.get('release') or {}).get('holds'))}")
     logger.info(f"Output → {OUTPUT_DIR}")
 
     # A batch in which NOTHING could be processed is an operational failure, not

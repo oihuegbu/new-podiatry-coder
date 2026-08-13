@@ -221,18 +221,29 @@ def deployment(tmp_path, monkeypatch):
     return _Deployment()
 
 
+def _gates(payload) -> list[dict]:
+    """The release-gate outcomes carried by the bundle."""
+    return [o for o in payload["outcomes"] if o["stage"] == "release_gate"]
+
+
 def _assert_nothing_releasable(payload):
-    assert payload["processed"] is True, payload.get("error")
-    assert payload["releasable"] is False
+    assert payload["processing_error"] == "", payload["processing_error"]
+    assert payload["release"]["producer_releasable"] is False
+    assert payload["release"]["holds"], (
+        "a bundle with no recorded hold is a bundle that claims it may be billed")
     assert payload["certificate"] is None
-    assert payload["certificate_sha256"] is None
-    assert payload["claim_lines"] == []
-    assert payload["verdict"] != "AUTO_READY"
-    assert payload["destination"] == "SYSTEM_HOLD"
-    assert payload["audit_record_hashes"] == [], (
+    assert payload["service_lines"] == []
+    assert payload["diagnoses"] == []
+    assert payload["release"]["producer_verdict"] != "AUTO_READY"
+    # SYSTEM_RETRY is the canonical destination for the producer's SYSTEM_HOLD:
+    # a dependency failed, so this is system work and never a coder's queue.
+    assert payload["release"]["destination"] == "SYSTEM_RETRY"
+    assert payload["release"]["producer_destination"] == "SYSTEM_HOLD"
+    assert payload["audit"]["audit_record_hashes"] == [], (
         "a durable audit row was committed even though the checkpoint refused")
-    held = [g for g in payload["gates"] if g["name"] == "pre_retrieval_integrity"]
-    assert held, f"no enforced-boundary hold in {[g['name'] for g in payload['gates']]}"
+    gates = _gates(payload)
+    held = [g for g in gates if g["name"] == "pre_retrieval_integrity"]
+    assert held, f"no enforced-boundary hold in {[g['name'] for g in gates]}"
     assert held[0]["outcome"] == "UNKNOWN"
     assert held[0]["retryable"] is True
 
@@ -248,8 +259,8 @@ def test_required_but_unavailable_checkpoint_releases_nothing(deployment, monkey
     _assert_nothing_releasable(payload)
 
     combined = json.loads((deployment.output_dir / "all_results.json").read_text())
-    assert [p for p in combined if p["document_id"] == STEM]
-    assert not [p for p in combined if p.get("releasable")], (
+    assert [p for p in combined if p["encounter"]["document_id"] == STEM]
+    assert not [p for p in combined if not (p.get("release") or {}).get("holds")], (
         "the aggregate corpus file offers a releasable claim the per-note file refused")
 
 
@@ -261,7 +272,7 @@ def test_mismatched_checkpoint_releases_nothing(deployment, monkeypatch):
                        f"file:{deployment.anchor_root}")
 
     first = deployment.run()
-    assert first["audit_record_hashes"], (
+    assert first["audit"]["audit_record_hashes"], (
         "control precondition failed: the working anchor committed no audit rows")
 
     deployment.anchor_file().write_text("{ this is not a valid checkpoint record")
@@ -283,14 +294,16 @@ def test_control_a_working_anchor_reaches_the_durable_audit_chain(deployment,
 
     payload = deployment.run()
 
-    assert payload["processed"] is True, payload.get("error")
-    assert len(payload["audit_record_hashes"]) >= 2, (
+    assert payload["processing_error"] == "", payload["processing_error"]
+    assert len(payload["audit"]["audit_record_hashes"]) >= 2, (
         "evidence anchoring and the relation graph must both be durably recorded")
     assert deployment.anchor_file().exists()
-    # Still not releasable — no reviewed participant roster, and an empty index — so
-    # nobody reads this control as 'the deployment auto-releases'.
-    assert payload["releasable"] is False
-    assert payload["claim_lines"] == []
+    # Still not releasable — no reviewed participant roster, no encounter-context
+    # source, and an empty index — so nobody reads this control as 'the deployment
+    # auto-releases'.
+    assert payload["release"]["producer_releasable"] is False
+    assert payload["release"]["holds"]
+    assert payload["service_lines"] == []
 
 
 # ------------------------------------------------------- round 6, Codex F6-R5-A
@@ -324,14 +337,15 @@ def test_a_missing_required_app_source_holds_the_deployed_entrypoint(deployment,
 
     payload = deployment.run()
 
-    assert payload["processed"] is True, payload.get("error")
-    assert payload["releasable"] is False
+    assert payload["processing_error"] == "", payload["processing_error"]
+    assert payload["release"]["producer_releasable"] is False
     assert payload["certificate"] is None
-    assert payload["claim_lines"] == []
-    assert payload["verdict"] != "AUTO_READY"
-    blocked = [g for g in payload["gates"] if g["name"] == "source_manifest"
+    assert payload["service_lines"] == []
+    assert payload["release"]["producer_verdict"] != "AUTO_READY"
+    gates = _gates(payload)
+    blocked = [g for g in gates if g["name"] == "source_manifest"
                and g["outcome"] != "PASS"]
     assert blocked, (
         f"a missing REQUIRED source did not stop the deployed path: "
-        f"{[(g['name'], g['outcome']) for g in payload['gates']]}")
+        f"{[(g['name'], g['outcome']) for g in gates]}")
     assert source_id in blocked[0]["detail"], blocked[0]["detail"]

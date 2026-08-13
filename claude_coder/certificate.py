@@ -16,18 +16,22 @@ private key would add non-repudiation on top of this integrity hash.)
 from __future__ import annotations
 
 import hashlib
-import json
 from typing import Any
+
+# ONE definition of "the same bytes", shared with the claim contract. The
+# certificate's content address is re-derived downstream -- by
+# `ClaimBundle.certificate.problems()`, which is how a bundle edited on disk is
+# detected -- so producer and verifier must canonicalize identically. Two
+# identical implementations in two files is the drift class this codebase keeps
+# finding; importing the shared one removes it by construction.
+from app.contracts.claim_bundle import canonical_json as _canonical
+from app.contracts.claim_bundle import content_digest
 
 from .models import CodingResult
 
 
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _canonical(obj: Any) -> str:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
 
 def build_certificate(result: CodingResult, note_text: str,
@@ -119,5 +123,5 @@ def build_certificate(result: CodingResult, note_text: str,
         "verdict": result.verdict.value,
         "source_identity": source_identity or {},
     }
-    payload["certificate_sha256"] = _sha(_canonical(payload))
+    payload["certificate_sha256"] = content_digest(payload)
     return payload

@@ -4,6 +4,25 @@ The certificate is the release boundary, not an informational annotation.
 It binds the billable claim, encounter context, full note/source identity,
 every control input, the source snapshot, and the authenticated operating
 scope. Registry ingest and claim submission both verify this same artifact.
+
+TWO ARTIFACT SHAPES, TWO BATTERIES, ONE BOUNDARY (issue #6, F6-R4-A1)
+--------------------------------------------------------------------
+This module now authorizes both:
+
+  * a canonical `ClaimBundle` (`app/contracts/claim_bundle.py`) — the shape
+    every NEW artifact has — via `verify_bundle_readiness()`;
+  * a retired `app.pipeline` result — the shape already on disk — via
+    `verify_readiness_certificate()`, unchanged.
+
+They are separate functions rather than one polymorphic one on purpose. The
+legacy battery asserts invariants that only the retired pipeline established
+(N-run consistency, the mutation ledger, the compliance scrub, the clinical
+audit); the bundle battery asserts invariants only the canonical contract
+establishes (a reproducing claim fingerprint, a resolved encounter context, a
+self-addressing certificate, bound authority). Running either battery over the
+other shape would return a confident answer about controls that never ran —
+which is the exact failure mode this finding was raised for. Callers dispatch
+on the artifact's declared schema, never on duck-typing.
 """
 
 from __future__ import annotations
@@ -702,6 +721,107 @@ def refresh_release_artifacts(result: dict) -> ClaimReadinessCertificate:
     result["claim_readiness_certificate"] = cert.model_dump(mode="json")
     return cert
 
+
+# --------------------------------------------------------------------------
+# canonical ClaimBundle authorization
+# --------------------------------------------------------------------------
+
+def bundle_encounter_context_fingerprint(bundle) -> str:
+    """The encounter-context fingerprint a bundle is bound to, RECOMPUTED.
+
+    Recomputed rather than read: the stored value is what a tamperer would
+    edit, and the registry uses this to detect a context changed after
+    verification. `EncounterContext.problems()` separately reports when the
+    stored and recomputed values disagree, so neither check can be the only
+    one that notices.
+    """
+    return bundle.context.compute_fingerprint()
+
+
+def verify_bundle_readiness(bundle) -> tuple[bool, str]:
+    """Authorize (or refuse) one canonical `ClaimBundle` for autonomous release.
+
+    Fail-closed and total: it returns the FIRST reason the bundle cannot be
+    released, and it can only return True when every one of these holds —
+
+      * the artifact is a `ClaimBundle` this build implements (an adapted
+        legacy artifact is refused here; its authorization is
+        `verify_readiness_certificate`, which runs the controls its shape
+        actually has);
+      * the bundle is internally coherent — claim fingerprint reproduces,
+        diagnosis order and pointers resolve, the certificate's own content
+        address reproduces over the certificate it carries;
+      * the encounter context is RESOLVED, complete, conflict-free, and its
+        fingerprint reproduces;
+      * an authoritative-data and source-manifest identity is bound;
+      * the release destination is AUTO_READY with a certificate, and the
+        certificate attests the same encounter and verdict as the bundle.
+
+    The last one is the cross-check that the certificate and the claim have not
+    been recombined: a valid certificate from a DIFFERENT encounter, pasted
+    into this bundle, still self-addresses correctly and would otherwise pass.
+    """
+    from app.contracts.claim_bundle import BundleOrigin, ClaimBundle
+
+    if not isinstance(bundle, ClaimBundle):
+        return False, (f"not a ClaimBundle "
+                       f"({type(bundle).__name__}); refusing to authorize")
+    if bundle.produced_by is not BundleOrigin.CLAUDE_CODER:
+        return False, (
+            f"bundle origin {bundle.produced_by.value} is an adapted legacy "
+            f"artifact; bundle-native controls did not run for it")
+
+    blockers = bundle.release_blockers()
+    if blockers:
+        return False, blockers[0]
+
+    certificate = bundle.certificate
+    if certificate is None:                       # unreachable via blockers
+        return False, "no release certificate"    # pragma: no cover - defensive
+    payload = certificate.certificate
+    attested_encounter = str(payload.get("encounter_id") or "")
+    if attested_encounter != bundle.encounter.encounter_id:
+        return False, (f"certificate attests encounter "
+                       f"{attested_encounter!r}, not "
+                       f"{bundle.encounter.encounter_id!r}")
+    attested_verdict = str(payload.get("verdict") or "")
+    if attested_verdict != bundle.release.producer_verdict:
+        return False, (f"certificate attests verdict {attested_verdict!r}, "
+                       f"the bundle records {bundle.release.producer_verdict!r}")
+    attested_dos = payload.get("date_of_service")
+    if attested_dos != bundle.encounter.date_of_service:
+        return False, ("certificate and bundle disagree about the date of "
+                       "service")
+    attested_codes = sorted(
+        (str(line.get("system") or ""), str(line.get("code") or ""))
+        for line in (payload.get("lines") or []) if isinstance(line, dict))
+    bundle_codes = sorted(
+        (line.system, line.code)
+        for line in (*bundle.diagnoses, *bundle.service_lines))
+    if attested_codes != bundle_codes:
+        return False, ("certificate does not attest the same billed codes as "
+                       "the bundle")
+    return True, ""
+
+
+def verify_bundle_artifact(payload: dict) -> tuple[bool, str]:
+    """Load an on-disk payload as a bundle and authorize it, in one step.
+
+    Load failures are refusals with their typed reason, never an empty bundle:
+    "this file is not a claim bundle" and "this claim is not releasable" must
+    never both surface as False-with-no-reason.
+    """
+    from app.contracts.claim_bundle import ClaimBundleError, load_bundle
+    try:
+        bundle = load_bundle(payload)
+    except ClaimBundleError as exc:
+        return False, str(exc)
+    return verify_bundle_readiness(bundle)
+
+
+# --------------------------------------------------------------------------
+# legacy app.pipeline authorization
+# --------------------------------------------------------------------------
 
 def verify_readiness_certificate(
         result: dict, certificate: dict | None = None
