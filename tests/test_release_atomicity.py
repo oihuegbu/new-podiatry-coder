@@ -8,6 +8,7 @@ matching durable record.
 """
 import hashlib
 import json
+import os
 import pytest
 
 from claude_coder.data_access import MockSource
@@ -943,28 +944,86 @@ def test_an_absent_drug_dose_table_holds_rather_than_changing_billed_units():
     assert drug_units_gate(undosed, absent).outcome is Outcome.NOT_APPLICABLE
 
 
+#: The ONLY two modules allowed to name a source file: the declaration itself.  A path has
+#: to be constructed somewhere; `app/core/config.py` is where, and `app/release/
+#: source_manifest.py` is where each constructed path is bound to an identity and a
+#: disposition.  Everything else RESOLVES an identity.  This list is deliberately tiny and
+#: deliberately not a suppression list -- adding a module to it is a reviewable act.
+_SOURCE_DECLARATION_MODULES = (("app", "core", "config.py"),
+                               ("app", "release", "source_manifest.py"))
+
+
 def test_no_decision_module_composes_an_authoritative_filename_literal():
     """Structural guard against the NEXT under-declaration: a claim-affecting module may not
     name an authoritative file itself. Composing `DATA_DIR / "x.json"` inline is exactly how
     `global_period.json`, `modifiers.json` and the two control configs came to be read at
-    decision time while being certified by nobody. Paths come from the declaration."""
+    decision time while being certified by nobody. Paths come from the declaration.
+
+    Round 6 (Codex F6-R5-A): this scanned only top-level `claude_coder/*.py`, while the
+    DEPLOYED image runs `app/**` too -- the human-run 837P submission step resolves the
+    payer through `app.compliance.payer_registry`, `app.compliance.datastore.store` owns
+    the modifier-role and semantic-class vocabulary, and `app.release.scope_registry` owns
+    what may be released without a human. Every one of those composed its own filename
+    literal and so reached the manifest only through the incidental `data/codes/*.json`
+    sweep, which cannot distinguish a source that is intentionally absent from one that
+    silently disappeared. The scan now covers BOTH trees, recursively.
+    """
     import ast
     from pathlib import Path as _Path
-    root = _Path(__file__).resolve().parent.parent / "claude_coder"
+    repo = _Path(__file__).resolve().parent.parent
+    exempt = {repo.joinpath(*parts) for parts in _SOURCE_DECLARATION_MODULES}
     offenders = []
-    for module in sorted(root.glob("*.py")):
-        tree = ast.parse(module.read_text())
-        interpolated = {id(node) for parent in ast.walk(tree)
-                        if isinstance(parent, ast.JoinedStr)
-                        for node in ast.walk(parent)}
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                    and node.value.endswith(".json") and "*" not in node.value
-                    and id(node) not in interpolated):
-                offenders.append(f"{module.name}:{node.lineno}: {node.value!r}")
+    for tree_root in (repo / "claude_coder", repo / "app"):
+        for module in sorted(tree_root.rglob("*.py")):
+            if module in exempt:
+                continue
+            tree = ast.parse(module.read_text())
+            interpolated = {id(node) for parent in ast.walk(tree)
+                            if isinstance(parent, ast.JoinedStr)
+                            for node in ast.walk(parent)}
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                        and node.value.endswith(".json") and "*" not in node.value
+                        and id(node) not in interpolated):
+                    offenders.append(
+                        f"{module.relative_to(repo)}:{node.lineno}: {node.value!r}")
     assert not offenders, (
         "authoritative filename literal(s) outside the release-source declaration: "
         + "; ".join(offenders))
+
+
+def test_the_declaration_modules_are_the_only_exempted_ones():
+    """Failure path of the guard above: its exemption list must stay two files that exist.
+    A typo'd or stale entry would silently exempt nothing (harmless) -- but a THIRD entry
+    added to quiet a failure is exactly the suppression this finding is about, so the count
+    is pinned and the paths are proven real."""
+    from pathlib import Path as _Path
+    repo = _Path(__file__).resolve().parent.parent
+    assert len(_SOURCE_DECLARATION_MODULES) == 2
+    for parts in _SOURCE_DECLARATION_MODULES:
+        assert repo.joinpath(*parts).is_file(), parts
+
+
+def test_every_declared_source_is_dispositioned_across_both_trees():
+    """The registry half of the same guard: a filename literal is not the only way to read
+    an undeclared file, so every identity the declaration carries must also be REQUIRED or
+    reviewed-optional-with-a-justification -- including the app-side identities added in
+    round 6, which the deployed image reads and the release must account for."""
+    from app.release import source_manifest as sm
+    required = sm.required_release_sources()
+    optional = sm.optional_release_sources()
+    assert not (set(required) & set(optional))
+    assert set(sm._AUTHORITATIVE) <= set(required) | set(optional)
+    # The two Codex named by file, present as first-class identities rather than as
+    # incidental `codes/*.json` sweep entries.
+    for source_id in ("coding_semantics", "payer_registry"):
+        assert source_id in required, source_id
+        assert str(required[source_id]["role"]).strip()
+    manifest_ids = {record["source_id"] for record in sm.build_source_manifest()["records"]}
+    for source_id in ("coding_semantics", "payer_registry"):
+        assert source_id in manifest_ids
+        assert f"codes/{sm._AUTHORITATIVE[source_id].name}" not in manifest_ids, (
+            "the source is hashed twice, under its identity and under the sweep name")
 
 
 # ---- Round 5, phase 4: PRESENT-BUT-CORRUPT required sources must hold, not degrade ------
@@ -1260,3 +1319,187 @@ def test_an_empty_mue_table_reads_as_unavailable_not_as_no_limits(monkeypatch):
                         method=ResolutionMethod.DETERMINISTIC)
     held = mue_gate(CodingResult("e", "2026-08-01", lines=[line]), src)
     assert held.outcome is Outcome.UNKNOWN and held.retryable
+
+
+# ---- Round 6, Codex F6-R5-A: the two app-side sources the reviewer named by file --------
+# `coding_semantics.json` and `payers.json` were composed as filename literals inside their
+# own readers, so they were never source IDENTITIES -- only incidental entries in the
+# `data/codes/*.json` sweep, which a missing file simply drops out of. Both are now
+# declared, required, and read through the same fail-closed mechanic every other required
+# source uses. The tests below cover BOTH halves of the disposition: missing must hold, and
+# present-but-corrupt must hold rather than degrading to `{}` / last-known-good.
+
+def _repoint(monkeypatch, source_id, path):
+    """Point a declared identity at `path`, through the registry, exactly as the release
+    manifest and the reader both resolve it."""
+    from app.release import source_manifest as sm
+    registry = dict(sm._AUTHORITATIVE)
+    registry[source_id] = path
+    monkeypatch.setattr(sm, "_AUTHORITATIVE", registry)
+
+
+def test_a_missing_required_app_source_is_reported_by_the_release_manifest(monkeypatch,
+                                                                          tmp_path):
+    """The absence half. Before this fix the file's absence was INVISIBLE: it was hashed
+    only by the codes/ sweep, and a sweep cannot report what is not there. Now the identity
+    is declared, so absence is an ERROR on the manifest -- which is what the source-manifest
+    gate blocks the release on."""
+    from app.release import source_manifest as sm
+    for source_id in ("coding_semantics", "payer_registry"):
+        _repoint(monkeypatch, source_id, tmp_path / "absent.json")
+        errors = sm.build_source_manifest()["errors"]
+        assert [e for e in errors if e.startswith(f"{source_id}:")], (source_id, errors)
+        assert source_id in sm.required_release_sources()
+        monkeypatch.undo()
+
+
+def test_corrupt_coding_semantics_raise_instead_of_reclassifying_every_code(monkeypatch,
+                                                                           tmp_path):
+    """`_coding_semantics` logged and continued with `{}`. That is not a lost lookup: with
+    `{}` every modifier-role query returns an empty set and every semantic-class question
+    ("is this an E/M / a surgical procedure / an anaesthesia code / an external-cause
+    diagnosis") answers False for EVERY code -- one unreadable file silently reclassifying
+    the whole code set in the permissive direction."""
+    from app.compliance.datastore.store import ComplianceDataStore, CodingSemanticsUnavailable
+    from app.release.source_manifest import DeclaredSourceUnavailable
+    assert issubclass(CodingSemanticsUnavailable, DeclaredSourceUnavailable)
+    shapes = _CORRUPTIONS + (
+        # parses, but publishes only part of the vocabulary -- schema drift in the extract,
+        # indistinguishable downstream from "no modifier fills this role"
+        '{"modifier_roles": {"r": {}}}',
+        '{"modifier_roles": {"r": {}}, "code_classes": {}, "global_period_classes": {"a": 1}}',
+    )
+    for content in shapes:
+        path = tmp_path / "coding_semantics.json"
+        path.write_text(content)
+        _repoint(monkeypatch, "coding_semantics", path)
+        store = ComplianceDataStore.__new__(ComplianceDataStore)   # no DB build needed
+        store._coding_semantics_cache = None
+        with pytest.raises(CodingSemanticsUnavailable):
+            store._coding_semantics()
+        monkeypatch.undo()
+    # ...and an ABSENT file fails identically: absence must never read as "no semantics
+    # apply" in a process that already holds an open store.
+    _repoint(monkeypatch, "coding_semantics", tmp_path / "absent.json")
+    store = ComplianceDataStore.__new__(ComplianceDataStore)
+    store._coding_semantics_cache = None
+    with pytest.raises(CodingSemanticsUnavailable):
+        store._coding_semantics()
+
+
+def test_corrupt_payer_registry_raises_instead_of_silently_repricing_the_payer(monkeypatch,
+                                                                              tmp_path):
+    """`_load_payers` swallowed every failure and returned the last-known-good (initially
+    EMPTY) registry. With an empty registry every note's insurance text matches nothing:
+    payer_id None, is_medicare False, follows_medicare_coverage False -- i.e. every patient
+    is silently reclassified as an unrecognized commercial payer, changing which coverage
+    floor (LCD necessity, routine-foot-care findings, Medicare status-I validity) and which
+    prior-authorization policy apply."""
+    import app.compliance.payer_registry as pr
+    from app.release.source_manifest import DeclaredSourceUnavailable
+    assert issubclass(pr.PayerRegistryUnavailable, DeclaredSourceUnavailable)
+    insurance = "Some Payer Plan, Member/Policy ID: X1, Group Number: G1"
+    for content in ("", "{not json", "[]", "{}", '{"payers": []}', '{"payers": {}}'):
+        path = tmp_path / "payers.json"
+        path.write_text(content)
+        _repoint(monkeypatch, "payer_registry", path)
+        pr._payers_cache, pr._payers_mtime = [], -1
+        with pytest.raises(pr.PayerRegistryUnavailable):
+            pr.parse_insurance_text(insurance)
+        monkeypatch.undo()
+    _repoint(monkeypatch, "payer_registry", tmp_path / "absent.json")
+    pr._payers_cache, pr._payers_mtime = [], -1
+    with pytest.raises(pr.PayerRegistryUnavailable):
+        pr.parse_insurance_text(insurance)
+    monkeypatch.undo()
+    # the real, declared registry still parses -- the hold is about unreadability, not
+    # about refusing everything
+    pr._payers_cache, pr._payers_mtime = [], -1
+    assert pr.parse_insurance_text(insurance).raw_text == insurance
+
+
+def test_a_corrupt_payer_registry_never_leaves_a_stale_one_serving_claims(monkeypatch,
+                                                                         tmp_path):
+    """The specific shape Codex named: 'silently retains empty/stale state'. A GOOD read
+    followed by a corrupt rewrite must not keep answering from the superseded registry --
+    the claim would then be composed against aliases no certified file backs."""
+    import app.compliance.payer_registry as pr
+    path = tmp_path / "payers.json"
+    path.write_text(json.dumps({"payers": [
+        {"payer_id": "synthetic_a", "canonical_name": "Synthetic A",
+         "aliases": ["synthetic a"], "kind": "commercial"}]}))
+    _repoint(monkeypatch, "payer_registry", path)
+    pr._payers_cache, pr._payers_mtime = [], -1
+    assert pr.parse_insurance_text("Synthetic A plan").payer_id == "synthetic_a"
+
+    path.write_text("{ truncated")
+    os.utime(path, ns=(0, 0))           # a genuinely different mtime, as a rewrite gives
+    with pytest.raises(pr.PayerRegistryUnavailable):
+        pr.parse_insurance_text("Synthetic A plan")
+    # and it stays failed: the cache was never advanced past the last good read, so the
+    # next call re-reads and re-raises rather than settling back into the stale registry
+    with pytest.raises(pr.PayerRegistryUnavailable):
+        pr.parse_insurance_text("Synthetic A plan")
+
+
+def test_an_unreadable_payer_registry_stops_the_readiness_certificate(monkeypatch,
+                                                                     tmp_path):
+    """Boundary: the raise has to LAND somewhere that holds. `claim_readiness._context`
+    caught `Exception` and passed, which recorded payer_kind/payer_id as "" and signed the
+    certificate as though the note named no payer we recognize."""
+    import app.release.claim_readiness as cr
+    import app.compliance.payer_registry as pr
+    path = tmp_path / "payers.json"
+    path.write_text("{ truncated")
+    _repoint(monkeypatch, "payer_registry", path)
+    pr._payers_cache, pr._payers_mtime = [], -1
+    with pytest.raises(pr.PayerRegistryUnavailable):
+        cr._context({"patient_metadata": {"insurance": "Some Payer Plan"}})
+
+
+def test_both_named_sources_survive_a_round_trip_through_the_declaration():
+    """Certified bytes and read bytes are the SAME bytes: each reader resolves its file
+    from the declaration, so the identity the manifest hashes is the path the reader opens.
+    Asserted by identity, not by re-composing the filename here."""
+    from pathlib import Path
+    import app.compliance.payer_registry as pr
+    from app.compliance.datastore import store as store_mod
+    from app.release.source_manifest import declared_source_path
+    assert Path(declared_source_path(pr._PAYERS_SOURCE_ID)).is_file()
+    assert store_mod.CODING_SEMANTICS_SOURCE_ID == "coding_semantics"
+    assert Path(declared_source_path(store_mod.CODING_SEMANTICS_SOURCE_ID)).is_file()
+
+
+def test_unreadable_coding_semantics_holds_the_compliance_scrub(monkeypatch, tmp_path):
+    """Boundary: the raise has to LAND as a hold in the path that consumes it. The
+    compliance scrub wraps every agent in `except Exception` so one crash cannot sink the
+    run -- the question is what it records. It must record a BLOCKING error ('this claim
+    has not passed all required checks'), never a filter that quietly reported nothing and
+    was counted as passed."""
+    from app.compliance.agents.base import ComplianceAgent
+    from app.compliance.datastore.store import ComplianceDataStore
+    from app.compliance.engine import ClaimScrubber
+    from app.compliance.models import Disposition, Status
+
+    class _RoleConsumer(ComplianceAgent):
+        filter_id = "SYNTHETIC_ROLE"
+        filter_name = "synthetic modifier-role consumer"
+
+        def check(self, claim):
+            self.store.modifier_codes_for_role("synthetic_role")
+            return []
+
+    result = {"document_id": "SYNTHETIC", "patient_metadata": {},
+              "rag_context": {}, "icd_codes": [], "cpt_codes": [], "hcpcs_codes": []}
+    store = ComplianceDataStore.__new__(ComplianceDataStore)
+    store._coding_semantics_cache = None
+
+    corrupt = tmp_path / "coding_semantics.json"
+    corrupt.write_text("{ truncated")
+    _repoint(monkeypatch, "coding_semantics", corrupt)
+
+    out = ClaimScrubber(store, [_RoleConsumer(store)]).scrub(result)
+    assert out.clean is False
+    assert out.disposition is Disposition.REVIEW
+    assert [f for f in out.blocking_findings if f.status is Status.ERROR]
+    assert [r for r in out.filter_results if r["status"] == Status.ERROR.value]

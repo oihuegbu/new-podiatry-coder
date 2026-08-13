@@ -14,9 +14,13 @@ import os
 from datetime import date, datetime
 from pathlib import Path
 
-from app.core.config import DATA_DIR
+from app.release.source_manifest import declared_source_path
 
-DEFAULT_SCOPE_REGISTRY = DATA_DIR / "release" / "autonomous_scopes.json"
+# The registry of what may be released WITHOUT a human is itself a declared release
+# source: its bytes are content-addressed by the manifest the certificate binds, so a
+# substituted or truncated scope file is visible rather than silent. Resolved through
+# the declaration rather than composed here. (Codex F6-R5-A, round 6.)
+DEFAULT_SCOPE_REGISTRY = declared_source_path("autonomous_scopes")
 _MIN_SIGNING_KEY_BYTES = 32
 
 

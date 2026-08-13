@@ -22,9 +22,11 @@ from __future__ import annotations
 import json
 import re
 
-from app.core.config import CODES_DIR
+from app.release.source_manifest import declared_source_path
 
-_MAC_FILE = CODES_DIR / "mac_jurisdictions.json"
+# Declared identity, not a filename composed here -- the jurisdiction map decides which
+# contractor's coverage policy applies to a claim. (Codex F6-R5-A, round 6.)
+_MAC_FILE = declared_source_path("mac_jurisdictions")
 
 _cache: dict = {}
 _cache_mtime: int = -1

@@ -13,13 +13,16 @@ Payer aliases live in data/codes/payers.json — add a payer there, not here.
 """
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 
-from app.core.config import CODES_DIR
+from app.release.source_manifest import (DeclaredSourceUnavailable, declared_document,
+                                         declared_source_path)
 
-_PAYERS_FILE = CODES_DIR / "payers.json"
+#: Declared identity of the payer registry.  The PATH is not composed here: it is
+#: resolved from `app.release.source_manifest`, so the bytes the release certificate
+#: attests and the bytes this module parses are provably the same file.
+_PAYERS_SOURCE_ID = "payer_registry"
 
 _MEMBER_ID_RE = re.compile(r"Member/Policy ID:?\s*([A-Za-z0-9\-]+)", re.IGNORECASE)
 _GROUP_NUM_RE = re.compile(r"Group Number:?\s*([A-Za-z0-9\-]+)", re.IGNORECASE)
@@ -43,6 +46,22 @@ class ParsedInsurance:
     follows_medicare_coverage: bool = False
 
 
+class PayerRegistryUnavailable(DeclaredSourceUnavailable):
+    """The authoritative payer registry could not be read.
+
+    RAISED, never degraded to an empty or last-known-good registry, because "the payer
+    registry is unreadable" and "this note names no payer we recognize" are opposite
+    conclusions that used to be indistinguishable.  With an empty registry EVERY note's
+    insurance text fails to match: `payer_id` None, `is_medicare` False,
+    `follows_medicare_coverage` False — i.e. every patient is silently reclassified as an
+    unrecognized commercial payer, which changes the coverage floor applied (LCD medical
+    necessity, routine-foot-care class findings, Medicare status-I validity) and the
+    prior-authorization policy consulted.  Keeping the LAST-KNOWN-GOOD registry across a
+    corrupt write is the same defect one step removed: the claim is then composed against
+    aliases nobody can point to a certified file for.  (Codex F6-R5-A, round 6.)
+    """
+
+
 _payers_cache: list[dict] = []
 _payers_mtime: int = -1
 
@@ -50,19 +69,26 @@ _payers_mtime: int = -1
 def _load_payers() -> list[dict]:
     """mtime-cached read — editing payers.json (new payer, new alias) takes
     effect on the next parse without a process restart. Previously loaded
-    once at import, so alias changes silently didn't apply until restart."""
+    once at import, so alias changes silently didn't apply until restart.
+
+    FAIL-CLOSED: absent, unparseable, or publishing no payers all raise
+    `PayerRegistryUnavailable` (see above). The cache is only ever advanced by a read
+    that fully succeeded, so a corrupt write cannot leave the process serving a registry
+    whose mtime says it is current."""
     global _payers_cache, _payers_mtime
+    path = declared_source_path(_PAYERS_SOURCE_ID)
     try:
-        mtime = _PAYERS_FILE.stat().st_mtime_ns
-    except OSError:
-        return _payers_cache
+        mtime = path.stat().st_mtime_ns
+    except OSError as exc:
+        raise PayerRegistryUnavailable(
+            f"authoritative payer registry unavailable at {path}: {exc}") from exc
     if mtime != _payers_mtime:
-        try:
-            with open(_PAYERS_FILE) as f:
-                _payers_cache = json.load(f).get("payers", [])
-            _payers_mtime = mtime
-        except Exception:
-            pass  # keep last-known-good registry on a partial write/bad JSON
+        payers = declared_document(_PAYERS_SOURCE_ID, PayerRegistryUnavailable).get("payers")
+        if not isinstance(payers, list) or not payers:
+            raise PayerRegistryUnavailable(
+                f"authoritative payer registry at {path} publishes no non-empty "
+                f"'payers' list")
+        _payers_cache, _payers_mtime = payers, mtime
     return _payers_cache
 
 

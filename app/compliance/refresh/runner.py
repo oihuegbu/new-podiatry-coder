@@ -148,9 +148,12 @@ def _write_coverage_cache(articles: list[dict], effective: str | None) -> None:
     import os
     from datetime import datetime, timezone
 
-    from app.core.config import CODES_DIR
+    from app.release.source_manifest import declared_source_path
 
-    path = CODES_DIR / "mcd_coverage_cache.json"
+    # The WRITER resolves the same declared identity the reader and the release
+    # manifest do, so a refresh can never write the cache somewhere the certified
+    # manifest is not looking. (Codex F6-R5-A, round 6.)
+    path = declared_source_path("mcd_coverage_cache")
     payload = {
         "source": _MCD_EXPORT_URL,
         "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

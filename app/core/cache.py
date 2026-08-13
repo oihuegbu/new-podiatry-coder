@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 
 from app.core.config import BASE_DIR, LLM_PROVIDER
+from app.release.source_manifest import declared_source_path
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -36,7 +37,7 @@ _LOGIC_SOURCES = [
     _APP_DIR / "ner" / "entity_extractor.py",
     _APP_DIR / "ner" / "biomed_ner.py",
     _APP_DIR / "terminology" / "normalizer.py",
-    BASE_DIR / "data" / "terminology" / "clinical_abbreviations.json",
+    declared_source_path("terminology_registry"),
     _APP_DIR / "rag" / "retriever.py",
     _APP_DIR / "coding" / "code_assigner.py",
     _APP_DIR / "validation" / "validator.py",

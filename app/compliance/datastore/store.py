@@ -22,20 +22,42 @@ from app.core.config import (
     ICD10_FILE, CPT_FILE, HCPCS_FILE, NCCI_FILE, MUE_FILE, LCD_FILE,
     MCD_COVERAGE_CACHE_FILE, GLOBAL_PERIODS_FILE, DATA_DIR, CODES_DIR,
 )
+from app.release.source_manifest import (DeclaredSourceUnavailable, declared_document,
+                                         declared_source_path)
 
-POS_FILE = CODES_DIR / "pos_codes.json"
-MODIFIERS_FILE = CODES_DIR / "modifiers.json"
-MODIFIER_EXEMPT_FILE = CODES_DIR / "modifier_exempt.json"
-NCCI_AOC_FILE = CODES_DIR / "ncci_aoc_edits.json"
-ICD10_INSTRUCTIONAL_NOTES_FILE = CODES_DIR / "icd10cm_instructional_notes.json"
-ICD10_INDEX_TERMS_FILE = CODES_DIR / "icd10cm_index_terms.json"
-MCE_EDITS_FILE = CODES_DIR / "mce_edits.json"
-ICD10_CHRONIC_FILE = CODES_DIR / "icd10cm_chronic.json"
-EM_MDM_GRID_FILE = CODES_DIR / "em_mdm_grid.json"
-CODING_SEMANTICS_FILE = CODES_DIR / "coding_semantics.json"
-CPT_CATEGORIES_FILE = CODES_DIR / "cpt_categories.json"
-ICD10_CHAPTERS_FILE = CODES_DIR / "icd10cm_chapters.json"
-ICD10_EXTENSIONS_FILE = CODES_DIR / "icd10cm_extensions.json"
+# Every reference table this store ingests or reads is addressed by its DECLARED
+# release-source identity, never by a filename literal composed here.  Codex F6-R5-A:
+# a path composed in the reader reaches the release manifest only through the
+# incidental data/codes/*.json sweep, so a file that goes MISSING silently drops out
+# of the manifest instead of failing it -- the release then cannot tell an intentional
+# absence from a claim path that quietly lost an authority.  Resolving through the
+# declaration makes the bytes that are certified the bytes that are read, and makes
+# adding a new table here impossible without dispositioning it as required or
+# reviewed-optional.
+POS_FILE = declared_source_path("pos_codes")
+MODIFIERS_FILE = declared_source_path("modifier_definitions")
+MODIFIER_EXEMPT_FILE = declared_source_path("modifier_exempt")
+NCCI_AOC_FILE = declared_source_path("ncci_aoc_edits")
+ICD10_INSTRUCTIONAL_NOTES_FILE = declared_source_path("instructional_notes")
+ICD10_INDEX_TERMS_FILE = declared_source_path("index_terms")
+MCE_EDITS_FILE = declared_source_path("mce_edits")
+ICD10_CHRONIC_FILE = declared_source_path("icd10_chronic")
+EM_MDM_GRID_FILE = declared_source_path("em_mdm_grid")
+CODING_SEMANTICS_SOURCE_ID = "coding_semantics"
+CPT_CATEGORIES_FILE = declared_source_path("cpt_categories")
+ICD10_CHAPTERS_FILE = declared_source_path("icd10_chapters")
+ICD10_EXTENSIONS_FILE = declared_source_path("icd10_extensions")
+
+
+class CodingSemanticsUnavailable(DeclaredSourceUnavailable):
+    """The declared coding-semantics vocabulary could not be read.
+
+    Raised rather than degraded to `{}` because `{}` answers "no modifier fills this
+    role" and "this code is not an E/M / not a surgical procedure / not an anaesthesia
+    code / not an external-cause diagnosis" for EVERY code -- one unreadable file
+    silently reclassifying the whole code set, in the permissive direction, with a log
+    line as the only trace.  (Codex F6-R5-A, round 6.)
+    """
 
 # Official CPT phrasing that designates an add-on code (Appendix D)
 _ADDON_PHRASES = ("list separately in addition", "each additional", "add-on code")
@@ -2411,17 +2433,32 @@ class ComplianceDataStore:
 
         Python owns only the matching mechanism.  The role vocabulary and
         the authoritative descriptor/PFS attributes that define each role
-        live in ``data/codes/coding_semantics.json`` so a source update can
-        change membership without a code deployment.
+        live in the declared ``coding_semantics`` source so a source update
+        can change membership without a code deployment.
+
+        FAIL-CLOSED (Codex F6-R5-A): this used to log and continue with ``{}``, which is
+        never a neutral answer here.  With ``{}`` every ``modifier_roles`` lookup returns
+        an empty set and every ``code_matches_semantic_class`` question -- is this an E/M,
+        a surgical procedure, an anaesthesia code, an external-cause or injury diagnosis --
+        answers False for EVERY code.  Those answers are the inputs to modifier selection
+        and to the checks that key off a code's class, so an unreadable file did not lose a
+        lookup: it silently reclassified the entire code set.
         """
         cached = getattr(self, "_coding_semantics_cache", None)
         if cached is not None:
             return cached
-        try:
-            data = json.loads(CODING_SEMANTICS_FILE.read_text())
-        except (OSError, ValueError) as exc:
-            logger.error("coding semantics unavailable: %s", exc)
-            data = {}
+        data = declared_document(CODING_SEMANTICS_SOURCE_ID, CodingSemanticsUnavailable)
+        missing = [key for key in ("modifier_roles", "code_classes",
+                                   "global_period_classes")
+                   if not isinstance(data.get(key), dict) or not data[key]]
+        if missing:
+            # A document that parses but publishes no vocabulary yields exactly the `{}`
+            # the swallowed-exception path used to yield -- schema drift and a truncated
+            # write must fail the same way an unreadable file does.
+            raise CodingSemanticsUnavailable(
+                f"authoritative coding semantics at "
+                f"{declared_source_path(CODING_SEMANTICS_SOURCE_ID)} publishes no "
+                f"non-empty {missing} vocabulary")
         self._coding_semantics_cache = data
         return data
 

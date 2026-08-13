@@ -21,6 +21,7 @@ from app.release.certificate_models import (
 )
 from app.release.mutation_ledger import normalize_claim
 from app.release.scope_registry import approved_scope, scope_fingerprint
+from app.release.source_manifest import DeclaredSourceUnavailable
 
 
 _EVIDENCE_MIN_LEN = 14
@@ -76,6 +77,13 @@ def _context(result: dict) -> dict:
     try:
         from app.compliance.payer_registry import parse_insurance_text
         parsed = parse_insurance_text(str(meta.get("insurance") or ""))
+    except DeclaredSourceUnavailable:
+        # NOT swallowed: an unreadable payer registry is the one failure here that
+        # silently REWRITES the certificate's context rather than leaving a field blank
+        # -- payer_kind/payer_id would be recorded as "" and the certificate would be
+        # signed as though the note named no payer we recognize. The certificate cannot
+        # be built without the authority it is supposed to bind. (Codex F6-R5-A.)
+        raise
     except Exception:
         pass
     facility = meta.get("service_facility") or {}

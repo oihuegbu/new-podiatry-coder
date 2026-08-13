@@ -7100,14 +7100,18 @@ class CodingValidator:
         if cache is not None:
             return cache
         onto = {}
+        # The DECLARATION is resolved outside the try on purpose: an unregistered or
+        # undispositioned identity is a code/config defect, not a bad file, and must not
+        # be swallowed into the same `{}` a malformed file produces. (Codex F6-R5-A.)
+        from app.release.source_manifest import declared_source_path
+        path = declared_source_path("descriptor_qualifiers")
         try:
             import json
-            from app.core.config import DATA_DIR
-            path = DATA_DIR / "rules" / "descriptor_qualifiers.json"
             onto = (json.loads(path.read_text()).get("qualifiers") or {}) \
                 if path.exists() else {}
         except Exception as exc:  # a malformed file must never sink validation
-            logger.warning(f"descriptor_qualifiers.json load failed: {exc!r}")
+            logger.warning(f"descriptor-qualifier ontology load failed at "
+                           f"{path}: {exc!r}")
             onto = {}
         self._qual_onto_cache = onto
         return onto

@@ -53,7 +53,51 @@ _AUTHORITATIVE = {
     # it changing.  (Codex F6-R5, round 5.)
     "necessity_relation_control": config.NECESSITY_RELATION_CONTROL_FILE,
     "relation_evidence_grammar": config.RELATION_EVIDENCE_GRAMMAR_FILE,
+    # --- round 6: sources the APP-side claim path reads ---------------------------
+    # Codex F6-R5-A: round 5 derived the required set from `claude_coder`'s runtime
+    # graph and expanded the structural filename-literal guard over `claude_coder/*.py`
+    # only -- but `app/**` is in the deployed image and still owns claim-affecting
+    # reads (the human-run 837P submission step resolves the payer through
+    # `app.compliance.payer_registry`; `app.compliance.datastore.store` owns the
+    # modifier-role and semantic-class vocabulary; `app.release.scope_registry` owns
+    # what may be released autonomously).  Every one of these was composed as a
+    # filename literal in its own reader and therefore reached the manifest only
+    # through the incidental `data/codes/*.json` sweep below: a file that went MISSING
+    # simply dropped out of the manifest, so the release could not tell an intentional
+    # absence from a silently relaxed claim path.  They are identities now.
+    "coding_semantics": config.CODING_SEMANTICS_FILE,
+    "payer_registry": config.PAYERS_FILE,
+    "pos_codes": config.POS_CODES_FILE,
+    "modifier_exempt": config.MODIFIER_EXEMPT_FILE,
+    "ncci_aoc_edits": config.NCCI_AOC_FILE,
+    "mce_edits": config.MCE_EDITS_FILE,
+    "icd10_chronic": config.ICD10_CHRONIC_FILE,
+    "cpt_categories": config.CPT_CATEGORIES_FILE,
+    "icd10_chapters": config.ICD10_CHAPTERS_FILE,
+    "icd10_extensions": config.ICD10_EXTENSIONS_FILE,
+    "mac_jurisdictions": config.MAC_JURISDICTIONS_FILE,
+    "mcd_coverage_cache": config.MCD_COVERAGE_CACHE_FILE,
+    "descriptor_qualifiers": config.DESCRIPTOR_QUALIFIERS_FILE,
+    "autonomous_scopes": config.SCOPE_REGISTRY_FILE,
 }
+
+
+class DeclaredSourceUnavailable(RuntimeError):
+    """A DECLARED release source could not be obtained as usable authoritative data.
+
+    The base of every "this authority is unreadable" error in the repository, raised or
+    subclassed on BOTH sides of the production graph (`claude_coder.data_access`'s
+    `AuthoritativeDataUnavailable` family, and the `app/**` readers) so one `except`
+    catches "the authority is unavailable" regardless of which tree read it.
+
+    ABSENCE of a required source is caught upstream -- the capability manifest reports
+    `missing_required` and the source-manifest gate blocks before a certificate exists.
+    PRESENCE-but-unusable is what this exception exists for: a truncated, malformed or
+    schema-drifted file is hashed happily by the manifest (it is there, it has bytes) and
+    every one of these read paths used to swallow the parse failure into an EMPTY table --
+    which for each of these sources is the PERMISSIVE answer, so corruption RELAXED the
+    claim while absence blocked it.  (Codex F6-R5-A, round 6.)
+    """
 
 # Sources the claim-affecting path reads whose ABSENCE is reviewed and accepted, each with
 # the justification for why absence cannot make an ineligible/unsupported claim releasable.
@@ -123,6 +167,24 @@ _OPTIONAL_SOURCES: dict[str, dict] = {
             "drug-name recall aid and per-unit dose table; absence cannot change billed "
             "units because a documented dose with no authoritative per-unit dose HOLDS "
             "the claim (gates.drug_units_gate) instead of falling back to a count",
+    },
+    # --- round 6 (Codex F6-R5-A): app-side sources whose absence is reviewed ----------
+    "em_mdm_grid": {
+        "path": config.EM_MDM_GRID_FILE,
+        "role": "AMA-licensed E/M medical-decision-making grid",
+        "absence_justification":
+            "AMA-licensed content a deployment may not hold; `store.mdm_grid` returns "
+            "None without it and the E/M leveller then makes NO MDM-based level claim "
+            "at all, so absence removes a proposal rather than admitting a higher level",
+    },
+    "rule_exercise": {
+        "path": config.RULE_EXERCISE_FILE,
+        "role": "rule-exercise telemetry for the coding memorandum",
+        "absence_justification":
+            "GENERATED telemetry, not an upstream authority: it records which reviewed "
+            "rules a prior run exercised, and the memorandum narrates it. Absence "
+            "shortens an explanatory narrative; no code, modifier, unit or gate outcome "
+            "reads it",
     },
 }
 
@@ -275,6 +337,113 @@ _REQUIRED_RELEASE_SOURCES: dict[str, dict[str, str]] = {
             "effective window for it, so identity rests on the content digest (its own "
             "declared control version is recorded in the audit trail, not as provenance)",
     },
+    # --- round 6, Codex F6-R5-A: the app-side claim-affecting sources ----------------
+    # Each of these was read at decision time out of a filename literal in its own
+    # module.  The role recorded here is the ANSWER the source supplies; the shared
+    # reason all of them are REQUIRED rather than reviewed-optional is that for each,
+    # an empty/absent table is the PERMISSIVE answer -- it removes a restriction or
+    # silently substitutes a different one -- so absence must fail the release rather
+    # than quietly change what may be billed.
+    "coding_semantics": {
+        "role": "modifier-role and code-semantic-class vocabulary",
+        "release_metadata_exemption":
+            "reviewed in-repo control table (the code-free role vocabulary the generic "
+            "coding mechanics resolve against); no external authority publishes an "
+            "effective window for it, so identity rests on the content digest",
+    },
+    "payer_registry": {
+        # Read by app.compliance.payer_registry, which the human-run 837P submission
+        # step and the compliance claim builder both resolve the payer through.  Absent
+        # or unreadable, EVERY note's insurance text failed to match a payer: payer_id
+        # None, is_medicare False, follows_medicare_coverage False -- i.e. the note was
+        # silently treated as an unrecognized commercial payer, changing which coverage
+        # floor and prior-authorization policy apply.
+        "role": "payer identity / coverage-floor and prior-auth routing",
+        "release_metadata_exemption":
+            "reviewed in-repo payer alias registry, not an ingested upstream publication "
+            "with an effective window; identity rests on the content digest",
+    },
+    "pos_codes": {
+        "role": "place-of-service codes and facility indicator",
+        "release_metadata_exemption":
+            "CMS place-of-service list ingested without a published effective window; "
+            "identity rests on the content digest",
+    },
+    "modifier_exempt": {
+        "role": "modifier-51 / modifier-63 exemption lists",
+        "release_metadata_exemption":
+            "extract of the CPT/CMS exemption appendices, not ingested into a versioned "
+            "effective-window table; identity rests on the content digest",
+    },
+    "ncci_aoc_edits": {
+        "role": "NCCI add-on-code edit pairs",
+        "release_metadata_exemption":
+            "the add-on-code edit file is published alongside the quarterly NCCI PTP "
+            "release but is not ingested into the versioned effective-window table the "
+            "PTP edits are; identity rests on the content digest",
+    },
+    "mce_edits": {
+        "role": "Medicare Code Editor age / unacceptable-principal-diagnosis edits",
+        "release_metadata_exemption":
+            "parsed MCE extract, not ingested into a versioned effective-window table; "
+            "identity rests on the content digest",
+    },
+    "icd10_chronic": {
+        "role": "AHRQ chronic-condition indicator",
+        "release_metadata_exemption":
+            "AHRQ HCUP CCIR extract, not ingested into a versioned effective-window "
+            "table; identity rests on the content digest",
+    },
+    "cpt_categories": {
+        "role": "licensed CPT category membership",
+        "release_metadata_exemption":
+            "the file carries its own licensed CPT edition year, which the reader binds "
+            "to the date of service; it is not ingested into the versioned "
+            "effective-window table, so identity rests on the content digest",
+    },
+    "icd10_chapters": {
+        "role": "ICD-10-CM chapter classification",
+        "release_metadata_exemption":
+            "ships with the ICD-10-CM code edition rather than a release window of its "
+            "own; identity rests on the content digest",
+    },
+    "icd10_extensions": {
+        "role": "ICD-10-CM 7th-character extension roles",
+        "release_metadata_exemption":
+            "ships with the ICD-10-CM code edition rather than a release window of its "
+            "own; identity rests on the content digest",
+    },
+    "mac_jurisdictions": {
+        "role": "MAC jurisdiction map (which contractor's coverage policy applies)",
+        "release_metadata_exemption":
+            "reviewed in-repo jurisdiction map, not an ingested upstream publication "
+            "with an effective window; identity rests on the content digest",
+    },
+    "mcd_coverage_cache": {
+        # Overlaid over the flat LCD seed by `_ingest_lcd`; it carries the covered-ICD
+        # GROUP roles the seed lacks, i.e. the claim-composition grammar of coverage.
+        "role": "parsed CMS MCD article cache (covered-ICD group roles)",
+        "release_metadata_exemption":
+            "a locally written parse cache of the CMS MCD bulk export; the coverage "
+            "window it feeds is published by `coverage_policy`, so this identity rests "
+            "on the content digest",
+    },
+    "descriptor_qualifiers": {
+        "role": "descriptor-qualifier ontology for family arbitration",
+        "release_metadata_exemption":
+            "reviewed in-repo rule configuration, not an ingested upstream publication; "
+            "identity rests on the content digest",
+    },
+    "autonomous_scopes": {
+        # Not medical data: the HMAC-authenticated registry of what may be released
+        # WITHOUT a human.  A substituted or truncated registry changes autonomy, so its
+        # bytes belong in the same certifiable manifest as the code tables.
+        "role": "authenticated autonomous operating-scope registry",
+        "release_metadata_exemption":
+            "human-approved in-repo operating configuration; no external authority "
+            "publishes an effective window for it, so identity rests on the content "
+            "digest (each scope carries its own approval dates and signature)",
+    },
 }
 
 
@@ -338,6 +507,59 @@ def declared_source_path(source_id: str) -> Path:
             f"{source_id!r} is not a declared release source; a file read at decision "
             f"time must be registered and dispositioned in app.release.source_manifest")
     return Path(path)
+
+
+def declared_document(source_id: str,
+                      error: type[DeclaredSourceUnavailable]) -> dict:
+    """The parsed JSON document a DECLARED source publishes, read FAIL-CLOSED.
+
+    Unreadable, unparseable, truncated, or not-a-JSON-object all raise `error` -- the
+    caller's own typed subclass, so the hold names the authority that was lost rather than
+    surfacing as a bare parse error from a module no caller expects to raise.
+
+    This is the ONE mechanic every declared decision-time read shares, and it lives HERE,
+    next to the declaration, rather than in either consuming tree: round 5 put it in
+    `claude_coder.data_access`, which meant `app/**`'s readers -- the other half of the
+    deployed image -- could not reach it without inverting the dependency, and so kept
+    re-deriving (and re-losing) fail-closed behavior in their own `try: ... except:
+    return {}`.  `claude_coder.data_access.declared_document` now delegates here, so both
+    trees share one implementation.  (Codex F6-R5-A, round 6.)
+    """
+    try:
+        path = declared_source_path(source_id)
+    except Exception as exc:
+        # The DECLARATION itself is unresolvable -- an unregistered identity, or a
+        # registry that is not fully dispositioned.  The reader cannot obtain the
+        # authority, which is the same conclusion as unreadable bytes, so it travels the
+        # same typed path and holds.
+        raise error(f"authoritative {source_id} is not resolvable from the release-source "
+                    f"declaration: {exc}") from exc
+    try:
+        with open(path) as handle:
+            payload = json.load(handle)
+    except Exception as exc:
+        raise error(f"authoritative {source_id} unreadable at {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise error(f"authoritative {source_id} at {path} is not a JSON object "
+                    f"(got {type(payload).__name__})")
+    return payload
+
+
+def declared_table(source_id: str, key: str,
+                   error: type[DeclaredSourceUnavailable]) -> dict:
+    """The NON-EMPTY mapping a declared source publishes under `key`.
+
+    Non-empty is part of the contract, not a nicety: a document that parses but carries no
+    table (wrong schema, truncated write, an extract whose builder failed) yields exactly
+    the same `{}` the swallowed-exception path used to yield, and `{}` is the permissive
+    answer for every one of these sources.
+    """
+    payload = declared_document(source_id, error)
+    table = payload.get(key)
+    if not isinstance(table, dict) or not table:
+        raise error(f"authoritative {source_id} at {declared_source_path(source_id)} "
+                    f"publishes no non-empty {key!r} table")
+    return table
 
 
 def required_release_sources() -> dict[str, dict]:

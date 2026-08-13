@@ -29,6 +29,7 @@ from app.core.config import (
     RAG_SIMILARITY_THRESHOLD,
 )
 from app.core.logger import get_logger
+from app.release.source_manifest import declared_source_path
 
 logger = get_logger(__name__)
 
@@ -36,15 +37,19 @@ logger = get_logger(__name__)
 # ('Haglund', 'bunionette') that a terse Tabular descriptor omits — folded
 # into each diagnosis's embedding text so vocabulary-mismatched notes retrieve
 # the right code.
-ICD10_INDEX_TERMS_FILE = ICD10_FILE.parent / "icd10cm_index_terms.json"
+# Addressed by DECLARED identity, not by a filename composed here: these are the
+# reviewed-OPTIONAL recall aids in app/release/source_manifest, and resolving them
+# through the declaration is what keeps the bytes folded into the index the same bytes
+# the release manifest reports as present-or-absent. (Codex F6-R5-A, round 6.)
+ICD10_INDEX_TERMS_FILE = declared_source_path("index_terms")
 # LLM-generated, grounded, provenance-tagged clinical-synonym indexes
 # (tools/build_code_synonyms.py) — the eponym/clinician vocabulary the terse
 # descriptors omit. CPT/HCPCS ship no synonym source at all; ICD's authoritative
 # Index still misses eponyms, so its LLM file SUPPLEMENTS the Index. All
 # optional — an absent file degrades to descriptor(+Index)-only embeddings.
-CPT_SYNONYMS_FILE   = CPT_FILE.parent / "cpt_synonyms.json"
-HCPCS_SYNONYMS_FILE = HCPCS_FILE.parent / "hcpcs_synonyms.json"
-ICD10_SYNONYMS_FILE = ICD10_FILE.parent / "icd10_synonyms.json"
+CPT_SYNONYMS_FILE   = declared_source_path("cpt_synonyms")
+HCPCS_SYNONYMS_FILE = declared_source_path("hcpcs_synonyms")
+ICD10_SYNONYMS_FILE = declared_source_path("icd10_synonyms")
 # Cap synonyms folded per code so a code with a long index list does not
 # dominate/dilute its own embedding.
 _INDEX_TERMS_PER_CODE = 12

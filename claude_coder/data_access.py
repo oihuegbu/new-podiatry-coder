@@ -23,6 +23,14 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Protocol, runtime_checkable
 
+# The ONE typed source registry, shared by both halves of the deployed image. Importing
+# the base error and the fail-closed readers from it (rather than defining a second set
+# here) is what makes "declared source" mean the same thing in `app/**` and in
+# `claude_coder/**`. (Codex F6-R5-A, round 6.)
+from app.release.source_manifest import (DeclaredSourceUnavailable,
+                                         declared_document as _declared_document,
+                                         declared_table as _declared_table)
+
 from .models import CandidateCode, Outcome
 
 # Sentinel distinguishing an authority check that COULD NOT RUN (data missing / a
@@ -31,7 +39,7 @@ from .models import CandidateCode, Outcome
 AUTHORITY_UNAVAILABLE = "__unavailable__"
 
 
-class AuthoritativeDataUnavailable(RuntimeError):
+class AuthoritativeDataUnavailable(DeclaredSourceUnavailable):
     """A REQUIRED authoritative source could not be read as authoritative data.
 
     ABSENCE of a required source is caught upstream: the capability manifest reports it as
@@ -97,31 +105,12 @@ def declared_document(source_id: str,
                       error: type[AuthoritativeDataUnavailable]) -> dict:
     """The parsed JSON document a REQUIRED authoritative source publishes, read FAIL-CLOSED.
 
-    Unreadable, unparseable, truncated, or not-an-object all raise `error`. This is the ONE
-    mechanic every required decision-time read shares, so the next required source added to
-    the declaration inherits the fail-closed behavior instead of re-deriving (and re-losing)
-    it in its own `try: ... except: return {}`. (Round 5, phase 4.)
+    Delegates to the implementation that now lives beside the declaration itself
+    (`app.release.source_manifest.declared_document`) so `app/**`'s readers and this
+    module's share ONE mechanic rather than two that can drift.  Re-exported here under
+    the name the coder's modules already import.  (Codex F6-R5-A, round 6.)
     """
-    try:
-        path = _source_path(source_id)
-    except Exception as exc:
-        # The DECLARATION itself is unresolvable -- an unregistered identity, or a registry
-        # that is not fully dispositioned. The coder cannot obtain the authority, which is
-        # the same conclusion as unreadable bytes, so it travels the same typed path and
-        # holds, instead of escaping as a bare RuntimeError from a module no caller expects
-        # to raise. (Round 5, phase 4.)
-        raise error(f"authoritative {source_id} is not resolvable from the release-source "
-                    f"declaration: {exc}") from exc
-    try:
-        import json
-        with open(path) as fh:
-            payload = json.load(fh)
-    except Exception as exc:
-        raise error(f"authoritative {source_id} unreadable at {path}: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise error(f"authoritative {source_id} at {path} is not a JSON object "
-                    f"(got {type(payload).__name__})")
-    return payload
+    return _declared_document(source_id, error)
 
 
 def declared_table(source_id: str, key: str,
@@ -131,14 +120,10 @@ def declared_table(source_id: str, key: str,
     NON-EMPTY is part of the contract, not a nicety: a document that parses but carries no
     table (wrong schema, truncated write, an extract whose builder failed) yields exactly
     the same `{}` the swallowed-exception path used to yield, and `{}` is the permissive
-    answer for every one of these sources.
+    answer for every one of these sources.  See `declared_document` above for why the
+    implementation lives with the declaration.
     """
-    payload = declared_document(source_id, error)
-    table = payload.get(key)
-    if not isinstance(table, dict) or not table:
-        raise error(f"authoritative {source_id} at {_source_path(source_id)} publishes no "
-                    f"non-empty {key!r} table")   # the path resolved above, so this cannot raise
-    return table
+    return _declared_table(source_id, key, error)
 
 
 @runtime_checkable

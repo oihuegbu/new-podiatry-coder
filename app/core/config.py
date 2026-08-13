@@ -83,6 +83,32 @@ LCD_FILE    = CODES_DIR / os.getenv("LCD_FILENAME",    "podiatry_lcd.json")
 # over the seed so compliance.db rebuilds keep the claim-composition grammar.
 MCD_COVERAGE_CACHE_FILE = CODES_DIR / "mcd_coverage_cache.json"
 
+# --- Claim-affecting reference tables the COMPLIANCE side reads ------------------
+# These paths used to be composed as filename literals inside their own readers
+# (app/compliance/datastore/store.py, payer_registry.py, geo.py), which is exactly
+# how a claim-affecting source comes to be read at decision time while being
+# certified by nobody: the release manifest hashed them only incidentally, through
+# the data/codes/*.json sweep, so a file that went MISSING simply vanished from the
+# manifest instead of failing it.  They are declared here, registered as source
+# identities in app/release/source_manifest, and resolved by their readers through
+# `declared_source_path` -- so the bytes that are certified are the bytes that are
+# read.  (Codex F6-R5-A, round 6.)
+CODING_SEMANTICS_FILE = CODES_DIR / "coding_semantics.json"
+PAYERS_FILE = CODES_DIR / "payers.json"
+POS_CODES_FILE = CODES_DIR / "pos_codes.json"
+MODIFIER_EXEMPT_FILE = CODES_DIR / "modifier_exempt.json"
+NCCI_AOC_FILE = CODES_DIR / "ncci_aoc_edits.json"
+MCE_EDITS_FILE = CODES_DIR / "mce_edits.json"
+ICD10_CHRONIC_FILE = CODES_DIR / "icd10cm_chronic.json"
+CPT_CATEGORIES_FILE = CODES_DIR / "cpt_categories.json"
+ICD10_CHAPTERS_FILE = CODES_DIR / "icd10cm_chapters.json"
+ICD10_EXTENSIONS_FILE = CODES_DIR / "icd10cm_extensions.json"
+MAC_JURISDICTIONS_FILE = CODES_DIR / "mac_jurisdictions.json"
+# AMA-licensed E/M MDM grid -- reviewed-OPTIONAL (deployments without the licence
+# run without it), so its path is declared with the other optional aids in
+# app/release/source_manifest rather than here.
+EM_MDM_GRID_FILE = CODES_DIR / "em_mdm_grid.json"
+
 # Notes directory (PDFs to process) — can be any folder
 NOTES_DIR = Path(os.getenv("NOTES_DIR", str(ATTACHMENTS_DIR)))
 
@@ -102,6 +128,17 @@ MODIFIER_FILE = CODES_DIR / os.getenv("MODIFIER_FILENAME", "modifiers.json")
 INSTRUCTIONAL_NOTES_FILE = CODES_DIR / os.getenv(
     "INSTRUCTIONAL_NOTES_FILENAME", "icd10cm_instructional_notes.json")
 VALIDATOR_RULES_FILE = DATA_DIR / "rules" / "validator_rules.json"
+# Descriptor-qualifier ontology the validator's family-arbitration checks read.  Every
+# qualifier it publishes is a RESTRICTION on which family member may be released, so an
+# unreadable file used to degrade to {} and silently clear codes the reviewed ontology
+# flags -- declared here and registered so absence fails the release.  (F6-R5-A.)
+DESCRIPTOR_QUALIFIERS_FILE = DATA_DIR / "rules" / "descriptor_qualifiers.json"
+# Human-approved, HMAC-authenticated autonomous operating scopes (app/release/
+# scope_registry.py): the registry that decides what may be released autonomously.
+SCOPE_REGISTRY_FILE = DATA_DIR / "release" / "autonomous_scopes.json"
+# Rule-exercise telemetry the coding memorandum narrates from (generated, not an
+# upstream authority) -- reviewed-OPTIONAL, declared with the other optional aids.
+RULE_EXERCISE_FILE = DATA_DIR / "registry" / "rule_exercise.json"
 SNOMED_ROOTS_FILE = DATA_DIR / "snomed_root_concepts.json"
 TERMINOLOGY_REGISTRY_FILE = (
     DATA_DIR / "terminology" / "clinical_abbreviations.json"

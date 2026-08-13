@@ -291,3 +291,47 @@ def test_control_a_working_anchor_reaches_the_durable_audit_chain(deployment,
     # nobody reads this control as 'the deployment auto-releases'.
     assert payload["releasable"] is False
     assert payload["claim_lines"] == []
+
+
+# ------------------------------------------------------- round 6, Codex F6-R5-A
+# The reviewer named two claim-affecting sources that were read out of filename
+# literals in `app/**` and were therefore never source IDENTITIES: they reached the
+# release manifest only through the incidental `data/codes/*.json` sweep, and a sweep
+# cannot report a file that is not there. They are declared and REQUIRED now, so their
+# absence has to be visible from the DEPLOYED entrypoint -- not just from a unit test
+# against the registry.
+#
+# Being honest about which half of the finding this proves: post-cutover the deployed
+# note→code path (`claude_coder.pipeline.code_encounter`) does not READ either file, so
+# their corruption cannot reach a live claim; what binds here is the required-source
+# disposition, which now holds the release when one of them goes missing. Their
+# present-but-corrupt behavior is proved where they ARE read, in
+# tests/test_release_atomicity.py.
+
+@pytest.mark.parametrize("source_id", ["coding_semantics", "payer_registry"])
+def test_a_missing_required_app_source_holds_the_deployed_entrypoint(deployment,
+                                                                     monkeypatch,
+                                                                     tmp_path,
+                                                                     source_id):
+    """Same invocation as the control test above, with a WORKING checkpoint anchor --
+    so the only difference is the missing source, and the hold is attributable to it."""
+    from app.release import source_manifest as sm
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_REQUIRED", "1")
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_ANCHOR", f"file:{deployment.anchor_root}")
+    registry = dict(sm._AUTHORITATIVE)
+    registry[source_id] = tmp_path / "absent-required-source.json"
+    monkeypatch.setattr(sm, "_AUTHORITATIVE", registry)
+
+    payload = deployment.run()
+
+    assert payload["processed"] is True, payload.get("error")
+    assert payload["releasable"] is False
+    assert payload["certificate"] is None
+    assert payload["claim_lines"] == []
+    assert payload["verdict"] != "AUTO_READY"
+    blocked = [g for g in payload["gates"] if g["name"] == "source_manifest"
+               and g["outcome"] != "PASS"]
+    assert blocked, (
+        f"a missing REQUIRED source did not stop the deployed path: "
+        f"{[(g['name'], g['outcome']) for g in payload['gates']]}")
+    assert source_id in blocked[0]["detail"], blocked[0]["detail"]

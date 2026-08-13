@@ -333,7 +333,8 @@ def build_claim(doc: str, reg_event: dict, result: dict,
     """Assemble the clearinghouse professional-claim JSON from the registry's
     verified claim + the note's demographics + the practice config. Returns
     (payload, blocks); any block -> no payload."""
-    from app.compliance.payer_registry import parse_insurance_text
+    from app.compliance.payer_registry import (PayerRegistryUnavailable,
+                                                parse_insurance_text)
 
     blocks: list[str] = []
     claim = reg_event.get("claim") or {}
@@ -341,10 +342,18 @@ def build_claim(doc: str, reg_event: dict, result: dict,
     defaults = cfg.get("claim_defaults") or {}
 
     # -- payer ------------------------------------------------------------
-    parsed = parse_insurance_text(str(meta.get("insurance") or ""))
+    # This is the one production step that still transmits a claim, and the payer
+    # registry is what decides WHO it is transmitted to and under whose coverage
+    # rules. An unreadable registry is a BLOCK (no payload), never an exception out
+    # of a submission run and never a claim built against a payer nobody can name.
+    # (Codex F6-R5-A, round 6.)
+    try:
+        parsed = parse_insurance_text(str(meta.get("insurance") or ""))
+    except PayerRegistryUnavailable as exc:
+        return None, [f"payer registry unavailable: {exc}"]
     if not parsed.stedi_trading_partner_id:
         blocks.append(f"payer '{parsed.payer_name or 'unknown'}' has no "
-                      f"stedi_trading_partner_id in data/codes/payers.json")
+                      f"stedi_trading_partner_id in the declared payer registry")
     structured_member = str(meta.get("member_id") or
                             meta.get("insurance_id") or "").strip()
     parsed_member = str(parsed.member_id or "").strip()

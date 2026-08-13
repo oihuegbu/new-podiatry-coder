@@ -43,10 +43,11 @@ from pathlib import Path
 
 from loguru import logger
 
-from app.core.config import DATA_DIR
+from app.release.source_manifest import declared_source_path
 
-RULES_PATH = DATA_DIR / "rules" / "validator_rules.json"
-EXERCISE_PATH = DATA_DIR / "registry" / "rule_exercise.json"
+# Declared identities, not filenames composed here (Codex F6-R5-A, round 6).
+RULES_PATH = declared_source_path("validator_rules")
+EXERCISE_PATH = declared_source_path("rule_exercise")
 
 MAX_ENTRIES = 40
 MAX_GUIDANCE_CHARS = 320

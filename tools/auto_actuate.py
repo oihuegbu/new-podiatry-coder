@@ -175,12 +175,19 @@ class Replayer:
                 copy.deepcopy(payload.get("supporting_conditions") or []),
         }
         meta = payload.get("patient_metadata") or {}
+        from app.compliance.payer_registry import (PayerRegistryUnavailable,
+                                                    parse_insurance_text)
         try:
             from app.compliance.engine import _parse_dos
-            from app.compliance.payer_registry import parse_insurance_text
             dos = _parse_dos(meta)
             follows_medicare = parse_insurance_text(
                 str(meta.get("insurance") or "")).follows_medicare_coverage
+        except PayerRegistryUnavailable:
+            # NOT swallowed into `follows_medicare = False`: that is the answer for a
+            # commercial payer, so an unreadable registry would silently validate every
+            # note against the WRONG coverage floor (no LCD necessity, no routine-foot-care
+            # class findings, no status-I check). (Codex F6-R5-A, round 6.)
+            raise
         except Exception:
             dos, follows_medicare = None, False
         v = self._fresh_validator()
