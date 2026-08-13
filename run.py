@@ -1,140 +1,322 @@
 #!/usr/bin/env python3
-"""
-Podiatry Medical Coding System
-NER → RAG (Qdrant hybrid) → LLM (Claude Opus 5.0) → Validation Pipeline
+"""Podiatry Medical Coding System — the deployed batch entrypoint.
+
+    PDF ─► verbatim note text (app.ingestion.pdf_parser — a text-extraction utility)
+        ─► claude_coder.pipeline.code_encounter   ◄── THE note→code decision engine
+        ─► {stem}_results.json + all_results.json in OUTPUT_DIR
 
 Usage:
-    python run.py                     # Process all notes
-    python run.py --note NOTE_01...   # Process single note
-    python run.py --rebuild-index     # Force rebuild Qdrant collections
-    python run.py --setup-only        # Load/build all dependencies (models,
-                                       # Qdrant collections, compliance.db)
-                                       # and exit — no notes processed. Run
-                                       # this once; the built state persists
-                                       # in Docker volumes, so later
-                                       # `python run.py` invocations skip
-                                       # straight to fast-path processing.
+    python run.py                     # process every PDF in NOTES_DIR
+    python run.py --note NOTE_01.pdf  # process a single note
+    python run.py --rebuild-index     # force-rebuild the Qdrant collections
+    python run.py --setup-only        # build/load all dependencies and exit —
+                                      # no notes processed. Run once; the built
+                                      # state persists in the Docker volumes, so
+                                      # later `python run.py` invocations skip
+                                      # straight to processing.
+
+================================================================================
+WHY THIS FILE CHANGED — issue #6, Codex finding F6-R4-A1 (P1)
+================================================================================
+Until this cutover the deployed entrypoint — `docker-compose.yml`'s
+`command: ["python", "run.py"]`, and the `process-notes.sh` helper plus
+`note-watcher.service` that `terraform/templates/user_data.sh.tftpl` installs —
+constructed `app.pipeline.MedicalCodingPipeline`.
+
+That is a *different, non-communicating* implementation from
+`claude_coder.pipeline.code_encounter`, which is where the provenance
+repository, the source gates, eligibility-before-retrieval, certificate
+creation, and the external terminal-head checkpoint all live. `app/` and
+`claude_coder/` do not import each other, so pinning
+`PROVENANCE_CHECKPOINT_REQUIRED=1` in Compose was inert for the real note
+processor: no deployed claim ever passed through any of those controls.
+
+`app.pipeline` is a previous build that did not translate doctors' notes to
+codes accurately; `claude_coder` is its replacement. This entrypoint now makes
+the note→code decision with `claude_coder.pipeline.code_encounter` and keeps
+only the operational shell around it — note discovery, note selection, output
+files, logging and the batch summary.
+
+Reachability of the checkpoint chain from THIS file is regression-tested end to
+end by `tests/test_deployment_entrypoint.py`, which drives `main()` exactly as
+`docker compose run app python run.py` does, with a required-but-unavailable
+checkpoint anchor, and proves no releasable claim or certificate can emerge.
+
+DELIBERATELY NOT CALLED FROM HERE ANY MORE — not an oversight, not a TODO
+--------------------------------------------------------------------------------
+The post-batch "growth loop" this file used to drive is paradigm-specific to the
+retired `app.pipeline` self-consistency model: it re-ran each note N times,
+compared the N runs' billing arrays, and minted/replayed declarative rules out
+of the disagreements. `claude_coder` was explicitly designed to replace that
+approach with built-in propose-then-verify plus independent cross-model
+corroboration (see `claude_coder/README.md`, "Running it"), so there are no N
+runs to compare and nothing for that machinery to consume. Porting it to the new
+paradigm is out of scope for this cutover.
+
+The tool modules themselves are INTENTIONALLY LEFT IN PLACE and untouched — they
+remain independently runnable and may be revisited — they are simply no longer
+invoked from the deployed entrypoint:
+
+    app/validation/consistency.py     N-run comparison / canonical selection
+    tools/flip_triage.py              flip triage queue
+    tools/auto_actuate.py             declarative rule auto-actuation
+    tools/replay_reconcile.py         replay reconciliation + review finalization
+    tools/coder_adjudicator.py        expert-coder adjudication
+    tools/clinical_auditor.py         clinical-correctness review
+    tools/audit_convergence_loop.py   audit-dispute convergence
+    tools/claims_registry.py          finalized-claims registry ingest
+    tools/pack_consolidation.py       rule-pack consolidation
+    tools/calibration_dataset.py      calibration row export
+    tools/graduate_templates.py       template graduation
+    tools/denial_feedback.py          denial-feedback gate
+    tools/claim_submitter.py          837P claim submission — see below
+
+Automatic claim submission deserves its own note. `AUTO_SUBMIT_CLAIMS=1` used to
+make this entrypoint transmit real 837P claims to the clearinghouse at the end of
+every batch. Transmission is irreversible, and the submitter reads an
+`app.pipeline`-shaped result that this entrypoint no longer produces, so the
+deployed entrypoint now submits nothing under any configuration. Submission is an
+explicit, separate, human-run step: `python tools/claim_submitter.py --dry-run`.
+
+`tools/unanimity_loop.py` *drives* this file (`subprocess … run.py --consistency
+N --consistency-workers W`). It is left in place too, and the retired flags below
+are still parsed here for exactly one reason: so that driver fails LOUDLY, naming
+this finding, instead of silently receiving one non-consistency run when it asked
+for N independent ones.
+
+Environment variables that only the removed call sites read (`CONSISTENCY_RUNS`,
+`CONSISTENCY_WORKERS`, `AUTO_ACTUATE*`, `DEFER_REVIEW_ROUTING`,
+`CODER_ADJUDICATION`, `CLINICAL_AUDIT`, `DEFER_CLINICAL_AUDIT`,
+`AUDIT_CONVERGENCE`, `PACK_CONSOLIDATION*`, `AUTO_SUBMIT_CLAIMS`,
+`AUTO_GRADUATE`) are now vestigial *for this entrypoint*; they still configure the
+tools above when those are run by hand. They are annotated as such in
+`.env.example` and `terraform/secrets.tf`.
 """
 
 import argparse
 import json
 import os
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from app.core.config import NOTES_DIR, OUTPUT_DIR
+from app.core.dates import parse_date_of_service
 from app.core.logger import get_logger
-from app.pipeline import MedicalCodingPipeline
+from app.ingestion.pdf_parser import extract_from_pdf
+from claude_coder.data_access import AuthoritativeSource
+from claude_coder.models import Verdict
+from claude_coder.pipeline import code_encounter, render
 
 logger = get_logger("main")
 
-# ---------------------------------------------------------------- parallel
-# consistency workers. Process-based (spawn), NOT threads: the pipeline's
-# SQLite connections and mutable validator state are not thread-safe, and a
-# spawned process builds its own full pipeline instance so nothing is shared.
-# The N runs of one note are fully independent by design (use_cache=False),
-# so running them concurrently changes wall time only — per-run behavior,
-# inputs and outputs are byte-identical to the sequential path.
-_WORKER_PIPELINE = None
+#: Identity of the per-note JSON shape written below. It is deliberately NOT
+#: `app.pipeline.CodingResult.model_dump()`'s shape — that model belongs to the
+#: retired pipeline. Bump this when the payload changes so a reader can tell which
+#: producer wrote a file.
+RESULTS_SCHEMA = "claude_coder.run/1"
+
+#: Retired-flag exit code: distinct from argparse's own 2 so a driver can tell
+#: "you asked for something this entrypoint no longer does" from "bad usage".
+EXIT_RETIRED_FLAG = 3
 
 
-def _consistency_worker_init():
-    global _WORKER_PIPELINE
-    from app.pipeline import MedicalCodingPipeline
-    _WORKER_PIPELINE = MedicalCodingPipeline()
-    _WORKER_PIPELINE.initialize()
-    logger.info(f"  [CONSISTENCY] worker pid {os.getpid()} ready")
+# ----------------------------------------------------------------- note inputs
+def read_note(pdf_path: Path) -> dict:
+    """The three inputs `code_encounter` needs, out of one PDF.
+
+    `extract_from_pdf` is a TEXT-EXTRACTION utility (per-page verbatim
+    transcription + patient metadata), not a coding-decision component — reusing
+    it is not reusing the retired pipeline. Everything downstream of this
+    function is `claude_coder`.
+
+      note_text         the complete verbatim transcription. This exact string is
+                        what every evidence span is anchored INTO, so it must be
+                        the full text, never a reconstruction from selected
+                        sections.
+      date_of_service   parsed from the extracted metadata. `claude_coder` does
+                        NOT extract a DOS itself — its extraction step is
+                        code-free clinical facts — so the DOS is genuinely an
+                        external, pre-parsed argument. Unparseable/absent stays
+                        None: the release gates fail closed on it rather than
+                        letting anything guess a service date.
+      document_version  the immutable identity of the SOURCE document (the PDF's
+                        own sha256), which is what evidence-span ids are salted
+                        with. Falls back to None -> the pipeline salts with the
+                        text hash instead.
+    """
+    extraction = extract_from_pdf(pdf_path)
+    sections = extraction.get("sections") or {}
+    note_text = str(sections.get("full_text") or "")
+    if not note_text.strip():
+        raise ValueError(
+            f"PDF text extraction produced no text for {pdf_path.name}; refusing to "
+            f"code an empty note")
+    metadata = extraction.get("metadata") or {}
+    dos = parse_date_of_service(metadata)
+    integrity = extraction.get("note_integrity") or {}
+    document_version = str(integrity.get("source_pdf_sha256") or "").strip() or None
+    return {
+        "note_text": note_text,
+        "date_of_service": dos.isoformat() if dos else None,
+        "document_version": document_version,
+        "patient_metadata": metadata,
+    }
 
 
-def _consistency_worker_run(pdf_path_str: str, run_idx: int, total: int) -> dict:
-    logger.info(f"  [CONSISTENCY] {Path(pdf_path_str).stem}: run {run_idx}/{total} "
-                f"(worker pid {os.getpid()})")
-    try:
-        result = _WORKER_PIPELINE.process_note(Path(pdf_path_str), use_cache=False)
-        return result.model_dump()
-    except Exception as exc:
-        # Log the full traceback HERE, in the worker — it is the only place
-        # the original stack exists. Then re-raise as a plain, picklable
-        # exception: SDK exceptions (e.g. anthropic APIStatusError
-        # subclasses) require keyword-only args that pickle's default
-        # reconstruction can't supply — sending one across the process
-        # boundary crashes the Pool's result-handler thread, after which
-        # every p.get() in the parent hangs forever (observed live: batch
-        # froze 3h mid-corpus on note 029).
-        import traceback
-        logger.error(f"  [CONSISTENCY] run {run_idx}/{total} failed for "
-                     f"{Path(pdf_path_str).name}:\n{traceback.format_exc()}")
-        raise RuntimeError(
-            f"consistency run {run_idx}/{total} failed for "
-            f"{Path(pdf_path_str).name}: {type(exc).__name__}: {exc}"
-        ) from None
+def load_billing_context(path: str | None) -> dict | None:
+    """Structured encounter context (billing entity + participant roster).
+
+    Same file and same schema as `python -m claude_coder.cli --billing-context`;
+    the pipeline's extractor validates it strictly and fails closed on a
+    malformed roster. None is the correct default when a deployment has no
+    reviewed roster: actor ownership then resolves UNKNOWN, which holds every
+    claim line rather than assuming the billing entity performed the service.
+    That hold is intentional and visible — see the warning logged by `main`.
+    """
+    if not path:
+        return None
+    with open(path) as fh:
+        context = json.load(fh)
+    if not isinstance(context, dict):
+        raise ValueError(f"--billing-context {path}: file must contain a JSON object")
+    return context
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Podiatry Medical Coding System")
-    parser.add_argument("--note", type=str, help="Process a single PDF note (filename or path)")
-    parser.add_argument("--rebuild-index", action="store_true", help="Force rebuild Qdrant vector collections")
-    parser.add_argument("--no-cache", action="store_true", help="Skip cache lookup and force fresh processing")
-    parser.add_argument("--setup-only", action="store_true", help="Load/build all dependencies and exit — process no notes")
-    parser.add_argument("--consistency", type=int,
-                        default=int(os.getenv("CONSISTENCY_RUNS", "1")),
-                        help="Run each note N times and flag non-unanimous codes "
-                             "for review (self-consistency; forces --no-cache)")
-    parser.add_argument("--consistency-workers", type=int,
-                        default=int(os.getenv("CONSISTENCY_WORKERS", "1")),
-                        help="Run a note's N consistency runs concurrently in this "
-                             "many worker processes (1 = sequential). Each worker "
-                             "builds its own pipeline instance — the runs are "
-                             "independent, so this only changes wall time. Mind "
-                             "the LLM provider's rate limits before raising it.")
-    parser.add_argument("--start-at", type=str, default="",
-                        help="Skip notes sorting before this stem/filename prefix — "
-                             "resume a batch without redoing completed notes")
-    parser.add_argument("--end-at", type=str, default="",
-                        help="Skip notes sorting after this stem/filename prefix — "
-                             "bound a batch to a subset (e.g. --end-at 011 with "
-                             "--start-at 001 runs notes 001-010)")
-    parser.add_argument("--only", type=str, default="",
-                        help="Comma-separated note stems: process exactly these "
-                             "notes (a non-contiguous subset --start/--end can't "
-                             "express, e.g. the unanimity loop's holdouts)")
-    args = parser.parse_args()
+# ---------------------------------------------------------------- note outputs
+def _line_payload(line) -> dict:
+    chosen = line.chosen
+    return {
+        "system": chosen.system if chosen else None,
+        "code": chosen.code if chosen else None,
+        "descriptor": chosen.descriptor if chosen else None,
+        "modifiers": list(line.modifiers),
+        "units": line.units,
+        "kind": line.fact.kind.value,
+        "subject": line.fact.description,
+        "method": line.method.value,
+        "rationale": line.rationale,
+        "excluded_reason": line.excluded_reason,
+        "authority": chosen.authority if chosen else {},
+        "evidence": [s.text for s in line.fact.evidence],
+    }
 
-    from app.core.config import LLM_PROVIDER, CLAUDE_MODEL, OPENAI_MODEL
-    active_model = CLAUDE_MODEL if LLM_PROVIDER == "claude" else OPENAI_MODEL
-    logger.info("=" * 70)
-    logger.info("PODIATRY MEDICAL CODING SYSTEM")
-    logger.info(f"Pipeline: NER → RAG (Qdrant hybrid) → LLM ({LLM_PROVIDER}:{active_model}) → Validation")
-    logger.info(f"Timestamp: {datetime.now().isoformat()}")
-    logger.info("=" * 70)
 
-    # Initialize pipeline
-    pipeline = MedicalCodingPipeline()
-    pipeline.initialize(force_rebuild_index=args.rebuild_index)
+def result_payload(result, *, pdf_path: Path, document_version: str | None) -> dict:
+    """The per-note artifact.
 
-    if args.setup_only:
-        logger.info("\n--setup-only: dependencies loaded, no notes processed. Exiting.")
-        return
+    Deliberately explicit about the two things a reader most needs and most
+    easily gets wrong:
 
-    # Find notes to process
+      `releasable` is the ONLY field that says a claim may be billed without a
+      human. It requires BOTH an AUTO_READY verdict AND a certificate — a
+      certificate is never built when the data fingerprint, the release
+      evidence, or the terminal durable write failed, so an AUTO_READY verdict
+      with no certificate is not a release.
+
+      `claim_lines` holds only lines that are actually billable (resolved,
+      billable, not excluded); everything else stays under `other_lines` for the
+      audit trail instead of being dropped.
+    """
+    # Identity, not equality: ResolvedLine is a dataclass, so two genuinely
+    # distinct lines that happen to carry equal field values would compare equal
+    # and silently disappear from `other_lines` under an `in` test.
+    billable_ids = {id(ln) for ln in result.billable_lines}
+    return {
+        "schema": RESULTS_SCHEMA,
+        "produced_by": "claude_coder.pipeline.code_encounter",
+        "document_id": result.encounter_id,
+        "source_pdf": pdf_path.name,
+        "document_version": document_version,
+        "date_of_service": result.date_of_service,
+        "processed": True,
+        "error": None,
+        "verdict": result.verdict.value,
+        "destination": result.destination.value if result.destination else None,
+        "control_mode": result.control_mode,
+        "releasable": bool(result.verdict is Verdict.AUTO_READY and result.certificate),
+        "claim_lines": [_line_payload(ln) for ln in result.billable_lines],
+        "other_lines": [_line_payload(ln) for ln in result.lines
+                        if id(ln) not in billable_ids],
+        "gates": [{"name": g.name, "outcome": g.outcome.value, "detail": g.detail,
+                   "authority": g.authority, "retryable": g.retryable}
+                  for g in result.gates],
+        "notes": list(result.notes),
+        "routing": list(result.routing),
+        "recommendations": list(result.recommendations),
+        "necessity_support": list(result.necessity_support),
+        "audit_record_hashes": list(result.audit_record_hashes),
+        "certificate": result.certificate,
+        "certificate_sha256": (result.certificate or {}).get("certificate_sha256"),
+        # The explainability surface, verbatim, so the JSON artifact is readable
+        # without re-running anything.
+        "audit_trail": render(result),
+    }
+
+
+def failure_payload(pdf_path: Path, exc: Exception) -> dict:
+    """A note that could not be processed at all still gets an artifact.
+
+    Writing nothing would leave a stale success from an earlier run in place and
+    make a failed note invisible in OUTPUT_DIR — an empty success by omission.
+    """
+    return {
+        "schema": RESULTS_SCHEMA,
+        "produced_by": "claude_coder.pipeline.code_encounter",
+        "document_id": pdf_path.stem,
+        "source_pdf": pdf_path.name,
+        "processed": False,
+        "error": f"{type(exc).__name__}: {exc}",
+        "verdict": None,
+        "destination": None,
+        "releasable": False,
+        "claim_lines": [],
+    }
+
+
+def write_result(payload: dict, pdf_path: Path) -> Path:
+    output_file = OUTPUT_DIR / f"{pdf_path.stem}_results.json"
+    with open(output_file, "w") as fh:
+        json.dump(payload, fh, indent=2, default=str)
+    return output_file
+
+
+def rebuild_all_results() -> None:
+    """Combined output — rebuilt from the per-note files on disk, not from this
+    batch's in-memory list, so a resumed batch (`--start-at`) or a partial
+    failure never overwrites the corpus aggregate with a subset."""
+    combined = []
+    for path in sorted(OUTPUT_DIR.glob("*_results.json")):
+        if path.name == "all_results.json":
+            continue
+        try:
+            combined.append(json.loads(path.read_text()))
+        except Exception as exc:
+            logger.warning(f"  all_results: skipped unreadable {path.name} ({exc})")
+    with open(OUTPUT_DIR / "all_results.json", "w") as fh:
+        json.dump(combined, fh, indent=2, default=str)
+
+
+# ------------------------------------------------------------- note selection
+def select_notes(args) -> list[Path]:
+    """The notes this invocation should process, or [] with the SPECIFIC reason
+    already logged — a caller that reported a generic "no notes found" over the
+    top of "--only: no PDF found for [...]" would bury the real cause."""
     if args.note:
         note_path = Path(args.note)
         if not note_path.exists():
             note_path = NOTES_DIR / args.note
         if not note_path.exists():
             logger.error(f"Note not found: {args.note}")
-            sys.exit(1)
-        note_files = [note_path]
-    else:
-        note_files = sorted(NOTES_DIR.glob("*.pdf"))
+            return []
+        return [note_path]
 
+    note_files = sorted(NOTES_DIR.glob("*.pdf"))
     if not note_files:
         logger.error(f"No clinical notes found in {NOTES_DIR}")
-        sys.exit(1)
-
+        return []
     if args.start_at:
         before = len(note_files)
         note_files = [p for p in note_files if p.stem >= args.start_at]
@@ -142,10 +324,9 @@ def main():
                     f"already-completed note(s)")
     if args.end_at:
         before = len(note_files)
-        # Inclusive: '--end-at 010' must include 010's own note file —
-        # '010_samuel...' compares GREATER than the bare prefix '010', so a
-        # strict < silently dropped the last requested note (measured live:
-        # two batches in a row skipped their final note with no message).
+        # Inclusive: '--end-at 010' must include 010's own file — '010_samuel…'
+        # compares GREATER than the bare prefix '010', so a strict < silently
+        # dropped the last requested note (measured live: two batches in a row).
         note_files = [p for p in note_files
                       if p.stem[:len(args.end_at)] <= args.end_at]
         logger.info(f"--end-at {args.end_at}: excluding {before - len(note_files)} "
@@ -156,437 +337,202 @@ def main():
         missing = wanted - {p.stem for p in note_files}
         if missing:
             logger.error(f"--only: no PDF found for {sorted(missing)}")
-            sys.exit(1)
+            return []
         logger.info(f"--only: processing exactly {len(note_files)} note(s)")
+    return note_files
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Podiatry Medical Coding System")
+    parser.add_argument("--note", type=str,
+                        help="Process a single PDF note (filename or path)")
+    parser.add_argument("--rebuild-index", action="store_true",
+                        help="Force rebuild the Qdrant vector collections")
+    parser.add_argument("--setup-only", action="store_true",
+                        help="Build/load all dependencies and exit — process no notes")
+    # Defaults from the environment because the deployed path takes no flags:
+    # `docker compose run app python run.py` (and the note-watcher's
+    # process-notes.sh) would otherwise have no way to supply a roster without
+    # editing a generated helper script. Documented in .env.example.
+    parser.add_argument("--billing-context", type=str,
+                        default=os.getenv("BILLING_CONTEXT_FILE", ""),
+                        help="Path to a JSON file declaring billing_entity_id and the "
+                             "encounter's participant roster (env: BILLING_CONTEXT_FILE). "
+                             "Without it, actor ownership is UNKNOWN and every claim "
+                             "line holds.")
+    parser.add_argument("--start-at", type=str, default="",
+                        help="Skip notes sorting before this stem/filename prefix — "
+                             "resume a batch without redoing completed notes")
+    parser.add_argument("--end-at", type=str, default="",
+                        help="Skip notes sorting after this stem/filename prefix "
+                             "(inclusive) — bound a batch to a subset")
+    parser.add_argument("--only", type=str, default="",
+                        help="Comma-separated note stems: process exactly these notes")
+    # --- retired flags: parsed only so their callers fail loudly (F6-R4-A1) ---
+    parser.add_argument("--no-cache", action="store_true",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--consistency", type=int, default=1,
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--consistency-workers", type=int, default=1,
+                        help=argparse.SUPPRESS)
+    return parser
+
+
+def reject_retired_flags(args) -> int | None:
+    """Retired-flag handling, stated out loud rather than silently ignored.
+
+    `--no-cache` was a switch on `app.pipeline`'s result cache. `claude_coder`
+    has no result cache — every encounter is coded fresh — so the flag is a
+    no-op that still means what the caller wanted. It warns and continues.
+
+    `--consistency`/`--consistency-workers` asked for N independent runs whose
+    disagreements drive the retired growth loop. Honouring the flag by running
+    once would silently give a caller a fraction of the assurance it requested,
+    so it is refused instead.
+    """
+    if args.no_cache:
+        logger.warning(
+            "--no-cache is a no-op: the result cache belonged to the retired "
+            "app.pipeline; claude_coder codes every encounter fresh already.")
+    if args.consistency > 1 or args.consistency_workers > 1:
+        logger.error(
+            f"--consistency={args.consistency} "
+            f"--consistency-workers={args.consistency_workers} is retired "
+            f"(issue #6, F6-R4-A1). The deployed entrypoint now runs "
+            f"claude_coder.pipeline.code_encounter, which replaces the N-run "
+            f"self-consistency comparison with built-in propose-then-verify plus "
+            f"independent cross-model corroboration. Running once while you asked for "
+            f"multiple independent runs would silently give you less assurance than "
+            f"you requested, so this run is refused. Drop the flags to process the "
+            f"batch.")
+        return EXIT_RETIRED_FLAG
+    return None
+
+
+# ------------------------------------------------------------------------ main
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    retired = reject_retired_flags(args)
+    if retired is not None:
+        return retired
+
+    from app.core.config import CLAUDE_MODEL, LLM_PROVIDER, OPENAI_MODEL
+    active_model = CLAUDE_MODEL if LLM_PROVIDER == "claude" else OPENAI_MODEL
+    logger.info("=" * 70)
+    logger.info("PODIATRY MEDICAL CODING SYSTEM")
+    logger.info(f"Pipeline: PDF text → claude_coder (extract → eligibility → "
+                f"resolve → gates → certificate) [{LLM_PROVIDER}:{active_model}]")
+    logger.info(f"Timestamp: {datetime.now().isoformat()}")
+    logger.info("=" * 70)
+
+    try:
+        billing_context = load_billing_context(args.billing_context)
+    except Exception as exc:
+        logger.error(f"--billing-context could not be read: {exc}")
+        return 1
+    if billing_context is None:
+        logger.warning(
+            "No --billing-context supplied: actor ownership resolves UNKNOWN, so "
+            "every claim line will HOLD before retrieval. This is fail-closed by "
+            "design — supply the reviewed participant roster to release claims.")
+
+    if args.setup_only:
+        AuthoritativeSource().prepare(force_rebuild_index=args.rebuild_index)
+        logger.info("\n--setup-only: dependencies loaded, no notes processed. Exiting.")
+        return 0
+
+    # Note selection BEFORE dependency loading, deliberately: `prepare()` can cost
+    # an hour on a cold index, and a typo in --note/--only must not be reported
+    # only after paying for it.
+    note_files = select_notes(args)
+    if not note_files:
+        return 1
+
+    # ONE authoritative source for the whole batch: it caches the vector store,
+    # the reference tables and every authoritative file, so per-note construction
+    # would repay a multi-minute load on every note.
+    source = AuthoritativeSource()
+    source.prepare(force_rebuild_index=args.rebuild_index)
 
     logger.info(f"\nProcessing {len(note_files)} clinical note(s)\n")
-
-    # Worker pool for parallel consistency runs — created once for the whole
-    # batch (each worker's pipeline init costs ~1 min; per-note pools would
-    # pay it 54 times). 'spawn' start method: forked children would inherit
-    # the parent's live SQLite connections and Qdrant client, which must not
-    # be shared across processes; spawned children import fresh and build
-    # their own in _consistency_worker_init.
-    pool = None
-    if args.consistency > 1 and args.consistency_workers > 1:
-        import multiprocessing as mp
-        # cap at the batch's total run count — extra workers would only idle
-        n_workers = min(args.consistency_workers,
-                        args.consistency * len(note_files))
-        pool = mp.get_context("spawn").Pool(
-            processes=n_workers, initializer=_consistency_worker_init)
-        logger.info(f"[CONSISTENCY] {n_workers} parallel run workers starting "
-                    f"(pipeline init in each)")
-
-    # Process notes
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    results = []
-    deferred_docs: list[str] = []  # non-unanimous, awaiting finalization
 
-    # Cross-note parallelism: every note's N runs are submitted to the pool
-    # up front, so the workers drain one batch-wide queue instead of
-    # parallelizing only within a single note (which capped useful workers
-    # at N and left the batch note-sequential). With W workers, ~W/N notes
-    # are in flight at once; wall time approaches max(single-run time) as W
-    # grows. Results are still collected, compared and saved in note order.
-    # The runs stay fully independent (own worker pipeline, use_cache=False),
-    # so per-run behavior is byte-identical to the sequential path.
-    jobs: dict = {}
-    if pool is not None and args.consistency > 1:
-        for pdf_path in note_files:
-            jobs[pdf_path] = [
-                pool.apply_async(_consistency_worker_run,
-                                 (str(pdf_path), i + 1, args.consistency))
-                for i in range(args.consistency)
-            ]
-
+    payloads = []
+    failures = 0
     for pdf_path in note_files:
+        logger.info("=" * 70)
+        logger.info(f"PROCESSING: {pdf_path.name}")
+        logger.info("=" * 70)
         try:
-            if args.consistency > 1:
-                # Self-consistency: N independent uncached runs; any code that
-                # is not unanimous across them is routed to human review.
-                from app.validation.consistency import (
-                    compare_runs, select_canonical, annotate_result)
-                if pool is not None:
-                    dumps = [p.get() for p in jobs[pdf_path]]
-                else:
-                    dumps = []
-                    for i in range(args.consistency):
-                        logger.info(f"  [CONSISTENCY] run {i + 1}/{args.consistency}")
-                        r = pipeline.process_note(pdf_path, use_cache=False)
-                        dumps.append(r.model_dump())
-                # Persist every independent run — flip forensics need the
-                # losing runs' validation traces, and only the canonical
-                # payload survives otherwise.
-                runs_dir = OUTPUT_DIR / "consistency_runs"
-                runs_dir.mkdir(parents=True, exist_ok=True)
-                for i, dump in enumerate(dumps, 1):
-                    with open(runs_dir / f"{pdf_path.stem}_run{i}.json", "w") as rf:
-                        json.dump(dump, rf, indent=2, default=str)
-                report = compare_runs(dumps, store=pipeline.compliance_store)
-                idx = select_canonical(dumps)
-                # A disagreement at save time is not yet a human's problem:
-                # the post-batch actuation may mint a rule and the replay
-                # reconciliation realize it minutes from now. Routing to
-                # REVIEW is a FINALIZATION decision, made after this batch's
-                # actuation+reconcile pass (below) — or by the unanimity
-                # loop's own end-of-loop finalization when it is driving.
-                payload = annotate_result(dumps[idx], report, route=False)
-                if not report["unanimous"]:
-                    deferred_docs.append(pdf_path.stem)
-                n_billing = sum(1 for d in report["disagreements"]
-                                if not d.get("advisory"))
-                n_advisory = len(report["disagreements"]) - n_billing
-                if not report["unanimous"]:
-                    logger.warning(
-                        f"  [CONSISTENCY] {pdf_path.stem}: {n_billing} billing "
-                        f"disagreement(s) ({n_advisory} advisory) across "
-                        f"{report['runs']} runs — review deferred pending "
-                        f"actuation + replay reconciliation")
-                else:
-                    logger.info(
-                        f"  [CONSISTENCY] {pdf_path.stem}: billing arrays "
-                        f"unanimous across {report['runs']} runs"
-                        + (f" ({n_advisory} advisory-only variance)" if n_advisory else ""))
-            else:
-                result = pipeline.process_note(pdf_path, use_cache=not args.no_cache)
-                payload = result.model_dump()
-            results.append(payload)
-
-            output_file = OUTPUT_DIR / f"{pdf_path.stem}_results.json"
-            with open(output_file, "w") as f:
-                json.dump(payload, f, indent=2, default=str)
-            logger.info(f"  Saved → {output_file.name}")
-
-        except Exception as e:
-            logger.error(f"FAILED: {pdf_path.name} — {e}")
+            note = read_note(pdf_path)
+            if not note["date_of_service"]:
+                logger.warning(
+                    f"  {pdf_path.name}: no parseable date of service in the note; "
+                    f"date-dependent gates will hold this encounter")
+            logger.info(f"  DOS: {note['date_of_service']} | "
+                        f"document_version: {note['document_version']}")
+            result = code_encounter(
+                pdf_path.stem,
+                note["note_text"],
+                note["date_of_service"],
+                source=source,
+                billing_context=billing_context,
+                document_version=note["document_version"],
+            )
+            payload = result_payload(result, pdf_path=pdf_path,
+                                     document_version=note["document_version"])
+            logger.info(f"  VERDICT: {payload['verdict']} → {payload['destination']} "
+                        f"| {len(payload['claim_lines'])} claim line(s) "
+                        f"| releasable={payload['releasable']}")
+        except Exception as exc:
+            failures += 1
+            logger.error(f"FAILED: {pdf_path.name} — {type(exc).__name__}: {exc}")
             import traceback
-            traceback.print_exc()
+            logger.error(traceback.format_exc())
+            payload = failure_payload(pdf_path, exc)
+        payloads.append(payload)
+        # Its own boundary: a note that coded fine but whose artifact cannot be
+        # written has NOT been delivered, and must be counted as a failure rather
+        # than aborting the remaining notes on an I/O problem.
+        try:
+            logger.info(f"  Saved → {write_result(payload, pdf_path).name}")
+        except Exception as exc:
+            if payload.get("processed"):
+                failures += 1
+            logger.error(f"FAILED to write results for {pdf_path.name} — "
+                         f"{type(exc).__name__}: {exc}")
 
-    if pool is not None:
-        pool.close()
-        pool.join()
+    try:
+        rebuild_all_results()
+    except Exception as exc:   # the aggregate is derived; never lose the summary to it
+        logger.error(f"all_results.json could not be rebuilt — "
+                     f"{type(exc).__name__}: {exc}")
 
-    def _rebuild_all_results():
-        # Combined output — rebuilt from the per-note files on disk, not
-        # this batch's in-memory list, so a resumed batch (--start-at) or
-        # partial failure never overwrites the corpus aggregate with a
-        # subset. Called again after the post-batch growth loop, whose
-        # reconciliation/finalization rewrites per-note files.
-        combined_payloads = []
-        for f_path in sorted(OUTPUT_DIR.glob("*_results.json")):
-            if f_path.name == "all_results.json":
-                continue
-            try:
-                combined_payloads.append(json.loads(f_path.read_text()))
-            except Exception as exc:
-                logger.warning(f"  all_results: skipped unreadable {f_path.name} ({exc})")
-        with open(OUTPUT_DIR / "all_results.json", "w") as f:
-            json.dump(combined_payloads, f, indent=2, default=str)
-
-    if results:
-        _rebuild_all_results()
-
-    # Final summary
-    logger.info(f"\n{'='*70}")
+    logger.info(f"\n{'=' * 70}")
     logger.info("BATCH COMPLETE")
-    logger.info(f"{'='*70}")
-    logger.info(f"Total: {len(results)} | Success: {sum(1 for r in results if r.get('success'))} | Failed: {sum(1 for r in results if not r.get('success'))}")
-
-    tiers = {"AUTO": 0, "REVIEW": 0, "REJECT": 0}
-    for r in results:
-        tiers[r.get("auto_coding_tier")] = tiers.get(r.get("auto_coding_tier"), 0) + 1
-
-    logger.info(f"Auto: {tiers['AUTO']} | Review: {tiers['REVIEW']} | Reject: {tiers['REJECT']}")
+    logger.info(f"{'=' * 70}")
+    logger.info(f"Total: {len(payloads)} | Processed: {len(payloads) - failures} "
+                f"| Failed: {failures}")
+    destinations: dict[str, int] = {}
+    for payload in payloads:
+        key = payload.get("destination") or ("PROCESSING_FAILURE"
+                                             if not payload.get("processed") else "UNKNOWN")
+        destinations[key] = destinations.get(key, 0) + 1
+    logger.info("Destinations: " + " | ".join(
+        f"{name}: {count}" for name, count in sorted(destinations.items())))
+    logger.info(f"Releasable (AUTO_READY + certificate): "
+                f"{sum(1 for p in payloads if p.get('releasable'))}")
     logger.info(f"Output → {OUTPUT_DIR}")
 
-    # Denial feedback gate — part of the pipeline, not a side tool: when the
-    # registry holds payer denials (ingested from 835s/CSV), every batch
-    # re-checks that each denial's error class is now caught pre-submission.
-    # A MISSED denial means a deterministic layer is still absent for a
-    # failure mode a payer has already demonstrated — loudest possible flag.
-    try:
-        from tools.denial_feedback import _load_registry, build_report
-        if _load_registry():
-            report = build_report(OUTPUT_DIR)
-            counts = report["counts"]
-            missed = [c for c in report["denials"]
-                      if c["status"] == "MISSED" and not c.get("waived")]
-            logger.info(f"Denial feedback: {counts}")
-            for c in missed:
-                logger.warning(
-                    f"  [DENIAL MISSED] {c.get('document_id')} {c.get('code')} "
-                    f"CARC {c.get('carc')} ({c.get('carc_label', '')[:50]}) — "
-                    f"pipeline still passes this clean; a layer is missing")
-    except Exception as e:  # never let the gate break batch output
-        logger.warning(f"Denial feedback gate skipped: {e}")
-
-    # Post-batch growth loop, in dependency order:
-    #   1. flip triage + actuation  — disagreements become declarative rules
-    #   2. replay reconciliation    — accepted rules are realized on THIS
-    #      batch's stored runs (no new LLM spend); notes whose replays now
-    #      agree become unanimous on disk
-    #   3. finalization             — whatever is STILL split has survived
-    #      an actuation pass that minted no fix for it: only now does it
-    #      become a human's problem (unless the unanimity loop is driving —
-    #      it iterates further and owns the finalization decision)
-    #   4. registry ingest + calibration — record every unanimous+CLEAN
-    #      claim, including ones reconciliation just converged
-    if args.consistency > 1:
-        actuated_rules = 0
-        try:
-            from tools import flip_triage
-            tstats = flip_triage.scan(OUTPUT_DIR)
-            logger.info(
-                f"Flip queue: {tstats['total_classes']} class(es), "
-                f"{tstats['open']} open")
-            # total_classes, not open: actuate() also reopens escalations
-            # whose "no template fits" verdict predates the current template
-            # vocabulary — a queue with zero open classes can still yield.
-            if tstats["total_classes"] and os.getenv("AUTO_ACTUATE", "1") == "1":
-                from tools.auto_actuate import actuate
-                limit = int(os.getenv("AUTO_ACTUATE_LIMIT", "5"))
-                # Scope to THIS batch's documents: evidence, convergence,
-                # and the inertness control set all stay inside the corpus
-                # just processed — stale results from older corpora in the
-                # same directory can neither trigger nor veto a rule.
-                # AUTO_ACTUATE_SCOPE (comma-separated stems/prefixes)
-                # overrides for callers that process a SUBSET but need the
-                # gates verified against the whole corpus — the unanimity
-                # loop reruns only holdouts, but a rule must still be inert
-                # on the notes that are already unanimous.
-                scope_env = os.getenv("AUTO_ACTUATE_SCOPE", "")
-                batch_scope = (
-                    tuple(s.strip() for s in scope_env.split(",")
-                          if s.strip())
-                    if scope_env else tuple(p.stem for p in note_files))
-                astats = actuate(OUTPUT_DIR, limit=limit, dry_run=False,
-                                 scope=batch_scope)
-                actuated_rules = astats["actuated"]
-                logger.info(
-                    f"Auto-actuation: {astats['actuated']} rule(s) accepted, "
-                    f"{astats['escalated']} class(es) escalated to human "
-                    f"review (of {astats['considered']} considered)")
-        except Exception as e:
-            logger.warning(f"Flip actuation skipped: {e}")
-
-        # Unconditional when anything is split: rules accepted THIS pass are
-        # the obvious trigger, but actuation also proves classes "resolved
-        # at baseline" (the current pack already converges their replays —
-        # measured live: 6 such classes with zero acceptances), and the pack
-        # can have moved through any parallel driver. Replay is cheap and
-        # deterministic; a skipped reconcile strands convergeable notes.
-        if deferred_docs:
-            try:
-                from tools.replay_reconcile import reconcile
-                rstats = reconcile(OUTPUT_DIR, docs=deferred_docs)
-                logger.info(
-                    f"Replay reconciliation: {rstats['reconciled']} note(s) "
-                    f"now unanimous under the new rules, "
-                    f"{rstats['still_split']} still split "
-                    f"(of {rstats['checked']} replayed)")
-                deferred_docs = [
-                    d for d in deferred_docs
-                    if not rstats["docs"].get(d, "").startswith("reconciled")]
-            except Exception as e:
-                logger.warning(f"Replay reconciliation skipped: {e}")
-
-        # Expert-coder adjudication: what survives actuation + reconcile is
-        # judgment-shaped (modifier-25 significance, MDM leveling,
-        # documentation sufficiency) — no generic deterministic rule decides
-        # it. The automated coder (Fable 5, bound to the authoritative
-        # sources in the case file) adjudicates each holdout; independent
-        # passes must agree, verdicts touch only the disputed items, and
-        # the realigned runs must replay unanimous. Only abstentions and
-        # split verdicts continue on to the human queue. When the unanimity
-        # loop is driving it adjudicates at ITS end instead — mid-loop
-        # holdouts may still converge under the next accepted rule.
-        if deferred_docs and os.getenv("DEFER_REVIEW_ROUTING", "0") != "1" \
-                and os.getenv("CODER_ADJUDICATION", "1") == "1":
-            try:
-                from tools.coder_adjudicator import adjudicate
-                astats = adjudicate(OUTPUT_DIR, docs=deferred_docs)
-                logger.info(
-                    f"Coder adjudication: {astats['adjudicated']} note(s) "
-                    f"settled, {astats['abstained']} abstained, "
-                    f"{astats['split_verdicts']} split, "
-                    f"{astats['failed_replay']} failed replay "
-                    f"(of {astats['considered']} considered)")
-                deferred_docs = [
-                    d for d in deferred_docs
-                    if not astats["docs"].get(d, "").startswith("adjudicated")]
-            except Exception as e:
-                logger.warning(f"Coder adjudication skipped: {e}")
-
-        # Finalization: the unanimity loop (DEFER_REVIEW_ROUTING=1) keeps
-        # iterating with fresh LLM runs and finalizes at ITS end; every
-        # other driver finalizes here — this batch's actuation+reconcile
-        # was its one automated shot.
-        if deferred_docs and os.getenv("DEFER_REVIEW_ROUTING", "0") != "1":
-            try:
-                from tools.replay_reconcile import finalize_review_routing
-                routed = finalize_review_routing(OUTPUT_DIR, deferred_docs)
-                logger.info(f"Finalized: {routed} note(s) routed to REVIEW")
-            except Exception as e:
-                logger.warning(f"Review finalization skipped: {e}")
-
-        # Clinical-correctness review — the universal CLEAN gate: EVERY
-        # scrub-CLEAN claim was HELD at REVIEW by the pipeline under the
-        # [clinical_audit/pending] marker, and only this review's upheld
-        # verdict promotes it to CLEAN. The review is a whole-claim expert
-        # pass (code selection, primary designation, missing documented
-        # codes, coverage logic, wrong system advisories) PLUS a verdict on
-        # every interpretive layer correction — self-reported and
-        # diff-derived, so no unreported mutation escapes it. A dispute
-        # replaces the hold with the named item (human queue), and every
-        # disputed correction/finding is enqueued as an audit_dispute flip
-        # class on the next triage scan — the growth loop that turns
-        # confirmed review findings into deterministic rules/templates once
-        # a human verifies the correct claim. Fail closed: no review ->
-        # never CLEAN.
-        # DEFER_CLINICAL_AUDIT=1 (set by the unanimity loop) skips the audit
-        # here: mid-loop, a holdout's interpretive corrections still change
-        # every iteration, so auditing them now re-spends the LLM on
-        # intermediate states and lets a dispute be overwritten by the next
-        # iteration before the growth queue captures it. The loop runs the
-        # audit ONCE at its finalization on the settled claims instead.
-        # Registry auto-recording independently blocks un-audited
-        # interpretive claims (eligible_for_auto fails closed), so nothing
-        # ships CLEAN while the audit is deferred.
-        if (os.getenv("CLINICAL_AUDIT", "1") == "1"
-                and os.getenv("DEFER_CLINICAL_AUDIT", "0") != "1"):
-            try:
-                from tools.clinical_auditor import audit_batch
-                batch_docs = [str(r.get("document_id", ""))
-                              for r in results
-                              if isinstance(r, dict) and r.get("document_id")]
-                caud = audit_batch(OUTPUT_DIR, docs=batch_docs or None)
-                logger.info(
-                    f"Clinical audit: {caud['audited']} audited "
-                    f"({caud['upheld']} upheld, {caud['disputed']} "
-                    f"disputed), {caud['skipped']} unchanged/skipped")
-                for doc, msg in sorted(caud["docs"].items()):
-                    if "disputed" in msg:
-                        logger.warning(f"  [clinical-audit] {doc}: {msg}")
-                # Audit convergence — a disputed review does not just sit
-                # in the human queue: AUDIT_CONVERGENCE=1 (default) runs
-                # the convergence loop, where the expert-coder adjudicator
-                # settles each grounded finding against the authoritative
-                # sources, actuation turns the verified fix into a
-                # deterministic rule/template/gate, and the note replays
-                # and is re-reviewed until upheld. Only a STALLED loop
-                # leaves disputes with a human.
-                if os.getenv("AUDIT_CONVERGENCE", "1") == "1":
-                    from tools.audit_convergence_loop import (
-                        _disputed_docs, _scope_docs, converge)
-                    # judge from the saved files, not this pass's counters:
-                    # a note still disputed from an EARLIER batch is skipped
-                    # by fingerprint (caud counts it as unchanged), and it
-                    # deserves convergence just the same
-                    in_scope = _scope_docs(OUTPUT_DIR, batch_docs or None)
-                    if _disputed_docs(OUTPUT_DIR, in_scope):
-                        summary = converge(OUTPUT_DIR,
-                                           docs=batch_docs or None)
-                        logger.info(
-                            f"Audit convergence: {summary['status']} after "
-                            f"{len(summary['iterations'])} iteration(s); "
-                            f"remaining dispute(s): "
-                            f"{summary.get('final_disputed', [])}")
-            except Exception as e:
-                logger.warning(f"Clinical audit skipped: {e}")
-
-        try:
-            from tools.claims_registry import ingest as registry_ingest
-            stats = registry_ingest(OUTPUT_DIR)
-            logger.info(
-                f"Claims registry: {stats['recorded']} recorded, "
-                f"{stats['unchanged']} unchanged, "
-                f"{stats['human_protected']} human-protected, "
-                f"{stats['skipped']} awaiting review/ineligible")
-        except Exception as e:  # never let the ledger break batch output
-            logger.warning(f"Claims registry ingest skipped: {e}")
-
-        # Pack consolidation — the growth loop's maintenance counterpart
-        # (tools/pack_consolidation.py): exercise scan (cached by
-        # pack+corpus hash — free when nothing changed), dormancy tags,
-        # and behavior-preserving merges gated on byte-identical corpus
-        # replay. When the unanimity loop is driving
-        # (DEFER_REVIEW_ROUTING=1) it consolidates at ITS finalization
-        # instead — mid-loop the pack is still growing.
-        if os.getenv("DEFER_REVIEW_ROUTING", "0") != "1" \
-                and os.getenv("PACK_CONSOLIDATION", "1") == "1":
-            try:
-                from tools.pack_consolidation import consolidate
-                csum = consolidate(
-                    OUTPUT_DIR,
-                    merge=os.getenv("PACK_CONSOLIDATION_MERGE",
-                                    "1") == "1")
-                logger.info(
-                    f"Pack consolidation: "
-                    f"{len(csum['dormancy'].get('tagged', []))} newly "
-                    f"dormant, {len(csum['merges'])} merge(s) accepted, "
-                    f"{len(csum['declined']) + len(csum['rejected'])} "
-                    f"declined/rejected")
-            except Exception as e:
-                logger.warning(f"Pack consolidation skipped: {e}")
-
-        # Claim submission — registry-verified CLEAN claims -> 837P via the
-        # clearinghouse adapter. Opt-in (AUTO_SUBMIT_CLAIMS=1): transmission
-        # is irreversible, so the default posture is build-on-demand via
-        # `python tools/claim_submitter.py --dry-run`. Every envelope value
-        # (fee schedule, NPIs/TIN, payer trading-partner IDs, facility) is
-        # read from data/practice_config.json + data/codes/payers.json at
-        # submission time; a missing value blocks that one claim with a
-        # recorded reason and never crashes the batch.
-        if os.getenv("AUTO_SUBMIT_CLAIMS", "0") == "1":
-            try:
-                from tools.claim_submitter import submit_all
-                sstats = submit_all(OUTPUT_DIR)
-                logger.info(
-                    f"Claim submission: {sstats['submitted']} submitted, "
-                    f"{sstats['already_submitted']} already submitted, "
-                    f"{sstats['blocked']} blocked")
-                for doc, msg in sorted(sstats["docs"].items()):
-                    if not msg.startswith("submitted"):
-                        logger.info(f"  [submit] {doc}: {msg}")
-            except Exception as e:
-                logger.warning(f"Claim submission skipped: {e}")
-
-        # Calibration dataset — labeled rows (features from each result,
-        # labels from the routing verdict + registry human/payer outcomes)
-        # accumulate from day one so a learned confidence model can be
-        # trained the moment human-verdict volume supports it.
-        try:
-            from tools.calibration_dataset import (
-                export as calib_export, DEFAULT_OUT as CALIB_OUT)
-            cstats = calib_export(OUTPUT_DIR, CALIB_OUT)
-            logger.info(
-                f"Calibration dataset: {cstats['total']} row(s) "
-                f"({cstats['new']} new, {cstats['updated']} updated)")
-        except Exception as e:
-            logger.warning(f"Calibration dataset export skipped: {e}")
-
-        # Template graduation proposal — maturity is evaluated, but runtime
-        # code never writes executable application modules.
-        if os.getenv("AUTO_GRADUATE", "0") == "1":
-            try:
-                from tools.graduate_templates import graduate
-                gstats = graduate(OUTPUT_DIR)
-                if gstats["considered"]:
-                    logger.info(
-                        f"Template graduation: "
-                        f"{len(gstats['promoted'])} proposed, "
-                        f"{len(gstats['not_yet'])} not yet eligible, "
-                        f"{len(gstats['failed'])} rolled back "
-                        f"(of {gstats['considered']} sandboxed)")
-            except Exception as e:
-                logger.warning(f"Template graduation skipped: {e}")
-
-        # Reconciliation/finalization rewrote per-note files after the
-        # first aggregate build — refresh so all_results.json matches disk.
-        if results:
-            _rebuild_all_results()
+    # A batch in which NOTHING could be processed is an operational failure, not
+    # an empty success — exit non-zero so a caller/`set -e` script sees it. A
+    # partial failure keeps exit 0 (each failure is logged and has its own
+    # artifact), matching the prior entrypoint's contract for resumable batches.
+    if failures and failures == len(payloads):
+        logger.error("Every note in this batch failed to process.")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

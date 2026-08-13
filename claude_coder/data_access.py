@@ -227,6 +227,35 @@ class AuthoritativeSource:
         self._drug_units: dict | None = None
         self._rich: dict | None = None
 
+    def prepare(self, force_rebuild_index: bool = False) -> None:
+        """Build/load every heavy dependency ONCE, up front, and fail loudly if it
+        cannot be built.
+
+        Everything this adapter reads is lazy by design, so a batch that never calls
+        this still works — it just pays the vector-store build (up to ~60-90 min on a
+        cold Qdrant) and the reference-DB load inside the first encounter it codes,
+        where the cost looks like a hung first note and where a *missing* dependency
+        surfaces as that note's system hold rather than as a startup failure.
+
+        This is the entrypoint's `--setup-only` step (and its pre-batch warm-up):
+
+          * the Qdrant hybrid collections — rebuilt from scratch when
+            `force_rebuild_index` is set, otherwise loaded/refreshed by checksum;
+          * the authoritative code-reference tables;
+          * the claim-assembly data (PFS indicators + modifier definitions), asserted
+            readable here for the same reason `code_encounter` asserts it: an empty
+            table is the PERMISSIVE answer for both, so its unavailability must be an
+            error, never a default. Raises `AuthoritativeDataUnavailable`.
+        """
+        if force_rebuild_index:
+            from app.rag.vector_store import MedicalCodeVectorStore
+            self._store = MedicalCodeVectorStore()
+            self._store.build_or_load(force_rebuild=True)
+        else:
+            self._vector_store()
+        self._reference()
+        self.assert_claim_assembly_data_readable()
+
     def _rich_records(self, system: str) -> dict:
         """Raw {code: record} straight from data/codes/<system>_codes.json, which
         carries the FULL set of authoritative description tiers (the in-memory

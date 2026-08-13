@@ -43,13 +43,20 @@ resource "aws_secretsmanager_secret_version" "app_env" {
     AUTHORIZED_MODEL_PROVIDERS    = join(",", var.authorized_model_providers)
     CODING_EXECUTION_PROFILES     = jsonencode(var.coding_execution_profiles)
     MIN_INDEPENDENT_MODEL_DOMAINS = tostring(var.min_independent_model_domains)
-    CONSISTENCY_MODE              = var.consistency_mode
-    CONSISTENCY_RUNS              = tostring(var.consistency_runs)
-    CONSISTENCY_WORKERS           = tostring(var.consistency_workers)
-    CODER_ADJUDICATOR_MODEL       = var.coder_adjudicator_model
-    CODER_ADJUDICATION_PASSES     = tostring(var.coder_adjudication_passes)
-    CLINICAL_AUDITOR_MODEL        = var.clinical_auditor_model
-    CLINICAL_AUDIT_PASSES         = tostring(var.clinical_audit_passes)
+    # VESTIGIAL for the deployed entrypoint since issue #6 finding F6-R4-A1:
+    # `python run.py` now codes with claude_coder.pipeline.code_encounter and no
+    # longer drives the self-consistency / adjudication / clinical-audit loop that
+    # read these. They are still delivered because the tools/*.py utilities that
+    # read them remain runnable by hand on the box, and because REMOVING a key from
+    # this map DELETES it from the live secret (the exact class of silent loss this
+    # file's header note records). Removal is a separate, deliberate decision.
+    CONSISTENCY_MODE          = var.consistency_mode
+    CONSISTENCY_RUNS          = tostring(var.consistency_runs)
+    CONSISTENCY_WORKERS       = tostring(var.consistency_workers)
+    CODER_ADJUDICATOR_MODEL   = var.coder_adjudicator_model
+    CODER_ADJUDICATION_PASSES = tostring(var.coder_adjudication_passes)
+    CLINICAL_AUDITOR_MODEL    = var.clinical_auditor_model
+    CLINICAL_AUDIT_PASSES     = tostring(var.clinical_audit_passes)
 
     # Terminal-head checkpoint anchor (claude_coder/checkpoint.py, issue #6
     # F6-R4-A). DERIVED from the bucket resource, never a literal: the bucket

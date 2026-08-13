@@ -1,0 +1,293 @@
+"""The DEPLOYED entrypoint reaches the checkpoint-enforced coder — proved, not asserted.
+
+Codex finding F6-R4-A1 (issue #6, P1): `docker-compose.yml` runs `python run.py` and
+`terraform/templates/user_data.sh.tftpl` calls the same path on first boot and from the
+note watcher, but `run.py` used to construct `app.pipeline.MedicalCodingPipeline` — a
+separate implementation that never touches `claude_coder`'s provenance repository, source
+gates, eligibility gates, certificate creation, or external terminal-head checkpoint.
+Pinning `PROVENANCE_CHECKPOINT_REQUIRED=1` in Compose was therefore inert for the real note
+processor, and the prior wiring regression only proved that the environment STRING existed.
+
+This module closes that hole from the deployment side:
+
+  * the structural tests pin the deployment command to this entrypoint, and pin this
+    entrypoint's coding call to `claude_coder`, by parsing the checked-in source;
+
+  * the end-to-end tests drive `run.main()` — the exact Python target of
+    `docker compose run app python run.py` — over a note directory, with the checkpoint
+    anchor REQUIRED and either unavailable or mismatched, and prove that no releasable
+    claim and no certificate can come out of the deployed path.
+
+What is substituted, and why each substitution cannot manufacture the result:
+
+  `run.extract_from_pdf`   the Claude-Vision PDF transcriber. An input source, not a
+                           decision component; stubbed so the test needs no API key. It
+                           supplies note text, a DOS and a document version, i.e. MORE
+                           input than the real thing has to produce.
+  the extraction LLM       stubbed with a well-formed fact/relation graph so extraction
+                           genuinely SUCCEEDS. This matters: if extraction failed, the
+                           encounter would hold at the same `pre_retrieval_integrity`
+                           boundary for a completely different reason and the test would
+                           pass for the wrong one.
+  `AuthoritativeSource._vector_store`
+                           the RAG index, replaced by an index that returns no hits. A
+                           test must not build a 60-90 minute Qdrant index. Everything
+                           else on the source (reference tables, claim-assembly data,
+                           gates, fingerprint) is the real `AuthoritativeSource`, and an
+                           empty index can only ever make the outcome MORE conservative.
+  the verify/corroborate   answer "nothing is entailed" — the conservative answer, and
+  LLMs                     the only one an index with no hits could support. Stubbed so
+                           the run needs no network at all; without this the encounter
+                           would hold on a provider error, which is a DIFFERENT hold
+                           than the one under test.
+
+The control test is the discriminator: the SAME invocation with a working anchor commits
+durable audit rows, so the two failing cases differ from it in exactly one thing — the
+terminal-head checkpoint.
+
+No real medical code appears anywhere in this file; the fixture note is synthetic.
+"""
+import ast
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+import run as entrypoint  # noqa: E402  — the exact module the deployment executes
+
+
+# --------------------------------------------------------------- structural wiring
+def test_the_compose_command_is_this_entrypoint():
+    """The deployed container command must still be the file these tests drive."""
+    compose = (REPO_ROOT / "docker-compose.yml").read_text()
+    assert 'command: ["python", "run.py"]' in compose, (
+        "docker-compose.yml no longer runs run.py; the end-to-end proof below no longer "
+        "describes the deployed path")
+
+
+def test_first_boot_and_the_note_watcher_invoke_the_same_entrypoint():
+    user_data = (REPO_ROOT / "terraform" / "templates" / "user_data.sh.tftpl").read_text()
+    assert "python run.py --setup-only" in user_data, (
+        "first-boot dependency loading no longer goes through run.py --setup-only")
+    assert "python run.py" in user_data.split("process-notes.sh")[-1] or \
+           "run.py \"$@\"" in user_data, (
+        "the process-notes helper (which the note-watcher service calls) no longer runs run.py")
+
+
+def test_the_entrypoint_imports_the_claude_coder_pipeline_and_not_the_retired_one():
+    """Parsed from the AST, not grepped: this file's own header discusses `app.pipeline`
+    in prose, and a substring check would either miss the real thing or trip on the
+    explanation of why it is gone."""
+    tree = ast.parse((REPO_ROOT / "run.py").read_text())
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            imported.update(f"{node.module}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+    assert "claude_coder.pipeline.code_encounter" in imported, (
+        "the deployed entrypoint no longer imports the checkpoint-enforced coder")
+    assert not [name for name in imported if name.startswith("app.pipeline")], (
+        f"the deployed entrypoint imports the retired app.pipeline again: "
+        f"{sorted(n for n in imported if n.startswith('app.pipeline'))}")
+
+
+def test_retired_consistency_flags_are_refused_not_silently_downgraded():
+    """`tools/unanimity_loop.py` still invokes this entrypoint with exactly these flags.
+    Honouring them by running ONCE would hand a caller a fraction of the assurance it
+    asked for, silently; the refusal makes that driver stop and say so. Returns before
+    any dependency is loaded, so this is also the cheap proof that the refusal is
+    unconditional rather than dependent on a healthy environment."""
+    assert entrypoint.main(["--consistency", "3", "--consistency-workers", "12"]) == \
+        entrypoint.EXIT_RETIRED_FLAG
+    assert entrypoint.main(["--consistency", "2"]) == entrypoint.EXIT_RETIRED_FLAG
+    assert entrypoint.EXIT_RETIRED_FLAG not in (0, 1, 2), (
+        "the retired-flag exit code must be distinguishable from success, a batch "
+        "failure, and argparse's usage error")
+
+
+# ------------------------------------------------------------------- e2e fixture
+#: Synthetic note. The pipeline's disposition/negation logic turns on LINGUISTIC
+#: markers, never on any clinical term, so nothing here needs to be a real code.
+NOTE_TEXT = (
+    "Procedure: excision of lesion alpha, right site two. "
+    "Assessment: condition alpha, right side. "
+    "Excision of lesion alpha was performed for condition alpha of the right side. "
+    "Patient denies finding gamma."
+)
+
+FACTS_JSON = json.dumps({
+    "facts": [
+        {"kind": "procedure", "description": "excision of lesion alpha",
+         "attributes": {"laterality": "right", "anatomy": "site two"},
+         "disposition": "performed_today", "negated": False,
+         "evidence": ["excision of lesion alpha, right site two",
+                      "Excision of lesion alpha was performed"],
+         "confidence": 0.97,
+         "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
+                             "temporal": 0.99, "performer": 0.99, "relationship": 0.99}},
+        {"kind": "diagnosis", "description": "condition alpha of the right side",
+         "attributes": {"laterality": "right"}, "disposition": "performed_today",
+         "negated": False,
+         "evidence": ["condition alpha, right side",
+                      "condition alpha of the right side"],
+         "confidence": 0.98,
+         "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
+                             "temporal": 0.99, "assertion": 0.99, "experiencer": 0.99}},
+    ],
+    "relations": [
+        {"subject_event_id": "F2", "object_event_id": "F1", "predicate": "reason_for",
+         "state": "asserted", "evidence_fact_ids": ["F1", "F2"], "confidence": 0.99},
+    ],
+})
+
+STEM = "NOTE_ENTRYPOINT_001"
+DOCUMENT_VERSION = "sha256:" + "a" * 64
+
+
+class _StubVectorStore:
+    """Stands in for the Qdrant hybrid index — an index that knows nothing.
+
+    Retrieval IS reached here (a diagnosis has no performer, so it is not held by the
+    unknown-ownership gate the way a procedure is), and building a real 60-90 minute
+    Qdrant index inside a test is not an option. Returning no hits leaves every gate,
+    every authoritative lookup and the whole release path real, and simply means the
+    synthetic fixture concepts resolve to nothing — which is the honest answer for
+    concepts that exist in no code set.
+    """
+
+    def search(self, description, system, top_k=20):
+        return []
+
+
+@pytest.fixture
+def deployment(tmp_path, monkeypatch):
+    """A complete, isolated deployment: notes in, results out, own provenance store."""
+    from app.core import config as app_config
+    from claude_coder import extraction
+    from claude_coder import verify as verify_module
+    from claude_coder.data_access import AuthoritativeSource
+
+    notes_dir = tmp_path / "attachments"
+    notes_dir.mkdir()
+    output_dir = tmp_path / "results"
+    output_dir.mkdir()
+    anchor_root = tmp_path / "anchor"
+    (notes_dir / f"{STEM}.pdf").write_bytes(b"%PDF-1.4 fixture")
+
+    monkeypatch.setattr(entrypoint, "NOTES_DIR", notes_dir)
+    monkeypatch.setattr(entrypoint, "OUTPUT_DIR", output_dir)
+    monkeypatch.setattr(app_config, "PROVENANCE_DB", tmp_path / "provenance.db")
+    monkeypatch.setattr(entrypoint, "extract_from_pdf", lambda pdf_path: {
+        "metadata": {"date_of_service": "2026-03-14"},
+        "sections": {"full_text": NOTE_TEXT},
+        "note_integrity": {"source_pdf_sha256": DOCUMENT_VERSION},
+    })
+    monkeypatch.setattr(extraction, "_default_llm", lambda system, user: FACTS_JSON)
+    monkeypatch.setattr(AuthoritativeSource, "_vector_store",
+                        lambda self: _StubVectorStore())
+    # Declared providers mirror the deployment's (verifier OpenAI, corroborator
+    # Anthropic) so the independence machinery sees a well-formed pair rather than an
+    # undeclared one; both answer "not entailed", so nothing can be verified anyway.
+    monkeypatch.setattr(verify_module, "default_verify_llm",
+                        verify_module.declare_model_profile(
+                            lambda system, user: '{"choice": 0, "reason": "stub"}',
+                            provider="openai"))
+    monkeypatch.setattr(verify_module, "default_corroborate_llm",
+                        verify_module.declare_model_profile(
+                            lambda system, user: '{"entailed": false, '
+                                                 '"missing_element": false, '
+                                                 '"reason": "stub"}',
+                            provider="claude"))
+
+    class _Deployment:
+        def __init__(self):
+            self.output_dir = output_dir
+            self.anchor_root = anchor_root
+
+        def run(self) -> dict:
+            assert entrypoint.main([]) == 0, "the batch itself must not crash"
+            return json.loads((output_dir / f"{STEM}_results.json").read_text())
+
+        def anchor_file(self) -> Path:
+            (found,) = list(anchor_root.glob("*.checkpoint.json"))
+            return found
+
+    return _Deployment()
+
+
+def _assert_nothing_releasable(payload):
+    assert payload["processed"] is True, payload.get("error")
+    assert payload["releasable"] is False
+    assert payload["certificate"] is None
+    assert payload["certificate_sha256"] is None
+    assert payload["claim_lines"] == []
+    assert payload["verdict"] != "AUTO_READY"
+    assert payload["destination"] == "SYSTEM_HOLD"
+    assert payload["audit_record_hashes"] == [], (
+        "a durable audit row was committed even though the checkpoint refused")
+    held = [g for g in payload["gates"] if g["name"] == "pre_retrieval_integrity"]
+    assert held, f"no enforced-boundary hold in {[g['name'] for g in payload['gates']]}"
+    assert held[0]["outcome"] == "UNKNOWN"
+    assert held[0]["retryable"] is True
+
+
+# ------------------------------------------------------------------- the proof
+def test_required_but_unavailable_checkpoint_releases_nothing(deployment, monkeypatch):
+    """`PROVENANCE_CHECKPOINT_REQUIRED=1` with no anchor configured — the exact drift
+    docker-compose.yml's pinned constant is designed to guarantee is the WORST case."""
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_REQUIRED", "1")
+    monkeypatch.delenv("PROVENANCE_CHECKPOINT_ANCHOR", raising=False)
+
+    payload = deployment.run()
+    _assert_nothing_releasable(payload)
+
+    combined = json.loads((deployment.output_dir / "all_results.json").read_text())
+    assert [p for p in combined if p["document_id"] == STEM]
+    assert not [p for p in combined if p.get("releasable")], (
+        "the aggregate corpus file offers a releasable claim the per-note file refused")
+
+
+def test_mismatched_checkpoint_releases_nothing(deployment, monkeypatch):
+    """A configured anchor whose stored checkpoint cannot be verified. Unverifiable is
+    not absent: the release must hold, never fall back to 'no anchor configured'."""
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_REQUIRED", "1")
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_ANCHOR",
+                       f"file:{deployment.anchor_root}")
+
+    first = deployment.run()
+    assert first["audit_record_hashes"], (
+        "control precondition failed: the working anchor committed no audit rows")
+
+    deployment.anchor_file().write_text("{ this is not a valid checkpoint record")
+
+    payload = deployment.run()
+    _assert_nothing_releasable(payload)
+
+
+def test_control_a_working_anchor_reaches_the_durable_audit_chain(deployment,
+                                                                  monkeypatch):
+    """The discriminator. Same entrypoint, same note, same stubs — only the checkpoint
+    differs — and here the encounter DOES reach the provenance repository and commit
+    durable rows. So the two holds above are attributable to the checkpoint and to
+    nothing else (a missing API key, a malformed note, an unbuilt index would all have
+    held identically and silently)."""
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_REQUIRED", "1")
+    monkeypatch.setenv("PROVENANCE_CHECKPOINT_ANCHOR",
+                       f"file:{deployment.anchor_root}")
+
+    payload = deployment.run()
+
+    assert payload["processed"] is True, payload.get("error")
+    assert len(payload["audit_record_hashes"]) >= 2, (
+        "evidence anchoring and the relation graph must both be durably recorded")
+    assert deployment.anchor_file().exists()
+    # Still not releasable — no reviewed participant roster, and an empty index — so
+    # nobody reads this control as 'the deployment auto-releases'.
+    assert payload["releasable"] is False
+    assert payload["claim_lines"] == []

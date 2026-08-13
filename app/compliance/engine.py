@@ -6,9 +6,6 @@ Flow:  CodingResult dict  ──build_claim──▶  Claim
 """
 from __future__ import annotations
 
-import re
-from datetime import date, datetime
-
 from app.compliance.agents.base import ComplianceAgent
 from app.compliance.datastore.store import ComplianceDataStore
 from app.compliance.models import (
@@ -16,33 +13,21 @@ from app.compliance.models import (
     ScrubResult, Status, Subscriber,
 )
 from app.compliance.geo import is_state_abbr, state_from_text
+from app.core.dates import parse_date, parse_date_of_service
 from app.compliance.payer_registry import parse_insurance_text
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-def _parse_date(raw: str) -> date | None:
-    raw = str(raw or "").strip()
-    if not raw:
-        return None
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%B %d, %Y", "%b %d, %Y", "%m/%d/%y"):
-        try:
-            return datetime.strptime(raw, fmt).date()
-        except ValueError:
-            continue
-    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", raw)
-    if m:
-        try:
-            return date(int(m[1]), int(m[2]), int(m[3]))
-        except ValueError:
-            pass
-    return None
-
-
-def _parse_dos(meta: dict) -> date | None:
-    raw = (meta or {}).get("date_of_service") or (meta or {}).get("dos") or ""
-    return _parse_date(raw)
+# Documented-date parsing moved to app/core/dates.py so the deployed
+# claude_coder entrypoint (run.py) can reuse it WITHOUT importing this module's
+# compliance stack. Re-exported under the original private names: every existing
+# caller (app/pipeline.py, app/coding/code_assigner.py, app/release/
+# claim_readiness.py, app/validation/validator.py, tools/*) keeps working, and
+# there is still exactly ONE implementation.
+_parse_date = parse_date
+_parse_dos = parse_date_of_service
 
 
 def _split_name(meta: dict) -> tuple[str | None, str | None]:

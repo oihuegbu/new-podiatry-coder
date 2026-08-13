@@ -85,6 +85,14 @@ services:
       # state existed when the volume was first created.
       - ./data/rules:/app/data/rules
       - ./app:/app/app
+      # claude_coder/ IS the coding decision since issue #6 F6-R4-A1 (run.py calls
+      # claude_coder.pipeline.code_encounter). Without this mount a host-side code
+      # deploy would update run.py and app/ while the container kept running the
+      # image's baked-in claude_coder — i.e. the gates, certificate and checkpoint
+      # logic would silently stay at whatever version the image was last built
+      # from. Same failure mode the tools/ and tests/ mounts below exist to
+      # prevent, on the one directory where it matters most.
+      - ./claude_coder:/app/claude_coder
       - ./run.py:/app/run.py
       # tools/ is imported by run.py's denial-feedback gate (and used for
       # audits/benchmarks); without this mount the container would run the
@@ -111,6 +119,12 @@ services:
         echo 'Qdrant is ready.'
         exec "$@"
       - --
+    # The deployed coding run. Since issue #6 finding F6-R4-A1 this entrypoint
+    # codes with claude_coder.pipeline.code_encounter (provenance repository,
+    # source gates, eligibility gates, certificate, terminal-head checkpoint)
+    # instead of app.pipeline — which is what makes PROVENANCE_CHECKPOINT_REQUIRED
+    # above actually bind on this path. tests/test_deployment_entrypoint.py pins
+    # this command to that entrypoint and proves the binding end to end.
     command: ["python", "run.py"]
 
 volumes:

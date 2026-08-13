@@ -63,7 +63,7 @@ cd /opt/app
 docker compose up -d qdrant
 docker compose build app
 
-echo "==> Phase 1: loading dependencies (GLiNER, embeddings, Qdrant collections, compliance.db)"
+echo "==> Phase 1: loading dependencies (embeddings, Qdrant collections, code reference + compliance.db)"
 docker compose run --rm app python run.py --setup-only
 # This state now lives in the app_data/hf_cache/qdrant_data named volumes and
 # survives container recreation — later note-processing runs skip straight
@@ -91,7 +91,12 @@ echo "==> Installing process-notes helper for Phase 2"
 cat > /opt/app/process-notes.sh <<'SCRIPT'
 #!/usr/bin/env bash
 # Phase 2: process notes against the already-loaded dependencies from Phase 1.
-# Usage: ./process-notes.sh [--note FILE.pdf] [--no-cache]
+# Usage: ./process-notes.sh [--note FILE.pdf] [--only STEM,STEM]
+#                           [--start-at PREFIX] [--end-at PREFIX]
+#                           [--billing-context FILE.json]
+# Coding runs through claude_coder.pipeline.code_encounter (issue #6, F6-R4-A1).
+# --no-cache is still accepted but is a no-op (the result cache belonged to the
+# retired app.pipeline); --consistency/--consistency-workers are refused.
 cd /opt/app
 docker compose run --rm app python run.py "$@"
 SCRIPT
