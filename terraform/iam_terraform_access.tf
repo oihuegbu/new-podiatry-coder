@@ -98,13 +98,31 @@ resource "aws_iam_role_policy_attachment" "terraform_operator_poweruser" {
   policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
 }
 
-# PowerUserAccess deliberately excludes IAM. Scope IAM management to exactly
-# the principals this project's terraform config manages (the app role and
-# this operator role itself) -- not blanket iam:* over every principal in the
-# account.
+# PowerUserAccess deliberately excludes IAM entirely -- it cannot self-
+# escalate on its own. This custom statement re-adds a narrow slice of IAM
+# specifically so terraform can manage the APP role's policy (needed for
+# ongoing checkpoint-bucket/permission work). It does NOT cover this
+# operator role's own ARN.
+#
+# CORRECTED per Codex's round-7 re-review (issue #6, F6-R4-B reopened): the
+# prior version of this statement DID include aws_iam_role.terraform_operator.arn
+# in its resources, on the theory that the operator might someday need to
+# manage its own policy. That was a real, severe self-escalation path, not a
+# theoretical one: a session holding PowerUserAccess PLUS iam:PutRolePolicy/
+# AttachRolePolicy on ITS OWN role can attach AdministratorAccess to itself
+# or rewrite its own policy to remove every restriction -- turning a leaked
+# bootstrap key from "bounded <=1h PowerUser session" into permanent full
+# account compromise. In practice this role's own configuration has only
+# ever been changed using local root credentials directly (assuming this
+# role was never actually exercised for that) -- so removing the capability
+# costs nothing real. If this role's own policy ever needs to change, that
+# goes back through root/local, same as every change to this file so far.
+# The explicit Deny below makes this a structural guarantee, not just an
+# absence: even a future accidental re-widening of the Allow above stays
+# blocked unless someone deliberately removes this Deny too.
 data "aws_iam_policy_document" "terraform_operator_iam_management" {
   statement {
-    sid = "ManageProjectRoles"
+    sid = "ManageAppRolePolicyOnly"
     actions = [
       "iam:GetRole",
       "iam:GetRolePolicy",
@@ -117,16 +135,29 @@ data "aws_iam_policy_document" "terraform_operator_iam_management" {
       "iam:TagRole",
       "iam:UntagRole",
     ]
-    resources = [
-      aws_iam_role.app.arn,
-      aws_iam_role.terraform_operator.arn,
-    ]
+    resources = [aws_iam_role.app.arn]
   }
 
   statement {
     sid       = "ReadProjectInstanceProfile"
     actions   = ["iam:GetInstanceProfile"]
     resources = [aws_iam_instance_profile.app.arn]
+  }
+
+  statement {
+    sid    = "DenySelfPolicyModification"
+    effect = "Deny"
+    actions = [
+      "iam:PutRolePolicy",
+      "iam:DeleteRolePolicy",
+      "iam:AttachRolePolicy",
+      "iam:DetachRolePolicy",
+      "iam:UpdateAssumeRolePolicy",
+      "iam:DeleteRole",
+      "iam:TagRole",
+      "iam:UntagRole",
+    ]
+    resources = [aws_iam_role.terraform_operator.arn]
   }
 }
 
