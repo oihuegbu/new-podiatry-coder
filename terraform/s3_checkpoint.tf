@@ -131,6 +131,50 @@ resource "aws_iam_role_policy" "provenance_checkpoint" {
   policy = data.aws_iam_policy_document.provenance_checkpoint.json
 }
 
+# Write-once for sequence records, enforced at the storage layer -- not just
+# by the Python client always sending IfNoneMatch (F6-R4-A2, issue #6). The
+# app role's identity-based policy above grants unconditional PutObject over
+# the whole checkpoints/ prefix (S3 has no IAM condition key that means "only
+# when this specific key doesn't already exist" -- IfNoneMatch is a REQUEST
+# header, not a resource attribute an IAM policy can inspect); a second
+# process using the same instance-role credentials could call PutObject
+# directly, skip the header, and silently overwrite an already-anchored
+# sequence's current version. Versioning keeps the prior bytes recoverable,
+# but the release reader reads the CURRENT version, so an unconditional
+# overwrite is functionally indistinguishable from tampering to that reader.
+#
+# This is a resource-based bucket policy (not another identity-based
+# statement) because request-header inspection -- "was IfNoneMatch actually
+# sent" -- is exactly what S3's documented conditional-write enforcement
+# pattern requires:
+# https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes-enforce.html
+#
+# Scoped to */seq/* only. The head.json pointer is deliberately, permanently
+# mutable (checkpoint.py's own docstring: "NOT trusted... a starting FLOOR")
+# and must stay overwritable without a conditional header.
+data "aws_iam_policy_document" "provenance_checkpoint_bucket_policy" {
+  statement {
+    sid       = "RequireConditionalWriteForSequenceRecords"
+    effect    = "Deny"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.provenance_checkpoint.arn}/checkpoints/*/seq/*"]
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+    condition {
+      test     = "Null"
+      variable = "s3:if-none-match"
+      values   = ["true"]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "provenance_checkpoint" {
+  bucket = aws_s3_bucket.provenance_checkpoint.id
+  policy = data.aws_iam_policy_document.provenance_checkpoint_bucket_policy.json
+}
+
 output "provenance_checkpoint_bucket" {
   value = aws_s3_bucket.provenance_checkpoint.bucket
 }

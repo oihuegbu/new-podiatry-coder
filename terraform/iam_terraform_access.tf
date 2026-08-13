@@ -13,24 +13,76 @@
 # the Deny.
 #
 # Fix: a SEPARATE role, not attached to the instance profile, assumable only
-# by explicit human action (the account root) -- never by the app's own
+# via an explicit human bootstrap action -- never by the app's own
 # instance-metadata-sourced credentials, which are not a trusted principal in
 # its trust policy. The always-on app process can never reach this role's
-# permissions no matter what code runs under it. To run terraform from the
-# box: generate short-lived credentials locally (`aws sts assume-role
-# --role-arn <this role's arn> --role-session-name terraform`, using the
-# account root credentials already used to bootstrap this project) and export
-# them into that one SSH session only -- never written to disk on the box,
-# never available to the always-running app.
+# permissions no matter what code runs under it.
+#
+# CORRECTED TWICE, both times by a live negative-AND-positive test the first
+# version skipped (issue #6, F6-R4-A -> finding B -> F6-R4-B):
+#
+# 1. The original trust policy named the account-root ARN as Principal,
+#    intending "root-user-only." Per AWS's own docs
+#    (reference_policies_elements_principal.html) that Principal form
+#    delegates trust to the ACCOUNT, not literally the root user -- any
+#    principal later granted sts:AssumeRole on this role's ARN in their own
+#    policy could assume it too. Not exploitable in practice (nothing else
+#    held that grant), but not the boundary claimed.
+# 2. Tightening it with an `aws:PrincipalArn == root` condition (this file's
+#    prior revision) turned out to fix nothing, because verifying it live
+#    (root actually attempting the assume, not just confirming the app role
+#    is refused) surfaced a harder fact: **AWS unconditionally refuses to let
+#    the root user assume ANY role** ("Roles may not be assumed by root
+#    accounts") -- not a trust-policy-configurable restriction, and true even
+#    for a session-token derived from root (tested live). The entire
+#    root-assumable design could never have worked; only the negative half
+#    (app role refused) had ever actually been checked.
+#
+# Real fix: a dedicated IAM USER whose ONLY permission is sts:AssumeRole on
+# this role -- a valid principal type for AssumeRole, unlike root. The user's
+# own long-term access key is deliberately narrow (assume-only, nothing
+# else), so a leaked key's blast radius is "can start a <=1h PowerUserAccess
+# session," not "has PowerUserAccess directly." To run terraform from the
+# box: fetch that key ONCE (`terraform output -raw terraform_operator_access_key_id`
+# / `-raw terraform_operator_secret_access_key`, store it in a password
+# manager, not in this repo or on the box), then from local:
+# `AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... aws sts assume-role
+# --role-arn <this role's arn> --role-session-name terraform`, and export
+# the resulting SHORT-LIVED credentials into one SSH session only -- never
+# written to disk on the box, never available to the always-running app.
 
 data "aws_caller_identity" "current" {}
+
+resource "aws_iam_user" "terraform_operator" {
+  name = "${var.project_name}-terraform-operator-user"
+}
+
+resource "aws_iam_access_key" "terraform_operator" {
+  user = aws_iam_user.terraform_operator.name
+}
+
+# Deliberately the ONLY permission this user has: mint a session on the
+# actually-privileged role below. Nothing else -- this user is a bootstrap
+# key, not an admin identity in its own right.
+data "aws_iam_policy_document" "terraform_operator_user_assume_only" {
+  statement {
+    actions   = ["sts:AssumeRole"]
+    resources = [aws_iam_role.terraform_operator.arn]
+  }
+}
+
+resource "aws_iam_user_policy" "terraform_operator_assume_only" {
+  name   = "${var.project_name}-terraform-operator-assume-only"
+  user   = aws_iam_user.terraform_operator.name
+  policy = data.aws_iam_policy_document.terraform_operator_user_assume_only.json
+}
 
 data "aws_iam_policy_document" "terraform_operator_assume" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
       type        = "AWS"
-      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
+      identifiers = [aws_iam_user.terraform_operator.arn]
     }
   }
 }
@@ -86,4 +138,15 @@ resource "aws_iam_role_policy" "terraform_operator_iam_management" {
 
 output "terraform_operator_role_arn" {
   value = aws_iam_role.terraform_operator.arn
+}
+
+# Sensitive: fetch once with `-raw`, store in a password manager, never
+# commit or leave sitting in shell history / a file on the box.
+output "terraform_operator_access_key_id" {
+  value = aws_iam_access_key.terraform_operator.id
+}
+
+output "terraform_operator_secret_access_key" {
+  value     = aws_iam_access_key.terraform_operator.secret
+  sensitive = true
 }
