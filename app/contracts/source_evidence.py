@@ -1,0 +1,878 @@
+"""The versioned `SourceEvidenceDocument` — the ORIGINAL document as read, not as transcribed.
+
+================================================================================
+WHY THIS MODULE EXISTS — issue #6, finding F6-R6-A (P1), product directive §1
+================================================================================
+Until this contract existed, one vision model produced `page_texts` and every
+downstream "exact" evidence span was exact only *relative to that model's own
+output*. Page-coverage checks proved the model emitted a string for every page;
+they proved nothing about whether the side, the ordinal, the unit, the decimal,
+the measurement or the negation in that string is what the document actually
+says. A misread word could therefore become a fully anchored, certified, billed
+code, and the audit trail could identify the PDF but not show where the billed
+fact appears in it.
+
+The reviewer's framing is the invariant this module implements:
+
+    An LLM transcription may be a candidate reading; it is never the authority
+    against which its own correctness is proven.
+
+So a `SourceEvidenceDocument` is a document read by MORE THAN ONE channel:
+
+    original PDF bytes  ── document_sha256
+        ├── rendered page images ── per-page image_sha256, size, rotation
+        ├── channel 1 (primary)  ── the vision transcription  (a CANDIDATE reading)
+        └── channel 2..n         ── the embedded text layer with word boxes, and/or
+                                    a genuinely independent second model read
+                                    (different declared provider)
+
+and reconciliation is the act of proving a quotation taken from channel 1 also
+appears, token for token, in an INDEPENDENT channel's reading of the same page.
+
+WHAT IS RECONCILED, AND WHY IT IS NOT EVERY WORD
+------------------------------------------------
+The unit of reconciliation is the EVIDENCE SPAN: the verbatim quotation the
+extraction layer used to support one clinical fact. That is precisely the
+"code-changing text" the directive names — laterality, anatomy, ordinal,
+measurement, dose, status and negation all live inside those quotations, and
+nothing else in the document can change a code without first becoming one.
+Reconciling spans rather than whole documents is also what keeps the second
+channel affordable: only the PAGES carrying a span that justified a RELEASED
+line ever need an independently paid-for read.
+
+NO MEDICAL VOCABULARY APPEARS HERE, AND NONE MAY
+-------------------------------------------------
+The materiality rule is structural, not lexical: two readings agree when their
+token sequences are equal after Unicode/case/edge-punctuation normalization, and
+disagree otherwise. There is no list of laterality words, no list of units, no
+negation lexicon — a perturbed side, a perturbed ordinal, a perturbed decimal
+and a dropped negation are all simply *token differences inside a quotation that
+justified a billed code*. That is what makes this mechanism survive every future
+change to the clinical vocabulary the extraction layer uses (directive §1's
+final acceptance test).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+import unicodedata
+from enum import Enum
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from .claim_bundle import content_digest
+
+# --------------------------------------------------------------------------
+# schema identity
+# --------------------------------------------------------------------------
+
+SCHEMA_ID = "source_evidence_document"
+SCHEMA_VERSION = 1
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1})
+
+#: The string joining consecutive pages into the one text the coder reads. It is
+#: part of the CONTRACT because every evidence span's character offsets are taken
+#: in that joined string: change it and every recorded offset silently shifts.
+PAGE_SEPARATOR = "\n\n"
+
+
+class SourceEvidenceError(Exception):
+    """Base class: any refusal to interpret a payload as a SourceEvidenceDocument."""
+
+
+class UnknownSourceEvidenceSchema(SourceEvidenceError):
+    """The payload declares a schema id/version this build does not implement."""
+
+
+class InvalidSourceEvidenceDocument(SourceEvidenceError):
+    """The payload declares a supported schema but does not satisfy it."""
+
+
+# --------------------------------------------------------------------------
+# enums
+# --------------------------------------------------------------------------
+
+class PageStatus(str, Enum):
+    """What happened to ONE page. Every page has exactly one of these — a page is
+    never silently absent from the document (directive §1, blank/rotated/duplicated/
+    missing/low-quality pages must have explicit outcomes)."""
+
+    READ = "READ"
+    #: Deliberately distinct from UNREADABLE: a genuinely empty page is a normal
+    #: document feature and must not look like a failed read.
+    BLANK = "BLANK"
+    #: The renderer produced the page but no channel could obtain text from it.
+    UNREADABLE = "UNREADABLE"
+    #: The renderer produced the page and a channel did NOT return it at all.
+    MISSING = "MISSING"
+
+
+class ChannelKind(str, Enum):
+    #: The PDF's own embedded text layer, with per-word boxes. Deterministic: it
+    #: is a property of the document bytes, not of any model.
+    EMBEDDED_TEXT = "embedded_text"
+    #: A vision/multimodal model reading a rendered page image.
+    VISION = "vision"
+    #: A deterministic OCR engine reading a rendered page image.
+    OCR = "ocr"
+
+
+class ReconciliationStatus(str, Enum):
+    """The outcome of proving one quotation against an independent reading."""
+
+    #: The quotation's token sequence was found in an independent channel.
+    AGREED = "AGREED"
+    #: An independent channel reads the same region DIFFERENTLY.
+    DISAGREED = "DISAGREED"
+    #: An independent channel read the page and the quotation is not in it at all.
+    NOT_LOCATED = "NOT_LOCATED"
+    #: No independent channel covers this quotation's page(s) — nothing was proven
+    #: either way. This is system work (obtain a second channel), not coding work.
+    UNVERIFIABLE = "UNVERIFIABLE"
+    #: The quotation carries no material token (punctuation/whitespace only), so
+    #: there is nothing to reconcile. Recorded rather than dropped.
+    VACUOUS = "VACUOUS"
+
+
+#: A detected disagreement is an INTEGRITY failure: the record does not say what the
+#: claim rests on. It is never retryable and never a coder's judgement call.
+BLOCKING_STATUSES = frozenset({ReconciliationStatus.DISAGREED,
+                               ReconciliationStatus.NOT_LOCATED})
+#: An absent second channel proves nothing. Fail closed, but as SYSTEM work.
+HOLDING_STATUSES = frozenset({ReconciliationStatus.UNVERIFIABLE})
+#: Statuses that permit a release.
+CLEARED_STATUSES = frozenset({ReconciliationStatus.AGREED,
+                              ReconciliationStatus.VACUOUS})
+
+
+# --------------------------------------------------------------------------
+# token normalization — the ONE definition of "the same reading"
+# --------------------------------------------------------------------------
+
+#: Zero-width and soft-hyphen characters carry no reading; they are layout, not text.
+_INVISIBLE = dict.fromkeys(
+    map(ord, "­​‌‍⁠﻿"), None)
+_DASHES = {ord(c): "-" for c in "‐‑‒–—―−"}
+_APOSTROPHES = {ord(c): "'" for c in "‘’ʼ′"}
+_QUOTES = {ord(c): '"' for c in "“”″"}
+_TRANSLATION = {**_INVISIBLE, **_DASHES, **_APOSTROPHES, **_QUOTES}
+
+_LEADING_PUNCT = re.compile(r"^[^0-9a-z]+")
+_TRAILING_PUNCT = re.compile(r"[^0-9a-z]+$")
+_ALNUM_ONLY = re.compile(r"[^0-9a-z]+")
+_HAS_DIGIT = re.compile(r"\d")
+
+
+def normalize_token(raw: str) -> str:
+    """The comparable form of one token.
+
+    Unicode form, letter case and EDGE punctuation are presentation, not reading:
+    `"(RIGHT)"`, `"right,"` and `"right"` are the same word. INTERNAL punctuation is
+    NOT stripped, deliberately — doing so would make `"3.0"` and `"30"` compare equal
+    and silently erase exactly the decimal-misread class this module exists to catch.
+    """
+    text = unicodedata.normalize("NFKC", str(raw or "")).translate(_TRANSLATION)
+    text = text.casefold()
+    text = _LEADING_PUNCT.sub("", text)
+    text = _TRAILING_PUNCT.sub("", text)
+    return text
+
+
+def is_numeric_token(normalized: str) -> bool:
+    """Does this token carry a digit? Recorded on every difference so an auditor can
+    see at a glance that a disagreement was on a measurement/ordinal/dose rather than
+    on prose. It is an ANNOTATION, never a gate input — gating must not depend on a
+    token's shape, or a misread word would become releasable."""
+    return bool(_HAS_DIGIT.search(normalized))
+
+
+def tokens_equal(left: str, right: str) -> bool:
+    """Do two normalized tokens represent the same reading?
+
+    Equal forms agree. Beyond that there is exactly ONE tolerance, and it is a
+    typesetting artifact rather than a reading difference: a word broken across a
+    line by a hyphen ("well-" / "healed") is recovered by one channel as a compound
+    and by the other as a hyphenless run. Two tokens that differ ONLY in internal
+    punctuation are therefore treated as equal *when neither carries a digit* — a
+    numeric token's internal punctuation is its decimal point, which is claim-
+    affecting and can never be normalized away.
+    """
+    if left == right:
+        return True
+    if not left or not right:
+        return False
+    if is_numeric_token(left) or is_numeric_token(right):
+        return False
+    return _ALNUM_ONLY.sub("", left) == _ALNUM_ONLY.sub("", right)
+
+
+def tokenize(text: str) -> tuple[str, ...]:
+    """Whitespace tokens of `text`, normalized, with empty (pure-punctuation) tokens
+    dropped. Dropping them is what makes punctuation-only differences between two
+    readings a NON-event (directive §1, acceptance test 2)."""
+    out: list[str] = []
+    for piece in str(text or "").split():
+        token = normalize_token(piece)
+        if token:
+            out.append(token)
+    return tuple(out)
+
+
+# --------------------------------------------------------------------------
+# the document
+# --------------------------------------------------------------------------
+
+class _Strict(BaseModel):
+    """Frozen + `extra="forbid"`, for the same reason as the claim contract: a
+    source-evidence record a consumer can edit is not evidence."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class SourceToken(_Strict):
+    """One token as ONE channel read it, with where on the page it sits.
+
+    `x0/top/x1/bottom` are PDF user-space coordinates with the origin at the page's
+    top-left (pdfplumber's convention), or all None for a channel that reports no
+    geometry (a model reading a page image returns text, not boxes). A missing box
+    is recorded as missing; it is never approximated.
+    """
+
+    text: str
+    normalized: str
+    x0: float | None = None
+    top: float | None = None
+    x1: float | None = None
+    bottom: float | None = None
+    confidence: float | None = None
+    #: Competing readings this channel considered for this token, best first.
+    alternatives: tuple[str, ...] = ()
+
+
+class PageRead(_Strict):
+    """What ONE channel obtained from ONE page."""
+
+    channel_id: str
+    page_number: int = Field(ge=1)
+    status: PageStatus
+    text: str = ""
+    text_sha256: str = ""
+    tokens: tuple[SourceToken, ...] = ()
+    #: Why this read is not READ, when it is not.
+    detail: str = ""
+
+    @property
+    def usable(self) -> bool:
+        """Can this read be used to PROVE or DISPROVE a quotation? A blank page
+        proves nothing about a quotation someone claims is on it."""
+        return self.status is PageStatus.READ and bool(self.tokens)
+
+
+class ReadChannel(_Strict):
+    """The identity of one way of reading the document.
+
+    Mirrors `claude_coder.extraction.ExtractionOrigin` deliberately — provider,
+    profile, prompt digest and schema version are the SAME four facts that decide
+    whether two model assertions are independent anywhere else in this codebase, and
+    a second notion of identity here would be free to drift out of agreement with
+    that one.
+    """
+
+    channel_id: str
+    kind: ChannelKind
+    #: Declared provider ("pdf" for the document's own text layer, an LLM vendor for
+    #: a model read). Never a credential.
+    provider: str = ""
+    profile: str = ""
+    prompt_sha256: str = ""
+    schema_version: str = ""
+    #: Free-form engine/tool identity (library + version) for deterministic channels.
+    engine: str = ""
+
+
+class SourcePage(_Strict):
+    """One rendered page of the ORIGINAL document, and every channel's read of it."""
+
+    page_number: int = Field(ge=1)
+    #: sha256 of the rendered page image bytes — the "source image hash" a released
+    #: fact must resolve to.
+    image_sha256: str = ""
+    width: float | None = None
+    height: float | None = None
+    rotation: int = 0
+    status: PageStatus = PageStatus.READ
+    #: Explicit, non-fatal observations: `rotated:90`, `duplicate_of_page:2`,
+    #: `low_text_yield`, `no_embedded_text`. Recorded so a page anomaly is a stated
+    #: outcome rather than a silent skip.
+    flags: tuple[str, ...] = ()
+    reads: tuple[PageRead, ...] = ()
+    #: [char_start, char_end) of this page's PRIMARY text inside `primary_text()`.
+    char_start: int = 0
+    char_end: int = 0
+
+    def read_by(self, channel_id: str) -> PageRead | None:
+        for read in self.reads:
+            if read.channel_id == channel_id:
+                return read
+        return None
+
+
+class SourceEvidenceDocument(_Strict):
+    """A versioned, multi-channel reading of one original document."""
+
+    schema_id: str = SCHEMA_ID
+    schema_version: int = SCHEMA_VERSION
+    filename: str = ""
+    #: sha256 of the ORIGINAL document bytes (`sha256:<hex>` form, matching the
+    #: `document_version` every evidence span is already salted with).
+    document_sha256: str = ""
+    page_count: int = 0
+    channels: tuple[ReadChannel, ...] = ()
+    primary_channel_id: str = ""
+    pages: tuple[SourcePage, ...] = ()
+    #: Document-level anomalies (duplicate pages, page-count disagreements between
+    #: channels, an unopenable text layer). Carried into the certificate.
+    anomalies: tuple[str, ...] = ()
+    compiled_at: str = ""
+    #: Why a deterministic channel is absent, when it is. An EMPTY string with no
+    #: independent channel would read as "nobody looked"; this says who looked and
+    #: what they found.
+    compiler_notes: tuple[str, ...] = ()
+
+    # ------------------------------------------------------------------ views
+
+    def channel(self, channel_id: str) -> ReadChannel | None:
+        for channel in self.channels:
+            if channel.channel_id == channel_id:
+                return channel
+        return None
+
+    @property
+    def primary_channel(self) -> ReadChannel | None:
+        return self.channel(self.primary_channel_id)
+
+    def page(self, page_number: int) -> SourcePage | None:
+        for page in self.pages:
+            if page.page_number == page_number:
+                return page
+        return None
+
+    def primary_text(self) -> str:
+        """The exact string the coder reads and every evidence span is anchored into."""
+        return PAGE_SEPARATOR.join(
+            (page.read_by(self.primary_channel_id).text
+             if page.read_by(self.primary_channel_id) else "")
+            for page in self.pages)
+
+    def pages_for_offsets(self, start: int | None, end: int | None) -> tuple[int, ...]:
+        """Which page(s) a [start, end) character range of `primary_text()` falls on.
+
+        A quotation may straddle the page separator; returning EVERY overlapped page
+        (rather than the first) is what lets such a span be reconciled against the
+        concatenation of the readings that actually contain it.
+        """
+        if start is None or end is None or end <= start:
+            return ()
+        return tuple(page.page_number for page in self.pages
+                     if page.char_start < end and start < page.char_end)
+
+    def independent_channels(self) -> tuple[ReadChannel, ...]:
+        """Every channel that may be used to CHECK the primary one."""
+        primary = self.primary_channel
+        if primary is None:
+            return ()
+        return tuple(c for c in self.channels if independent_of(c, primary))
+
+    # ------------------------------------------------------------- integrity
+
+    def integrity_problems(self) -> tuple[str, ...]:
+        out: list[str] = []
+        if self.schema_id != SCHEMA_ID:
+            out.append(f"schema id {self.schema_id!r} is not {SCHEMA_ID!r}")
+        if self.schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+            out.append(f"schema version {self.schema_version} is not supported")
+        if not self.document_sha256:
+            out.append("document carries no source-document digest")
+        if self.primary_channel is None:
+            out.append("document declares no primary read channel")
+        if len(self.pages) != self.page_count:
+            out.append(f"document declares {self.page_count} page(s) but carries "
+                       f"{len(self.pages)}")
+        numbers = [p.page_number for p in self.pages]
+        if numbers != sorted(set(numbers)) or (numbers and numbers[0] != 1):
+            out.append("pages are not a contiguous 1-based sequence")
+        # The offsets are the join between a character span and a page. If they do not
+        # reproduce the primary text, every recorded page number is wrong.
+        text = self.primary_text()
+        for page in self.pages:
+            read = page.read_by(self.primary_channel_id)
+            expected = read.text if read else ""
+            if text[page.char_start:page.char_end] != expected:
+                out.append(f"page {page.page_number} character offsets do not "
+                           f"reproduce its primary text")
+        return tuple(out)
+
+    # ------------------------------------------------------- transformations
+
+    def with_channel(self, channel: ReadChannel,
+                     reads: dict[int, PageRead]) -> "SourceEvidenceDocument":
+        """A COPY carrying one more channel — how a lazily obtained second read is
+        added without mutating an already-attested document.
+
+        Refuses to replace an existing channel id: a channel whose reads can be
+        overwritten is not evidence of anything.
+        """
+        if self.channel(channel.channel_id) is not None:
+            raise InvalidSourceEvidenceDocument(
+                f"channel {channel.channel_id!r} is already part of this document; "
+                f"a second read is a NEW channel, never an overwrite of an old one")
+        pages = tuple(
+            page.model_copy(update={"reads": page.reads + (reads[page.page_number],)})
+            if page.page_number in reads else page
+            for page in self.pages)
+        return self.model_copy(update={"channels": self.channels + (channel,),
+                                       "pages": pages})
+
+    # ----------------------------------------------------------- serialization
+
+    def identity(self) -> dict[str, Any]:
+        """The compact, certificate-sized identity of this reading.
+
+        The full token streams are NOT included: a certificate must bind WHICH bytes
+        were read by WHICH channels, not carry a second copy of the document.
+        """
+        return {
+            "schema": f"{self.schema_id}/{self.schema_version}",
+            "filename": self.filename,
+            "document_sha256": self.document_sha256,
+            "page_count": self.page_count,
+            "primary_channel_id": self.primary_channel_id,
+            "channels": [c.model_dump(mode="json") for c in self.channels],
+            "pages": [{
+                "page_number": p.page_number,
+                "image_sha256": p.image_sha256,
+                "status": p.status.value,
+                "rotation": p.rotation,
+                "flags": list(p.flags),
+                "reads": [{"channel_id": r.channel_id, "status": r.status.value,
+                           "text_sha256": r.text_sha256, "tokens": len(r.tokens),
+                           "detail": r.detail}
+                          for r in p.reads],
+            } for p in self.pages],
+            "anomalies": list(self.anomalies),
+            "compiler_notes": list(self.compiler_notes),
+        }
+
+    def fingerprint(self) -> str:
+        return "sha256:" + content_digest(self.identity())
+
+    def to_payload(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+def independent_of(channel: ReadChannel, primary: ReadChannel) -> bool:
+    """May `channel` be used as evidence ABOUT `primary`'s reading?
+
+    A channel is never independent of itself. A channel of a DIFFERENT KIND is
+    independent by construction — the document's own text layer and a deterministic
+    OCR engine are properties of the bytes/pixels rather than of the transcriber. Two
+    channels of the SAME kind are independent only when a different declared provider
+    answered, which is the identical rule `claude_coder.verify.corroboration_origin`
+    applies to code corroboration: one vendor agreeing with itself is repetition, not
+    confirmation.
+    """
+    if channel.channel_id == primary.channel_id:
+        return False
+    if channel.kind is not primary.kind:
+        return True
+    return bool(channel.provider) and bool(primary.provider) and \
+        channel.provider != primary.provider
+
+
+def load_document(payload: Any) -> SourceEvidenceDocument:
+    """Parse a payload as a SourceEvidenceDocument, or refuse with a typed error."""
+    if not isinstance(payload, dict):
+        raise InvalidSourceEvidenceDocument(
+            f"a SourceEvidenceDocument payload must be an object, got "
+            f"{type(payload).__name__}")
+    schema_id = payload.get("schema_id")
+    if schema_id != SCHEMA_ID:
+        raise UnknownSourceEvidenceSchema(
+            f"payload declares schema_id {schema_id!r}, not {SCHEMA_ID!r}")
+    version = payload.get("schema_version")
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
+        raise UnknownSourceEvidenceSchema(
+            f"payload declares schema_version {version!r}; this build reads "
+            f"{sorted(SUPPORTED_SCHEMA_VERSIONS)}")
+    try:
+        return SourceEvidenceDocument.model_validate(payload)
+    except ValidationError as exc:
+        raise InvalidSourceEvidenceDocument(
+            f"payload declares {SCHEMA_ID}/{version} but does not satisfy it: "
+            f"{exc}") from None
+
+
+# --------------------------------------------------------------------------
+# reconciliation
+# --------------------------------------------------------------------------
+
+class SpanTarget(_Strict):
+    """One quotation to prove: what it says and where the primary channel put it."""
+
+    span_id: str
+    text: str
+    start: int | None = None
+    end: int | None = None
+    #: The clinical fact this quotation supports — the join key back into the graph.
+    fact_id: str = ""
+
+
+class TokenDifference(_Strict):
+    """One disagreement between two readings of the same place on the page."""
+
+    #: `substituted` | `missing_from_independent_read` | `absent_from_quotation`
+    kind: str
+    quoted: str = ""
+    independent: str = ""
+    #: Annotation only (see `is_numeric_token`): does either side carry a digit?
+    numeric: bool = False
+
+
+class PageRegion(_Strict):
+    """Where on the page a quotation was found, in PDF user space.
+
+    Present only when the proving channel reports geometry. `None` is recorded as
+    `None`: an approximate box would be worse than an absent one, because a claim
+    reviewer would take it literally.
+    """
+
+    page_number: int
+    x0: float
+    top: float
+    x1: float
+    bottom: float
+
+
+class SpanReconciliation(_Strict):
+    """The proof (or the refusal) for ONE quotation."""
+
+    span_id: str
+    fact_id: str = ""
+    status: ReconciliationStatus
+    #: Which page(s) of the ORIGINAL document the quotation sits on.
+    pages: tuple[int, ...] = ()
+    #: sha256 of the rendered image(s) of those page(s) — the source image identity a
+    #: released fact must resolve to.
+    page_image_sha256: tuple[str, ...] = ()
+    #: The channel that proved (or refuted) it, and the digest of the exact text it read.
+    verified_by_channel_id: str = ""
+    verified_text_sha256: tuple[str, ...] = ()
+    region: PageRegion | None = None
+    differences: tuple[TokenDifference, ...] = ()
+    detail: str = ""
+
+    @property
+    def blocking(self) -> bool:
+        return self.status in BLOCKING_STATUSES
+
+    @property
+    def holding(self) -> bool:
+        return self.status in HOLDING_STATUSES
+
+
+class SourceReconciliation(_Strict):
+    """Every quotation's proof, for one encounter — bound into the certificate."""
+
+    control_mode: str = "ENFORCED_FAIL_CLOSED"
+    document_sha256: str = ""
+    document_fingerprint: str = ""
+    primary_channel_id: str = ""
+    independent_channel_ids: tuple[str, ...] = ()
+    spans: tuple[SpanReconciliation, ...] = ()
+    #: Per-page explicit outcomes, including pages nothing was quoted from.
+    page_outcomes: tuple[dict[str, Any], ...] = ()
+    document_anomalies: tuple[str, ...] = ()
+
+    def by_span_id(self) -> dict[str, SpanReconciliation]:
+        return {s.span_id: s for s in self.spans}
+
+    def summary(self) -> dict[str, int]:
+        counts: dict[str, int] = {s.value: 0 for s in ReconciliationStatus}
+        for span in self.spans:
+            counts[span.status.value] += 1
+        return counts
+
+    def certificate_record(self) -> dict[str, Any]:
+        """What the release certificate binds: identities, per-span outcomes and every
+        difference — never the token streams themselves."""
+        return {
+            "control_mode": self.control_mode,
+            "document_sha256": self.document_sha256,
+            "document_fingerprint": self.document_fingerprint,
+            "primary_channel_id": self.primary_channel_id,
+            "independent_channel_ids": list(self.independent_channel_ids),
+            "summary": self.summary(),
+            "document_anomalies": list(self.document_anomalies),
+            "page_outcomes": [dict(p) for p in self.page_outcomes],
+            "spans": [s.model_dump(mode="json") for s in self.spans],
+        }
+
+
+def _infix_alignment(quoted: tuple[str, ...],
+                     independent: tuple[str, ...]) -> tuple[int, list[tuple[str, int, int]]]:
+    """Best alignment of `quoted` ANYWHERE inside `independent`.
+
+    Semi-global (infix) edit distance: skipping independent-channel tokens before and
+    after the match is free, so a short quotation is located inside a whole page's
+    reading without having to guess a window. Returns the edit cost and the operation
+    trace `(op, quoted_index, independent_index)` with `op` in
+    {"match", "substitute", "delete", "insert"} — "delete" means the quotation has a
+    token the independent read does not, "insert" the reverse.
+
+    O(len(quoted) x len(independent)); the quotation is a short verbatim phrase and a
+    page's reading is at most a few thousand tokens, so this is cheap enough to run on
+    every span of every note.
+    """
+    n, m = len(quoted), len(independent)
+    if n == 0:
+        return 0, []
+    # dp[i][j] = cost of aligning quoted[:i] ending at independent[:j]; row 0 is all
+    # zeros (a free prefix skip).
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        dp[i][0] = i
+    for i in range(1, n + 1):
+        row, prev = dp[i], dp[i - 1]
+        qi = quoted[i - 1]
+        for j in range(1, m + 1):
+            sub = prev[j - 1] + (0 if tokens_equal(qi, independent[j - 1]) else 1)
+            row[j] = min(sub, prev[j] + 1, row[j - 1] + 1)
+    end = min(range(m + 1), key=lambda j: (dp[n][j], -j))
+    cost = dp[n][end]
+    # Backtrace from (n, end) to row 0 (the free prefix skip).
+    trace: list[tuple[str, int, int]] = []
+    i, j = n, end
+    while i > 0:
+        qi = quoted[i - 1]
+        if j > 0 and dp[i][j] == dp[i - 1][j - 1] + (
+                0 if tokens_equal(qi, independent[j - 1]) else 1):
+            trace.append(("match" if tokens_equal(qi, independent[j - 1])
+                          else "substitute", i - 1, j - 1))
+            i, j = i - 1, j - 1
+        elif dp[i][j] == dp[i - 1][j] + 1:
+            trace.append(("delete", i - 1, -1))
+            i -= 1
+        else:
+            trace.append(("insert", -1, j - 1))
+            j -= 1
+    trace.reverse()
+    return cost, trace
+
+
+def _region_of(tokens: list[SourceToken], indices: list[int],
+               page_of_index: list[int]) -> PageRegion | None:
+    """The bounding box of the matched tokens, when the proving channel reports one.
+
+    Only tokens on ONE page contribute: a box spanning two pages is not a region on
+    any page, and reporting the first page's box for a two-page quotation would state
+    something false. A quotation that straddles a page break therefore resolves to its
+    page NUMBERS with no box, which is recorded honestly rather than approximated.
+    """
+    boxed = [(page_of_index[i], tokens[i]) for i in indices
+             if 0 <= i < len(tokens) and tokens[i].x0 is not None]
+    if not boxed:
+        return None
+    pages = {p for p, _ in boxed}
+    if len(pages) != 1:
+        return None
+    page_number = pages.pop()
+    xs0 = [t.x0 for _, t in boxed if t.x0 is not None]
+    tops = [t.top for _, t in boxed if t.top is not None]
+    xs1 = [t.x1 for _, t in boxed if t.x1 is not None]
+    bottoms = [t.bottom for _, t in boxed if t.bottom is not None]
+    if not (xs0 and tops and xs1 and bottoms):
+        return None
+    return PageRegion(page_number=page_number, x0=min(xs0), top=min(tops),
+                      x1=max(xs1), bottom=max(bottoms))
+
+
+#: How bad each answer is. A quotation gets the WORST answer any independent channel
+#: gave it, never the most convenient one: two independent readings that disagree with
+#: each other about a word a billed line rests on is an unresolved discrepancy, and the
+#: directive's instruction for an unresolved discrepancy is to block. Letting a second
+#: channel that happens to repeat the primary's misreading clear the first channel's
+#: disagreement would make the mechanism weaker the more channels it is given.
+_SEVERITY = {
+    ReconciliationStatus.DISAGREED: 0,
+    ReconciliationStatus.NOT_LOCATED: 1,
+    ReconciliationStatus.AGREED: 2,
+}
+
+#: Below this share of matched tokens the independent reading does not contain the
+#: quotation at all (NOT_LOCATED) rather than reading it differently (DISAGREED).
+#: It only splits one blocking status from another blocking status — no release
+#: depends on where it sits.
+_LOCATION_THRESHOLD = 0.5
+
+
+def reconcile_spans(document: SourceEvidenceDocument,
+                    targets: list[SpanTarget] | tuple[SpanTarget, ...],
+                    *, control_mode: str = "ENFORCED_FAIL_CLOSED") -> SourceReconciliation:
+    """Prove every quotation against an INDEPENDENT reading of its own page(s).
+
+    Fail-closed by construction: the only statuses that permit a release are AGREED
+    (an independent channel read the same tokens) and VACUOUS (the quotation contains
+    no material token). Everything else — a differing token, a quotation the
+    independent reading does not contain, or no independent reading at all — is
+    reported as what it is and stops the claim at the gate that reads this record.
+    """
+    primary = document.primary_channel
+    independents = document.independent_channels()
+    results: list[SpanReconciliation] = []
+
+    for target in targets:
+        quoted = tokenize(target.text)
+        pages = document.pages_for_offsets(target.start, target.end)
+        page_images = tuple(
+            (document.page(n).image_sha256 if document.page(n) else "") for n in pages)
+        if not quoted:
+            results.append(SpanReconciliation(
+                span_id=target.span_id, fact_id=target.fact_id,
+                status=ReconciliationStatus.VACUOUS, pages=pages,
+                page_image_sha256=page_images,
+                detail="quotation carries no material token (punctuation only)"))
+            continue
+        if not pages:
+            results.append(SpanReconciliation(
+                span_id=target.span_id, fact_id=target.fact_id,
+                status=ReconciliationStatus.UNVERIFIABLE,
+                detail="quotation has no verified character offsets in the primary "
+                       "reading, so no page of the original document can be named"))
+            continue
+
+        candidates: list[SpanReconciliation] = []
+        for channel in independents:
+            reads = [document.page(n).read_by(channel.channel_id) if document.page(n)
+                     else None for n in pages]
+            if any(r is None or not r.usable for r in reads):
+                continue                      # this channel does not cover every page
+            tokens: list[SourceToken] = []
+            page_of_index: list[int] = []
+            for page_number, read in zip(pages, reads):
+                for token in read.tokens:
+                    tokens.append(token)
+                    page_of_index.append(page_number)
+            independent = tuple(t.normalized for t in tokens)
+            cost, trace = _infix_alignment(quoted, independent)
+            matched = [j for op, _, j in trace if op == "match"]
+            differences = tuple(
+                TokenDifference(
+                    kind=("substituted" if op == "substitute"
+                          else "missing_from_independent_read" if op == "delete"
+                          else "absent_from_quotation"),
+                    quoted=(quoted[i] if i >= 0 else ""),
+                    independent=(independent[j] if j >= 0 else ""),
+                    numeric=(is_numeric_token(quoted[i]) if i >= 0 else False)
+                    or (is_numeric_token(independent[j]) if j >= 0 else False))
+                for op, i, j in trace if op != "match")
+            share = len(matched) / len(quoted)
+            if cost == 0:
+                status = ReconciliationStatus.AGREED
+                detail = (f"every token of the quotation was read identically by "
+                          f"{channel.channel_id}")
+            elif share >= _LOCATION_THRESHOLD:
+                status = ReconciliationStatus.DISAGREED
+                detail = (f"{channel.channel_id} reads {len(differences)} token(s) of "
+                          f"this quotation differently")
+            else:
+                status = ReconciliationStatus.NOT_LOCATED
+                detail = (f"{channel.channel_id} read page(s) "
+                          f"{', '.join(str(p) for p in pages)} and the quotation does "
+                          f"not appear in that reading")
+            candidates.append(SpanReconciliation(
+                span_id=target.span_id, fact_id=target.fact_id, status=status,
+                pages=pages, page_image_sha256=page_images,
+                verified_by_channel_id=channel.channel_id,
+                verified_text_sha256=tuple(r.text_sha256 for r in reads if r),
+                region=_region_of(tokens, matched, page_of_index),
+                differences=differences, detail=detail))
+        # The worst answer wins (see `_SEVERITY`). Channels that could not read the
+        # page at all produced no candidate and therefore contribute nothing — an
+        # unreadable channel is not an opinion.
+        best = min(candidates, key=lambda c: _SEVERITY[c.status], default=None)
+        if best is None:
+            missing = ", ".join(str(p) for p in pages)
+            best = SpanReconciliation(
+                span_id=target.span_id, fact_id=target.fact_id,
+                status=ReconciliationStatus.UNVERIFIABLE, pages=pages,
+                page_image_sha256=page_images,
+                detail=(f"no independent channel produced a usable reading of page(s) "
+                        f"{missing}; the transcription cannot be its own authority"))
+        results.append(best)
+
+    quoted_pages = {p for r in results for p in r.pages}
+    page_outcomes = tuple({
+        "page_number": page.page_number,
+        "status": page.status.value,
+        "image_sha256": page.image_sha256,
+        "rotation": page.rotation,
+        "flags": list(page.flags),
+        "quoted_from": page.page_number in quoted_pages,
+        "independently_read_by": [c.channel_id for c in independents
+                                  if (page.read_by(c.channel_id) or None)
+                                  and page.read_by(c.channel_id).usable],
+    } for page in document.pages)
+
+    return SourceReconciliation(
+        control_mode=control_mode,
+        document_sha256=document.document_sha256,
+        document_fingerprint=document.fingerprint(),
+        primary_channel_id=(primary.channel_id if primary else ""),
+        independent_channel_ids=tuple(c.channel_id for c in independents),
+        spans=tuple(results),
+        page_outcomes=page_outcomes,
+        document_anomalies=document.anomalies)
+
+
+def pages_needing_independent_read(
+        document: SourceEvidenceDocument,
+        reconciliation: SourceReconciliation,
+        span_ids: set[str] | frozenset[str]) -> tuple[int, ...]:
+    """Exactly the pages a SECOND PAID READ would change the answer for.
+
+    This is the cost control the directive asks for, expressed as a query rather than
+    as a policy buried in a caller: a page is worth paying to re-read only when a
+    quotation that justified a RELEASED line sits on it AND no independent channel
+    could read it. Pages nobody quoted from, and pages already independently read, are
+    never re-read — so a document whose text layer covers it costs nothing extra at
+    all, and a scanned document costs one read of the few pages that carry the claim.
+    """
+    wanted: set[int] = set()
+    for span in reconciliation.spans:
+        if span.span_id in span_ids and span.status is ReconciliationStatus.UNVERIFIABLE:
+            wanted.update(span.pages)
+    return tuple(sorted(n for n in wanted if document.page(n) is not None))
+
+
+def build_page_read(channel_id: str, page_number: int, text: str,
+                    *, tokens: list[SourceToken] | None = None,
+                    status: PageStatus | None = None,
+                    detail: str = "") -> PageRead:
+    """One channel's read of one page, with its digest and token stream derived here.
+
+    Centralised so every producer — the PDF text layer, the vision transcription and
+    any second model read — hashes and tokenizes identically. Two producers computing
+    "the same" digest differently is the drift class this codebase keeps finding.
+    """
+    body = str(text or "")
+    if tokens is None:
+        tokens = [SourceToken(text=piece, normalized=normalize_token(piece))
+                  for piece in body.split() if normalize_token(piece)]
+    if status is None:
+        status = PageStatus.READ if tokens else PageStatus.BLANK
+    return PageRead(
+        channel_id=channel_id, page_number=page_number, status=status, text=body,
+        text_sha256="sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        tokens=tuple(tokens), detail=detail)

@@ -151,14 +151,27 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
         raise RuntimeError(f"PDF conversion produced no pages: {pdf_path.name}")
     source_digest = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
 
+    # The rendered page images ARE the thing the vision channel read, so their
+    # identity is recorded here rather than re-derived later: a compiler that
+    # re-rendered the PDF to hash it would be attesting to bytes that are merely
+    # LIKELY the same as the ones the model saw (dpi, poppler version, colour
+    # profile all move the digest). Issue #6 F6-R6-A / directive §1.
     image_blocks = []
-    for img in images:
+    page_images = []
+    for index, img in enumerate(images, start=1):
         buffer = BytesIO()
         img.save(buffer, format="PNG")
-        b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        raw = buffer.getvalue()
+        b64 = base64.b64encode(raw).decode("utf-8")
         image_blocks.append({
             "type": "image",
             "source": {"type": "base64", "media_type": "image/png", "data": b64},
+        })
+        page_images.append({
+            "page_number": index,
+            "sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+            "width": img.size[0],
+            "height": img.size[1],
         })
 
     # Shared client from llm_client: hard request timeout + our own retry
@@ -327,6 +340,15 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
     return {
         "metadata": metadata,
         "sections": sections,
+        # The per-page transcription, kept rather than only concatenated. It is the
+        # PRIMARY read channel of the Source Evidence Compiler, and the page boundaries
+        # are what map an evidence span's character offsets onto a page of the original
+        # document. `sections["full_text"]` remains the exact PAGE_SEPARATOR join of
+        # these texts, so every existing offset is unchanged.
+        "page_texts": [{"page_number": int(p["page_number"]),
+                        "status": str(p.get("status") or ""),
+                        "text": str(p.get("text") or "")}
+                       for p in page_texts],
         "note_category": result.get("note_category", ""),
         "procedures_performed_today": result.get("procedures_performed_today", []),
         "imaging_performed_today": result.get("imaging_performed_today", []),
@@ -340,6 +362,8 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
             "extracted_page_count": len(page_texts),
             "source_pdf_sha256": f"sha256:{source_digest}",
             "extracted_text_sha256": f"sha256:{text_digest}",
+            # Identity of the exact rendered images the vision channel was shown.
+            "page_images": page_images,
             "page_coverage": [
                 {
                     "page_number": int(p["page_number"]),

@@ -65,7 +65,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import run as entrypoint  # noqa: E402  — the exact module the deployment executes
-from app.contracts.claim_bundle import load_bundle  # noqa: E402
+from app.contracts.claim_bundle import (  # noqa: E402
+    SCHEMA_ID, SCHEMA_VERSION, load_bundle)
+from app.contracts.source_evidence import (  # noqa: E402
+    ReconciliationStatus)
+from app.ingestion.source_evidence import (  # noqa: E402
+    EMBEDDED_TEXT_CHANNEL_ID)
+from tests.source_pdf import build_pdf, vision_extraction  # noqa: E402
 from tools import claim_submitter as cs  # noqa: E402
 from tools import claims_registry as reg  # noqa: E402
 
@@ -267,7 +273,11 @@ def deployment(tmp_path, monkeypatch):
     notes_dir.mkdir()
     output_dir = tmp_path / "results"
     output_dir.mkdir()
-    (notes_dir / f"{STEM}.pdf").write_bytes(b"%PDF-1.4 fixture")
+    # A REAL document: its embedded text layer is the independent reading the
+    # source-evidence gate reconciles the transcription against (F6-R6-A). A
+    # placeholder byte string would hold every encounter as unverifiable, and the
+    # AUTO_READY assertions below would then be proving the wrong thing.
+    (notes_dir / f"{STEM}.pdf").write_bytes(build_pdf([[NOTE_TEXT]]))
 
     # Real source, real tables — used both to pick the fixture codes and (via
     # the patched vector store) by the run itself.
@@ -281,13 +291,11 @@ def deployment(tmp_path, monkeypatch):
     monkeypatch.setattr(entrypoint, "NOTES_DIR", notes_dir)
     monkeypatch.setattr(entrypoint, "OUTPUT_DIR", output_dir)
     monkeypatch.setattr(app_config, "PROVENANCE_DB", tmp_path / "provenance.db")
-    monkeypatch.setattr(entrypoint, "extract_from_pdf", lambda pdf_path: {
-        "metadata": {"date_of_service": DOS_ISO},
-        "sections": {"full_text": NOTE_TEXT},
-        "note_integrity": {"source_pdf_sha256": DOCUMENT_VERSION,
-                           "extracted_text_sha256": EXTRACTED_TEXT_SHA,
-                           "page_count": 1},
-    })
+    monkeypatch.setattr(entrypoint, "extract_from_pdf", lambda pdf_path:
+                        vision_extraction(
+                            [NOTE_TEXT], metadata={"date_of_service": DOS_ISO},
+                            document_version=DOCUMENT_VERSION,
+                            extracted_text_sha256=EXTRACTED_TEXT_SHA))
     monkeypatch.setattr(extraction, "_default_llm", lambda system, user: FACTS_JSON)
     monkeypatch.setattr(
         AuthoritativeSource, "_vector_store",
@@ -419,8 +427,11 @@ def test_document_to_bundle_to_registry_to_837p_preserves_the_claim(deployment):
     payload = deployment.run()
 
     # ---- hop 1: the entrypoint wrote ONE canonical artifact ----------------
-    assert payload["schema_id"] == "claim_bundle"
-    assert payload["schema_version"] == 1
+    assert payload["schema_id"] == SCHEMA_ID
+    # Read from the contract, not restated: a version bump is a deliberate change to
+    # the artifact and belongs in one place, or this assertion becomes a second,
+    # silently-drifting declaration of what the deployment writes.
+    assert payload["schema_version"] == SCHEMA_VERSION
     bundle = load_bundle(payload)
     assert bundle.release_blockers() == (), bundle.release_blockers()
     assert bundle.release.destination.value == "AUTO_READY"
@@ -450,6 +461,28 @@ def test_document_to_bundle_to_registry_to_837p_preserves_the_claim(deployment):
         "the service line lost its link to the diagnosis that justified it")
     assert service.units >= 1
     assert bundle.certificate is not None
+
+    # ---- hop 1b: every released fact is anchored in the ORIGINAL DOCUMENT ----
+    # Issue #6 F6-R6-A / directive §1, proven through the DEPLOYED ENTRYPOINT: the
+    # note the coder read is one model's transcription of the PDF, and every
+    # quotation behind these two lines was reconciled against the document's own
+    # embedded text layer before this bundle could become releasable.
+    references = [reference for line in (*bundle.diagnoses, *bundle.service_lines)
+                  for reference in line.evidence]
+    assert references, "the released claim carries no evidence at all"
+    for reference in references:
+        assert reference.source_reconciliation == ReconciliationStatus.AGREED.value, (
+            f"a released fact was not confirmed against the original document: "
+            f"{reference.text!r} -> {reference.source_reconciliation!r}")
+        assert reference.verified_by_channel_id == EMBEDDED_TEXT_CHANNEL_ID
+        assert reference.page == 1
+        assert reference.page_image_sha256, "no source image identity"
+        assert reference.region is not None, "no page region"
+    source_evidence = bundle.certificate.certificate["source_evidence"]
+    assert source_evidence["control_mode"] == "ENFORCED_FAIL_CLOSED"
+    assert source_evidence["document_sha256"] == DOCUMENT_VERSION
+    assert source_evidence["summary"]["DISAGREED"] == 0
+    assert EMBEDDED_TEXT_CHANNEL_ID in source_evidence["independent_channel_ids"]
     assert bundle.certificate.certificate_sha256
     assert bundle.authority.data_fingerprint
     assert bundle.authority.source_manifest_fingerprint
@@ -826,3 +859,40 @@ def _other_place_of_service(current: str) -> str:
     raw = json.loads((REPO_ROOT / "data" / "codes" / "pos_codes.json").read_text())
     return next(code for code in sorted(raw.get("codes") or {})
                 if code != current)
+
+
+def test_a_misread_page_cannot_reach_the_registry(deployment, monkeypatch):
+    """The negative of the hop above, through the same entrypoint.
+
+    The PDF on disk is unchanged; only the TRANSCRIPTION is perturbed — exactly what a
+    vision misread looks like from every downstream component's point of view. Nothing
+    after the transcription can tell it is wrong, which is why the check has to be
+    against the document itself.
+    """
+    misread = NOTE_TEXT.replace("right site two", "left site two")
+    assert misread != NOTE_TEXT
+    monkeypatch.setattr(entrypoint, "extract_from_pdf", lambda pdf_path:
+                        vision_extraction(
+                            [misread], metadata={"date_of_service": DOS_ISO},
+                            document_version=DOCUMENT_VERSION,
+                            extracted_text_sha256=EXTRACTED_TEXT_SHA))
+    from claude_coder import extraction as extraction_module
+    monkeypatch.setattr(
+        extraction_module, "_default_llm",
+        lambda system, user: FACTS_JSON.replace("right site two", "left site two"))
+
+    bundle = load_bundle(deployment.run())
+    assert not bundle.is_releasable
+    assert bundle.release.destination.value == "BLOCKED"
+    assert "source_evidence_reconciliation" in bundle.release.reason_codes
+    outcome = next(o for o in bundle.outcomes
+                   if o.name == "source_evidence_reconciliation")
+    assert outcome.outcome == "BLOCKED"
+    assert not outcome.retryable, (
+        "a misread page is an integrity stop, not a retryable dependency failure")
+
+    # and the retained claim path refuses it, which is the property that matters:
+    # a bundle the registry will not record can never become an 837P.
+    ingested = deployment.ingest()
+    assert ingested.get("recorded", 0) == 0, (
+        f"a claim resting on a misread page reached the registry: {ingested}")

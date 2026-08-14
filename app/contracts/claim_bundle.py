@@ -80,10 +80,16 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 #: Producer-independent identity of this artifact shape. A reader that finds
 #: anything else on disk is looking at a different contract and must say so.
 SCHEMA_ID = "claim_bundle"
-SCHEMA_VERSION = 1
+#: 2 adds the ORIGINAL-DOCUMENT location and reconciliation proof to
+#: `EvidenceReference` (issue #6 F6-R6-A, directive §1). It is a version bump rather
+#: than a silent field addition because the ABSENCE of those fields means two
+#: different things: in a v1 artifact the question was never askable, in a v2 artifact
+#: it was asked and the answer is recorded. A reader that could not tell those apart
+#: would read "no proof recorded" as "no proof needed".
+SCHEMA_VERSION = 2
 #: Every version this build can read. Adding a version means adding a reader,
 #: never silently accepting a shape whose semantics are unknown.
-SUPPORTED_SCHEMA_VERSIONS = frozenset({1})
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
 
 
 class ClaimBundleError(Exception):
@@ -293,6 +299,17 @@ class EvidenceReference(_Strict):
     document_sha256: str = ""
     document_version: str = ""
     anchored: bool = False
+    #: sha256 of the rendered image of the ORIGINAL page this quotation sits on.
+    page_image_sha256: str = ""
+    #: (x0, top, x1, bottom) in PDF user space — the exact region on that page. Absent
+    #: when the confirming channel reports no geometry (a model reading an image
+    #: returns text, not boxes); an approximated box would be worse than none.
+    region: tuple[float, float, float, float] | None = None
+    #: A `contracts.source_evidence.ReconciliationStatus` value. Empty means no source
+    #: document accompanied the encounter, which is NOT the same as unproven.
+    source_reconciliation: str = ""
+    #: Which independent reading confirmed (or refuted) it.
+    verified_by_channel_id: str = ""
 
 
 class CodeAuthority(_Strict):
@@ -1016,6 +1033,13 @@ def _evidence_of(fact) -> tuple[EvidenceReference, ...]:
             document_sha256=str(getattr(span, "document_sha256", "") or ""),
             document_version=str(getattr(span, "document_version", "") or ""),
             anchored=bool(getattr(span, "anchored", False)),
+            page_image_sha256=str(getattr(span, "page_image_sha256", "") or ""),
+            region=(tuple(float(v) for v in getattr(span, "region", None))
+                    if getattr(span, "region", None) else None),
+            source_reconciliation=str(
+                getattr(span, "source_reconciliation", "") or ""),
+            verified_by_channel_id=str(
+                getattr(span, "verified_by_channel_id", "") or ""),
         )
         for span in (getattr(fact, "evidence", None) or [])
     )

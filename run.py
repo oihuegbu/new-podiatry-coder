@@ -139,6 +139,8 @@ from app.core.config import NOTES_DIR, OUTPUT_DIR
 from app.core.dates import parse_date_of_service
 from app.core.logger import get_logger
 from app.ingestion.pdf_parser import extract_from_pdf
+from app.ingestion.source_evidence import (
+    IndependentVisionReader, compile_source_evidence)
 from claude_coder.data_access import AuthoritativeSource
 from claude_coder.pipeline import code_encounter, render
 
@@ -188,6 +190,14 @@ def read_note(pdf_path: Path) -> dict:
                         text hash instead.
     """
     extraction = extract_from_pdf(pdf_path)
+    # THE ORIGINAL DOCUMENT, read by more than one channel (issue #6 F6-R6-A). The
+    # vision transcription above is one candidate reading of the PDF; on its own it is
+    # the authority against which its own correctness would be "proven", which proves
+    # nothing. The compiler binds the PDF's digest, each rendered page image's digest,
+    # and the document's own embedded text layer with word boxes as an independent,
+    # deterministic second reading — and refuses (raises) rather than returning a
+    # single-channel document that would look checked and is not.
+    source_evidence = compile_source_evidence(pdf_path, extraction)
     sections = extraction.get("sections") or {}
     note_text = str(sections.get("full_text") or "")
     if not note_text.strip():
@@ -213,6 +223,11 @@ def read_note(pdf_path: Path) -> dict:
             integrity.get("extracted_text_sha256") or "").strip() or None,
         "page_count": int(page_count) if isinstance(page_count, int) else None,
         "patient_metadata": metadata,
+        "source_evidence": source_evidence,
+        # The PAID second channel, for image-only pages the text layer cannot cover.
+        # Constructed here (it needs the PDF) but INVOKED by the pipeline, and only for
+        # the pages carrying a quotation behind a released line.
+        "source_reader": IndependentVisionReader(pdf_path),
     }
 
 
@@ -581,6 +596,8 @@ def main(argv: list[str] | None = None) -> int:
                 source=source,
                 billing_context=billing_context,
                 document_version=note["document_version"],
+                source_evidence=note["source_evidence"],
+                source_reader=note["source_reader"],
             )
             payload = build_bundle(result, pdf_path=pdf_path, note=note,
                                    context=context, source=source)

@@ -61,6 +61,98 @@ def evidence_gate(result: CodingResult, note_text: str) -> GateResult:
                       else f"unsupported: {misses}", "note text")
 
 
+def source_evidence_gate(result: CodingResult) -> GateResult:
+    """Does every quotation the RELEASED claim rests on say, in the ORIGINAL document,
+    what the transcription says it says? (Issue #6 F6-R6-A, directive §1.)
+
+    `evidence_gate` above proves a quotation is verbatim in the TRANSCRIPTION. That is
+    a check of the transcription against itself, and it passes just as cleanly when the
+    transcription misread a side, an ordinal, a unit, a decimal or a negation. This
+    gate is the missing half: an INDEPENDENT reading of the same page — the document's
+    own text layer, or a second model from a different vendor — must contain the same
+    tokens.
+
+    Three outcomes, deliberately distinguished because they need three different
+    responses:
+
+      BLOCKED  an independent reading of the page says something else. The record does
+               not support the claim; this is an integrity stop, never retryable and
+               never a coder's judgement call.
+      UNKNOWN  nothing independent could read the page (image-only page, no second
+               channel configured), or a source document was read but no source-
+               evidence compilation accompanied it. Nothing was proven either way —
+               system work (obtain a channel), routed to SYSTEM_HOLD.
+      PASS     every quotation behind every billed line was independently confirmed and
+               resolves to a page of the original document with that page's image
+               digest and the digest of the exact text that proved it.
+    """
+    from app.contracts.source_evidence import ReconciliationStatus
+    authority = "issue #6 F6-R6-A; product directive §1 (Source Evidence Compiler)"
+    reconciliation = getattr(result, "source_reconciliation", None)
+    if reconciliation is None:
+        if getattr(result, "document_version", None):
+            return GateResult(
+                "source_evidence_reconciliation", Outcome.UNKNOWN,
+                "this encounter was read from a source document, but no independent "
+                "source-evidence compilation accompanied it: the transcription would be "
+                "its own authority",
+                authority, retryable=True)
+        return GateResult(
+            "source_evidence_reconciliation", Outcome.NOT_APPLICABLE,
+            "no source document accompanied this encounter (note text was supplied "
+            "directly), so there is no original page to reconcile against",
+            authority)
+
+    index = reconciliation.by_span_id()
+    disagreed: list[str] = []
+    unproven: list[str] = []
+    checked = 0
+    for ln in result.billable_lines:
+        subject = ln.chosen.code if ln.chosen else ln.fact.description
+        for span in (ln.fact.evidence or []):
+            record = index.get(span.span_id or "")
+            if record is None:
+                unproven.append(f"{subject}: a quotation was never submitted for "
+                                f"reconciliation")
+                continue
+            checked += 1
+            if record.blocking:
+                differing = ", ".join(
+                    f"{d.quoted or '-'}!={d.independent or '-'}"
+                    for d in record.differences[:5]) or record.status.value
+                disagreed.append(f"{subject} p{record.pages or '-'} [{differing}]")
+            elif record.holding:
+                unproven.append(f"{subject}: {record.detail}")
+            elif record.status is ReconciliationStatus.AGREED and not (
+                    record.pages and all(record.page_image_sha256)
+                    and record.verified_text_sha256):
+                # An "agreement" that cannot name the page, the page image or the text
+                # that proved it is not a resolvable location, and a released fact must
+                # resolve to one (directive §1, acceptance test 3).
+                unproven.append(f"{subject}: the confirming reading does not resolve to "
+                                f"a page image and text digest")
+    if disagreed:
+        return GateResult(
+            "source_evidence_reconciliation", Outcome.BLOCKED,
+            f"an independent reading of the original page disagrees with the "
+            f"transcription this claim rests on: {disagreed}",
+            authority)
+    if unproven:
+        return GateResult(
+            "source_evidence_reconciliation", Outcome.UNKNOWN,
+            f"the original document could not be read independently for: {unproven}",
+            authority, retryable=True)
+    if not checked:
+        return GateResult("source_evidence_reconciliation", Outcome.NOT_APPLICABLE,
+                          "no billable line carries a quotation", authority)
+    return GateResult(
+        "source_evidence_reconciliation", Outcome.PASS,
+        f"{checked} quotation(s) behind the billed lines were independently confirmed "
+        f"against the original document by "
+        f"{list(reconciliation.independent_channel_ids)}",
+        authority)
+
+
 def code_active_gate(result: CodingResult, source: CodeSource) -> GateResult:
     outcomes, detail = [], []
     for ln in result.billable_lines:
@@ -601,6 +693,7 @@ def run_gates(result: CodingResult, note_text: str, source: CodeSource) -> list[
             claim_ownership_gate(result),
             dos_gate(result),
             evidence_gate(result, note_text),
+            source_evidence_gate(result),
             code_active_gate(result, source),
             medical_necessity_gate(result, source),
             ncci_gate(result, source),

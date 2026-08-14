@@ -64,6 +64,17 @@ class EvidenceSpan:
     document_version: str | None = None
     span_id: str | None = None
     page: int | None = None
+    # WHERE IN THE ORIGINAL DOCUMENT, and by WHOSE reading (issue #6 F6-R6-A).
+    # `page`/`start`/`end` above locate the quote in the TRANSCRIPTION; these locate it
+    # in the document the physician actually signed, and record which INDEPENDENT
+    # channel proved it. `source_reconciliation` is a
+    # `contracts.source_evidence.ReconciliationStatus` value; None means the question
+    # was never asked (no source document accompanied the encounter), which is a
+    # different — and separately routed — thing from "asked and unproven".
+    page_image_sha256: str | None = None
+    region: tuple[float, float, float, float] | None = None
+    source_reconciliation: str | None = None
+    verified_by_channel_id: str | None = None
 
 
 @dataclass
@@ -261,6 +272,14 @@ class CodingResult:
     # The certificate binds this, so the justification is auditable from the artifact rather
     # than only internally consistent. (Codex F6-R3.)
     necessity_support: list[dict] = field(default_factory=list)
+    # Proof that every quotation this claim rests on says, in the ORIGINAL document,
+    # what the transcription claims it says — a
+    # `contracts.source_evidence.SourceReconciliation`. None means no source document
+    # accompanied the encounter; `document_version` is what tells the gate whether
+    # that absence is honest (text supplied directly) or a bypass (a document was
+    # read, but nothing checked the reading). (Issue #6 F6-R6-A, directive §1.)
+    source_reconciliation: Any = None
+    document_version: str | None = None
 
     @property
     def billable_lines(self) -> list[ResolvedLine]:

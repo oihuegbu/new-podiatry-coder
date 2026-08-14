@@ -59,6 +59,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import run as entrypoint  # noqa: E402  — the exact module the deployment executes
+from tests.source_pdf import build_pdf, vision_extraction  # noqa: E402
 
 
 # --------------------------------------------------------------- structural wiring
@@ -178,16 +179,17 @@ def deployment(tmp_path, monkeypatch):
     output_dir = tmp_path / "results"
     output_dir.mkdir()
     anchor_root = tmp_path / "anchor"
-    (notes_dir / f"{STEM}.pdf").write_bytes(b"%PDF-1.4 fixture")
+    # A REAL document, so the source-evidence reconciliation these tests now pass
+    # through has an independent reading to work with (issue #6 F6-R6-A).
+    (notes_dir / f"{STEM}.pdf").write_bytes(build_pdf([[NOTE_TEXT]]))
 
     monkeypatch.setattr(entrypoint, "NOTES_DIR", notes_dir)
     monkeypatch.setattr(entrypoint, "OUTPUT_DIR", output_dir)
     monkeypatch.setattr(app_config, "PROVENANCE_DB", tmp_path / "provenance.db")
-    monkeypatch.setattr(entrypoint, "extract_from_pdf", lambda pdf_path: {
-        "metadata": {"date_of_service": "2026-03-14"},
-        "sections": {"full_text": NOTE_TEXT},
-        "note_integrity": {"source_pdf_sha256": DOCUMENT_VERSION},
-    })
+    monkeypatch.setattr(entrypoint, "extract_from_pdf", lambda pdf_path:
+                        vision_extraction(
+                            [NOTE_TEXT], metadata={"date_of_service": "2026-03-14"},
+                            document_version=DOCUMENT_VERSION))
     monkeypatch.setattr(extraction, "_default_llm", lambda system, user: FACTS_JSON)
     monkeypatch.setattr(AuthoritativeSource, "_vector_store",
                         lambda self: _StubVectorStore())

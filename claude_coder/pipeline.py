@@ -144,7 +144,17 @@ def code_encounter(
     audit_repository=None,
     document_version: str | None = None,
     model_profiles: dict | None = None,
+    source_evidence=None,
+    source_reader=None,
 ) -> CodingResult:
+    """`source_evidence` is a `contracts.source_evidence.SourceEvidenceDocument`: the
+    ORIGINAL document as read by more than one channel. Without it the note text is one
+    model's transcription with nothing to check it against, and
+    `gates.source_evidence_gate` holds every encounter that came from a document
+    (issue #6 F6-R6-A). `source_reader` is the OPTIONAL, lazily-invoked second model
+    read used only for pages no deterministic channel could read — see the escalation
+    below, which is the cost control that keeps this from doubling the price of notes
+    whose text layer already covers them."""
     from .models import GateResult, Outcome
     from .modifiers import ModifierEngine
     source = source or AuthoritativeSource()
@@ -206,6 +216,22 @@ def code_encounter(
             audit_repository = _prov.SqliteAuditRepository(PROVENANCE_DB, strict=True)
         audit_hashes = [audit_repository.append(
             encounter_id, "evidence_anchoring", _prov.anchoring_report(facts))]
+        # ---- Source evidence: the transcription is a CANDIDATE reading ---------------
+        # Anchoring above proves each quotation is verbatim in the TRANSCRIPTION. This
+        # proves it is verbatim in the ORIGINAL DOCUMENT, by reconciling it against an
+        # independent reading of the very page it sits on, and writes that page, its
+        # image digest and the region back onto the span. Every deterministic channel
+        # already in the document is free, so this runs for every quotation; the PAID
+        # channel is escalated to later, and only where it can change the answer.
+        source_targets = _prov.span_targets(facts)
+        source_reconciliation = None
+        if source_evidence is not None:
+            from app.contracts.source_evidence import reconcile_spans
+            source_reconciliation = reconcile_spans(source_evidence, source_targets)
+            _prov.apply_reconciliation(facts, source_reconciliation)
+            audit_hashes.append(audit_repository.append(
+                encounter_id, "source_evidence_reconciliation",
+                source_reconciliation.certificate_record()))
         audit_hashes.append(audit_repository.append(encounter_id, "relation_graph", {
             "schema_version": extracted.schema_version,
             # the extraction call this graph came from -- the unit of assertion independence
@@ -381,6 +407,59 @@ def code_encounter(
     apply_integral_bundling(result, source)
 
     apply_global_package(result, source)
+    # ---- Escalation to a PAID independent read, scoped to where it matters -----------
+    # Only now is it known WHICH quotations justify a released line, so only now can the
+    # second read be aimed. A page is re-read only when (a) a quotation behind a billed
+    # line sits on it and (b) no deterministic channel could read it — an image-only or
+    # low-yield page. A document whose text layer covers it therefore costs nothing
+    # extra; a scanned one costs a read of the few pages the claim rests on, never a
+    # second read of the whole note.
+    result.document_version = document_version
+    if (source_evidence is not None and source_reader is not None
+            and source_reconciliation is not None):
+        from app.contracts.source_evidence import (
+            pages_needing_independent_read, reconcile_spans)
+        billed_span_ids = {s.span_id for ln in result.billable_lines
+                           for s in (ln.fact.evidence or []) if s.span_id}
+        wanted = pages_needing_independent_read(
+            source_evidence, source_reconciliation, billed_span_ids)
+        if wanted:
+            try:
+                extra = source_reader.read_pages(wanted)
+                channel = source_reader.channel()
+            except Exception as exc:
+                # A failed second read proves nothing, so it must not look like one:
+                # the affected quotations stay UNVERIFIABLE and the gate holds.
+                extra, channel = {}, None
+                result.notes.append(
+                    f"independent page read unavailable for pages {list(wanted)} "
+                    f"({type(exc).__name__}); those quotations remain unverified")
+            if extra and channel is not None:
+                try:
+                    escalated = source_evidence.with_channel(channel, extra)
+                    reconciled = reconcile_spans(escalated, source_targets)
+                except Exception as exc:
+                    # A second read that cannot be INCORPORATED proves nothing either.
+                    # The first reconciliation stands (those quotations are still
+                    # UNVERIFIABLE and still hold), and the reason is recorded rather
+                    # than raised past the claim that has already been computed.
+                    result.notes.append(
+                        f"independent page read could not be incorporated "
+                        f"({type(exc).__name__}: {exc}); those quotations remain "
+                        f"unverified")
+                else:
+                    source_evidence = escalated
+                    source_reconciliation = reconciled
+                    _prov.apply_reconciliation(facts, source_reconciliation)
+                    try:
+                        audit_hashes.append(audit_repository.append(
+                            encounter_id, "source_evidence_reconciliation",
+                            source_reconciliation.certificate_record()))
+                    except Exception as exc:              # durable audit is enforced
+                        return _system_hold_result(
+                            encounter_id, date_of_service,
+                            "source_evidence_audit_persistence", exc, source)
+    result.source_reconciliation = source_reconciliation
     result.gates = pre_retrieval_gates + gates.run_gates(result, note_text, source)
     decide(result, source=source)
     # Actionable documentation guidance for whatever could not be coded confidently.

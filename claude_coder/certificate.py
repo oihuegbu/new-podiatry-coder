@@ -61,6 +61,13 @@ def build_certificate(result: CodingResult, note_text: str,
             "document_version": s.document_version,
             "span_id": s.span_id,
             "anchored": s.anchored,
+            # WHERE IN THE ORIGINAL DOCUMENT this quotation is, and which INDEPENDENT
+            # reading proved it. Without these the certificate can identify the PDF but
+            # cannot demonstrate where the billed fact appears in it. (F6-R6-A.)
+            "page_image_sha256": s.page_image_sha256,
+            "region": list(s.region) if s.region else None,
+            "source_reconciliation": s.source_reconciliation,
+            "verified_by_channel_id": s.verified_by_channel_id,
         } for s in ln.fact.evidence],
         "authority": ln.chosen.authority,
     } for ln in result.billable_lines]
@@ -121,6 +128,11 @@ def build_certificate(result: CodingResult, note_text: str,
         "gates": [{"name": g.name, "outcome": g.outcome.value, "detail": g.detail}
                   for g in result.gates],
         "verdict": result.verdict.value,
+        # The multi-channel reading of the ORIGINAL document and every quotation's
+        # proof against it. Bound into the content address, so a certificate cannot be
+        # separated from the evidence that the transcription behind it was checked.
+        "source_evidence": (result.source_reconciliation.certificate_record()
+                            if result.source_reconciliation is not None else None),
         "source_identity": source_identity or {},
     }
     payload["certificate_sha256"] = content_digest(payload)

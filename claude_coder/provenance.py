@@ -124,6 +124,56 @@ def anchor_facts(note_text: str, facts: list, document_version: str | None = Non
     return facts
 
 
+def span_targets(facts: list) -> list:
+    """Every ANCHORED quotation, as something the source-evidence layer can prove.
+
+    Unanchored spans are excluded deliberately: a quotation that is not verbatim in
+    the transcription has no character offsets, so it cannot be attributed to a page
+    of the original document. It is already held by `gates.evidence_gate`, and
+    inventing a page for it here would turn one honest failure into a fabricated
+    location.
+    """
+    from app.contracts.source_evidence import SpanTarget
+    targets = []
+    for fact in facts:
+        for span in (fact.evidence or []):
+            if not span.anchored or not span.span_id:
+                continue
+            targets.append(SpanTarget(span_id=span.span_id, text=span.text,
+                                      start=span.start, end=span.end,
+                                      fact_id=fact.fact_id))
+    return targets
+
+
+def apply_reconciliation(facts: list, reconciliation) -> list:
+    """Write each quotation's ORIGINAL-DOCUMENT location and proof back onto its span.
+
+    This is what carries page coordinates and reconciliation evidence into every
+    `EvidenceSpan` — and therefore into the certificate and the ClaimBundle — rather
+    than leaving them in a side report only this module reads (directive §1).
+    """
+    index = reconciliation.by_span_id() if reconciliation is not None else {}
+    for fact in facts:
+        updated = []
+        for span in (fact.evidence or []):
+            record = index.get(span.span_id or "")
+            if record is None:
+                updated.append(span)
+                continue
+            region = record.region
+            updated.append(replace(
+                span,
+                page=(record.pages[0] if record.pages else span.page),
+                page_image_sha256=(record.page_image_sha256[0]
+                                   if record.page_image_sha256 else None),
+                region=((region.x0, region.top, region.x1, region.bottom)
+                        if region is not None else None),
+                source_reconciliation=record.status.value,
+                verified_by_channel_id=record.verified_by_channel_id or None))
+        fact.evidence = updated
+    return facts
+
+
 def anchoring_report(facts: list) -> dict[str, Any]:
     """Shadow coverage report: how many evidence spans anchored, and which did not."""
     total = anchored = 0

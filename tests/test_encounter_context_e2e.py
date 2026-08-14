@@ -47,6 +47,7 @@ if str(REPO_ROOT) not in sys.path:
 import run as entrypoint  # noqa: E402  — the module the deployment executes
 from app.contracts.claim_bundle import load_bundle  # noqa: E402
 from tools import claim_submitter as cs  # noqa: E402
+from tests.source_pdf import build_pdf, vision_extraction  # noqa: E402
 from tools import claims_registry as reg  # noqa: E402
 
 # The deployment fixture and its roster identifiers, imported (not copied) so a
@@ -87,7 +88,7 @@ def _add_second_note(deployment, *, npi: str) -> None:
     failure that reaches the wrong one is visible.
     """
     (deployment.tmp_path / "attachments" / f"{OTHER_STEM}.pdf").write_bytes(
-        b"%PDF-1.4 fixture")
+        build_pdf([[NOTE_TEXT]]))
     roster = deployment.roster
     roster["providers"][npi] = {"first_name": "Sam", "last_name": "Okonkwo",
                                 "display_name": "Sam Okonkwo"}
@@ -174,13 +175,13 @@ def test_the_note_cannot_supply_or_override_a_resolved_identity(deployment,
     """
     impostor = _valid_npi("177777777")
     assert impostor != deployment.rendering_npi
-    monkeypatch.setattr(entrypoint, "extract_from_pdf", lambda pdf_path: {
-        "metadata": {"date_of_service": DOS_ISO, "provider_npi": impostor},
-        "sections": {"full_text": NOTE_TEXT},
-        "note_integrity": {"source_pdf_sha256": DOCUMENT_VERSION,
-                           "extracted_text_sha256": EXTRACTED_TEXT_SHA,
-                           "page_count": 1},
-    })
+    monkeypatch.setattr(entrypoint, "extract_from_pdf", lambda pdf_path:
+                        vision_extraction(
+                            [NOTE_TEXT],
+                            metadata={"date_of_service": DOS_ISO,
+                                      "provider_npi": impostor},
+                            document_version=DOCUMENT_VERSION,
+                            extracted_text_sha256=EXTRACTED_TEXT_SHA))
     assert _run(deployment) == 0
     bundle = _bundle(deployment, STEM)
 
