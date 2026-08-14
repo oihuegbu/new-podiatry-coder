@@ -53,6 +53,7 @@ test cannot rot into an assertion about a code set that has since changed — an
 cannot silently pass because a literal happened to still exist.
 """
 
+import copy
 import json
 import sys
 from pathlib import Path
@@ -70,6 +71,19 @@ from tools import claims_registry as reg  # noqa: E402
 
 STEM = "NOTE_BUNDLE_E2E_001"
 DOS_ISO = "2026-03-14"
+
+#: Roster identifiers. Opaque strings — the point of the normalized context
+#: source is that identities are declared once and referenced BY IDENTIFIER, so
+#: what the identifiers say is irrelevant and what they LINK is everything.
+PATIENT_ID = "PAT-E2E-1"
+COVERAGE_ID = "COV-E2E-1"
+PAYER_ID = "PAY-E2E-1"
+ENTITY_ID = "ENT-E2E-1"
+AFFILIATION_ID = "AFF-E2E-1"
+FACILITY_ID = "FAC-E2E-1"
+#: Every time-bound record starts well before the DOS and is open-ended, so a
+#: test that changes a window is changing the ONLY thing under test.
+ROSTER_START = "2020-01-01"
 DOCUMENT_VERSION = "sha256:" + "b" * 64
 EXTRACTED_TEXT_SHA = "sha256:" + "c" * 64
 
@@ -219,16 +233,20 @@ class _Deployment:
     def write_artifact(self, payload: dict) -> None:
         self.artifact_path.write_text(json.dumps(payload, indent=2))
 
-    def write_context(self, *, version: str, entry_overrides: dict | None = None,
-                      path: Path | None = None) -> Path:
-        entry = dict(self.context_entry)
-        entry.update(entry_overrides or {})
+    def write_context(self, *, version: str,
+                      mutate=None, path: Path | None = None) -> Path:
+        """Write a NORMALIZED (`encounter_context/2`) source for this deployment.
+
+        `mutate` receives a deep copy of the canonical roster and edits it in
+        place, so each negative case changes exactly one thing and nothing else
+        drifts between the positive and negative runs.
+        """
+        roster = copy.deepcopy(self.roster)
+        roster["version"] = version
+        if mutate is not None:
+            mutate(roster)
         target = path or self.context_file
-        target.write_text(json.dumps({
-            "schema": "encounter_context/1",
-            "version": version,
-            "encounters": {STEM: entry},
-        }, indent=2))
+        target.write_text(json.dumps(roster, indent=2))
         return target
 
     def ingest(self) -> dict:
@@ -293,20 +311,43 @@ def deployment(tmp_path, monkeypatch):
     billing_context_file = tmp_path / "billing_context.json"
     billing_context_file.write_text(json.dumps(BILLING_CONTEXT))
 
-    context_entry = {
-        "patient": {"first_name": "Alexis", "last_name": "Quintero",
-                    "date_of_birth": "09/02/1982", "gender": "F",
-                    "record_number": "MRN-E2E-1"},
-        "subscriber": {"member_id": "MEM-E2E-1", "group_number": "GRP-E2E-1"},
-        "payer": {"name": payer_alias, "payer_id": "", "kind": ""},
-        "rendering_provider": {"npi": rendering_npi, "first_name": "Robin",
-                               "last_name": "Vasquez",
-                               "display_name": "Robin Vasquez"},
-        "service_facility": {"name": "Test Practice", "npi": billing_npi,
-                             "address1": "1 Test Way", "city": "Testville",
-                             "state": "FL", "postal_code": "33101"},
-        "place_of_service": place_of_service,
-        "jurisdiction": "FL",
+    # The normalized context source. Every identity is declared ONCE and
+    # referenced by identifier; the encounter itself names only identifiers, so
+    # nothing about who is billed can be inlined per encounter and drift.
+    roster = {
+        "schema": "encounter_context/2",
+        "version": "context-edition-1",
+        "patients": {PATIENT_ID: {
+            "first_name": "Alexis", "last_name": "Quintero",
+            "date_of_birth": "09/02/1982", "gender": "F",
+            "record_number": "MRN-E2E-1"}},
+        "payers": {PAYER_ID: {"name": payer_alias, "payer_id": "", "kind": "",
+                              "plan": ""}},
+        "coverages": [{
+            "coverage_id": COVERAGE_ID, "patient_id": PATIENT_ID,
+            "payer_id": PAYER_ID, "member_id": "MEM-E2E-1",
+            "group_number": "GRP-E2E-1", "relationship_to_patient": "",
+            "effective_start": ROSTER_START, "effective_end": ""}],
+        "authorizations": [],
+        "providers": {rendering_npi: {
+            "first_name": "Robin", "last_name": "Vasquez",
+            "display_name": "Robin Vasquez"}},
+        "billing_entities": {ENTITY_ID: {
+            "name": "Test Podiatry PLLC", "npi": billing_npi,
+            "tax_id": "123456789", "taxonomy_code": "213E00000X"}},
+        "affiliations": [{
+            "affiliation_id": AFFILIATION_ID, "provider_npi": rendering_npi,
+            "billing_entity_id": ENTITY_ID,
+            "effective_start": ROSTER_START, "effective_end": ""}],
+        "facilities": {FACILITY_ID: {
+            "name": "Test Practice", "npi": billing_npi,
+            "address1": "1 Test Way", "city": "Testville", "state": "FL",
+            "postal_code": "33101", "place_of_service": place_of_service,
+            "jurisdiction": "FL"}},
+        "encounters": {STEM: {
+            "patient_id": PATIENT_ID, "coverage_id": COVERAGE_ID,
+            "rendering_provider_npi": rendering_npi,
+            "facility_id": FACILITY_ID}},
     }
 
     practice_config_file = tmp_path / "practice_config.json"
@@ -351,7 +392,9 @@ def deployment(tmp_path, monkeypatch):
         "dryrun_dir": tmp_path / "submissions",
         "context_file": tmp_path / "encounter_context.json",
         "billing_context_file": billing_context_file,
-        "context_entry": context_entry,
+        "practice_config_file": practice_config_file,
+        "roster": roster,
+        "billing_npi": billing_npi,
         "diagnosis_code": diagnosis_code,
         "procedure_code": procedure_code,
         "trading_partner": trading_partner,
@@ -388,10 +431,15 @@ def test_document_to_bundle_to_registry_to_837p_preserves_the_claim(deployment):
     # the finding, directly: encounter context obtained by `read_note` used to
     # be discarded before the artifact was written.
     assert bundle.context.resolution.value == "RESOLVED"
-    assert bundle.context.provider_id == "versioned_roster/1"
+    assert bundle.context.provider_id == "versioned_roster/2"
     assert bundle.context.context_version == "context-edition-1"
     assert bundle.context.place_of_service == deployment.place_of_service
     assert bundle.context.rendering_provider.npi == deployment.rendering_npi
+    # the identifier chain, not a per-encounter inline dump: the billing entity
+    # is the one the AFFILIATION IN FORCE ON THE DOS names.
+    assert bundle.context.billing_entity.entity_id == ENTITY_ID
+    assert bundle.context.affiliation.affiliation_id == AFFILIATION_ID
+    assert bundle.context.coverage.coverage_id == COVERAGE_ID
 
     (diagnosis,) = bundle.diagnoses
     (service,) = bundle.service_lines
@@ -537,10 +585,11 @@ def test_a_changed_encounter_context_stops_the_dry_run(deployment):
     """
     _verified_once(deployment)
 
-    deployment.write_context(version="context-edition-2",
-                             entry_overrides={"place_of_service":
-                                              _other_place_of_service(
-                                                  deployment.place_of_service)})
+    def _move_facility(roster):
+        roster["facilities"][FACILITY_ID]["place_of_service"] = \
+            _other_place_of_service(deployment.place_of_service)
+
+    deployment.write_context(version="context-edition-2", mutate=_move_facility)
     fresh = deployment.run()
     assert load_bundle(fresh).context.fingerprint != \
         reg.bundle_of_event(
@@ -593,11 +642,13 @@ def test_an_unknown_encounter_holds_only_that_encounter(deployment):
     source, so an operator can tell "the roster has no entry" from "the roster
     could not be read" from "the roster is fine and the note is the problem".
     """
-    empty = deployment.tmp_path / "other_context.json"
-    empty.write_text(json.dumps({"schema": "encounter_context/1",
-                                 "version": "context-edition-1",
-                                 "encounters": {"SOME_OTHER_NOTE": {}}}))
-    bundle = load_bundle(deployment.run(context_file=empty))
+    def _rekey(roster):
+        roster["encounters"] = {"SOME_OTHER_NOTE": roster["encounters"][STEM]}
+
+    other = deployment.write_context(
+        version="context-edition-1", mutate=_rekey,
+        path=deployment.tmp_path / "other_context.json")
+    bundle = load_bundle(deployment.run(context_file=other))
     assert bundle.context.resolution.value == "UNRESOLVED"
     assert any("not in the encounter context source" in hold
                for hold in bundle.release.holds), bundle.release.holds

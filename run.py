@@ -401,13 +401,16 @@ def build_parser() -> argparse.ArgumentParser:
                              "line holds.")
     parser.add_argument("--encounter-context", type=str,
                         default=os.getenv("ENCOUNTER_CONTEXT_FILE", ""),
-                        help="Path to a versioned encounter-context source "
-                             "(schema encounter_context/1) resolving each encounter's "
-                             "patient/subscriber/payer/rendering-provider/facility/POS "
-                             "by stable identifier (env: ENCOUNTER_CONTEXT_FILE). "
-                             "Without it, no encounter context is AUTHORITATIVELY "
-                             "resolved: the note's own metadata travels with the claim "
-                             "as corroboration only, and every bundle holds.")
+                        help="The encounter-context source resolving each encounter's "
+                             "patient/subscriber/payer/rendering-provider/billing-"
+                             "entity/facility/POS by stable identifier (env: "
+                             "ENCOUNTER_CONTEXT_FILE). Either a path to a versioned "
+                             "roster (schema encounter_context/2) or "
+                             "'<adapter>:<locator>' for any registered adapter — see "
+                             "app/contracts/encounter_context.py. Without it, no "
+                             "encounter context is AUTHORITATIVELY resolved: the note's "
+                             "own metadata travels with the claim as corroboration "
+                             "only, and every bundle holds.")
     parser.add_argument("--start-at", type=str, default="",
                         help="Skip notes sorting before this stem/filename prefix — "
                              "resume a batch without redoing completed notes")
@@ -488,21 +491,38 @@ def main(argv: list[str] | None = None) -> int:
     # note is processed: a malformed context file must stop the batch here,
     # loudly, rather than resolve UNRESOLVED on every note and look like a
     # deployment that simply has no roster. (Directive §2.)
-    context_provider = build_provider(args.encounter_context or None)
+    try:
+        context_provider = build_provider(args.encounter_context or None)
+        # PREFLIGHT, not a probe resolution: the source is read and validated
+        # before any note is processed, so a malformed or unreachable context
+        # source stops the batch HERE, loudly, instead of resolving UNRESOLVED
+        # on every note and looking like a deployment that simply has no
+        # roster. Asking for an encounter that does not exist (which is what
+        # the previous empty-identifier `resolve()` call did) is a real
+        # resolution request against whatever backend an adapter speaks to.
+        preflight = context_provider.preflight()
+    except Exception as exc:
+        logger.error(f"--encounter-context could not be used: "
+                     f"{type(exc).__name__}: {exc}")
+        return 1
     if not args.encounter_context:
         logger.warning(
             "No --encounter-context supplied: no encounter's patient/subscriber/"
-            "payer/rendering-provider/POS is AUTHORITATIVELY resolved, so every "
-            "ClaimBundle holds with an UNRESOLVED context. The note's own extracted "
-            "metadata still travels with the claim, as corroboration only.")
+            "payer/rendering-provider/billing-entity/POS is AUTHORITATIVELY "
+            "resolved, so every ClaimBundle holds with an UNRESOLVED context. The "
+            "note's own extracted metadata still travels with the claim, as "
+            "corroboration only.")
     else:
-        try:
-            context_provider.resolve(encounter_id="", document_id="",
-                                     date_of_service=None, note_metadata=None)
-        except Exception as exc:
-            logger.error(f"--encounter-context could not be read: "
-                         f"{type(exc).__name__}: {exc}")
-            return 1
+        logger.info(f"Encounter context source: {preflight}")
+        duplicates = preflight.get("duplicate_identifiers") or {}
+        if duplicates:
+            # Not batch-fatal: only encounters resolving THROUGH a collided
+            # identifier hold. Surfaced once here so the operator sees the
+            # source defect without reading every note's holds.
+            logger.warning(
+                f"  encounter context source declares duplicate identifiers "
+                f"{duplicates}; every encounter resolving through one of them "
+                f"will hold")
 
     if args.setup_only:
         AuthoritativeSource().prepare(force_rebuild_index=args.rebuild_index)
@@ -549,6 +569,11 @@ def main(argv: list[str] | None = None) -> int:
                         f"[{context.provider_id}"
                         + (f" {context.context_version}" if context.context_version
                            else "") + "]")
+            for step in context.resolution_steps:
+                logger.info(f"    {step.step}: {step.identifier or '-'} → "
+                            f"{step.resolved_to or '-'} ({step.outcome})")
+            for reason in (*context.unresolved, *context.conflicts):
+                logger.info(f"    context hold: {reason}")
             result = code_encounter(
                 pdf_path.stem,
                 note["note_text"],

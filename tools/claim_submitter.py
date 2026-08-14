@@ -246,22 +246,66 @@ def _split_provider_name(full: str) -> tuple[str, str] | None:
     return parts[0], parts[-1]
 
 
-def resolve_rendering_provider(cfg: dict, provider) -> tuple[dict | None, str]:
-    """Rendering provider, resolved dynamically from the bundle's provider identity.
+def _rendering_from_identity(provider, npi: str, rp_cfg: dict) -> dict:
+    """The claim's rendering provider, built from the RESOLVED identity itself.
 
-    Fidelity order, unchanged: config roster match on the encounter's provider
-    name first, then the encounter's own NPI (when the config trusts it), then
-    the configured default.
+    The practice config contributes only a fallback taxonomy code — an
+    attribute of how the practice bills, not an answer to who rendered the
+    service.
+    """
+    first = str(getattr(provider, "first_name", "") or "")
+    last = str(getattr(provider, "last_name", "") or "")
+    if not (first and last):
+        split = _split_provider_name(
+            str(getattr(provider, "display_name", "") or ""))
+        first, last = split if split else ("", "")
+    return {"first_name": first, "last_name": last, "npi": npi,
+            "taxonomy_code": (str(getattr(provider, "taxonomy_code", "") or "")
+                              or rp_cfg.get("default_taxonomy_code"))}
 
-    `provider` is the bundle's `ProviderIdentity`. When the encounter context
-    was RESOLVED by an authoritative provider, that NPI is an authoritative
-    identity rather than something a model read off a letterhead — and
-    `trust_note_npi` then means what its name always claimed. When the context
-    is UNRESOLVED the bundle cannot release at all, so this path is only
-    reachable for legacy artifacts, where the flag retains its original
-    (weaker) meaning.
+
+def resolve_rendering_provider(cfg: dict, provider, *,
+                               authoritative: bool) -> tuple[dict | None, str]:
+    """Rendering provider for the claim, from the bundle's provider identity.
+
+    ISSUE #6, DIRECTIVE §2 — "resolve by stable identifiers, not model
+    inference", and "must not invent or select a provider identity from a broad
+    roster". This function used to do both, on the canonical path, AFTER the
+    encounter context had already resolved the provider BY NPI:
+
+      * a practice-config roster entry whose `match` pattern was a SUBSTRING of
+        the resolved provider's display name replaced the resolved NPI with the
+        config's own — so a config entry matching "lee" would sign this claim
+        as a different person the moment a "Leeson" was resolved, silently and
+        with every downstream check still passing;
+      * and when nothing matched, a configured DEFAULT provider's NPI was put
+        on the claim instead.
+
+    Both put a different human's NPI on an autonomously released claim. So the
+    behaviour is now split by whether the identity is AUTHORITATIVE:
+
+      authoritative  the resolved participant IS the rendering provider. The
+                     config may supply a taxonomy code it did not carry, and
+                     nothing else. An invalid resolved NPI BLOCKS — substituting
+                     another provider for a bad identifier is how a wrong claim
+                     becomes a clean one.
+      legacy         (an adapted `app.pipeline`/`claude_coder.run/1` artifact,
+                     whose "context" is note-extracted text and which can never
+                     auto-release) keeps the original fidelity order, because
+                     for those artifacts the practice config genuinely is the
+                     better authority.
     """
     rp_cfg = cfg.get("rendering_providers") or {}
+    npi = str(getattr(provider, "npi", "") or "").strip()
+
+    if authoritative:
+        if not _valid_npi(npi):
+            return None, (
+                f"the authoritatively resolved rendering provider NPI {npi!r} "
+                f"is not a valid CMS NPI; the practice config may not "
+                f"substitute another provider for a resolved one")
+        return _rendering_from_identity(provider, npi, rp_cfg), ""
+
     display_name = str(getattr(provider, "display_name", "") or "").lower()
     for entry in rp_cfg.get("providers") or []:
         for pattern in entry.get("match") or []:
@@ -271,17 +315,8 @@ def resolve_rendering_provider(cfg: dict, provider) -> tuple[dict | None, str]:
                 return None, (f"roster entry for '{pattern}' has an invalid "
                               f"NPI — fix rendering_providers in the "
                               f"practice config")
-    npi = str(getattr(provider, "npi", "") or "").strip()
     if rp_cfg.get("trust_note_npi") and _valid_npi(npi):
-        first = str(getattr(provider, "first_name", "") or "")
-        last = str(getattr(provider, "last_name", "") or "")
-        if not (first and last):
-            split = _split_provider_name(
-                str(getattr(provider, "display_name", "") or ""))
-            first, last = split if split else ("", "")
-        return {"first_name": first, "last_name": last, "npi": npi,
-                "taxonomy_code": (str(getattr(provider, "taxonomy_code", "") or "")
-                                  or rp_cfg.get("default_taxonomy_code"))}, ""
+        return _rendering_from_identity(provider, npi, rp_cfg), ""
     default = rp_cfg.get("default")
     if default and _valid_npi(default.get("npi")):
         return default, ""
@@ -443,7 +478,13 @@ def build_claim(doc: str, reg_event: dict, result: dict,
             blocks.append(f"claim_defaults.{field} missing")
 
     # -- providers ----------------------------------------------------------
-    rendering, why = resolve_rendering_provider(cfg, context.rendering_provider)
+    # A RESOLVED context resolved this provider BY NPI. Passing that fact down
+    # is what stops the practice config from substituting a different provider
+    # for one the authoritative source already named. (Directive §2.)
+    from app.contracts.claim_bundle import ContextResolution
+    rendering, why = resolve_rendering_provider(
+        cfg, context.rendering_provider,
+        authoritative=context.resolution is ContextResolution.RESOLVED)
     if rendering is None:
         blocks.append(why)
 

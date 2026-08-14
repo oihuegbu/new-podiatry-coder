@@ -1,0 +1,133 @@
+{
+  "_README": [
+    "TEMPLATE for the encounter context source read by ENCOUNTER_CONTEXT_FILE",
+    "(app/contracts/encounter_context.py, schema encounter_context/2).",
+    "",
+    "Copy to data/context/encounter_context.json and replace every REPLACE_ME.",
+    "This directory is bind-mounted into the container by docker-compose.yml, so",
+    "the file is edited on the HOST and needs no rebuild and no code change.",
+    "",
+    "Everything is resolved BY IDENTIFIER. Each identity is declared ONCE and",
+    "referenced; an encounter never inlines a provider or a payer, so the same",
+    "provider cannot be affiliated with two different billing entities in two",
+    "different encounters without the source contradicting itself.",
+    "",
+    "Every window is [effective_start, effective_end] with BOTH BOUNDS INCLUSIVE,",
+    "compared against the encounter's own date of service. effective_start is",
+    "REQUIRED; effective_end may be omitted for an open-ended record. A provider",
+    "who changes group mid-year gets TWO affiliation rows with adjoining windows,",
+    "and each encounter then bills under the group in force on its own DOS.",
+    "",
+    "Anything that cannot be resolved holds THAT ENCOUNTER ONLY, by name. A file",
+    "that cannot be parsed or does not declare this schema fails the whole batch,",
+    "deliberately: a corrupt source must never look like an unconfigured one.",
+    "",
+    "'version' identifies the EDITION and is fingerprinted into every claim.",
+    "Change it whenever you change anything in this file: a claim verified under",
+    "one edition must not be submittable under another."
+  ],
+
+  "schema": "encounter_context/2",
+  "version": "REPLACE_ME-roster-edition-0000-00-00",
+
+  "patients": {
+    "REPLACE_ME_PATIENT_ID": {
+      "first_name": "REPLACE_ME",
+      "last_name": "REPLACE_ME",
+      "date_of_birth": "REPLACE_ME",
+      "gender": "REPLACE_ME",
+      "record_number": "REPLACE_ME"
+    }
+  },
+
+  "payers": {
+    "REPLACE_ME_PAYER_ID": {
+      "name": "REPLACE_ME",
+      "payer_id": "REPLACE_ME",
+      "kind": "REPLACE_ME",
+      "plan": "REPLACE_ME"
+    }
+  },
+
+  "coverages": [
+    {
+      "coverage_id": "REPLACE_ME_COVERAGE_ID",
+      "patient_id": "REPLACE_ME_PATIENT_ID",
+      "payer_id": "REPLACE_ME_PAYER_ID",
+      "member_id": "REPLACE_ME",
+      "group_number": "REPLACE_ME",
+      "relationship_to_patient": "REPLACE_ME",
+      "effective_start": "0000-00-00",
+      "effective_end": ""
+    }
+  ],
+
+  "authorizations": [
+    {
+      "_note": "Optional. An authorization is only carried onto a claim when its coverage, rendering provider AND facility all match the ones resolved for that encounter and its window contains the DOS. If any of them changed, the encounter HOLDS instead of silently reusing a prior approval.",
+      "authorization_id": "REPLACE_ME_AUTHORIZATION_ID",
+      "authorization_number": "REPLACE_ME",
+      "coverage_id": "REPLACE_ME_COVERAGE_ID",
+      "rendering_provider_npi": "REPLACE_ME_NPI",
+      "facility_id": "REPLACE_ME_FACILITY_ID",
+      "effective_start": "0000-00-00",
+      "effective_end": "0000-00-00"
+    }
+  ],
+
+  "providers": {
+    "REPLACE_ME_NPI": {
+      "_note": "The KEY is the provider's NPI and is authoritative; the record's own npi field is overwritten with it.",
+      "first_name": "REPLACE_ME",
+      "last_name": "REPLACE_ME",
+      "display_name": "REPLACE_ME",
+      "taxonomy_code": "REPLACE_ME",
+      "specialty": "REPLACE_ME"
+    }
+  },
+
+  "billing_entities": {
+    "REPLACE_ME_ENTITY_ID": {
+      "name": "REPLACE_ME",
+      "npi": "REPLACE_ME",
+      "tax_id": "REPLACE_ME",
+      "taxonomy_code": "REPLACE_ME"
+    }
+  },
+
+  "affiliations": [
+    {
+      "affiliation_id": "REPLACE_ME_AFFILIATION_ID",
+      "provider_npi": "REPLACE_ME_NPI",
+      "billing_entity_id": "REPLACE_ME_ENTITY_ID",
+      "effective_start": "0000-00-00",
+      "effective_end": ""
+    }
+  ],
+
+  "facilities": {
+    "REPLACE_ME_FACILITY_ID": {
+      "_note": "place_of_service is validated downstream against the authoritative CMS set. jurisdiction is the coverage jurisdiction you bill under; it is DECLARED here rather than derived from the address, because deriving it would be a proxy for a real lookup against the authoritative MAC jurisdiction data.",
+      "name": "REPLACE_ME",
+      "npi": "REPLACE_ME",
+      "address1": "REPLACE_ME",
+      "city": "REPLACE_ME",
+      "state": "REPLACE_ME",
+      "postal_code": "REPLACE_ME",
+      "place_of_service": "REPLACE_ME",
+      "jurisdiction": "REPLACE_ME"
+    }
+  },
+
+  "encounters": {
+    "REPLACE_ME_ENCOUNTER_OR_DOCUMENT_ID": {
+      "_note": "The key is the encounter id OR the source document id (run.py uses the note's file stem for both). coverage_id may be omitted when the patient has exactly one coverage in force on the DOS; if two are, the encounter holds rather than picking one. date_of_service is optional and is a CROSS-CHECK: if it disagrees with the document's own DOS the encounter holds.",
+      "patient_id": "REPLACE_ME_PATIENT_ID",
+      "coverage_id": "REPLACE_ME_COVERAGE_ID",
+      "rendering_provider_npi": "REPLACE_ME_NPI",
+      "facility_id": "REPLACE_ME_FACILITY_ID",
+      "authorization_id": "",
+      "date_of_service": ""
+    }
+  }
+}

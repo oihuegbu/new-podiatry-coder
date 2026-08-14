@@ -84,6 +84,21 @@ services:
       # as versioned config — a named volume would pin the pack at whatever
       # state existed when the volume was first created.
       - ./data/rules:/app/data/rules
+      # Encounter context source (app/contracts/encounter_context.py, directive
+      # §2): the versioned roster that resolves, BY STABLE IDENTIFIER, who each
+      # encounter is for, which provider signed it, which billing entity they
+      # were affiliated with ON THAT DATE OF SERVICE, and which facility/POS
+      # applies. Bind-mounted for the same reason as feedback/registry/policy/
+      # rules, and it is REQUIRED here rather than optional: /app/data is a
+      # NAMED VOLUME, so a roster written to ./data on the host is invisible
+      # inside the container. Without this mount, configuring
+      # ENCOUNTER_CONTEXT_FILE to a host path would fail the batch on every
+      # boot ("file could not be read") with nothing in the deployment
+      # explaining why -- and the only working configuration would be one a
+      # developer wired by hand inside a running container, which vanishes on
+      # recreate. Read-only: the coder resolves against this source, never
+      # writes to it.
+      - ./data/context:/app/data/context:ro
       - ./app:/app/app
       # claude_coder/ IS the coding decision since issue #6 F6-R4-A1 (run.py calls
       # claude_coder.pipeline.code_encounter). Without this mount a host-side code

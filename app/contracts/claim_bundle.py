@@ -397,6 +397,83 @@ class FacilityIdentity(_Strict):
     postal_code: str = ""
 
 
+class BillingEntityIdentity(_Strict):
+    """The organization this encounter's claim is billed under.
+
+    Resolved from the rendering provider's AFFILIATION ON THE DATE OF SERVICE,
+    never from "the practice that owns the deployment". A provider who changed
+    group mid-year bills the group they were affiliated with on the DOS; a
+    claim that names the current group is wrong for every earlier encounter,
+    and wrong in a way no downstream control can detect.
+    """
+
+    entity_id: str = ""
+    name: str = ""
+    npi: str = ""
+    tax_id: str = ""
+    taxonomy_code: str = ""
+
+
+class AffiliationBinding(_Strict):
+    """WHICH provider->billing-entity affiliation record was in force on the DOS.
+
+    The window is carried, not only its verdict, so an auditor can see which
+    affiliation record authorized this claim without re-reading the context
+    edition that produced it — and so a re-resolution against a corrected
+    roster produces a visibly different binding rather than the same answer.
+
+    `effective_end` empty means open-ended. Both bounds are INCLUSIVE calendar
+    dates; no wall clock and no timezone participates in the comparison.
+    """
+
+    affiliation_id: str = ""
+    provider_npi: str = ""
+    billing_entity_id: str = ""
+    effective_start: str = ""
+    effective_end: str = ""
+
+
+class CoverageBinding(_Strict):
+    """The coverage — and any prior authorization — in force on the DOS.
+
+    `authorization_number` is populated ONLY from an authorization whose own
+    declared coverage, rendering provider and facility match the ones resolved
+    for THIS encounter and whose window contains the DOS. An authorization
+    obtained under a different provider, facility or payer is not authorization
+    for this claim, and carrying it over would be the exact silent-staleness
+    the context fingerprint exists to prevent.
+    """
+
+    coverage_id: str = ""
+    effective_start: str = ""
+    effective_end: str = ""
+    authorization_id: str = ""
+    authorization_number: str = ""
+    authorization_effective_start: str = ""
+    authorization_effective_end: str = ""
+
+
+class ResolutionStep(_Strict):
+    """One link of the identifier chain that produced this context.
+
+    Machine-shaped deliberately: it is fingerprinted with the rest of the
+    context, so it must change when the RESOLUTION changes and must not change
+    when its prose is reworded.
+    """
+
+    step: str
+    identifier: str = ""
+    resolved_to: str = ""
+    outcome: str = ""
+
+
+#: `field_sources` labels. A RESOLVED context whose required fields are not all
+#: `AUTHORITATIVE` is a contract violation, not a preference — see
+#: `EncounterContext.problems()`.
+AUTHORITATIVE_FIELD_SOURCE = "authoritative"
+CORROBORATION_FIELD_SOURCE = "note_corroboration"
+
+
 #: Encounter-level context a professional claim cannot be assembled without.
 #: These are transaction-envelope identities, NOT code sets — the bundle is the
 #: authority for who the encounter was about; practice-level values (billing
@@ -413,9 +490,16 @@ REQUIRED_ENCOUNTER_CONTEXT: tuple[str, ...] = (
     "patient.date_of_birth",
     "patient.gender",
     "subscriber.member_id",
+    "coverage.coverage_id",
     "payer.name",
     "rendering_provider.npi",
+    "billing_entity.entity_id",
+    "billing_entity.name",
+    "affiliation.affiliation_id",
+    "affiliation.billing_entity_id",
+    "affiliation.effective_start",
     "place_of_service",
+    "jurisdiction",
 )
 
 
@@ -444,6 +528,21 @@ class EncounterContext(_Strict):
     service_facility: FacilityIdentity = Field(default_factory=FacilityIdentity)
     place_of_service: str = ""
     jurisdiction: str = ""
+    #: Ownership/billing context (directive §2): who the claim is billed under
+    #: FOR THIS DATE OF SERVICE, which affiliation record establishes that, and
+    #: which coverage/authorization was in force.
+    billing_entity: BillingEntityIdentity = Field(
+        default_factory=BillingEntityIdentity)
+    affiliation: AffiliationBinding = Field(default_factory=AffiliationBinding)
+    coverage: CoverageBinding = Field(default_factory=CoverageBinding)
+    #: The identifier chain, in order, that produced the fields above. This is
+    #: the auditable answer to "how was this provider selected?" — and the
+    #: reason the answer can never be "the model read it off the letterhead".
+    resolution_steps: tuple[ResolutionStep, ...] = ()
+    #: For every `REQUIRED_ENCOUNTER_CONTEXT` path, WHICH SOURCE supplied it.
+    #: A RESOLVED context in which any required field is note-derived is
+    #: refused by `problems()`: extracted text corroborates, it never decides.
+    field_sources: dict[str, str] = Field(default_factory=dict)
     #: Field paths the provider could not resolve, and identity disagreements
     #: between sources. Both are recorded rather than blanked so a hold names
     #: what is missing instead of "context incomplete".
@@ -493,11 +592,50 @@ class EncounterContext(_Strict):
             out.append(f"context provider could not resolve: {path}")
         for conflict in self.conflicts:
             out.append(f"context sources disagree: {conflict}")
+        out.extend(self._resolved_context_invariants())
         if self.fingerprint and self.fingerprint != self.compute_fingerprint():
             out.append("encounter context fingerprint does not reproduce "
                        "(context changed after it was recorded)")
         if not self.fingerprint:
             out.append("encounter context carries no fingerprint")
+        return tuple(out)
+
+    def _resolved_context_invariants(self) -> tuple[str, ...]:
+        """Invariants that only a RESOLVED context can violate.
+
+        An UNRESOLVED context is already blocked by `problems()`; running these
+        against it would report the same hold twice under two different names.
+        What they catch is a resolver BUG — a context that claims authority it
+        does not have, or that binds a billing entity to the wrong affiliation
+        or the wrong provider. Those cannot be caught downstream: every field
+        would be populated and every fingerprint would reproduce.
+        """
+        if self.resolution is not ContextResolution.RESOLVED:
+            return ()
+        out: list[str] = []
+        for path in REQUIRED_ENCOUNTER_CONTEXT:
+            if not self.field_value(path):
+                continue          # already reported by missing_required()
+            origin = self.field_sources.get(path, "")
+            if origin != AUTHORITATIVE_FIELD_SOURCE:
+                out.append(
+                    f"required encounter context {path} was not supplied by an "
+                    f"authoritative context source (recorded source: "
+                    f"{origin or 'none'}); note-extracted text corroborates a "
+                    f"claim, it never decides one")
+        if self.affiliation.billing_entity_id and self.billing_entity.entity_id \
+                and self.affiliation.billing_entity_id != \
+                self.billing_entity.entity_id:
+            out.append(
+                f"the affiliation in force binds billing entity "
+                f"{self.affiliation.billing_entity_id!r} but the context names "
+                f"{self.billing_entity.entity_id!r}")
+        if self.affiliation.provider_npi and self.rendering_provider.npi and \
+                self.affiliation.provider_npi != self.rendering_provider.npi:
+            out.append(
+                f"the affiliation in force belongs to provider "
+                f"{self.affiliation.provider_npi!r}, not to this encounter's "
+                f"rendering provider {self.rendering_provider.npi!r}")
         return tuple(out)
 
 
