@@ -24,6 +24,11 @@ from .models import CodingResult, ResolutionMethod, ResolvedLine
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
+# The second reading is its OWN assertion origin: a distinct run id keeps it from being
+# folded into the primary reading's origin, so a relation both readings assert is
+# recorded as multiply-asserted rather than as one call repeating itself.
+_SECOND_READING_RUN_ID = "second-reading"
+
 
 def _fingerprint_certifiable(fp) -> bool:
     """A release may be certified only against a fingerprint that actually IDENTIFIES the
@@ -136,6 +141,7 @@ def code_encounter(
     date_of_service: str | None,
     source: CodeSource | None = None,
     extract_llm: LLMFn | None = None,
+    extract_llm_b: LLMFn | None = None,
     arbitrate_llm: LLMFn | None = None,
     verify_llm: LLMFn | None = None,
     corroborate_llm: LLMFn | None = None,
@@ -193,8 +199,17 @@ def code_encounter(
         verify_llm = default_verify_llm
         if corroborate_llm is None:
             corroborate_llm = default_corroborate_llm
+    # Two independent readings of the note (directive section 3). Enabled in real mode
+    # for the same reason and by the same rule as corroboration above: a caller that
+    # supplies its own extractor (every test) opts out, so the deterministic path is
+    # unchanged. `config.GRAPH_CONSENSUS=0` disables the control explicitly and the
+    # audit record then says only one reading was taken.
+    if extract_llm is None and extract_llm_b is None:
+        from app.core import config as _config
+        if getattr(_config, "GRAPH_CONSENSUS", True):
+            extract_llm_b = extraction.default_second_extract_llm
     profiles = model_profiles or _model_profile_identity(
-        extract_llm, verify_llm, corroborate_llm)
+        extract_llm, verify_llm, corroborate_llm, extract_llm_b)
 
     from .models import FactKind
     # Enforced evidence/service graph. Any extraction, anchoring, graph-integrity,
@@ -216,6 +231,18 @@ def code_encounter(
             audit_repository = _prov.SqliteAuditRepository(PROVENANCE_DB, strict=True)
         audit_hashes = [audit_repository.append(
             encounter_id, "evidence_anchoring", _prov.anchoring_report(facts))]
+        # ---- Second independent reading, compared on GRAPH AXES ---------------------
+        # Not a vote. The second reading DETECTS a disagreement on a code-changing axis;
+        # the ORIGINAL PAGE settles it (directive section 3). Differently worded prose
+        # for the same event aligns and produces no disagreement at all, so nothing can
+        # be routed anywhere merely because two models phrased a finding differently.
+        consensus = None
+        if extract_llm_b is not None:
+            consensus, source_evidence = _run_graph_consensus(
+                note_text, facts, billing_context, extract_llm_b, profiles,
+                document_version, source_evidence, source_reader)
+            audit_hashes.append(audit_repository.append(
+                encounter_id, "graph_consensus", consensus.as_record()))
         # ---- Source evidence: the transcription is a CANDIDATE reading ---------------
         # Anchoring above proves each quotation is verbatim in the TRANSCRIPTION. This
         # proves it is verbatim in the ORIGINAL DOCUMENT, by reconciling it against an
@@ -262,6 +289,28 @@ def code_encounter(
             "summary": _elig.summary(intents),
             "diff": _elig.shadow_diff(facts, intents),
         }))
+        # ---- THE single clinical representation --------------------------------------
+        # Everything above -- anchored evidence, the reconciled relation kernel, the
+        # eligibility roles, the service episodes and the cannot-link constraints -- is
+        # compiled into ONE addressable graph here. Retrieval below is authorized by its
+        # intents, the certificate binds its record, and claim assembly reads it to say
+        # exactly which nodes and edges each released line rests on.
+        from . import graph as _graph
+        _episodes, _ = _elig.build_episodes(facts, relations, encounter_id,
+                                            date_of_service)
+        clinical_graph = _graph.build_graph(
+            facts, relations, intents, encounter_id=encounter_id,
+            date_of_service=date_of_service, episodes=_episodes,
+            extraction_schema_version=extracted.schema_version,
+            relation_grammar_version=_prov.load_relation_grammar()["version"],
+            axis_resolutions=(consensus.resolutions if consensus is not None else ()),
+            unmatched_second_reading=(consensus.unmatched_second
+                                      if consensus is not None else ()))
+        graph_problems = clinical_graph.integrity_problems()
+        audit_hashes.append(audit_repository.append(
+            encounter_id, "clinical_graph",
+            {"graph_sha256": clinical_graph.graph_sha256(),
+             **clinical_graph.as_record()}))
     except Exception as exc:
         return _system_hold_result(encounter_id, date_of_service,
                                    "pre_retrieval_integrity", exc, source)
@@ -273,6 +322,13 @@ def code_encounter(
     from .eligibility import RetrievalRequest
     _elig_state = {e: it for it in intents for e in it.clinical_event_ids}
     pre_retrieval_gates = []
+    # A graph that contradicts itself is an integrity state, not a retry and not a
+    # coding judgement: every later stage would be reasoning about a representation
+    # that disagrees with itself. Non-retryable -> BLOCKED (directive section 8).
+    if graph_problems:
+        pre_retrieval_gates.append(GateResult(
+            "clinical_graph_integrity", Outcome.BLOCKED, "; ".join(graph_problems),
+            "clinical evidence/service graph", retryable=False))
     lines = []
     for fact in facts:
         _it = _elig_state.get(fact.fact_id)
@@ -286,13 +342,31 @@ def code_encounter(
                 "no eligibility intent was produced for the extracted event",
                 "eligibility-before-retrieval", retryable=True))
         elif _it.state is not _ES.ELIGIBLE_FOR_RETRIEVAL:
-            _r = "; ".join(f"{d.gate}: {d.detail}" for d in _it.decisions
-                           if d.outcome is not Outcome.PASS) or _it.state.value
+            # ALL non-PASS decisions for the human-readable rationale; only the
+            # decisions that actually produced the state for the ROUTING decision. A
+            # recorded-but-non-blocking note (a diagnosis with no explicit documented
+            # linkage) must not make a single-cause hold look multi-cause.
+            _non_pass = [d for d in _it.decisions if d.outcome is not Outcome.PASS]
+            _blocking = _elig.blocking_decisions(_it)
+            _r = "; ".join(f"{d.gate}: {d.detail}" for d in _non_pass) or _it.state.value
+            # The one case the directive names explicitly: the ONLY thing standing in the
+            # way is a code-changing axis two independent readings read differently that
+            # the original page could not settle. The record genuinely does not state the
+            # fact, so this becomes ONE precise provider question. Deliberately no
+            # GateResult and no excluded_reason: a gate here would route the encounter to
+            # generic REVIEW, and an excluded_reason would drop the item from routing
+            # entirely -- both of which the directive forbids for this case.
+            _axis_only = bool(_blocking) and all(d.gate == "axis_consensus"
+                                                 for d in _blocking)
             line = ResolvedLine(
                 fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
-                rationale=f"diverted before retrieval ({_it.state.value}: {_r})",
-                excluded_reason=f"eligibility state {_it.state.value}")
-            if _it.state is _ES.AUTO_HOLD:
+                rationale=(f"held for a targeted provider query ({_r})" if _axis_only
+                           else f"diverted before retrieval ({_it.state.value}: {_r})"),
+                excluded_reason=(None if _axis_only
+                                 else f"eligibility state {_it.state.value}"),
+                documentation_gap=("; ".join(d.detail for d in _blocking)
+                                   if _axis_only else None))
+            if _it.state is _ES.AUTO_HOLD and not _axis_only:
                 actor_unknown = any(d.gate == "actor_ownership"
                                     and d.outcome is Outcome.UNKNOWN for d in _it.decisions)
                 hard_integrity = any(
@@ -389,6 +463,8 @@ def code_encounter(
         claim_line_intents=intents,
         relations=relations,
         audit_record_hashes=audit_hashes,
+        graph=clinical_graph,
+        consensus=(consensus.as_record() if consensus is not None else None),
     )
     # Mechanic 4 — collapse duplicate resolved codes into one line before anything
     # downstream reasons about the claim as a set.
@@ -585,7 +661,77 @@ def _system_hold_result(encounter_id: str, date_of_service: str | None,
     return result
 
 
-def _model_profile_identity(extract_llm, verify_llm, corroborate_llm) -> dict:
+def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profiles,
+                         document_version, source_evidence, source_reader):
+    """Second reading -> axis comparison -> TARGETED original-page verification.
+
+    Returns `(report, source_evidence)`. The document is returned because a targeted
+    page verification may have added a paid independent channel to it: carrying that
+    forward means the later release-time escalation never pays to read the same page
+    twice, and the reconciliation the claim is finally proven against is the strongest
+    reading obtained anywhere in the run.
+
+    Failure is loud, never silent: anything that goes wrong here propagates to the
+    caller's pre-retrieval boundary, which holds the encounter with zero retrieval. A
+    second reading that could not be taken must never present as two readings agreeing.
+    """
+    from . import graph_consensus as _gc
+    from . import provenance as _prov
+
+    extracted_b = extraction.extract_note(
+        note_text, extract_llm_b, billing_context,
+        run_id=_SECOND_READING_RUN_ID,
+        model_profile=profiles.get("second_extraction"))
+    _prov.anchor_facts(note_text, extracted_b.facts, document_version=document_version)
+    report, primary_by_id, second_by_node = _gc.compare(
+        facts, extracted_b.facts, second_origin=extracted_b.origin)
+    primary_provider = str((profiles.get("extraction") or {}).get("provider") or "")
+    second_provider = str((profiles.get("second_extraction") or {}).get("provider") or "")
+    report.independent_providers = bool(
+        primary_provider and second_provider and primary_provider != second_provider)
+
+    reconciliation = None
+    if source_evidence is not None and report.disagreements:
+        from app.contracts.source_evidence import (pages_needing_independent_read,
+                                                   reconcile_spans)
+        wanted = _gc.disagreement_span_ids(report.disagreements, primary_by_id,
+                                           second_by_node)
+        targets = [t for t in _prov.span_targets(list(facts) + list(extracted_b.facts))
+                   if t.span_id in wanted]
+        reconciliation = reconcile_spans(source_evidence, targets)
+        # TARGETED escalation, exactly as the directive asks: pay for an independent read
+        # of only the pages a disagreeing quotation sits on that no channel could read.
+        if source_reader is not None:
+            pages = pages_needing_independent_read(source_evidence, reconciliation,
+                                                   wanted)
+            if pages:
+                try:
+                    escalated = source_evidence.with_channel(
+                        source_reader.channel(), source_reader.read_pages(pages))
+                    reconciled = reconcile_spans(escalated, targets)
+                except Exception as exc:
+                    # A verification that could not run proves nothing, and must not look
+                    # like one: the affected axes stay unresolved and become a query.
+                    report.escalation_detail = (
+                        f"targeted page verification unavailable for pages "
+                        f"{list(pages)} ({type(exc).__name__}); the disagreeing axes "
+                        f"remain unsettled by the original document")
+                else:
+                    source_evidence = escalated
+                    reconciliation = reconciled
+                    report.escalated_pages = tuple(pages)
+                    report.escalation_detail = (
+                        "disagreeing axes verified against a paid independent read of "
+                        "the original pages")
+    resolutions = _gc.resolve(list(report.disagreements), primary_by_id, second_by_node,
+                              reconciliation)
+    _gc.apply_resolutions(primary_by_id, second_by_node, resolutions)
+    report.resolutions = tuple(resolutions)
+    return report, source_evidence
+
+
+def _model_profile_identity(extract_llm, verify_llm, corroborate_llm,
+                            extract_llm_b=None) -> dict:
     """Auditable provider/profile identity; no credential values are ever included.
 
     The verification/corroboration providers are read from what each CALLABLE declares
@@ -604,6 +750,8 @@ def _model_profile_identity(extract_llm, verify_llm, corroborate_llm) -> dict:
                          **_verify.model_profile_of(verify_llm)},
         "corroboration": {"callable": callable_name(corroborate_llm),
                           **_verify.model_profile_of(corroborate_llm)},
+        "second_extraction": {"callable": callable_name(extract_llm_b),
+                              **_verify.model_profile_of(extract_llm_b)},
     }
     try:
         from app.core import config
@@ -614,6 +762,13 @@ def _model_profile_identity(extract_llm, verify_llm, corroborate_llm) -> dict:
         # model this configuration actually selects.
         if verify_llm is _verify.default_verify_llm:
             profiles["verification"]["model"] = config.OPENAI_MODEL
+        if extract_llm_b is extraction.default_second_extract_llm:
+            _second = extraction._SECOND_READING_PROVIDER.get(config.LLM_PROVIDER)
+            if _second is not None:
+                profiles["second_extraction"].update({
+                    "provider": _second,
+                    "model": (config.OPENAI_MODEL if _second == "openai"
+                              else config.CLAUDE_MODEL)})
         if corroborate_llm is _verify.default_corroborate_llm:
             profiles["corroboration"].update({
                 "model": config.CLAUDE_VERIFY_MODEL or config.CLAUDE_MODEL,

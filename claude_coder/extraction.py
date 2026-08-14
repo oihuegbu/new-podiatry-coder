@@ -248,6 +248,43 @@ def _default_llm(system: str, user: str) -> str:
     return out
 
 
+#: Which provider gives the INDEPENDENT second reading, given the primary one. Two
+#: calls into one vendor share training data, tokeniser and failure modes, so the second
+#: reading is pinned to the other declared provider whenever one is configured.
+_SECOND_READING_PROVIDER = {"claude": "openai", "openai": "claude"}
+
+
+class SecondReadingUnavailable(RuntimeError):
+    """No independent provider is configured for the second reading of the note.
+
+    Raised rather than silently falling back to the SAME provider (which would make the
+    audit record claim an independence the run never had) or to no second reading at all
+    (which would silently drop a control). The pipeline turns it into a retryable system
+    hold with zero retrieval.
+    """
+
+
+def default_second_extract_llm(system: str, user: str) -> str:
+    """The second, independent reading of the note.
+
+    Same prompt and same schema as the primary reading on purpose: the comparison
+    downstream is between two readings of the DOCUMENT, so anything else that differed
+    would confound it. The provider is the one the primary extraction is NOT using.
+    """
+    from app.core import config
+    from app.core.llm_client import chat_completion
+    primary = str(getattr(config, "LLM_PROVIDER", "") or "").strip().lower()
+    provider = _SECOND_READING_PROVIDER.get(primary)
+    if provider is None:
+        raise SecondReadingUnavailable(
+            f"no independent second-reading provider is configured for primary "
+            f"extraction provider {primary!r}")
+    model = (config.OPENAI_MODEL if provider == "openai" else config.CLAUDE_MODEL)
+    out, _ = chat_completion(system, user, model=model, provider=provider,
+                             temperature=0.0, json_mode=True, use_batch=False)
+    return out
+
+
 class ExtractionSchemaError(ValueError):
     """The extractor returned output that is not a valid claim graph: invalid JSON, a
     malformed fact/relation object, a blank or duplicate fact id, a malformed confidence, or

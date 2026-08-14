@@ -246,6 +246,26 @@ def _gate_documentation_minimum(fact: ClinicalFact) -> EligibilityDecision:
                                "no clinical action to search on", "documentation sufficiency")
 
 
+def _gate_axis_consensus(fact: ClinicalFact) -> EligibilityDecision:
+    """Two independent readings of the ORIGINAL DOCUMENT disagreed on a code-changing
+    axis and the page itself could not settle it.
+
+    That is a missing clinical FACT, not a coding judgement: the record does not state
+    what the claim needs. UNKNOWN here holds the event before retrieval, and the
+    pipeline converts THIS gate specifically into one precise provider question rather
+    than a coder queue -- the product directive forbids routing an otherwise resolved
+    claim to generic review because two models read differently.
+    """
+    conflicts = [str(c).strip() for c in (getattr(fact, "axis_conflicts", None) or [])
+                 if str(c).strip()]
+    if not conflicts:
+        return EligibilityDecision("axis_consensus", Outcome.PASS,
+                                   "no unsettled cross-reading axis",
+                                   "source-settled fact axes")
+    return EligibilityDecision("axis_consensus", Outcome.UNKNOWN, " ".join(conflicts),
+                               "source-settled fact axes")
+
+
 def _classify(decisions: list[EligibilityDecision]) -> EligibilityState:
     """Precedence: NON_CLAIM (the event should never have been a line) before AUTO_HOLD
     (material ambiguity) before ELIGIBLE. A silent default-to-eligible is impossible —
@@ -261,7 +281,8 @@ def _classify(decisions: list[EligibilityDecision]) -> EligibilityState:
            if g in ("evidence_required", "actor_ownership")):
         return EligibilityState.AUTO_HOLD
     if any(o is Outcome.UNKNOWN for g, o in by.items()
-           if g in ("actor_ownership", "conflict", "documentation_minimum")):
+           if g in ("actor_ownership", "conflict", "documentation_minimum",
+                    "axis_consensus")):
         return EligibilityState.AUTO_HOLD
     return EligibilityState.ELIGIBLE_FOR_RETRIEVAL
 
@@ -492,7 +513,8 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
         span_ids = [s.span_id for s in (f.evidence or []) if getattr(s, "span_id", None)]
         billing_id = (f.attributes or {}).get("billing_entity_id")
         if f.kind is FactKind.DIAGNOSIS:
-            core = [_gate_evidence_required(f), _gate_occurrence(f)]
+            core = [_gate_evidence_required(f), _gate_occurrence(f),
+                    _gate_axis_consensus(f)]
             state = (EligibilityState.ELIGIBLE_FOR_RETRIEVAL
                      if all(d.outcome is Outcome.PASS for d in core)
                      else (EligibilityState.NON_CLAIM_EVIDENCE
@@ -515,7 +537,8 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
         elif f.kind in _SERVICE_KINDS:
             decisions = [_gate_evidence_required(f), _gate_occurrence(f),
                          _gate_actor_ownership(f), _gate_part_of_demotion(f, relations),
-                         _gate_conflict(f, relations), _gate_documentation_minimum(f)]
+                         _gate_conflict(f, relations), _gate_documentation_minimum(f),
+                         _gate_axis_consensus(f)]
             state = _classify(decisions)
             component = ClaimComponent.SERVICE
         else:
@@ -536,6 +559,23 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
                        if r.predicate is RelationPredicate.SEPARATE_FROM
                        and r.state is RelationState.ASSERTED}
     return merge_duplicate_intents(intents, _separate_pairs)
+
+
+#: Decisions RECORDED for the audit trail that never determine the eligibility state.
+#: Defined by exclusion on purpose: every other gate -- including one added tomorrow --
+#: counts as blocking, so the failure mode is over-escalation, never a silent downgrade.
+NON_BLOCKING_GATES = frozenset({"diagnosis_linkage"})
+
+
+def blocking_decisions(intent: ClaimLineIntent) -> list[EligibilityDecision]:
+    """The decisions that actually produced this intent's state.
+
+    A caller asking "why is this held?" must not be answered with decisions that were
+    recorded but changed nothing -- that is how a single-cause hold gets mistaken for a
+    multi-cause one and routed to the wrong destination.
+    """
+    return [d for d in intent.decisions
+            if d.outcome is not Outcome.PASS and d.gate not in NON_BLOCKING_GATES]
 
 
 def eligible_intents(intents: list[ClaimLineIntent]) -> list[ClaimLineIntent]:

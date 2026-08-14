@@ -109,6 +109,12 @@ class ClinicalFact:
     # read cannot conceal a weak axis; gating uses the weakest, never an average. Empty
     # until extraction populates it -> min_confidence falls back to the scalar.
     axis_confidence: dict[str, float] = field(default_factory=dict)
+    # Code-changing axes that TWO INDEPENDENT READINGS of the original document read
+    # differently and the ORIGINAL PAGE could not settle (`claude_coder.graph_consensus`).
+    # Each entry is the precise, self-contained question to send to the provider. A
+    # non-empty list holds the event before retrieval and routes it to PROVIDER_QUERY --
+    # never to a coder queue, which the product directive forbids for model disagreement.
+    axis_conflicts: list[str] = field(default_factory=list)
     fact_id: str = ""
 
     @property
@@ -280,6 +286,15 @@ class CodingResult:
     # read, but nothing checked the reading). (Issue #6 F6-R6-A, directive §1.)
     source_reconciliation: Any = None
     document_version: str | None = None
+    # THE single clinical representation this encounter was decided from -- a
+    # `claude_coder.graph.ClinicalGraph`. Extraction fills it, eligibility roles it,
+    # retrieval is authorized by it, the certificate binds it and claim assembly reads
+    # it to say which nodes/edges each released line rests on. None only on a
+    # pre-retrieval system hold, which has no lines either.
+    graph: Any = None
+    # The two-reading axis comparison record (`graph_consensus.ConsensusReport`
+    # serialized), or None when only one reading was taken.
+    consensus: dict | None = None
 
     @property
     def billable_lines(self) -> list[ResolvedLine]:

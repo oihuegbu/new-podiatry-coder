@@ -949,6 +949,23 @@ class ClaimBundle(_Strict):
                            f"linkage")
         if not self.encounter.date_of_service:
             out.append("encounter has no date of service")
+        # Every released line must name the clinical-graph event it bills, and that
+        # event must be inside the graph binding this bundle carries. Otherwise the
+        # line cannot be traced back to the evidence, relations and eligibility
+        # decision that justified it — which is the whole point of the graph being
+        # the single clinical representation. Scoped to natively produced bundles:
+        # a legacy artifact predates the graph, is never routed by this contract and
+        # is already held for that reason.
+        if self.produced_by is BundleOrigin.CLAUDE_CODER:
+            bound = set(self.graph.clinical_event_ids)
+            for line in (*self.diagnoses, *self.service_lines):
+                if line.clinical_event_id not in bound:
+                    out.append(
+                        f"claim line {line.code or '?'} is not bound to the clinical "
+                        f"graph (event {line.clinical_event_id or '<none>'})")
+            if ((self.diagnoses or self.service_lines)
+                    and not self.graph.extraction_schema_version):
+                out.append("claim lines carry no clinical-graph schema identity")
         # De-duplicate while preserving order: the same condition can be
         # reported by two checks (e.g. a missing certificate), and a caller
         # printing the list should not read that as two separate defects.
@@ -1241,23 +1258,26 @@ def bundle_from_coding_result(
         date_of_service=getattr(result, "date_of_service", None),
         source_document=source_document,
     )
-    graph = GraphReference(
-        clinical_event_ids=tuple(
-            str(getattr(getattr(line, "fact", None), "fact_id", "") or "")
-            for line in (getattr(result, "lines", None) or [])
-            if getattr(getattr(line, "fact", None), "fact_id", "")),
-        claim_line_intent_ids=tuple(
-            str(getattr(intent, "intent_id", "") or "")
-            for intent in (getattr(result, "claim_line_intents", None) or [])),
-        relation_ids=tuple(
-            str(getattr(relation, "relation_id", "") or "")
-            for relation in (getattr(result, "relations", None) or [])),
-        evidence_span_ids=tuple(sorted({
-            reference.span_id
-            for line in (*diagnoses, *service_lines)
-            for reference in line.evidence if reference.span_id
-        })),
-    )
+    # ---- Clinical/service graph binding ---------------------------------
+    # Bound to THE graph the producer decided from
+    # (`claude_coder.graph.ClinicalGraph`), narrowed to the nodes and edges the
+    # RELEASED lines actually rest on: those events, every duplicate mention
+    # their claim-line intent merged in, and one documented hop outward — the
+    # conditions the record gave as the reason, the components it called
+    # integral, the services it called distinct. That is a binding; the previous
+    # unfiltered dump of every id the run produced was not, because it stayed
+    # identical whichever lines were released.
+    #
+    # A producer with no graph yields an EMPTY reference and `release_blockers()`
+    # then refuses the claim (below) rather than letting an unbound line through
+    # — the graph is not optional for a natively produced bundle.
+    released_event_ids = [line.clinical_event_id
+                          for line in (*diagnoses, *service_lines)
+                          if line.clinical_event_id]
+    reference_payload = getattr(getattr(result, "graph", None),
+                                "reference_payload", None)
+    graph = (GraphReference(**reference_payload(released_event_ids))
+             if callable(reference_payload) else GraphReference())
 
     bundle = ClaimBundle(
         produced_by=produced_by,

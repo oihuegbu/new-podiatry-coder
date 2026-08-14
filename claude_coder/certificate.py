@@ -134,6 +134,16 @@ def build_certificate(result: CodingResult, note_text: str,
         "source_evidence": (result.source_reconciliation.certificate_record()
                             if result.source_reconciliation is not None else None),
         "source_identity": source_identity or {},
+        # THE single clinical representation this claim was decided from, bound by its
+        # own content digest, plus the two-reading axis comparison that settled its
+        # code-changing axes. Without these the certificate can show the released lines
+        # and the edges, but not that they came from ONE coherent graph, nor what a
+        # second independent reading disagreed about and how the document settled it.
+        # (Directive section 3.)
+        "clinical_graph": (result.graph.certificate_record()
+                           if getattr(result, "graph", None) is not None else None),
+        "graph_consensus": (dict(result.consensus)
+                            if getattr(result, "consensus", None) else None),
     }
     payload["certificate_sha256"] = content_digest(payload)
     return payload

@@ -55,6 +55,12 @@ ANTHROPIC_BATCH_MAX_WAIT_S: float = float(
 # The downstream normalizers stay as a backstop. Set to "0" to disable.
 STRUCTURED_OUTPUTS: bool = os.getenv("STRUCTURED_OUTPUTS", "1") != "0"
 
+# Two independent readings of the note, compared on graph axes and settled against the
+# original page (product directive section 3). ON by default in real mode; set to 0 to
+# disable the control without a code change (a run then records that only one reading
+# was taken, rather than pretending two agreed).
+GRAPH_CONSENSUS: bool = os.getenv("GRAPH_CONSENSUS", "1") != "0"
+
 # --- Paths ---
 DATA_DIR = BASE_DIR / "data"
 QDRANT_DIR = BASE_DIR / Path(os.getenv("QDRANT_PATH", "data/qdrant_store"))

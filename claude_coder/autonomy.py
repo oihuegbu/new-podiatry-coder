@@ -167,7 +167,19 @@ def decide(result: CodingResult,
 
     billable = result.billable_lines
     if not billable:
-        route(Destination.REVIEW, "claim", "no defensible billable line was produced")
+        # A claim with no billable line is normally genuine coding judgement -- but NOT
+        # when every open item is already a precise documentation question whose answer
+        # determines the claim. A coder has nothing to decide there: the record is simply
+        # missing a fact, and sending it to a coder anyway is exactly the generic-review
+        # fallback the product directive forbids (sections 3 and 8). Found by the
+        # evidence-graph acceptance suite: an encounter whose only open item was an
+        # unsettled fact axis reached REVIEW through this catch-all even though every
+        # item on it was a provider query.
+        _open = [r for r in routing if r["blocking"]]
+        if not (_open and all(r["destination"] == Destination.PROVIDER_QUERY.value
+                              for r in _open)):
+            route(Destination.REVIEW, "claim",
+                  "no defensible billable line was produced")
 
     # 4. Release rests on CLOSURE, not on a self-reported confidence number. A line
     #    is autonomous when its code is GROUNDED — resolved by a deterministic
