@@ -13,6 +13,7 @@ method -> authority) so any decision can be explained.
 """
 from __future__ import annotations
 
+import logging
 import re
 
 from . import arbitration, certificate, em, extraction, gates, ontology, resolution
@@ -21,6 +22,8 @@ from .autonomy import decide
 from .data_access import AuthoritativeSource, CodeSource
 from .models import CodingResult, ResolutionMethod, ResolvedLine
 
+
+logger = logging.getLogger(__name__)
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -651,8 +654,24 @@ def _terminal_head_anchor(audit_repository) -> dict:
 
 def _system_hold_result(encounter_id: str, date_of_service: str | None,
                         stage: str, exc: Exception, source) -> CodingResult:
-    """Typed fail-closed result for any pre-retrieval operational/integrity failure."""
+    """Typed fail-closed result for any pre-retrieval operational/integrity failure.
+
+    LOUD as well as fail-closed. Holding here is correct and already typed, but the
+    hold alone is not diagnosable: the ClaimBundle carries no gate detail, so this
+    stage reaches an operator only as a coarse `release.reason_codes` entry, and the
+    deployed batch log says nothing beyond `SYSTEM_RETRY | 0 diagnosis line(s) | 0
+    service line(s)`. Every note in the batch then fails identically with the cause
+    stated nowhere -- which is how a missing second-reading credential, an unreachable
+    provider or a malformed extractor response all present as the same silent zero.
+
+    So the CAUSE and its traceback go to the log. They deliberately do NOT go into the
+    artifact: an exception message can quote the note (`ExtractionSchemaError` embeds
+    the offending value), and a claim artifact is a different distribution boundary
+    from an operator log. The artifact keeps the exception TYPE only.
+    """
     from .models import GateResult, Outcome
+    logger.error("  %s: held with zero retrieval at the %s boundary - %s: %s",
+                 encounter_id, stage, type(exc).__name__, exc, exc_info=True)
     result = CodingResult(encounter_id=encounter_id, date_of_service=date_of_service)
     result.gates = [GateResult(stage, Outcome.UNKNOWN,
                                f"{stage} failed ({type(exc).__name__})",

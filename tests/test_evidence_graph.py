@@ -617,6 +617,39 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
         self.assertIs(held.destination, Destination.SYSTEM_HOLD)
         self.assertTrue(any(g.name == "pre_retrieval_integrity" for g in held.gates))
 
+    def test_a_second_reading_that_fails_says_why_it_failed(self):
+        """Fail-closed is not the whole requirement: the hold must also be DIAGNOSABLE.
+
+        The test above proves the encounter stops with zero retrieval, which is the
+        claim-safety half. This is the operability half, and its absence is what made a
+        real incident expensive: the ClaimBundle carries no gate detail, so a pipeline
+        that stopped here surfaced to an operator only as `SYSTEM_RETRY | 0 diagnosis
+        line(s) | 0 service line(s)`. A missing second-reading credential, an
+        unreachable vendor and a malformed extractor response were indistinguishable,
+        and every note in the batch failed the same way with the cause recorded
+        nowhere. The cause, the stage and the traceback must reach the log.
+        """
+        def _broken(system, user):
+            raise RuntimeError("second reading unavailable")
+
+        from claude_coder.pipeline import code_encounter
+        with self.assertLogs("claude_coder.pipeline", level="ERROR") as captured:
+            code_encounter(
+                "enc", NOTE_E2E, "2026-03-14", source=_mock_source(),
+                extract_llm=lambda s, u: _reading(
+                    "excision procedure alpha performed", "right",
+                    "Procedure alpha performed today"),
+                extract_llm_b=_broken, verify_llm=_stub_llm,
+                corroborate_llm=_stub_llm, billing_context=_BILLING,
+                audit_repository=_null_audit())
+        logged = "\n".join(captured.output)
+        # WHICH encounter, WHICH boundary, WHICH failure, and where it came from.
+        self.assertIn("enc", logged)
+        self.assertIn("pre_retrieval_integrity", logged, logged)
+        self.assertIn("RuntimeError", logged, logged)
+        self.assertIn("second reading unavailable", logged, logged)
+        self.assertIn("Traceback", logged, logged)
+
     def test_a_held_condition_is_not_made_multi_cause_by_a_recorded_note(self):
         """Post-fix regression (second-pass review).
 

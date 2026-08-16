@@ -265,6 +265,7 @@ class _Deployment:
 @pytest.fixture
 def deployment(tmp_path, monkeypatch):
     from app.core import config as app_config
+    from claude_coder import arbitration
     from claude_coder import extraction
     from claude_coder import verify as verify_module
     from claude_coder.data_access import AuthoritativeSource
@@ -310,6 +311,47 @@ def deployment(tmp_path, monkeypatch):
                             lambda system, user:
                             '{"entailed": true, "missing_element": false, '
                             '"reason": "stub"}', provider="claude"))
+    # The SECOND INDEPENDENT READING (product directive section 3; phase 4, commit
+    # 97f748b). Substituted here for exactly the same reason as the two callables
+    # above, and it MUST be: `run.main()` calls `code_encounter()` with no extractor,
+    # so the pipeline treats the run as real mode and auto-enables
+    # `extraction.default_second_extract_llm`, which calls a live vendor. Left
+    # unsubstituted, every suite built on this fixture silently depended on a network
+    # and a real second-provider API key; without them the second reading raised, the
+    # pre-retrieval boundary held the encounter, and the DEPLOYED path produced zero
+    # diagnosis and zero service lines.
+    #
+    # CROSS-PHASE FIXTURE CURRENCY -- read this before adding a control that calls a
+    # model. This fixture is imported by `tests/test_encounter_context_e2e.py` and
+    # `tests/test_deployment_entrypoint.py`, which drive the deployed entrypoint and
+    # therefore cannot pass their own callables. A phase that adds a new real-mode
+    # default LLM to the pipeline MUST substitute it here in the same commit.
+    # `test_every_real_mode_default_llm_is_substituted` below derives that requirement
+    # from the modules instead of restating a list, so the next one fails immediately
+    # with a message naming the callable, rather than as an unexplained zero-line hold
+    # discovered two phases later.
+    #
+    # Both channels return the same reading deliberately: two readings that agree on
+    # every axis is the deterministic positive path, and it keeps the consensus control
+    # ENABLED -- switching it off with GRAPH_CONSENSUS=0 would prove a configuration the
+    # deployment does not run. The disagreement paths are covered end to end in
+    # `tests/test_evidence_graph.py`.
+    monkeypatch.setattr(extraction, "default_second_extract_llm",
+                        verify_module.declare_model_profile(
+                            lambda system, user: FACTS_JSON, provider="openai"))
+    # `arbitration.arbitrate()` falls back to its OWN module-level default LLM whenever
+    # the caller passes none -- and the deployed entrypoint passes none. It does not
+    # fire under this fixture today only because the substituted index offers a single
+    # candidate, so no line is left ambiguous; a fixture whose index offered two would
+    # reach a live vendor from a test that believes it is hermetic. Substituted as a
+    # TRIPWIRE rather than as a permissive answer: if arbitration ever does fire here,
+    # the run must fail by name instead of quietly taking a different resolution path.
+    def _arbitration_tripwire(system, user):
+        raise AssertionError(
+            "arbitration reached its real-mode default LLM from an e2e fixture; "
+            "substitute it deliberately rather than calling a live vendor")
+
+    monkeypatch.setattr(arbitration, "_default_llm", _arbitration_tripwire)
 
     # Durable audit anchor available, so a hold here would be attributable to
     # the claim path and not to the checkpoint (which round 6 already proves).
@@ -411,6 +453,55 @@ def deployment(tmp_path, monkeypatch):
     })
     deployment.write_context(version="context-edition-1")
     return deployment
+
+
+# --------------------------------------------------------------------------
+# cross-phase fixture-currency guard
+# --------------------------------------------------------------------------
+
+def test_every_real_mode_default_llm_is_substituted(deployment):
+    """No test driving the DEPLOYED entrypoint may reach a live model vendor.
+
+    WHY THIS EXISTS. `run.main()` takes no LLM arguments, so a suite built on this
+    fixture cannot opt out of real mode by passing its own callables the way a unit
+    test does -- it can only substitute the module-level defaults the pipeline
+    auto-enables. That makes the fixture the single point where a new model-calling
+    control has to be declared, and nothing enforced it: phase 4 added
+    `extraction.default_second_extract_llm`, this fixture was never extended, and the
+    three suites that share it silently began requiring a network and a real
+    second-provider key. Where those were present the suites passed while paying a
+    vendor mid-test; where they were not, the pre-retrieval boundary held every
+    encounter and 27 tests failed with zero diagnosis lines, zero service lines and no
+    stated cause.
+
+    WHAT IT CHECKS. The requirement is DERIVED, not restated: every module-level
+    callable in the loaded `claude_coder` package whose name ends in `_llm` is a
+    real-mode default by construction, and one still bound to its own defining module
+    has not been substituted. A control added in a future phase is therefore covered
+    the day it lands, and it fails HERE, naming the exact callable, instead of two
+    phases later as an unexplained hold.
+    """
+    import sys
+
+    package = [m for name, m in sorted(sys.modules.items()) if m is not None
+               and (name == "claude_coder" or name.startswith("claude_coder."))]
+    unsubstituted = []
+    for module in package:
+        for name, value in sorted(vars(module).items()):
+            if not name.endswith("_llm") or not callable(value):
+                continue
+            # A substituted callable is defined by the TEST, so its `__module__` no
+            # longer matches the module it is bound to. Comparing modules rather than
+            # identities also survives a re-import of the package under test.
+            if getattr(value, "__module__", None) == module.__name__:
+                unsubstituted.append(f"{module.__name__}.{name}")
+
+    assert not unsubstituted, (
+        "these real-mode default LLM callables are still live under the deployment "
+        "fixture, so this suite would call a model vendor (or hold every encounter "
+        f"when it cannot): {sorted(set(unsubstituted))}. Substitute each of them in "
+        "the `deployment` fixtures of tests/test_claim_bundle_e2e.py AND "
+        "tests/test_deployment_entrypoint.py, in the same commit that adds it.")
 
 
 # --------------------------------------------------------------------------

@@ -170,6 +170,7 @@ class _StubVectorStore:
 def deployment(tmp_path, monkeypatch):
     """A complete, isolated deployment: notes in, results out, own provenance store."""
     from app.core import config as app_config
+    from claude_coder import arbitration
     from claude_coder import extraction
     from claude_coder import verify as verify_module
     from claude_coder.data_access import AuthoritativeSource
@@ -206,6 +207,33 @@ def deployment(tmp_path, monkeypatch):
                                                  '"missing_element": false, '
                                                  '"reason": "stub"}',
                             provider="claude"))
+    # The SECOND INDEPENDENT READING (product directive section 3; phase 4, commit
+    # 97f748b). This file keeps its OWN copy of the deployment fixture, so it needs the
+    # same substitution for the same reason as `tests/test_claim_bundle_e2e.py`: the
+    # deployed entrypoint passes no extractor, the pipeline therefore auto-enables
+    # `extraction.default_second_extract_llm`, and an unsubstituted one calls a live
+    # vendor. Without a network that call raises, the pre-retrieval boundary holds the
+    # encounter, and the anchor/source-manifest behaviour these tests exist to prove is
+    # never reached -- the run holds for the wrong reason and the test says nothing.
+    # A new real-mode default LLM must be substituted in BOTH fixtures in the same
+    # commit; `test_every_real_mode_default_llm_is_substituted` in
+    # `tests/test_claim_bundle_e2e.py` derives that requirement from the modules.
+    monkeypatch.setattr(extraction, "default_second_extract_llm",
+                        verify_module.declare_model_profile(
+                            lambda system, user: FACTS_JSON, provider="openai"))
+    # `arbitration.arbitrate()` falls back to its OWN module-level default LLM whenever
+    # the caller passes none -- and the deployed entrypoint passes none. It does not
+    # fire under this fixture today only because the substituted index offers a single
+    # candidate, so no line is left ambiguous; a fixture whose index offered two would
+    # reach a live vendor from a test that believes it is hermetic. Substituted as a
+    # TRIPWIRE rather than as a permissive answer: if arbitration ever does fire here,
+    # the run must fail by name instead of quietly taking a different resolution path.
+    def _arbitration_tripwire(system, user):
+        raise AssertionError(
+            "arbitration reached its real-mode default LLM from an e2e fixture; "
+            "substitute it deliberately rather than calling a live vendor")
+
+    monkeypatch.setattr(arbitration, "_default_llm", _arbitration_tripwire)
 
     class _Deployment:
         def __init__(self):
