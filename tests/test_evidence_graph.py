@@ -793,6 +793,135 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
                             for ln in result.lines),
                         "one reading still codes the encounter")
 
+    def test_a_disagreement_pays_for_a_targeted_read_of_only_the_pages_it_needs(self):
+        """The escalation branch itself, end to end.
+
+        The page carrying both quotations has NO independent reading at all (an
+        image-only page), so nothing can settle the disagreement until one is obtained.
+        The consensus step must therefore aim the PAID reader at exactly that page —
+        not at the whole document — and then decide from what it reads.
+        """
+        import tempfile
+        from pathlib import Path as _Path
+
+        from app.contracts.source_evidence import (
+            ChannelKind, PAGE_SEPARATOR, ReadChannel, build_page_read)
+        from app.ingestion.source_evidence import (
+            SECONDARY_VISION_CHANNEL_ID, compile_source_evidence)
+        from tests.source_pdf import build_pdf, vision_extraction
+
+        vision_text = ("Procedure alpha performed today, side one. "
+                       "Condition alpha addressed today.")
+        # An image-only page: the PDF carries no embedded text, so no channel in the
+        # compiled document can confirm or refute anything on it.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        pdf_path = _Path(tmp.name) / "note.pdf"
+        pdf_path.write_bytes(build_pdf([[]]))
+        document = compile_source_evidence(
+            pdf_path,
+            vision_extraction([vision_text],
+                              metadata={"date_of_service": "2026-03-14"},
+                              page_separator=PAGE_SEPARATOR))
+
+        read_calls = []
+
+        class _PaidReader:
+            def channel(self):
+                return ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                                   kind=ChannelKind.VISION, provider="openai")
+
+            def read_pages(self, page_numbers):
+                read_calls.append(tuple(page_numbers))
+                # What the ORIGINAL page actually says: it contradicts the primary
+                # reading's quotation and confirms the second reading's.
+                return {number: build_page_read(
+                    SECONDARY_VISION_CHANNEL_ID, number,
+                    "Procedure beta performed today, side one. "
+                    "Condition alpha addressed today.")
+                    for number in page_numbers}
+
+        result = _run(
+            _reading("excision procedure alpha performed", "right",
+                     "Procedure alpha performed today"),
+            _reading("procedure alpha performed excision", "left",
+                     "Condition alpha addressed today"),
+            note_text=document.primary_text(),
+            source_evidence=document,
+            source_reader=_PaidReader())
+
+        self.assertEqual(read_calls, [(1,)],
+                         "the paid read must be aimed at exactly the page the "
+                         "disagreeing quotations sit on")
+        self.assertEqual(result.consensus["escalated_pages"], [1])
+        laterality = next(r for r in result.consensus["resolutions"]
+                          if r["axis"] == "laterality")
+        self.assertEqual(laterality["verdict"], "resolved_from_source")
+        self.assertEqual(laterality["proof"], "original_page_reconciliation")
+        self.assertEqual(laterality["accepted_from"], "second")
+        self.assertEqual(result.graph.nodes["F1"].attributes["laterality"], "left")
+
+    def test_a_failed_targeted_read_is_a_dependency_failure_not_a_coder_queue(self):
+        """The failure path of the escalation: a read that could not happen proves
+        nothing, and must not be allowed to look like a resolution."""
+        import tempfile
+        from pathlib import Path as _Path
+
+        from app.contracts.source_evidence import PAGE_SEPARATOR
+        from app.ingestion.source_evidence import compile_source_evidence
+        from claude_coder.models import Destination, Outcome
+        from tests.source_pdf import build_pdf, vision_extraction
+
+        vision_text = ("Procedure alpha performed today, side one. "
+                       "Condition alpha addressed today.")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        pdf_path = _Path(tmp.name) / "note.pdf"
+        pdf_path.write_bytes(build_pdf([[]]))
+        document = compile_source_evidence(
+            pdf_path,
+            vision_extraction([vision_text],
+                              metadata={"date_of_service": "2026-03-14"},
+                              page_separator=PAGE_SEPARATOR))
+
+        class _BrokenReader:
+            def channel(self):
+                raise RuntimeError("independent reader unavailable")
+
+            def read_pages(self, page_numbers):
+                raise RuntimeError("independent reader unavailable")
+
+        result = _run(
+            _reading("excision procedure alpha performed", "right",
+                     "Procedure alpha performed today"),
+            _reading("procedure alpha performed excision", "left",
+                     "Condition alpha addressed today"),
+            note_text=document.primary_text(),
+            source_evidence=document,
+            source_reader=_BrokenReader())
+
+        self.assertEqual(result.consensus["escalated_pages"], [])
+        self.assertIn("unavailable", result.consensus["escalation_detail"])
+        laterality = next(r for r in result.consensus["resolutions"]
+                          if r["axis"] == "laterality")
+        self.assertEqual(laterality["verdict"], "unresolved")
+        self.assertEqual(laterality["provider_question"], "",
+                         "with nothing confirmed, this is not a documentation gap")
+
+        # The axis comparison deliberately does NOT convert an unreadable page into a
+        # provider query (see the precedence test above), so the source-evidence control
+        # keeps ownership and reports it as what it is: a dependency that could not be
+        # reached — retry it, do not pay a coder to look at it.
+        gate = next(g for g in result.gates
+                    if g.name == "source_evidence_reconciliation")
+        self.assertIs(gate.outcome, Outcome.UNKNOWN, gate.detail)
+        self.assertTrue(gate.retryable,
+                        "an unreadable page is a dependency failure, not judgement")
+        self.assertFalse(
+            any(r["destination"] == Destination.REVIEW.value for r in result.routing),
+            f"a read that could not happen must not send the claim to a coder: "
+            f"{result.routing}")
+
 
 
 if __name__ == "__main__":
