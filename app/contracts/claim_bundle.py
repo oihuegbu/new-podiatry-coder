@@ -86,10 +86,19 @@ SCHEMA_ID = "claim_bundle"
 #: different things: in a v1 artifact the question was never askable, in a v2 artifact
 #: it was asked and the answer is recorded. A reader that could not tell those apart
 #: would read "no proof recorded" as "no proof needed".
-SCHEMA_VERSION = 2
+#: 3 binds the certificate to ONE COMPLETE claim rather than to a summary of it:
+#: `GraphReference.graph_sha256` and the certificate's `certified_claim` seal
+#: (issue #6 F7-R1). A version bump for the same reason version 2 was one --
+#: the ABSENCE of the seal means two different things. In a v2 artifact the
+#: certificate and the claim were only ever checked to name the same set of
+#: codes; in a v3 artifact they are checked to be the SAME CLAIM -- line order,
+#: units, modifiers, pointers, context, evidence, authority and graph included.
+#: A reader that could not tell those apart would read an unbound certificate
+#: as a bound one, which is precisely the finding.
+SCHEMA_VERSION = 3
 #: Every version this build can read. Adding a version means adding a reader,
 #: never silently accepting a shape whose semantics are unknown.
-SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3})
 
 
 class ClaimBundleError(Exception):
@@ -129,6 +138,73 @@ def content_digest(value: Any) -> str:
 def prefixed_digest(value: Any) -> str:
     """`sha256:<hex>` — the prefixed form used by the release/manifest layer."""
     return "sha256:" + content_digest(value)
+
+
+#: Key under which a release certificate carries its binding to ONE complete
+#: claim, and the identity of that binding's shape. The certificate is built by
+#: the producer BEFORE the encounter context, the source-document identity and
+#: the authoritative-data snapshot are known; the binding is SEALED onto it by
+#: `seal_claim_certificate()` at the one place that assembles the whole claim,
+#: and the producer's own content address is preserved inside the seal so the
+#: durable audit record that bound it still identifies the same attestation.
+CERTIFIED_CLAIM_KEY = "certified_claim"
+CERTIFIED_CLAIM_SCHEMA = "certified_claim/1"
+
+#: The sections of the certified claim, keyed by their payload field, mapped to
+#: how a refusal names them. The seal carries a digest PER SECTION as well as
+#: over the whole payload: one aggregate digest proves the claim changed, and
+#: proves nothing about WHAT changed, which turns every downstream refusal into
+#: "this artifact is not coherent" — the same undiagnosable outcome that made a
+#: lossy summary comparison attractive in the first place. The aggregate is
+#: still the control; the sections are how it explains itself.
+CERTIFIED_CLAIM_SECTIONS: dict[str, str] = {
+    "encounter": "the encounter and source-document identity",
+    "diagnoses": "the ordered diagnoses",
+    "service_lines": "the service lines (units, modifiers, pointers, POS/NDC)",
+    "context_fingerprint": "the encounter context",
+    "graph": "the clinical-graph binding",
+    "authority": "the authoritative data snapshot",
+    "release": "the release routing",
+}
+
+
+def evidence_records(spans: Any) -> list[dict[str, Any]]:
+    """ONE canonical record shape for a line's evidence, in documented order.
+
+    The release certificate and this contract each carry the same spans in
+    their own shape. A comparison between them is only EXACT if both are
+    projected through one function: two independently written projections
+    differ over an int-vs-float bounding box or a missing key long before they
+    differ over a fact, and that difference reads as tampering -- or, worse,
+    gets the comparison dropped as unreliable, which is how the certificate
+    came to attest evidence nothing checked the claim against. Duck-typed so it
+    takes a producer `EvidenceSpan` and this module's `EvidenceReference` alike.
+    """
+    def _int(value: Any) -> int | None:
+        return None if value is None else int(value)
+
+    out: list[dict[str, Any]] = []
+    for span in (spans or []):
+        region = getattr(span, "region", None)
+        out.append({
+            "text": str(getattr(span, "text", "") or ""),
+            "span_id": str(getattr(span, "span_id", "") or ""),
+            "section": str(getattr(span, "section", "") or ""),
+            "page": _int(getattr(span, "page", None)),
+            "start": _int(getattr(span, "start", None)),
+            "end": _int(getattr(span, "end", None)),
+            "text_sha256": str(getattr(span, "text_sha256", "") or ""),
+            "document_sha256": str(getattr(span, "document_sha256", "") or ""),
+            "document_version": str(getattr(span, "document_version", "") or ""),
+            "anchored": bool(getattr(span, "anchored", False)),
+            "page_image_sha256": str(getattr(span, "page_image_sha256", "") or ""),
+            "region": ([float(v) for v in region] if region else None),
+            "source_reconciliation": str(
+                getattr(span, "source_reconciliation", "") or ""),
+            "verified_by_channel_id": str(
+                getattr(span, "verified_by_channel_id", "") or ""),
+        })
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -273,6 +349,13 @@ class GraphReference(_Strict):
 
     extraction_schema_version: str = ""
     relation_grammar_version: str = ""
+    #: Content address of the WHOLE graph these ids point into. Ids alone are
+    #: reusable: swapping which relation or evidence-span id a claim names, or
+    #: rewriting the graph those ids resolve in, leaves every id-shaped field
+    #: plausible. The digest is what makes "the same graph" checkable, and it is
+    #: the same value the certificate records for its `clinical_graph`, so the
+    #: two cannot come apart. (Issue #6 F7-R1.)
+    graph_sha256: str = ""
     clinical_event_ids: tuple[str, ...] = ()
     claim_line_intent_ids: tuple[str, ...] = ()
     relation_ids: tuple[str, ...] = ()
@@ -823,6 +906,23 @@ class CertificateReference(_Strict):
     certificate: dict[str, Any] = Field(default_factory=dict)
     control_mode: str = ""
 
+    def producer_body(self) -> dict[str, Any]:
+        """The producer's own attestation: everything it certified, seal aside.
+
+        Its content digest is the address the PIPELINE bound into the durable
+        terminal release record before any claim existed. Preserving it through
+        the seal is what keeps that audit record and this artifact the same
+        attestation — a seal that could not be checked back to the producer's
+        address would be a second, unanchored certificate.
+        """
+        return {k: v for k, v in self.certificate.items()
+                if k not in (CERTIFIED_CLAIM_KEY, "certificate_sha256")}
+
+    def certified_claim(self) -> dict[str, Any]:
+        """This certificate's binding to ONE complete claim, or `{}`."""
+        block = self.certificate.get(CERTIFIED_CLAIM_KEY)
+        return dict(block) if isinstance(block, dict) else {}
+
     def problems(self) -> tuple[str, ...]:
         """Recompute the producer's own content address over the certificate.
 
@@ -846,6 +946,30 @@ class CertificateReference(_Strict):
         if embedded and embedded != self.certificate_sha256:
             out.append("certificate reference and certificate disagree about "
                        "the certificate's own content address")
+        # The seal, if this certificate carries one, must still contain the
+        # PRODUCER's intact attestation at the address the pipeline's terminal
+        # audit record bound. Re-derived here rather than trusted, so a body
+        # rewritten under a recomputed outer address is visible from the
+        # artifact alone. (Issue #6 F7-R1.)
+        seal = self.certified_claim()
+        if seal:
+            if str(seal.get("schema") or "") != CERTIFIED_CLAIM_SCHEMA:
+                out.append(
+                    f"certificate claim binding declares schema "
+                    f"{seal.get('schema')!r}, not {CERTIFIED_CLAIM_SCHEMA!r}")
+            if not str(seal.get("certified_claim_sha256") or ""):
+                out.append("certificate claim binding names no certified claim")
+            if not isinstance(seal.get("section_sha256"), dict):
+                out.append("certificate claim binding carries no per-section "
+                           "digests, so a refusal could not say what changed")
+            producer = str(seal.get("producer_certificate_sha256") or "")
+            if not producer:
+                out.append("certificate claim binding does not preserve the "
+                           "producer certificate's own content address")
+            elif content_digest(self.producer_body()) != producer:
+                out.append("the producer certificate inside this claim binding "
+                           "does not reproduce its own content address (what "
+                           "the producer attested was altered)")
         return tuple(out)
 
 
@@ -968,6 +1092,108 @@ class ClaimBundle(_Strict):
     def compute_claim_fingerprint(self) -> str:
         return prefixed_digest(self.claim_content())
 
+    def certified_claim_content(self) -> dict[str, Any]:
+        """THE claim a certificate attests — complete, ordered, nothing summarized.
+
+        WHY THIS EXISTS (issue #6 F7-R1)
+        --------------------------------
+        `claim_content()` is the change-detection fingerprint of the BILLABLE
+        payload. It was never the thing a certificate was compared against; the
+        certificate was compared against a sorted `(system, code)` multiset. So
+        an artifact could carry nine units where one was certified, an extra
+        modifier, a different patient, a different authority record and a
+        different graph, recompute its own two fingerprints, and still verify —
+        internally consistent, and no longer the claim anything attested.
+
+        This payload is the fix, and its rules are:
+
+        * ORDER IS CONTENT. Diagnoses and service lines appear in claim order
+          with their recorded `sequence`; modifiers and diagnosis pointers keep
+          the order the producer emitted them in (on a professional claim the
+          first modifier is not interchangeable with the second, and pointer
+          order is the necessity ranking).
+        * NOTHING IS SUMMARIZED. Units, POS, NDC, kind, method, primary status
+          and the clinical-event id are carried per line; evidence and the
+          authoritative record are carried by digest over their FULL canonical
+          projection, so any change to any field of any span or authority row
+          changes this payload.
+        * THE ENVELOPE IS PART OF THE CLAIM. Who the encounter was about (the
+          recomputed context fingerprint), which document it came from, which
+          authoritative data and index answered it, and which graph justified
+          it are all bound here — they decide the claim as surely as the codes.
+        * DERIVED STATE IS EXCLUDED. `release.holds` is `release_blockers()`,
+          which is computed FROM this digest; including it would make the
+          digest depend on its own verification result.
+        * PROSE IS EXCLUDED. Rationale and audit text can be reworded without
+          changing the claim, and a digest that moved when they did would be
+          re-derived away by the first consumer it inconvenienced.
+        """
+        def _line(line) -> dict[str, Any]:
+            return {
+                "sequence": line.sequence,
+                "system": line.system,
+                "code": line.code,
+                "descriptor": line.descriptor,
+                "clinical_event_id": line.clinical_event_id,
+                "method": line.method.value,
+                "evidence_sha256": content_digest(evidence_records(line.evidence)),
+                "authority_sha256": content_digest(
+                    line.authority.model_dump(mode="json")),
+            }
+
+        return {
+            "schema": CERTIFIED_CLAIM_SCHEMA,
+            "encounter": {
+                "encounter_id": self.encounter.encounter_id,
+                "document_id": self.encounter.document_id,
+                "date_of_service": self.encounter.date_of_service,
+                "source_document":
+                    self.encounter.source_document.model_dump(mode="json"),
+            },
+            "diagnoses": [dict(_line(d), primary=d.primary)
+                          for d in self.diagnoses],
+            "service_lines": [
+                dict(_line(s),
+                     units=s.units,
+                     modifiers=list(s.modifiers),
+                     diagnosis_pointers=list(s.diagnosis_pointers),
+                     place_of_service=s.place_of_service,
+                     ndc=s.ndc,
+                     kind=s.kind)
+                for s in self.service_lines
+            ],
+            # RECOMPUTED, never the stored value: the stored fingerprint is
+            # what a tamperer edits, and `EncounterContext.problems()` is a
+            # separate check, not this one's dependency.
+            "context_fingerprint": self.context.compute_fingerprint(),
+            "graph": self.graph.model_dump(mode="json"),
+            "authority": self.authority.model_dump(mode="json"),
+            "release": {
+                "destination": self.release.destination.value,
+                "producer_releasable": self.release.producer_releasable,
+                "producer_verdict": self.release.producer_verdict,
+                "producer_destination": self.release.producer_destination,
+            },
+        }
+
+    def compute_certified_claim_digest(self) -> str:
+        """`sha256:<hex>` over `certified_claim_content()` — the one exact digest
+        every consumer compares the certificate against."""
+        return prefixed_digest(self.certified_claim_content())
+
+    def certified_claim_sections(self) -> dict[str, str]:
+        """Per-section digests of the same payload, for DIAGNOSIS not for control.
+
+        A refusal has to be able to say "the authoritative data snapshot changed"
+        rather than "two 64-character strings differ", or the operator's only
+        move is to re-run everything and hope. These are derived from exactly the
+        same content as the aggregate digest, so they can never disagree with it
+        about whether the claim changed — only about how to describe it.
+        """
+        content = self.certified_claim_content()
+        return {name: content_digest(content[name])
+                for name in CERTIFIED_CLAIM_SECTIONS}
+
     # ------------------------------------------------------------- integrity
 
     def integrity_problems(self) -> tuple[str, ...]:
@@ -1018,6 +1244,7 @@ class ClaimBundle(_Strict):
 
         if self.certificate is not None:
             out.extend(self.certificate.problems())
+        out.extend(self.certificate_binding_problems())
         if self.release.producer_releasable and self.certificate is None:
             out.append("bundle asserts release without a certificate")
         if self.release.producer_releasable and \
@@ -1027,6 +1254,124 @@ class ClaimBundle(_Strict):
                 f"{self.release.destination.value}")
         if self.processing_error and self.release.producer_releasable:
             out.append("bundle asserts release after a processing failure")
+        return tuple(out)
+
+    def certificate_binding_problems(self) -> tuple[str, ...]:
+        """Is the certificate bound to THIS EXACT claim? (Issue #6 F7-R1.)
+
+        Part of `integrity_problems()` deliberately, not of readiness alone:
+        "the certificate attests a different claim" is a coherence question, and
+        putting it anywhere a consumer could skip is how the codes-only
+        comparison came to be the only thing standing between a recombined
+        artifact and an 837P. Every consumer that re-derives coherence — the
+        registry, release authorization, and the submitter's live-artifact
+        check — gets it without asking for it.
+
+        A bundle with NO certificate is not checked here (it is already refused
+        for having none). A LEGACY-origin bundle carries a certificate this
+        contract did not produce and cannot re-derive; its authorization is
+        `verify_readiness_certificate`, and demanding a seal of it would report
+        an unfixable defect on every adapted artifact.
+        """
+        certificate = self.certificate
+        if certificate is None:
+            return ()
+        native = self.produced_by is BundleOrigin.CLAUDE_CODER
+        seal = certificate.certified_claim()
+        if not seal:
+            if not native:
+                return ()
+            return ("the release certificate is not bound to this claim: it "
+                    "carries no certified-claim binding, so what it attests "
+                    "cannot be compared with what this bundle bills",)
+        out: list[str] = []
+        attested = str(seal.get("certified_claim_sha256") or "")
+        derived = self.compute_certified_claim_digest()
+        if attested != derived:
+            attested_sections = seal.get("section_sha256")
+            attested_sections = (attested_sections
+                                 if isinstance(attested_sections, dict) else {})
+            mine = self.certified_claim_sections()
+            differing = [label for name, label in CERTIFIED_CLAIM_SECTIONS.items()
+                         if str(attested_sections.get(name) or "") != mine[name]]
+            detail = ("it differs in " + "; ".join(differing) if differing else
+                      "its certified-claim digest does not reproduce")
+            out.append(
+                f"the release certificate does not attest this exact claim: "
+                f"{detail} (certified {attested or '<none>'}, this bundle "
+                f"{derived})")
+        out.extend(self._attested_line_problems(certificate.certificate))
+        graph_record = certificate.certificate.get("clinical_graph")
+        attested_graph = str((graph_record or {}).get("graph_sha256") or "") \
+            if isinstance(graph_record, dict) else ""
+        if self.graph.graph_sha256 and attested_graph and \
+                self.graph.graph_sha256 != attested_graph:
+            out.append(
+                "the clinical graph this claim binds is not the graph the "
+                "certificate attests")
+        return tuple(out)
+
+    def _attested_line_problems(self, payload: dict[str, Any]) -> tuple[str, ...]:
+        """Compare the certificate's own billed lines with the bundle's, EXACTLY.
+
+        The certificate records the producer's billable lines; this contract
+        records the same lines as the claim arranges them. The two shapes are
+        joined on (clinical event, system, code) — an identity, not a summary —
+        and then every field BOTH shapes carry is compared: units, ordered
+        modifiers, the full evidence projection and the full authority record.
+        A certificate line with no counterpart is reported too: dropping a
+        certified line from the claim is the tamper the old sorted-code
+        multiset did catch, and widening the comparison must not lose it.
+
+        Units and modifiers are compared only for SERVICE lines because only
+        they exist on a professional diagnosis line at all; the diagnosis's own
+        order and primary status are bound by the certified-claim digest.
+        """
+        index: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        for line in (payload.get("lines") or []):
+            if not isinstance(line, dict):
+                continue
+            key = (str(line.get("clinical_event_id") or ""),
+                   str(line.get("system") or ""), str(line.get("code") or ""))
+            index.setdefault(key, []).append(line)
+
+        out: list[str] = []
+        for line in (*self.diagnoses, *self.service_lines):
+            key = (line.clinical_event_id, line.system, line.code)
+            matches = index.get(key)
+            if not matches:
+                out.append(
+                    f"the certificate does not attest claim line "
+                    f"{line.code or '?'} (event "
+                    f"{line.clinical_event_id or '<none>'})")
+                continue
+            attested = matches.pop(0)
+            if not matches:
+                index.pop(key, None)
+            if content_digest(evidence_records(line.evidence)) != \
+                    content_digest(attested.get("evidence") or []):
+                out.append(f"the certificate attests different evidence for "
+                           f"claim line {line.code or '?'}")
+            if content_digest(line.authority.detail) != \
+                    content_digest(attested.get("authority") or {}):
+                out.append(f"the certificate attests a different authoritative "
+                           f"record for claim line {line.code or '?'}")
+            if isinstance(line, ServiceLine):
+                if attested.get("units") != line.units:
+                    out.append(
+                        f"the certificate attests {attested.get('units')!r} "
+                        f"units for service line {line.code or '?'}, the claim "
+                        f"bills {line.units}")
+                if [str(m) for m in (attested.get("modifiers") or [])] != \
+                        list(line.modifiers):
+                    out.append(
+                        f"the certificate attests different modifiers for "
+                        f"service line {line.code or '?'}")
+        for key, leftover in index.items():
+            for _ in leftover:
+                out.append(f"the certificate attests billed line {key[2] or '?'} "
+                           f"(event {key[0] or '<none>'}), which this claim does "
+                           f"not carry")
         return tuple(out)
 
     def release_blockers(self) -> tuple[str, ...]:
@@ -1187,6 +1532,37 @@ def _authority_of(chosen) -> CodeAuthority:
     )
 
 
+def _units_of(line) -> int:
+    """The producer's STATED unit count, or a refusal. (Issue #6 F7-R1.)
+
+    This used to be `max(1, int(getattr(line, "units", 1) or 1))`. That is a
+    silent repair of a number nobody decided, and it is worse than it looks:
+    the release certificate was built over the producer's ORIGINAL units, so a
+    zero or negative count became a 1-unit claim attested by a certificate that
+    said something else — and the codes-only comparison in force at the time
+    could not see the divergence at all. A unit count is billable quantity; a
+    producer that could not establish one has not produced a claim.
+
+    An ABSENT count still means one unit. That is this contract's documented
+    default for a line whose code carries no quantity dimension, not the
+    rewriting of a value the producer stated.
+    """
+    raw = getattr(line, "units", None)
+    if raw is None:
+        return 1
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise InvalidClaimBundle(
+            f"service line units must be a whole number, got "
+            f"{type(raw).__name__} {raw!r}; a claim cannot bill a quantity "
+            f"this contract had to convert")
+    if raw < 1:
+        raise InvalidClaimBundle(
+            f"service line units must be at least 1, got {raw}; coercing an "
+            f"unusable quantity to 1 would bill a number the producer never "
+            f"decided and the certificate never attested")
+    return raw
+
+
 def _method_of(line) -> LineMethod:
     raw = getattr(getattr(line, "method", None), "value", None) or \
         str(getattr(line, "method", "") or "")
@@ -1215,6 +1591,50 @@ def _line_snapshot(line) -> dict[str, Any]:
         "evidence": [str(getattr(s, "text", "") or "")
                      for s in (getattr(fact, "evidence", None) or [])],
     }
+
+
+def seal_claim_certificate(reference: CertificateReference,
+                           bundle: ClaimBundle) -> CertificateReference:
+    """Bind a producer certificate to ONE complete claim. (Issue #6 F7-R1.)
+
+    The producer builds its certificate inside the coding pipeline, where the
+    encounter context, the source-document identity and the authoritative-data
+    snapshot are not yet known — so the certificate cannot, on its own, attest
+    the claim that is finally assembled. Sealing is the join: the producer's
+    attestation is carried through UNCHANGED, its own content address is
+    preserved inside the seal (that address is what the pipeline's terminal
+    durable audit record bound, and it stays checkable from the artifact), and
+    the digest of the complete claim is added next to it. The whole packet is
+    then re-addressed, so the certificate a consumer verifies is the one that
+    attests both halves.
+
+    Idempotent: an already-sealed certificate is re-sealed from its producer
+    body, never sealed twice over its own seal.
+
+    Refuses a producer certificate that does not reproduce its own content
+    address. Sealing an already-broken attestation would launder it: the outer
+    address would reproduce perfectly over a body nobody attested.
+    """
+    body = reference.producer_body()
+    producer_sha = content_digest(body)
+    declared = str(reference.certificate.get("certificate_sha256") or "")
+    prior = reference.certified_claim()
+    expected = str(prior.get("producer_certificate_sha256") or "") or declared
+    if expected and expected != producer_sha:
+        raise InvalidClaimBundle(
+            "the producer certificate does not reproduce its own content "
+            "address; refusing to seal a claim to an attestation that was "
+            "already altered")
+    body[CERTIFIED_CLAIM_KEY] = {
+        "schema": CERTIFIED_CLAIM_SCHEMA,
+        "producer_certificate_sha256": producer_sha,
+        "certified_claim_sha256": bundle.compute_certified_claim_digest(),
+        "section_sha256": bundle.certified_claim_sections(),
+    }
+    sealed_sha = content_digest(body)
+    body["certificate_sha256"] = sealed_sha
+    return reference.model_copy(update={"certificate": body,
+                                        "certificate_sha256": sealed_sha})
 
 
 def bundle_from_coding_result(
@@ -1302,7 +1722,7 @@ def bundle_from_coding_result(
             rationale=str(getattr(line, "rationale", "") or ""),
             evidence=_evidence_of(fact),
             authority=_authority_of(chosen),
-            units=max(1, int(getattr(line, "units", 1) or 1)),
+            units=_units_of(line),
             modifiers=tuple(str(m) for m in (getattr(line, "modifiers", None) or [])),
             diagnosis_pointers=tuple(sorted(pointers)),
             place_of_service=context.place_of_service,
@@ -1426,6 +1846,14 @@ def bundle_from_coding_result(
             excluded_lines=excluded,
         ),
     )
+    # ---- Bind the certificate to THIS EXACT claim (issue #6 F7-R1) --------
+    # Done here, before `finalize()`, because this is the ONE place that has the
+    # whole claim: the producer's lines, the resolved encounter context, the
+    # source-document identity, the authoritative snapshot and the graph. The
+    # seal is what `integrity_problems()` then re-derives at every consumer.
+    if bundle.certificate is not None:
+        bundle = bundle.model_copy(update={
+            "certificate": seal_claim_certificate(bundle.certificate, bundle)})
     return finalize(bundle)
 
 

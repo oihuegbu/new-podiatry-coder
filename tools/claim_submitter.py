@@ -790,8 +790,30 @@ def _bundle_policy_gate(verified, result: dict, tier: str) -> str | None:
     live_problems = live.integrity_problems()
     if live_problems:
         return f"live result artifact is not internally coherent: {live_problems[0]}"
+    # The SAME re-derivation on the artifact the 837P is actually built FROM.
+    # `build_claim` reads the REGISTRY's bundle, not this file, and for the
+    # `human` tier nothing above re-derives it: the release authorization that
+    # would have is deliberately skipped for a coder-verified claim. Coherence
+    # is not a release policy, though — a recorded bundle whose certificate no
+    # longer attests its own claim must not become a claim under any tier.
+    # (Adjacent instance of the same class as the live-artifact check above;
+    # issue #6 F7-R1.)
+    verified_problems = verified.integrity_problems()
+    if verified_problems:
+        return (f"registry-verified claim is not internally coherent: "
+                f"{verified_problems[0]}")
     if live.context.compute_fingerprint() != verified.context.compute_fingerprint():
         return "encounter context changed after registry verification"
+    # RE-DERIVED and COMPLETE, not the stored billable-payload fingerprint: the
+    # certified-claim digest additionally covers line order, per-line evidence
+    # and authoritative record, the clinical-graph digest and the authoritative
+    # snapshot, and it is recomputed from each artifact's own content so a
+    # stored value edited to match cannot pass. The stored fingerprints are
+    # still compared below — two independent controls, neither the only one
+    # that would notice. (Issue #6 F7-R1.)
+    if live.compute_certified_claim_digest() != \
+            verified.compute_certified_claim_digest():
+        return "claim changed after registry verification"
     if live.claim_fingerprint != verified.claim_fingerprint:
         return "claim changed after registry verification"
     live_certificate = (live.certificate.certificate_sha256

@@ -372,6 +372,10 @@ class ClinicalGraph:
         binding = self.binding_for(node_ids)
         return {"extraction_schema_version": self.extraction_schema_version,
                 "relation_grammar_version": self.relation_grammar_version,
+                # The graph these ids point INTO, by content address -- the same
+                # value `certificate_record()` binds. Ids are reusable; the digest
+                # is what makes "the same graph" checkable. (Issue #6 F7-R1.)
+                "graph_sha256": self.graph_sha256(),
                 **binding.as_record()}
 
     # ------------------------------------------------------------------ audit

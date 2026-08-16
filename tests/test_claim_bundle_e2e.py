@@ -995,3 +995,338 @@ def test_a_misread_page_cannot_reach_the_registry(deployment, monkeypatch):
     ingested = deployment.ingest()
     assert ingested.get("recorded", 0) == 0, (
         f"a claim resting on a misread page reached the registry: {ingested}")
+
+
+# --------------------------------------------------------------------------
+# F7-R1 — the certificate must be bound to THIS EXACT claim
+# --------------------------------------------------------------------------
+#
+# Codex's reproduction, verbatim: take a valid AUTO_READY bundle, change the
+# units 1 -> 9, add a modifier, change the patient identity, change the line
+# authority and replace the graph relation/evidence ids, then RECOMPUTE the
+# bundle's own context and claim fingerprints and leave the certificate alone.
+# Every artifact-internal control reproduced, the sorted (system, code) multiset
+# was unchanged, and `verify_bundle_readiness()` returned `(True, "")`.
+#
+# These tests drive that scenario through release authorization, the registry
+# AND the 837P dry-run, because a unit-level check on one function is exactly
+# the kind of evidence that let the summary comparison survive review.
+
+
+def _revalidate(payload: dict):
+    """Reload a hand-edited artifact and recompute its OWN fingerprints.
+
+    This is the tamperer's move, not the producer's: `finalize()` is deliberately
+    NOT used, because `finalize()` is the honest path. What is reproduced here is
+    an attacker who knows exactly which two values the artifact checks against
+    itself and updates both.
+    """
+    from app.contracts.claim_bundle import ClaimBundle
+    tampered = ClaimBundle.model_validate(payload)
+    context = tampered.context.model_copy(
+        update={"fingerprint": tampered.context.compute_fingerprint()})
+    tampered = tampered.model_copy(update={"context": context})
+    return tampered.model_copy(
+        update={"claim_fingerprint": tampered.compute_claim_fingerprint()})
+
+
+def _codes(bundle) -> list:
+    """The summary the old check compared — a sorted (system, code) multiset."""
+    return sorted((line.system, line.code)
+                  for line in (*bundle.diagnoses, *bundle.service_lines))
+
+
+def test_a_recomputed_fingerprint_cannot_relaunder_a_tampered_claim(deployment):
+    """Codex F7-R1, reproduced exactly, then proven caught at every consumer."""
+    from app.release.claim_readiness import verify_bundle_readiness
+
+    _verified_once(deployment)
+    clean = load_bundle(deployment.artifact())
+    ok, reason = verify_bundle_readiness(clean)
+    assert ok, reason                      # the baseline really is releasable
+
+    payload = deployment.artifact()
+    payload["service_lines"][0]["units"] = 9
+    payload["service_lines"][0]["modifiers"] = \
+        list(payload["service_lines"][0]["modifiers"]) + ["ZZ"]
+    payload["context"]["patient"]["last_name"] += "-TAMPERED"
+    payload["service_lines"][0]["authority"]["edition"] = "not-the-edition-used"
+    payload["service_lines"][0]["authority"]["detail"]["edition"] = \
+        "not-the-edition-used"
+    payload["graph"]["relation_ids"] = ["tampered-relation"]
+    payload["graph"]["evidence_span_ids"] = ["tampered-span"]
+
+    tampered = _revalidate(payload)
+
+    # ---- the artifact is internally consistent, exactly as reported --------
+    assert tampered.claim_fingerprint == tampered.compute_claim_fingerprint()
+    assert tampered.context.fingerprint == tampered.context.compute_fingerprint()
+    assert tampered.certificate.problems() == (), (
+        "the certificate was not touched; it must still self-address")
+    assert _codes(tampered) == _codes(clean), (
+        "the tamper must be invisible to the summary the old check compared, "
+        "or this test is not reproducing the finding")
+
+    # ---- and it is refused, by the binding, naming what changed -----------
+    problems = tampered.certificate_binding_problems()
+    assert problems, "the certificate binding did not notice the tamper"
+    joined = " | ".join(problems)
+    assert "does not attest this exact claim" in joined, joined
+    # and it says WHICH parts of the claim moved, not just that one did
+    assert "the service lines" in joined, joined
+    assert "the encounter context" in joined, joined
+    assert "the clinical-graph binding" in joined, joined
+    assert "units" in joined, joined
+    assert "modifiers" in joined, joined
+    assert "authoritative record" in joined, joined
+
+    ok, reason = verify_bundle_readiness(tampered)
+    assert ok is False
+    assert "attest this exact claim" in reason, reason
+
+    # ---- through the registry ---------------------------------------------
+    # The RECOMPUTED artifact goes to disk, not the raw edit: writing the raw
+    # edit would be stopped by the stored claim fingerprint, which is the
+    # control the finding is explicitly about getting past.
+    deployment.write_artifact(tampered.to_payload())
+    stats = deployment.ingest()
+    assert stats["recorded"] == 0, stats
+    assert any("attest this exact claim" in str(r)
+               for r in stats["skip_reasons"].values()), stats["skip_reasons"]
+
+    # ---- and through the 837P dry-run --------------------------------------
+    stats = deployment.dry_run()
+    assert stats["submitted"] == 0
+    assert stats["blocked"] == 1
+    assert not (deployment.dryrun_dir / f"{STEM}_837p.json").exists()
+
+
+def _tamper_cases():
+    """One claim-affecting field per case, each applied ALONE.
+
+    The acceptance criterion lists the fields the old comparison could not see.
+    Each is asserted here on its own, so a fix that widened the comparison over
+    some of them and not others cannot pass by aggregate.
+    """
+    def units(payload, deployment):
+        payload["service_lines"][0]["units"] += 8
+
+    def modifiers(payload, deployment):
+        payload["service_lines"][0]["modifiers"] = \
+            list(payload["service_lines"][0]["modifiers"]) + ["ZZ"]
+
+    def modifier_order(payload, deployment):
+        payload["service_lines"][0]["modifiers"] = ["ZZ", "YY"]
+
+    def patient_identity(payload, deployment):
+        payload["context"]["patient"]["last_name"] += "-OTHER"
+
+    def line_authority(payload, deployment):
+        payload["service_lines"][0]["authority"]["detail"]["edition"] = "other"
+
+    def line_evidence(payload, deployment):
+        payload["service_lines"][0]["evidence"][0]["text"] += " (edited)"
+
+    def graph_relation_ids(payload, deployment):
+        payload["graph"]["relation_ids"] = ["swapped"]
+
+    def graph_evidence_ids(payload, deployment):
+        payload["graph"]["evidence_span_ids"] = ["swapped"]
+
+    def graph_digest(payload, deployment):
+        payload["graph"]["graph_sha256"] = "0" * 64
+
+    def diagnosis_primary(payload, deployment):
+        payload["diagnoses"][0]["primary"] = False
+
+    def diagnosis_pointers(payload, deployment):
+        payload["service_lines"][0]["diagnosis_pointers"] = []
+
+    def place_of_service(payload, deployment):
+        payload["service_lines"][0]["place_of_service"] = \
+            _other_place_of_service(deployment.place_of_service)
+
+    def ndc(payload, deployment):
+        payload["service_lines"][0]["ndc"] = "SYNTHETIC-NDC"
+
+    def clinical_event_id(payload, deployment):
+        payload["service_lines"][0]["clinical_event_id"] = "OTHER-EVENT"
+
+    def source_document(payload, deployment):
+        payload["encounter"]["source_document"]["document_version"] = "0" * 64
+
+    def data_snapshot(payload, deployment):
+        payload["authority"]["data_fingerprint"] = "sha256:" + "0" * 64
+
+    def date_of_service(payload, deployment):
+        payload["encounter"]["date_of_service"] = "2026-03-15"
+
+    return [(f.__name__, f) for f in (
+        units, modifiers, modifier_order, patient_identity, line_authority,
+        line_evidence, graph_relation_ids, graph_evidence_ids, graph_digest,
+        diagnosis_primary, diagnosis_pointers, place_of_service, ndc,
+        clinical_event_id, source_document, data_snapshot, date_of_service)]
+
+
+@pytest.mark.parametrize("name,mutate", _tamper_cases(),
+                         ids=[n for n, _ in _tamper_cases()])
+def test_every_claim_affecting_field_is_bound_to_the_certificate(
+        deployment, name, mutate):
+    """Change one field, recompute the artifact's own fingerprints, and the
+    certificate binding must still refuse it."""
+    from app.release.claim_readiness import verify_bundle_readiness
+
+    deployment.run()
+    payload = deployment.artifact()
+    assert load_bundle(payload).release_blockers() == ()
+
+    mutate(payload, deployment)
+    tampered = _revalidate(payload)
+
+    assert tampered.certificate_binding_problems(), (
+        f"{name}: the certificate is not bound to this field, so it can be "
+        f"changed after certification without detection")
+    ok, _ = verify_bundle_readiness(tampered)
+    assert ok is False, name
+
+
+def test_rewriting_what_the_certificate_ATTESTS_is_caught_too(deployment):
+    """The mirror image: leave the claim alone and rewrite the attestation.
+
+    A maximally capable editor re-seals as it goes — it updates the producer
+    certificate's own content address inside the binding and the certificate's
+    outer address, so every digest in the artifact reproduces and the certified
+    claim still matches the (untouched) bundle. Only the EXACT line-by-line
+    comparison between what the certificate attests and what the claim bills
+    can see it; a digest-only binding cannot.
+    """
+    from app.contracts.claim_bundle import (
+        CERTIFIED_CLAIM_KEY, content_digest, load_bundle as _load)
+    from app.release.claim_readiness import verify_bundle_readiness
+
+    deployment.run()
+    payload = deployment.artifact()
+    service_code = _load(payload).service_lines[0].code
+
+    certificate = payload["certificate"]["certificate"]
+    attested = next(line for line in certificate["lines"]
+                    if line["code"] == service_code)
+    attested["units"] += 4
+    body = {k: v for k, v in certificate.items()
+            if k not in (CERTIFIED_CLAIM_KEY, "certificate_sha256")}
+    certificate[CERTIFIED_CLAIM_KEY]["producer_certificate_sha256"] = \
+        content_digest(body)
+    resealed = content_digest({k: v for k, v in certificate.items()
+                               if k != "certificate_sha256"})
+    certificate["certificate_sha256"] = resealed
+    payload["certificate"]["certificate_sha256"] = resealed
+
+    tampered = _revalidate(payload)
+    assert tampered.certificate.problems() == (), (
+        "the re-sealed certificate must still self-address, or this test is "
+        "catching a weaker forgery than the one it claims to")
+    seal = tampered.certificate.certified_claim()
+    assert seal["certified_claim_sha256"] == \
+        tampered.compute_certified_claim_digest(), (
+            "the claim itself was not touched, so the digest must still match")
+
+    problems = " | ".join(tampered.certificate_binding_problems())
+    assert "units" in problems, problems
+    ok, _ = verify_bundle_readiness(tampered)
+    assert ok is False
+
+
+def test_a_certificate_with_no_claim_binding_can_never_release(deployment):
+    """A native bundle whose certificate is not sealed to a claim is refused.
+
+    This is what every artifact written before the binding existed looks like,
+    and what a future producer path that forgot to seal would emit. Both are
+    the same thing — a certificate whose subject cannot be established — and
+    neither may release.
+    """
+    from app.contracts.claim_bundle import CERTIFIED_CLAIM_KEY, content_digest
+    from app.release.claim_readiness import verify_bundle_readiness
+
+    deployment.run()
+    payload = deployment.artifact()
+    certificate = payload["certificate"]["certificate"]
+    certificate.pop(CERTIFIED_CLAIM_KEY)
+    unsealed = content_digest({k: v for k, v in certificate.items()
+                               if k != "certificate_sha256"})
+    certificate["certificate_sha256"] = unsealed
+    payload["certificate"]["certificate_sha256"] = unsealed
+
+    stripped = _revalidate(payload)
+    assert stripped.certificate.problems() == ()
+    assert any("carries no certified-claim binding" in problem
+               for problem in stripped.certificate_binding_problems())
+    ok, reason = verify_bundle_readiness(stripped)
+    assert ok is False
+    assert "not bound to this claim" in reason, reason
+
+
+def test_the_seal_preserves_the_producer_certificate_the_pipeline_recorded(
+        deployment):
+    """Sealing must not orphan the attestation the durable audit record bound.
+
+    `claude_coder.pipeline` persists the producer certificate's content address
+    in the terminal release decision BEFORE any claim exists. If sealing simply
+    re-addressed the certificate, that record would point at an attestation no
+    artifact carries any more. The producer address is therefore preserved
+    inside the binding, and re-derivable from the artifact alone.
+    """
+    from app.contracts.claim_bundle import content_digest
+
+    bundle = load_bundle(deployment.run())
+    reference = bundle.certificate
+    seal = reference.certified_claim()
+    assert seal["producer_certificate_sha256"] == \
+        content_digest(reference.producer_body())
+    assert seal["certified_claim_sha256"] == \
+        bundle.compute_certified_claim_digest()
+    assert reference.certificate_sha256 != seal["producer_certificate_sha256"], (
+        "the sealed certificate attests strictly more than the producer's did")
+    assert bundle.graph.graph_sha256 == \
+        bundle.certificate.certificate["clinical_graph"]["graph_sha256"]
+
+
+def test_an_unusable_unit_count_is_refused_not_quietly_billed_as_one():
+    """Zero or negative units must stop the claim, not become 1.
+
+    The producer's certificate is built over the ORIGINAL unit count, so the
+    old `max(1, ...)` coercion produced a claim that billed a quantity the
+    certificate did not attest — and the codes-only comparison could not see
+    the divergence. (Issue #6 F7-R1.)
+    """
+    from app.contracts.claim_bundle import (
+        AuthorityBinding, InvalidClaimBundle, SourceDocument,
+        bundle_from_coding_result)
+    from app.contracts.encounter_context import EncounterContext
+    from claude_coder.models import (
+        CandidateCode, ClinicalFact, CodingResult, Disposition, EvidenceSpan,
+        FactKind, ResolutionMethod, ResolvedLine)
+
+    def _result(units) -> CodingResult:
+        fact = ClinicalFact(
+            FactKind.PROCEDURE, "synthetic service", fact_id="F1",
+            disposition=Disposition.PERFORMED,
+            evidence=[EvidenceSpan("synthetic service", anchored=True,
+                                   span_id="s1")], confidence=0.9)
+        line = ResolvedLine(fact, CandidateCode("SYNTHETIC", "cpt", "Synthetic"),
+                            method=ResolutionMethod.DETERMINISTIC)
+        line.units = units
+        return CodingResult("enc", "2026-03-14", lines=[line])
+
+    def _bundle(units):
+        return bundle_from_coding_result(
+            _result(units), source_document=SourceDocument(),
+            context=EncounterContext(), authority=AuthorityBinding())
+
+    assert _bundle(3).service_lines[0].units == 3
+    for refused in (0, -1):
+        with pytest.raises(InvalidClaimBundle) as caught:
+            _bundle(refused)
+        assert "at least 1" in str(caught.value)
+    with pytest.raises(InvalidClaimBundle) as caught:
+        _bundle(2.5)
+    assert "whole number" in str(caught.value)

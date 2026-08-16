@@ -277,6 +277,7 @@ def _verification_key(event: dict) -> str:
         return _claim_key({
             "claim": event.get("claim") or {},
             "certificate_sha256": event.get("certificate_sha256") or "",
+            "certified_claim_sha256": event.get("certified_claim_sha256") or "",
             "encounter_context_fingerprint": event.get(
                 "encounter_context_fingerprint") or "",
         })
@@ -383,6 +384,13 @@ def _make_bundle_event(document_id: str, bundle, verification: str,
         "encounter_context_fingerprint": bundle_encounter_context_fingerprint(bundle),
         "certificate_sha256": (certificate.certificate_sha256
                                if certificate else ""),
+        # The digest of the COMPLETE claim this certificate attests, recomputed
+        # from the bundle rather than copied out of the seal. `claim` above is
+        # the billable payload; this additionally covers per-line evidence and
+        # authority, the graph, the authoritative snapshot and the context — so
+        # a re-ingest that differs in any of them is a new verification, not an
+        # idempotent no-op. (Issue #6 F7-R1.)
+        "certified_claim_sha256": bundle.compute_certified_claim_digest(),
     }
 
 

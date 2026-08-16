@@ -25,7 +25,7 @@ from typing import Any
 # identical implementations in two files is the drift class this codebase keeps
 # finding; importing the shared one removes it by construction.
 from app.contracts.claim_bundle import canonical_json as _canonical
-from app.contracts.claim_bundle import content_digest
+from app.contracts.claim_bundle import content_digest, evidence_records
 
 from .models import CodingResult
 
@@ -44,31 +44,27 @@ def build_certificate(result: CodingResult, note_text: str,
     lines = [{
         "system": ln.chosen.system,
         "code": ln.chosen.code,
+        # WHICH clinical-graph event this line bills. The join key that lets the
+        # claim contract compare its lines with these EXACTLY rather than by a
+        # sorted (system, code) multiset -- the comparison that let nine units,
+        # an extra modifier and a different authority record through. (F7-R1.)
+        "clinical_event_id": ln.fact.fact_id,
         "kind": ln.fact.kind.value,
-        "modifiers": sorted(ln.modifiers),
+        # IN THE ORDER THE PRODUCER EMITTED THEM. Sorting was a lossy summary of
+        # a claim-affecting fact: on a professional line the first modifier is
+        # not interchangeable with the second, and a certificate that sorts them
+        # cannot attest which order was billed. (F7-R1.)
+        "modifiers": list(ln.modifiers),
         "units": ln.units,
         "descriptor": ln.chosen.descriptor,
         "method": ln.method.value,
         "attributes": ln.fact.attributes,
-        "evidence": [{
-            "text": s.text,
-            "section": s.section,
-            "page": s.page,
-            "start": s.start,
-            "end": s.end,
-            "text_sha256": s.text_sha256,
-            "document_sha256": s.document_sha256,
-            "document_version": s.document_version,
-            "span_id": s.span_id,
-            "anchored": s.anchored,
-            # WHERE IN THE ORIGINAL DOCUMENT this quotation is, and which INDEPENDENT
-            # reading proved it. Without these the certificate can identify the PDF but
-            # cannot demonstrate where the billed fact appears in it. (F6-R6-A.)
-            "page_image_sha256": s.page_image_sha256,
-            "region": list(s.region) if s.region else None,
-            "source_reconciliation": s.source_reconciliation,
-            "verified_by_channel_id": s.verified_by_channel_id,
-        } for s in ln.fact.evidence],
+        # Projected through the CLAIM CONTRACT's one evidence-record function --
+        # WHERE in the original document each quotation is and which independent
+        # reading proved it (F6-R6-A) -- so the certificate's evidence and the
+        # bundle's evidence are the same bytes and can be compared exactly
+        # instead of approximately. (F7-R1.)
+        "evidence": evidence_records(ln.fact.evidence),
         "authority": ln.chosen.authority,
     } for ln in result.billable_lines]
 

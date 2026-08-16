@@ -755,11 +755,21 @@ def verify_bundle_readiness(bundle) -> tuple[bool, str]:
         fingerprint reproduces;
       * an authoritative-data and source-manifest identity is bound;
       * the release destination is AUTO_READY with a certificate, and the
-        certificate attests the same encounter and verdict as the bundle.
+        certificate attests the EXACT claim in this bundle — the same encounter,
+        verdict and date of service, and the same certified-claim digest:
+        line order, units, ordered modifiers, diagnosis pointers, POS/NDC,
+        per-line evidence and authoritative record, encounter-context
+        fingerprint, source-document identity, authoritative-data snapshot and
+        clinical-graph digest.
 
     The last one is the cross-check that the certificate and the claim have not
     been recombined: a valid certificate from a DIFFERENT encounter, pasted
     into this bundle, still self-addresses correctly and would otherwise pass.
+    It used to compare a sorted `(system, code)` multiset, which is a summary,
+    not the claim: units, modifiers, ordering, pointers, patient identity,
+    authority and graph could all be changed underneath it and the bundle would
+    still authorize (issue #6 F7-R1). It now compares the canonical
+    certified-claim digest, exactly.
     """
     from app.contracts.claim_bundle import BundleOrigin, ClaimBundle
 
@@ -792,15 +802,14 @@ def verify_bundle_readiness(bundle) -> tuple[bool, str]:
     if attested_dos != bundle.encounter.date_of_service:
         return False, ("certificate and bundle disagree about the date of "
                        "service")
-    attested_codes = sorted(
-        (str(line.get("system") or ""), str(line.get("code") or ""))
-        for line in (payload.get("lines") or []) if isinstance(line, dict))
-    bundle_codes = sorted(
-        (line.system, line.code)
-        for line in (*bundle.diagnoses, *bundle.service_lines))
-    if attested_codes != bundle_codes:
-        return False, ("certificate does not attest the same billed codes as "
-                       "the bundle")
+    # The EXACT comparison. `release_blockers()` above already re-derives this
+    # (it is part of `integrity_problems()`, so no consumer can skip it); it is
+    # restated here so this function's own refusal names the binding rather than
+    # whichever blocker happened to sort first, and so a future edit that
+    # narrows the blocker list cannot silently un-check the certificate.
+    binding = bundle.certificate_binding_problems()
+    if binding:
+        return False, binding[0]
     return True, ""
 
 
