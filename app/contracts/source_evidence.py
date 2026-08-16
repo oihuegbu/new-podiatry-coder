@@ -62,6 +62,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.core.dates import find_dates, parse_date
+
 from .claim_bundle import content_digest
 
 # --------------------------------------------------------------------------
@@ -876,3 +878,163 @@ def build_page_read(channel_id: str, page_number: int, text: str,
         channel_id=channel_id, page_number=page_number, status=status, text=body,
         text_sha256="sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest(),
         tokens=tuple(tokens), detail=detail)
+
+
+# --------------------------------------------------------------------------
+# the DATE OF SERVICE, reconciled the same way every other code-changing fact is
+# (issue #6 F7-R4)
+# --------------------------------------------------------------------------
+#
+# The DOS is not a clinical fact the extraction layer quotes -- it arrives as a
+# STRUCTURED METADATA FIELD of the primary vision transcription, so `reconcile_spans`
+# above never saw it. It is nonetheless the single most date-versioned value on the
+# claim: it selects the coverage in force, the provider's billing affiliation, the
+# authorization window, the effective code edition and the claim's own service date.
+# A one-character misread of it produces a fully populated, fully fingerprinted,
+# confidently wrong claim.
+#
+# Reconciling it needs no new mechanism, only an anchor. A date is proven exactly
+# like any other quotation once you can say WHERE ON THE PAGE it is written, so this
+# locates the transcription's proposed date inside the transcription's own reading
+# (`app.core.dates.find_dates` gives the character offsets), turns each occurrence
+# into an ordinary `SpanTarget`, and hands them to `reconcile_spans`. The proof, the
+# page, the page-image digest, the region and the token differences are then produced
+# by the same code path, with the same fail-closed statuses, as every clinical fact.
+#
+# NOTHING HERE IS CLINICAL, and nothing here is a date FORMAT policy: an unrecognised
+# written form simply yields no anchor, which holds.
+
+#: The `fact_id` every service-date span carries, so the reconciliation record can be
+#: joined back to the field it proves without pattern-matching a span id.
+SERVICE_DATE_FACT_ID = "encounter.date_of_service"
+
+#: Ordering used to collapse SEVERAL written occurrences of the same date into one
+#: answer. It is deliberately NOT `_SEVERITY`'s "worst wins": that rule collapses two
+#: CHANNELS reading ONE place, where a disagreement is unresolved and must block. Here
+#: the occurrences are different PLACES on the page that all say the same date, and the
+#: two failure modes are genuinely different:
+#:
+#:   * a CONTRADICTION (the independent reading of that place says something else, or
+#:     does not contain the date at all) is evidence the transcription invented or
+#:     misread a date, and one is enough to block -- worst wins among those;
+#:   * an ABSENCE (that place sits on a page nothing independent could read) proves
+#:     nothing either way, and must not erase a proof obtained elsewhere.
+#:
+#: So: any contradiction blocks; otherwise the best available proof stands.
+_SERVICE_DATE_PREFERENCE = {
+    ReconciliationStatus.AGREED: 0,
+    ReconciliationStatus.VACUOUS: 1,
+    ReconciliationStatus.UNVERIFIABLE: 2,
+    ReconciliationStatus.NOT_LOCATED: 3,
+    ReconciliationStatus.DISAGREED: 4,
+}
+
+
+class ServiceDateEvidence(_Strict):
+    """What the ORIGINAL DOCUMENT says its date of service is, and how that was proven.
+
+    `status is AGREED` is the only outcome that lets a document-derived DOS bind to a
+    claim. Every other outcome is recorded with the reason, and the encounter holds --
+    a date nobody could confirm against the page is not a safer default than no date,
+    it is a worse one, because it looks exactly like a confirmed date downstream.
+    """
+
+    #: The ISO date the primary transcription proposed, normalized. Empty when it
+    #: proposed nothing parseable.
+    candidate: str = ""
+    #: The date exactly as it is WRITTEN on the page ("March 14, 2026", "3/14/26").
+    located_text: str = ""
+    #: How many times that date is written in the primary reading.
+    occurrences: int = 0
+    status: ReconciliationStatus = ReconciliationStatus.UNVERIFIABLE
+    detail: str = ""
+    span_id: str = ""
+    pages: tuple[int, ...] = ()
+    page_image_sha256: tuple[str, ...] = ()
+    verified_by_channel_id: str = ""
+    verified_text_sha256: tuple[str, ...] = ()
+    differences: tuple[TokenDifference, ...] = ()
+    region: PageRegion | None = None
+    document_sha256: str = ""
+    document_fingerprint: str = ""
+
+    @property
+    def reconciled(self) -> bool:
+        """May this date bind to a claim on the document's authority alone?"""
+        return self.status is ReconciliationStatus.AGREED
+
+    def record(self) -> dict[str, Any]:
+        """The compact form carried in the encounter context and the certificate."""
+        return {
+            "candidate": self.candidate,
+            "located_text": self.located_text,
+            "occurrences": self.occurrences,
+            "status": self.status.value,
+            "detail": self.detail,
+            "span_id": self.span_id,
+            "pages": list(self.pages),
+            "page_image_sha256": list(self.page_image_sha256),
+            "verified_by_channel_id": self.verified_by_channel_id,
+            "document_sha256": self.document_sha256,
+            "document_fingerprint": self.document_fingerprint,
+            "differences": [d.model_dump(mode="json") for d in self.differences],
+        }
+
+
+def reconcile_service_date(document: SourceEvidenceDocument, candidate: Any,
+                           *, control_mode: str = "ENFORCED_FAIL_CLOSED"
+                           ) -> ServiceDateEvidence:
+    """Prove the transcription's date of service against the ORIGINAL document.
+
+    Three refusals, each a different fact and each recorded as itself:
+
+      * the transcription proposed nothing parseable -> UNVERIFIABLE (nothing to prove);
+      * it proposed a date that is written NOWHERE in its own reading of the document
+        -> NOT_LOCATED. This is the metadata-only misread: the structured field says
+        one date, the pages say another, and no page of the original can be named for
+        the value the claim would carry;
+      * it proposed a date that IS written on a page, but an independent reading of
+        that page reads those characters differently -> DISAGREED. This is the
+        transcription-wide misread, and it is exactly the perturbation case a
+        single-channel read can never detect.
+    """
+    base = {"document_sha256": document.document_sha256,
+            "document_fingerprint": document.fingerprint()}
+    parsed = parse_date(str(candidate or "").strip())
+    if parsed is None:
+        return ServiceDateEvidence(
+            status=ReconciliationStatus.UNVERIFIABLE,
+            detail="the document's reading proposed no parseable date of service, so "
+                   "there is no date to locate on a page of the original",
+            **base)
+    text = document.primary_text()
+    hits = [(start, end) for start, end, found in find_dates(text) if found == parsed]
+    if not hits:
+        return ServiceDateEvidence(
+            candidate=parsed.isoformat(), status=ReconciliationStatus.NOT_LOCATED,
+            detail=(f"the date of service reported for this encounter "
+                    f"({parsed.isoformat()}) is written nowhere in the document's own "
+                    f"reading, so no page of the original states it"),
+            **base)
+    targets = [SpanTarget(span_id=f"{SERVICE_DATE_FACT_ID}@{start}",
+                          text=text[start:end], start=start, end=end,
+                          fact_id=SERVICE_DATE_FACT_ID)
+               for start, end in hits]
+    reconciliation = reconcile_spans(document, targets, control_mode=control_mode)
+    # Any contradiction blocks (worst of them is reported); absent that, the best
+    # proof any occurrence obtained stands. See `_SERVICE_DATE_PREFERENCE`.
+    contradicting = [span for span in reconciliation.spans
+                     if span.status in BLOCKING_STATUSES]
+    chosen = (max(contradicting, key=lambda span: _SERVICE_DATE_PREFERENCE[span.status])
+              if contradicting
+              else min(reconciliation.spans,
+                       key=lambda span: _SERVICE_DATE_PREFERENCE[span.status]))
+    located = next((text[start:end] for start, end in hits
+                    if f"{SERVICE_DATE_FACT_ID}@{start}" == chosen.span_id), "")
+    return ServiceDateEvidence(
+        candidate=parsed.isoformat(), located_text=located, occurrences=len(hits),
+        status=chosen.status, detail=chosen.detail, span_id=chosen.span_id,
+        pages=chosen.pages, page_image_sha256=chosen.page_image_sha256,
+        verified_by_channel_id=chosen.verified_by_channel_id,
+        verified_text_sha256=chosen.verified_text_sha256,
+        differences=chosen.differences, region=chosen.region, **base)

@@ -139,6 +139,7 @@ from app.core.config import NOTES_DIR, OUTPUT_DIR
 from app.core.dates import parse_date_of_service
 from app.core.logger import get_logger
 from app.ingestion.pdf_parser import extract_from_pdf
+from app.contracts.source_evidence import reconcile_service_date
 from app.ingestion.source_evidence import (
     IndependentVisionReader, compile_source_evidence)
 from claude_coder.data_access import AuthoritativeSource
@@ -178,12 +179,18 @@ def read_note(pdf_path: Path) -> dict:
                         what every evidence span is anchored INTO, so it must be
                         the full text, never a reconstruction from selected
                         sections.
-      date_of_service   parsed from the extracted metadata. `claude_coder` does
-                        NOT extract a DOS itself — its extraction step is
-                        code-free clinical facts — so the DOS is genuinely an
-                        external, pre-parsed argument. Unparseable/absent stays
-                        None: the release gates fail closed on it rather than
-                        letting anything guess a service date.
+      date_of_service   parsed from the extracted metadata. This is a CANDIDATE
+                        reading, never the claim's date: it is one model's read of
+                        one metadata field. `service_date_evidence` below is what
+                        proves it, and `EncounterContextProvider.resolve()` is what
+                        BINDS the claim's actual date of service (issue #6 F7-R4).
+      service_date_evidence
+                        that candidate located on a page of the ORIGINAL document
+                        and reconciled against an independent reading of that page,
+                        by the same compiler that reconciles every clinical
+                        quotation. A misread date now either fails to appear on any
+                        page (NOT_LOCATED) or is read differently by the independent
+                        channel (DISAGREED) — and either way it cannot bind.
       document_version  the immutable identity of the SOURCE document (the PDF's
                         own sha256), which is what evidence-span ids are salted
                         with. Falls back to None -> the pipeline salts with the
@@ -206,6 +213,24 @@ def read_note(pdf_path: Path) -> dict:
             f"code an empty note")
     metadata = extraction.get("metadata") or {}
     dos = parse_date_of_service(metadata)
+    # THE DATE OF SERVICE IS A CODE-CHANGING FACT (issue #6 F7-R4). It selects the
+    # coverage in force, the billing affiliation, the authorization window and the
+    # effective code edition, and it is the claim's own service date — yet it
+    # arrived as a structured metadata field of the SAME transcription every other
+    # fact is checked against, and nothing ever checked it. It is now proven exactly
+    # like every quotation: located on a page of the original document, then
+    # reconciled against an independent reading of that page.
+    # Reconciled against the channels the compiler already built (the document's
+    # own text layer). It is deliberately NOT escalated to the paid
+    # `IndependentVisionReader` here: that reader writes ONE fixed channel id into
+    # the document, and the pipeline escalates the same channel later for the
+    # quotations behind released lines — a second writer at this point would make
+    # the later `with_channel()` refuse and silently degrade the clinical
+    # reconciliation. An image-only page carrying the date therefore holds the
+    # encounter as SYSTEM work (obtain a channel), which is the correct fail-closed
+    # answer even though it is not the maximally autonomous one.
+    service_date_evidence = reconcile_service_date(
+        source_evidence, dos.isoformat() if dos else "")
     integrity = extraction.get("note_integrity") or {}
     document_version = str(integrity.get("source_pdf_sha256") or "").strip() or None
     page_count = integrity.get("page_count")
@@ -224,6 +249,7 @@ def read_note(pdf_path: Path) -> dict:
         "page_count": int(page_count) if isinstance(page_count, int) else None,
         "patient_metadata": metadata,
         "source_evidence": source_evidence,
+        "service_date_evidence": service_date_evidence,
         # The PAID second channel, for image-only pages the text layer cannot cover.
         # Constructed here (it needs the PDF) but INVOKED by the pipeline, and only for
         # the pages carrying a quotation behind a released line.
@@ -570,16 +596,30 @@ def main(argv: list[str] | None = None) -> int:
             note = read_note(pdf_path)
             if not note["date_of_service"]:
                 logger.warning(
-                    f"  {pdf_path.name}: no parseable date of service in the note; "
-                    f"date-dependent gates will hold this encounter")
-            logger.info(f"  DOS: {note['date_of_service']} | "
+                    f"  {pdf_path.name}: the transcription reports no parseable "
+                    f"date of service; unless the encounter context source "
+                    f"declares one, this encounter holds")
+            logger.info(f"  DOS candidate: {note['date_of_service']} | "
                         f"document_version: {note['document_version']}")
             context = context_provider.resolve(
                 encounter_id=pdf_path.stem,
                 document_id=pdf_path.stem,
                 date_of_service=note["date_of_service"],
                 note_metadata=note["patient_metadata"],
+                document_service_date=note["service_date_evidence"],
             )
+            # ONE bound date of service, from here down. The candidate the
+            # transcription proposed is corroboration; what every date-versioned
+            # decision below is made against — coverage, affiliation,
+            # authorization, code activity, NCCI/MUE, the graph, the certificate
+            # and the claim's own service date — is this single value, with its
+            # origin and its proof recorded in the artifact. (Issue #6 F7-R4.)
+            binding = context.service_date
+            dos = context.date_of_service or None
+            logger.info(f"  DOS bound: {dos or 'NONE'} "
+                        f"[{binding.source or 'unbound'}] | document reads "
+                        f"{binding.documented_date or '-'} "
+                        f"({binding.document_status or 'not compiled'})")
             logger.info(f"  Encounter context: {context.resolution.value} "
                         f"[{context.provider_id}"
                         + (f" {context.context_version}" if context.context_version
@@ -592,12 +632,13 @@ def main(argv: list[str] | None = None) -> int:
             result = code_encounter(
                 pdf_path.stem,
                 note["note_text"],
-                note["date_of_service"],
+                dos,
                 source=source,
                 billing_context=billing_context,
                 document_version=note["document_version"],
                 source_evidence=note["source_evidence"],
                 source_reader=note["source_reader"],
+                service_date_binding=binding.model_dump(mode="json"),
             )
             payload = build_bundle(result, pdf_path=pdf_path, note=note,
                                    context=context, source=source)

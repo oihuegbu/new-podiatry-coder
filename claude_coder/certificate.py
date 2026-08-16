@@ -114,6 +114,14 @@ def build_certificate(result: CodingResult, note_text: str,
     payload: dict[str, Any] = {
         "encounter_id": result.encounter_id,
         "date_of_service": result.date_of_service,
+        # WHERE that date came from and how it was proven. Bound into the content
+        # address so a certificate can never be separated from the evidence that
+        # the claim's date of service -- which selects the coverage, the billing
+        # affiliation, the authorization window and the effective code edition --
+        # was established rather than transcribed. (Issue #6 F7-R4.)
+        "service_date_binding": (dict(result.service_date_binding)
+                                 if getattr(result, "service_date_binding", None)
+                                 else None),
         "note_sha256": _sha(note_text),
         "lines": lines,
         "claim_line_intents": intents,

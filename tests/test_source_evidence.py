@@ -33,7 +33,8 @@ from claude_coder.pipeline import code_encounter
 from claude_coder.provenance import NullAuditRepository
 
 from app.contracts.source_evidence import (
-    PAGE_SEPARATOR, PageStatus, ReconciliationStatus, SpanTarget, reconcile_spans,
+    BLOCKING_STATUSES, PAGE_SEPARATOR, PageStatus, ReconciliationStatus, SpanTarget,
+    reconcile_service_date, reconcile_spans,
 )
 from app.ingestion.source_evidence import (
     EMBEDDED_TEXT_CHANNEL_ID, PRIMARY_CHANNEL_ID, SECONDARY_VISION_CHANNEL_ID,
@@ -694,3 +695,103 @@ class IndependentChannelTest(unittest.TestCase):
 
 if __name__ == "__main__":       # pragma: no cover
     unittest.main()
+
+
+# --------------------------------------------------------------------------
+# the DATE OF SERVICE, reconciled like every other code-changing fact (F7-R4)
+# --------------------------------------------------------------------------
+
+class ServiceDateReconciliationTest(unittest.TestCase):
+    """Issue #6 F7-R4 at the compiler boundary.
+
+    The DOS never reached `reconcile_spans` because it is a structured metadata
+    FIELD of the transcription rather than a quotation supporting a fact — so the
+    one value that selects the coverage, the affiliation, the authorization window
+    and the effective code edition was the only code-changing value in the system
+    nothing checked. These cases perturb it the three ways a transcription can get
+    a date wrong.
+    """
+
+    PAGE = "Date of service: 2026-03-14. Procedure alpha performed on the left."
+
+    def _document(self, vision_text=None):
+        return _compile_two_readings(self, [self.PAGE], vision_text or self.PAGE)
+
+    def test_a_date_written_on_the_page_is_proven_by_the_independent_channel(self):
+        evidence = reconcile_service_date(self._document(), "2026-03-14")
+        self.assertEqual(evidence.status, ReconciliationStatus.AGREED)
+        self.assertTrue(evidence.reconciled)
+        self.assertEqual(evidence.candidate, "2026-03-14")
+        self.assertEqual(evidence.located_text, "2026-03-14")
+        self.assertEqual(evidence.occurrences, 1)
+        self.assertEqual(evidence.pages, (1,))
+        self.assertEqual(evidence.verified_by_channel_id, EMBEDDED_TEXT_CHANNEL_ID)
+        self.assertTrue(evidence.document_sha256)
+
+    def test_a_metadata_only_misread_names_no_page_of_the_original(self):
+        """The structured field says one date; the pages say another. There is
+        nowhere in the document the claim's date could be pointed at."""
+        for perturbed in ("2026-04-14", "2026-03-15", "2027-03-14"):
+            with self.subTest(perturbed=perturbed):
+                evidence = reconcile_service_date(self._document(), perturbed)
+                self.assertEqual(evidence.status, ReconciliationStatus.NOT_LOCATED)
+                self.assertFalse(evidence.reconciled)
+                self.assertIn("written nowhere", evidence.detail)
+
+    def test_a_transcription_wide_misread_is_caught_by_the_second_channel(self):
+        """The whole transcription — metadata AND page text — reads the date wrong.
+        Only a reading that is not the transcription's own can detect this.
+
+        The status is BLOCKING either way; which blocking status it is depends on
+        how the date is written, and that distinction is not a policy: an ISO date
+        is ONE token, so a perturbed one shares no token with the independent
+        reading and is reported as not appearing there (NOT_LOCATED), while a
+        written form is several tokens and is reported as read differently
+        (DISAGREED, below). Neither can bind, which is the only thing a claim
+        depends on.
+        """
+        for perturbed in ("2026-04-14", "2026-03-15", "2027-03-14"):
+            with self.subTest(perturbed=perturbed):
+                misread = self.PAGE.replace("2026-03-14", perturbed)
+                evidence = reconcile_service_date(
+                    self._document(vision_text=misread), perturbed)
+                self.assertIn(evidence.status, BLOCKING_STATUSES)
+                self.assertFalse(evidence.reconciled)
+                # It WAS anchored — a page of the original was named and read by
+                # an independent channel — which is what distinguishes this from
+                # the metadata-only misread above.
+                self.assertEqual(evidence.pages, (1,))
+                self.assertEqual(evidence.verified_by_channel_id,
+                                 EMBEDDED_TEXT_CHANNEL_ID)
+                self.assertTrue(evidence.span_id)
+
+    def test_a_misread_day_inside_a_written_date_is_reported_as_a_difference(self):
+        """The same perturbation on a multi-token written date: the independent
+        channel reads the same place and reads it differently, token for token."""
+        page = "Date of service: March 14, 2026. Procedure alpha performed."
+        for perturbed, iso in (("March 14, 2027", "2027-03-14"),
+                               ("April 14, 2026", "2026-04-14"),
+                               ("March 15, 2026", "2026-03-15")):
+            with self.subTest(perturbed=perturbed):
+                document = _compile_two_readings(
+                    self, [page], page.replace("March 14, 2026", perturbed))
+                evidence = reconcile_service_date(document, iso)
+                self.assertEqual(evidence.status, ReconciliationStatus.DISAGREED)
+                self.assertFalse(evidence.reconciled)
+                self.assertTrue(evidence.differences)
+
+    def test_a_date_written_in_another_form_still_resolves_to_the_same_day(self):
+        """The claim carries an ISO date; the page says what it says. Matching on
+        the parsed CALENDAR DAY rather than on the string is what lets a document
+        that writes 'March 14, 2026' prove an encounter dated 2026-03-14."""
+        page = "Date of service: March 14, 2026. Procedure alpha performed."
+        document = _compile_two_readings(self, [page], page)
+        evidence = reconcile_service_date(document, "2026-03-14")
+        self.assertEqual(evidence.status, ReconciliationStatus.AGREED)
+        self.assertEqual(evidence.located_text, "March 14, 2026")
+
+    def test_no_proposed_date_is_unverifiable_rather_than_absent(self):
+        evidence = reconcile_service_date(self._document(), "")
+        self.assertEqual(evidence.status, ReconciliationStatus.UNVERIFIABLE)
+        self.assertEqual(evidence.candidate, "")
+        self.assertFalse(evidence.reconciled)

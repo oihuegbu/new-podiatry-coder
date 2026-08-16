@@ -80,12 +80,15 @@ from pathlib import Path
 from typing import Any, Callable, Protocol, runtime_checkable
 
 from app.contracts.claim_bundle import (
-    AUTHORITATIVE_FIELD_SOURCE, CORROBORATION_FIELD_SOURCE,
-    REQUIRED_ENCOUNTER_CONTEXT, AffiliationBinding, BillingEntityIdentity,
-    ContextResolution, CoverageBinding, EncounterContext, FacilityIdentity,
-    PatientIdentity, PayerIdentity, ProviderIdentity, ResolutionStep,
+    AUTHORITATIVE_FIELD_SOURCE, CALLER_SERVICE_DATE_SOURCE,
+    CONTEXT_SERVICE_DATE_SOURCE, CORROBORATION_FIELD_SOURCE,
+    DOCUMENT_SERVICE_DATE_SOURCE, REQUIRED_ENCOUNTER_CONTEXT,
+    AffiliationBinding, BillingEntityIdentity, ContextResolution,
+    CoverageBinding, EncounterContext, FacilityIdentity, PatientIdentity,
+    PayerIdentity, ProviderIdentity, ResolutionStep, ServiceDateBinding,
     SubscriberIdentity,
 )
+from app.contracts.source_evidence import ServiceDateEvidence
 
 
 class EncounterContextUnavailable(Exception):
@@ -137,7 +140,8 @@ class EncounterContextProvider(Protocol):
 
     def resolve(self, *, encounter_id: str, document_id: str,
                 date_of_service: str | None,
-                note_metadata: dict[str, Any] | None = None
+                note_metadata: dict[str, Any] | None = None,
+                document_service_date: ServiceDateEvidence | None = None
                 ) -> EncounterContext:
         ...
 
@@ -174,7 +178,8 @@ def _stamp(context: EncounterContext, *, source_label: str) -> EncounterContext:
     return context.model_copy(update={"fingerprint": context.compute_fingerprint()})
 
 
-def context_from_note_metadata(metadata: dict[str, Any] | None
+def context_from_note_metadata(metadata: dict[str, Any] | None,
+                               service_date: ServiceDateBinding | None = None
                                ) -> EncounterContext:
     """Everything the note itself stated, as CORROBORATION only.
 
@@ -195,6 +200,7 @@ def context_from_note_metadata(metadata: dict[str, Any] | None
         resolution=ContextResolution.UNRESOLVED,
         provider_id=NoteMetadataContextProvider.provider_id,
         context_version="",
+        service_date=service_date or ServiceDateBinding(),
         patient=PatientIdentity(
             first_name=first, last_name=last,
             date_of_birth=str(meta.get("date_of_birth") or ""),
@@ -253,9 +259,18 @@ class NoteMetadataContextProvider:
 
     def resolve(self, *, encounter_id: str, document_id: str,
                 date_of_service: str | None,
-                note_metadata: dict[str, Any] | None = None
+                note_metadata: dict[str, Any] | None = None,
+                document_service_date: ServiceDateEvidence | None = None
                 ) -> EncounterContext:
-        return context_from_note_metadata(note_metadata)
+        # The context is UNRESOLVED whatever happens here, so nothing this
+        # provider returns can release a claim. The date is still BOUND rather
+        # than dropped: it is the value the rest of the run is about to make
+        # every date-versioned decision against, and an artifact that does not
+        # record where it came from cannot be audited afterwards.
+        _bound, binding = bind_service_date(
+            declared=None, caller=date_of_service, evidence=document_service_date,
+            holds=[], conflicts=[], steps=[])
+        return context_from_note_metadata(note_metadata, service_date=binding)
 
 
 # --------------------------------------------------------------------------
@@ -342,6 +357,128 @@ def _covers(dos: date, start: date, end: date | None) -> bool:
     Pure calendar-date comparison — no clock, no timezone, no locale.
     """
     return start <= dos and (end is None or dos <= end)
+
+
+def bind_service_date(*, declared: Any, caller: str | None,
+                      evidence: ServiceDateEvidence | None,
+                      holds: list[str], conflicts: list[str],
+                      steps: list[ResolutionStep]
+                      ) -> tuple[date | None, ServiceDateBinding]:
+    """Establish THE date of service, once, and say where it came from.
+
+    ISSUE #6 F7-R4 -- WHY THIS IS NOT "parse whatever the caller passed"
+    --------------------------------------------------------------------
+    The caller's date of service used to be the primary vision model's structured
+    metadata field, accepted unchecked. Every time-bound decision on the claim --
+    which coverage is in force, which billing affiliation applies, whether an
+    authorization covers the service, which edition of the code set is effective,
+    and the service date the claim itself carries -- was then made against a value
+    nothing had ever compared to the original document. A one-character misread
+    produced a fully populated, fully fingerprinted context for the wrong date.
+
+    There are exactly two things that may establish a claim's date of service:
+
+      1. THE ENCOUNTER CONTEXT SOURCE, when it declares one for this encounter.
+         That is an identifier-resolved fact from an authority, not a reading of a
+         page, so it wins.
+      2. THE ORIGINAL DOCUMENT, when the date it states has been located on a page
+         and PROVEN there against an independent reading of that page
+         (`source_evidence.reconcile_service_date`). A document date that could not
+         be located, or that an independent channel reads differently, establishes
+         nothing -- and is refused rather than used, because a date nobody could
+         confirm looks exactly like a confirmed one downstream.
+
+    A caller assertion binds only when NO source-evidence document accompanied the
+    encounter at all (note text supplied directly, nothing to reconcile against).
+    It is labelled `CALLER_SERVICE_DATE_SOURCE`, which
+    `EncounterContext.problems()` refuses for a RESOLVED context -- so it can carry
+    a date through an audit trail, and can never carry one onto a claim.
+
+    Disagreements between any two of the three are CONFLICTS, not corrections: the
+    document and the roster naming different service dates is a question for a
+    human, and silently preferring either is how the wrong one gets billed.
+    """
+    documented: date | None = None
+    document_fields: dict[str, Any] = {}
+    if evidence is not None:
+        document_fields = {
+            "documented_date": evidence.candidate,
+            "document_status": evidence.status.value,
+            "document_detail": evidence.detail,
+            "document_span_id": evidence.span_id,
+            "document_pages": evidence.pages,
+            "page_image_sha256": evidence.page_image_sha256,
+            "verified_by_channel_id": evidence.verified_by_channel_id,
+        }
+        try:
+            documented = _as_date(evidence.candidate, "documented date of service")
+        except _Hold as hold:                     # pragma: no cover - always ISO
+            holds.append(str(hold))
+
+    declared_date: date | None = None
+    declared_raw = str(declared or "").strip()
+    if declared_raw:
+        try:
+            declared_date = _as_date(declared_raw, "context source date_of_service")
+        except _Hold as hold:
+            holds.append(str(hold))
+
+    caller_date: date | None = None
+    if str(caller or "").strip():
+        try:
+            caller_date = _as_date(caller, "encounter date of service")
+        except _Hold as hold:
+            holds.append(str(hold))
+
+    if declared_date is not None and documented is not None and \
+            declared_date != documented:
+        conflicts.append(
+            f"date of service: the encounter context source says "
+            f"{declared_date.isoformat()!r}, the document says "
+            f"{documented.isoformat()!r}")
+    if documented is not None and caller_date is not None and \
+            documented != caller_date:
+        conflicts.append(
+            f"date of service: the caller supplied {caller_date.isoformat()!r}, "
+            f"the document's own reading states {documented.isoformat()!r}")
+    if declared_date is not None and caller_date is not None and \
+            documented is None and declared_date != caller_date:
+        conflicts.append(
+            f"date of service: the encounter context source says "
+            f"{declared_date.isoformat()!r}, the caller supplied "
+            f"{caller_date.isoformat()!r}")
+
+    bound: date | None = None
+    source = ""
+    if declared_date is not None:
+        bound, source = declared_date, CONTEXT_SERVICE_DATE_SOURCE
+    elif evidence is not None:
+        if documented is not None and evidence.reconciled:
+            bound, source = documented, DOCUMENT_SERVICE_DATE_SOURCE
+        else:
+            holds.append(
+                f"the encounter's date of service is not established: the "
+                f"encounter context source declares none, and the date the "
+                f"document reports ({evidence.candidate or 'none readable'}) is "
+                f"{evidence.status.value} against an independent reading of the "
+                f"original page ({evidence.detail})")
+    elif caller_date is not None:
+        bound, source = caller_date, CALLER_SERVICE_DATE_SOURCE
+    else:
+        holds.append(
+            "encounter has no usable date of service, so no time-bound "
+            "affiliation, coverage or authorization can be resolved")
+
+    steps.append(ResolutionStep(
+        step="date_of_service",
+        identifier=(bound.isoformat() if bound is not None else ""),
+        resolved_to=source,
+        outcome=("resolved" if bound is not None else "absent")))
+    return bound, ServiceDateBinding(
+        date_of_service=(bound.isoformat() if bound is not None else ""),
+        source=source,
+        declared_date=(declared_date.isoformat() if declared_date is not None else ""),
+        **document_fields)
 
 
 def _describe(row: dict[str, Any]) -> str:
@@ -546,7 +683,8 @@ class VersionedRosterContextProvider:
     # --------------------------------------------------------------- resolve
     def resolve(self, *, encounter_id: str, document_id: str,
                 date_of_service: str | None,
-                note_metadata: dict[str, Any] | None = None
+                note_metadata: dict[str, Any] | None = None,
+                document_service_date: ServiceDateEvidence | None = None
                 ) -> EncounterContext:
         raw = self._load()
         version = str(raw.get("version") or "")
@@ -565,13 +703,27 @@ class VersionedRosterContextProvider:
                                     identifier=encounter_id or document_id,
                                     resolved_to=key, outcome="resolved"))
 
-        dos = self._service_date(entry, date_of_service, holds, conflicts, steps)
+        dos, service_date = bind_service_date(
+            declared=entry.get("date_of_service"), caller=date_of_service,
+            evidence=document_service_date, holds=holds, conflicts=conflicts,
+            steps=steps)
 
+        # THE CHAIN, NOT SEVEN INDEPENDENT LOOKUPS (issue #6 F7-R2)
+        # --------------------------------------------------------
+        # Each branch below is independent in its FAILURE (one unresolvable
+        # coverage must not hide an expired affiliation), but NOT in what it is
+        # allowed to resolve against. Every downstream branch is handed the
+        # identity the previous branch actually resolved -- the patient the
+        # coverage must belong to, the provider the affiliation must belong to,
+        # the coverage/provider/facility the authorization must have been issued
+        # for -- so two records that each resolve perfectly well but describe two
+        # different people can never be combined into one claim.
         branch = dict(steps=steps, holds=holds)
-        patient = self._branch(self._resolve_patient, raw, entry,
-                               default=PatientIdentity(), **branch)
+        patient, patient_id = self._branch(
+            self._resolve_patient, raw, entry,
+            default=(PatientIdentity(), ""), **branch)
         subscriber, payer, coverage = self._branch(
-            self._resolve_coverage, raw, entry, dos,
+            self._resolve_coverage, raw, entry, patient_id, dos,
             default=(SubscriberIdentity(), PayerIdentity(), CoverageBinding()),
             **branch)
         provider = self._branch(self._resolve_participant, raw, entry,
@@ -579,12 +731,12 @@ class VersionedRosterContextProvider:
         affiliation, billing_entity = self._branch(
             self._resolve_affiliation, raw, provider, dos,
             default=(AffiliationBinding(), BillingEntityIdentity()), **branch)
-        facility, place_of_service, jurisdiction = self._branch(
+        facility, place_of_service, jurisdiction, facility_id = self._branch(
             self._resolve_facility, raw, entry,
-            default=(FacilityIdentity(), "", ""), **branch)
+            default=(FacilityIdentity(), "", "", ""), **branch)
         coverage = self._branch(
             self._resolve_authorization, raw, entry, dos, coverage, provider,
-            entry.get("facility_id"), default=coverage, **branch)
+            facility_id, default=coverage, **branch)
         subscriber = subscriber.model_copy(update={
             "authorization_number": coverage.authorization_number})
 
@@ -592,6 +744,7 @@ class VersionedRosterContextProvider:
             resolution=ContextResolution.RESOLVED,
             provider_id=self.provider_id,
             context_version=version,
+            service_date=service_date,
             patient=patient,
             subscriber=subscriber,
             payer=payer,
@@ -664,65 +817,54 @@ class VersionedRosterContextProvider:
                 f"resolve to two different encounter records")
         return matches[0][1], matches[0][0]
 
-    def _service_date(self, entry: dict[str, Any], date_of_service: str | None,
-                      holds: list[str], conflicts: list[str],
-                      steps: list[ResolutionStep]) -> date | None:
-        """The DOS every time-bound lookup is evaluated against.
-
-        The claim's own date of service is authoritative here — NOT the one the
-        context source may also declare — so the affiliation bound to the claim
-        can never be evaluated against a different date than the claim carries.
-        A context source that declares a DIFFERENT date is a conflict, not a
-        correction.
-        """
-        try:
-            dos = _as_date(date_of_service, "encounter date of service")
-        except _Hold as hold:
-            holds.append(str(hold))
-            dos = None
-        if dos is None:
-            holds.append(
-                "encounter has no usable date of service, so no time-bound "
-                "affiliation, coverage or authorization can be resolved")
-            steps.append(ResolutionStep(step="date_of_service",
-                                        outcome="absent"))
-            return None
-        declared = str(entry.get("date_of_service") or "").strip()
-        if declared:
-            try:
-                if _as_date(declared, "context source date_of_service") != dos:
-                    conflicts.append(
-                        f"date of service: the encounter context source says "
-                        f"{declared!r}, the document says {dos.isoformat()!r}")
-            except _Hold as hold:
-                holds.append(str(hold))
-        steps.append(ResolutionStep(step="date_of_service",
-                                    identifier=dos.isoformat(),
-                                    outcome="resolved"))
-        return dos
-
     def _resolve_patient(self, raw: dict[str, Any], entry: dict[str, Any],
-                         steps: list[ResolutionStep]) -> PatientIdentity:
+                         steps: list[ResolutionStep]
+                         ) -> tuple[PatientIdentity, str]:
+        """encounter -> patient id -> patient identity, and the id it resolved under.
+
+        The identifier is returned alongside the identity, and stamped ONTO it,
+        for the same reason `_resolve_participant` overwrites the provider's own
+        `npi` with its key: it is what every later branch checks its own record
+        against. A patient identity that cannot say which patient it is cannot be
+        used to prove that this encounter's coverage belongs to this encounter's
+        patient. (Issue #6 F7-R2.)
+        """
         patient_id = str(entry.get("patient_id") or "").strip()
         record = self._by_key(raw, "patients", patient_id, "patient")
         steps.append(ResolutionStep(step="patient", identifier=patient_id,
                                     resolved_to=patient_id, outcome="resolved"))
-        return PatientIdentity(**_section(record, PatientIdentity))
+        return (PatientIdentity(**{**_section(record, PatientIdentity),
+                                   "patient_id": patient_id}),
+                patient_id)
 
     def _resolve_coverage(self, raw: dict[str, Any], entry: dict[str, Any],
-                          dos: date | None, steps: list[ResolutionStep]
+                          patient_id: str, dos: date | None,
+                          steps: list[ResolutionStep]
                           ) -> tuple[SubscriberIdentity, PayerIdentity,
                                      CoverageBinding]:
-        """encounter -> coverage -> subscriber + payer, in force on the DOS.
+        """encounter -> coverage -> subscriber + payer, FOR THIS PATIENT, on the DOS.
 
-        An explicit `coverage_id` is authoritative. Without one, the patient's
+        An explicit `coverage_id` selects the record. Without one, the patient's
         coverages are selected by identifier and narrowed BY DATE — and the
         result must be UNIQUE. Two coverages active on the same date is a real
         situation (primary/secondary) that this contract cannot express, so it
         holds rather than picking the first row.
+
+        EVERY path ends at the same check (issue #6 F7-R2): the coverage that
+        binds to this claim must be the RESOLVED PATIENT'S coverage. An explicit
+        `coverage_id` used to be matched on the identifier and its effective
+        window alone — so an encounter naming patient P1 and an active coverage
+        belonging to P2 resolved cleanly, with P1's demographics and P2's member
+        id on one professional claim, no holds, and nothing downstream able to
+        tell. Identity and coverage are resolved by two branches; that is exactly
+        why the join between them has to be asserted here rather than assumed.
         """
         if dos is None:
             raise _Hold("coverage cannot be resolved without a date of service")
+        if not patient_id:
+            raise _Hold("this encounter's patient did not resolve, so no "
+                        "coverage can be bound to it; a claim must not carry a "
+                        "coverage that belongs to nobody it has identified")
         rows = self._rows(raw, "coverages")
         coverage_id = str(entry.get("coverage_id") or "").strip()
         if coverage_id:
@@ -732,6 +874,7 @@ class VersionedRosterContextProvider:
                 raise _Hold(f"coverage {coverage_id!r} is not in the encounter "
                             f"context source")
             self._reject_duplicate_row(coverage_id, "coverages", "coverage")
+            self._reject_foreign_coverage(candidates, patient_id)
             active = [r for r in candidates if _covers(dos, *_window(
                 r, f"coverage {coverage_id!r}"))]
             if not active:
@@ -740,7 +883,6 @@ class VersionedRosterContextProvider:
                     f"service {dos.isoformat()} "
                     f"({'; '.join(_describe(r) for r in candidates)})")
         else:
-            patient_id = str(entry.get("patient_id") or "").strip()
             candidates = [r for r in rows
                           if str(r.get("patient_id") or "") == patient_id]
             if not candidates:
@@ -765,6 +907,10 @@ class VersionedRosterContextProvider:
         row = active[0]
         resolved_id = str(row.get("coverage_id") or "")
         self._reject_duplicate_row(resolved_id, "coverages", "coverage")
+        # Re-asserted on the row that actually binds, not only on the candidate
+        # set: the two selection paths above are the kind of code a later change
+        # adds a third branch to, and this is the invariant all of them owe.
+        self._reject_foreign_coverage([row], patient_id)
         payer_id = str(row.get("payer_id") or "").strip()
         payer_record = self._by_key(raw, "payers", payer_id, "payer")
         steps.append(ResolutionStep(step="coverage", identifier=resolved_id,
@@ -777,10 +923,37 @@ class VersionedRosterContextProvider:
         payer = PayerIdentity(**_section(payer_record, PayerIdentity))
         binding = CoverageBinding(
             coverage_id=resolved_id,
+            # Carried onto the claim so the referential check above is
+            # REPRODUCIBLE from the artifact by a consumer that never saw the
+            # roster (`EncounterContext.problems()` re-derives it).
+            patient_id=str(row.get("patient_id") or ""),
+            payer_id=payer_id,
             effective_start=str(row.get("effective_start") or ""),
             effective_end=str(row.get("effective_end") or ""),
         )
         return subscriber, payer, binding
+
+    @staticmethod
+    def _reject_foreign_coverage(rows: list[dict[str, Any]],
+                                 patient_id: str) -> None:
+        """Refuse any coverage record that is not THIS patient's. (Issue #6 F7-R2.)
+
+        A coverage naming NO patient is refused for the same reason as one naming
+        a different patient: the claim would assert a subscriber relationship the
+        source never states. The hold is raised inside the coverage branch, so it
+        is this ENCOUNTER's hold — every other encounter in the same batch is
+        unaffected, which is the whole failure-boundary contract of this module.
+        """
+        for row in rows:
+            owner = str(row.get("patient_id") or "").strip()
+            if owner == patient_id:
+                continue
+            identifier = str(row.get("coverage_id") or "?")
+            raise _Hold(
+                f"coverage {identifier!r} belongs to patient "
+                f"{owner or '<none declared>'}, not to this encounter's patient "
+                f"{patient_id!r}; a claim must not carry one patient's "
+                f"demographics with another patient's coverage and member id")
 
     def _resolve_participant(self, raw: dict[str, Any], entry: dict[str, Any],
                              steps: list[ResolutionStep]) -> ProviderIdentity:
@@ -868,7 +1041,7 @@ class VersionedRosterContextProvider:
 
     def _resolve_facility(self, raw: dict[str, Any], entry: dict[str, Any],
                           steps: list[ResolutionStep]
-                          ) -> tuple[FacilityIdentity, str, str]:
+                          ) -> tuple[FacilityIdentity, str, str, str]:
         """facility id -> facility identity, place of service and jurisdiction.
 
         Both are DECLARED by the facility record, not derived from its address.
@@ -890,7 +1063,11 @@ class VersionedRosterContextProvider:
         steps.append(ResolutionStep(step="facility", identifier=facility_id,
                                     resolved_to=place_of_service,
                                     outcome="resolved"))
-        return facility, place_of_service, jurisdiction
+        # The RESOLVED identifier travels with the identity for the same reason
+        # the patient's does: the authorization branch must check itself against
+        # the facility this encounter actually resolved, not against whatever the
+        # encounter record claimed before anyone looked it up. (Issue #6 F7-R2.)
+        return facility, place_of_service, jurisdiction, facility_id
 
     def _resolve_authorization(self, raw: dict[str, Any], entry: dict[str, Any],
                                dos: date | None, coverage: CoverageBinding,
@@ -905,6 +1082,12 @@ class VersionedRosterContextProvider:
         anyway is exactly the silent staleness directive §2 names. A mismatch
         HOLDS rather than quietly dropping the number: an operator who recorded
         an authorization believed one was required.
+
+        `facility_id` is the identifier the FACILITY BRANCH RESOLVED, not the one
+        the encounter record declared. Checking against the declared value would
+        let an authorization "match" a facility that is not in the source at all
+        — the same combine-two-independent-resolutions-without-a-cross-check
+        defect as F7-R2, one branch over.
         """
         authorization_id = str(entry.get("authorization_id") or "").strip()
         if not authorization_id:
@@ -993,6 +1176,10 @@ class VersionedRosterContextProvider:
             "context_version": version,
             "resolution_steps": tuple(steps),
             "unresolved": tuple(dict.fromkeys(holds)),
+            # No encounter record resolved, so no date of service is bound to
+            # this encounter -- deliberately NOT the caller's assertion, which is
+            # what an artifact would otherwise carry as if it had been checked.
+            "service_date": ServiceDateBinding(),
         })
         return _stamp(context, source_label=CORROBORATION_FIELD_SOURCE)
 

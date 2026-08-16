@@ -768,3 +768,387 @@ def test_the_contract_cross_checks_the_affiliation_it_was_handed():
     assert any("not to this encounter's rendering provider" in problem
                for problem in wrong_provider.problems()), \
         wrong_provider.problems()
+
+
+# ==========================================================================
+# ISSUE #6, CODEX F7-R2 (P1) — a coverage must belong to THIS encounter's patient
+# ==========================================================================
+#
+# Reproduction as the reviewer ran it: encounter E1 references patient P1 and an
+# explicit, ACTIVE coverage C2 that belongs to a DIFFERENT patient P2. It resolved
+# `RESOLVED`, with P1's demographics, C2's coverage and P2's member id, no holds,
+# and `problems() == ()`. Patient identity and subscriber coverage are resolved by
+# two independent branches; nothing joined them, and nothing downstream could,
+# because every field was populated and every fingerprint reproduced.
+
+SECOND_PATIENT_ID = "PAT-E2E-2"
+SECOND_COVERAGE_ID = "COV-E2E-2"
+SECOND_MEMBER_ID = "MEMBER-P2"
+
+
+def _another_patients_active_coverage(roster):
+    """A second patient whose coverage is in force over the SAME window as the
+    first's — so the encounter's coverage differs from a correct one in exactly
+    one thing: whose it is."""
+    roster["patients"][SECOND_PATIENT_ID] = {
+        "first_name": "Devon", "last_name": "Marsh",
+        "date_of_birth": "01/03/1975", "gender": "M",
+        "record_number": "MRN-E2E-2"}
+    roster["coverages"].append({
+        "coverage_id": SECOND_COVERAGE_ID, "patient_id": SECOND_PATIENT_ID,
+        "payer_id": PAYER_ID, "member_id": SECOND_MEMBER_ID,
+        "group_number": "GRP-E2E-2", "relationship_to_patient": "",
+        "effective_start": ROSTER_START, "effective_end": ""})
+    roster["encounters"][STEM]["coverage_id"] = SECOND_COVERAGE_ID
+
+
+def test_an_encounter_cannot_resolve_with_another_patients_coverage(deployment):
+    """The adapter boundary, on the reviewer's exact reproduction."""
+    from app.contracts.encounter_context import VersionedRosterContextProvider
+
+    path = deployment.write_context(
+        version="ctx-foreign-coverage", mutate=_another_patients_active_coverage,
+        path=deployment.tmp_path / "foreign_coverage.json")
+    context = VersionedRosterContextProvider(path).resolve(
+        encounter_id=STEM, document_id=STEM, date_of_service=DOS_ISO)
+
+    assert context.resolution.value != "RESOLVED", context.resolution
+    assert any("not to this encounter's patient" in reason
+               for reason in context.unresolved), context.unresolved
+    # The other patient's identity reached NOTHING: not the member id, not the
+    # coverage binding, not the payer.
+    assert context.subscriber.member_id != SECOND_MEMBER_ID
+    assert context.coverage.coverage_id == ""
+    assert context.problems()
+
+
+def test_a_coverage_with_no_declared_patient_is_refused_too(deployment):
+    """The same defect's quiet twin: a coverage row that names nobody would
+    otherwise pass a `!=` check written the obvious way."""
+    from app.contracts.encounter_context import VersionedRosterContextProvider
+
+    def _orphan(roster):
+        roster["coverages"][0]["patient_id"] = ""
+
+    path = deployment.write_context(
+        version="ctx-orphan-coverage", mutate=_orphan,
+        path=deployment.tmp_path / "orphan_coverage.json")
+    context = VersionedRosterContextProvider(path).resolve(
+        encounter_id=STEM, document_id=STEM, date_of_service=DOS_ISO)
+
+    assert context.resolution.value != "RESOLVED"
+    assert any("<none declared>" in reason for reason in context.unresolved), \
+        context.unresolved
+
+
+def test_another_patients_coverage_holds_only_that_encounter(deployment):
+    """The DEPLOYED entrypoint, and the failure boundary that matters.
+
+    A referential-integrity break in one encounter's coverage is that
+    encounter's hold. The second note in the same batch reads the same source
+    file and must still reach AUTO_READY, or the fix would have traded a wrong
+    claim for a stopped practice.
+    """
+    _add_second_note(deployment, npi=_valid_npi("122222222"))
+    deployment.write_context(version="ctx-foreign-coverage-batch",
+                             mutate=_another_patients_active_coverage)
+
+    assert _run(deployment) == 0
+    broken = _bundle(deployment, STEM)
+    healthy = _bundle(deployment, OTHER_STEM)
+
+    assert broken.context.resolution.value != "RESOLVED"
+    assert any("not to this encounter's patient" in reason
+               for reason in broken.context.unresolved), broken.context.unresolved
+    assert broken.release_blockers()
+    assert broken.context.subscriber.member_id != SECOND_MEMBER_ID
+    assert broken.context.coverage.coverage_id == ""
+
+    assert healthy.release_blockers() == (), healthy.release_blockers()
+    assert healthy.release.destination.value == "AUTO_READY"
+    # Exactly one claim recorded, and it is the healthy one.
+    assert deployment.ingest()["recorded"] == 1
+
+
+def test_the_contract_cross_checks_the_coverage_it_was_handed():
+    """The invariant behind the resolver, at the boundary that enforces it.
+
+    Stated on the CONTRACT rather than only inside `VersionedRoster…` for the
+    same reason the affiliation invariants are: the next adapter (an EHR/FHIR or
+    practice-management one) resolves patient and coverage in two branches too,
+    and this is what stops it from shipping the same defect.
+    """
+    from app.contracts.claim_bundle import (
+        AUTHORITATIVE_FIELD_SOURCE, REQUIRED_ENCOUNTER_CONTEXT, ContextResolution,
+        CoverageBinding, EncounterContext, PatientIdentity)
+
+    sources = {path: AUTHORITATIVE_FIELD_SOURCE
+               for path in REQUIRED_ENCOUNTER_CONTEXT}
+    wrong_patient = EncounterContext(
+        resolution=ContextResolution.RESOLVED, field_sources=sources,
+        patient=PatientIdentity(patient_id="PAT-A"),
+        coverage=CoverageBinding(coverage_id="COV-1", patient_id="PAT-B"))
+    assert any("not to this encounter's patient" in problem
+               for problem in wrong_patient.problems()), wrong_patient.problems()
+
+
+def test_an_authorization_is_checked_against_the_RESOLVED_facility(deployment):
+    """The same bug class, one branch over (found by the F7-R2 second pass).
+
+    The authorization used to be checked against the facility id the ENCOUNTER
+    RECORD declared, not the one the facility branch resolved — so an
+    authorization could 'match' a facility that is not in the source at all.
+    """
+    from app.contracts.encounter_context import VersionedRosterContextProvider
+
+    def _unknown_facility(roster):
+        roster["encounters"][STEM]["facility_id"] = "FAC-NOT-IN-SOURCE"
+        roster["encounters"][STEM]["authorization_id"] = "AUTH-1"
+        roster["authorizations"].append({
+            "authorization_id": "AUTH-1", "authorization_number": "AUTH-NUMBER-1",
+            "coverage_id": COVERAGE_ID, "facility_id": "FAC-NOT-IN-SOURCE",
+            "rendering_provider_npi": deployment.rendering_npi,
+            "effective_start": ROSTER_START, "effective_end": ""})
+
+    path = deployment.write_context(
+        version="ctx-unknown-facility", mutate=_unknown_facility,
+        path=deployment.tmp_path / "unknown_facility.json")
+    context = VersionedRosterContextProvider(path).resolve(
+        encounter_id=STEM, document_id=STEM, date_of_service=DOS_ISO)
+
+    assert context.resolution.value != "RESOLVED"
+    assert any("service facility" in reason for reason in context.unresolved), \
+        context.unresolved
+    # The authorization number never reached the claim.
+    assert context.subscriber.authorization_number == ""
+    assert context.coverage.authorization_id == ""
+
+
+# ==========================================================================
+# ISSUE #6, CODEX F7-R4 (P1) — ONE date of service, established not transcribed
+# ==========================================================================
+#
+# `read_note()` took the DOS from the primary vision model's structured metadata
+# and nothing ever compared it to the document. The roster's encounter DOS is
+# optional, so when it was absent the resolver accepted any parseable caller value
+# and used it for coverage, affiliation, authorization, code activity and the claim
+# itself. A one-character misread selected a different coverage, a different
+# affiliation and a different effective code edition — and still produced a fully
+# populated, fully fingerprinted context.
+
+#: The three axes a date can be misread on.
+PERTURBED_DATES = ["2026-04-14", "2026-03-15", "2027-03-14"]
+
+
+def _transcription(monkeypatch, *, page_text=NOTE_TEXT, dos=DOS_ISO):
+    """Substitute the vision channel. The PDF ON DISK is never touched, so its
+    embedded text layer remains an independent reading of the TRUE document."""
+    monkeypatch.setattr(entrypoint, "extract_from_pdf", lambda pdf_path:
+                        vision_extraction(
+                            [page_text], metadata={"date_of_service": dos},
+                            document_version=DOCUMENT_VERSION,
+                            extracted_text_sha256=EXTRACTED_TEXT_SHA))
+
+
+def _declare_roster_dos(deployment, date_of_service=DOS_ISO, version="ctx-dos"):
+    return deployment.write_context(
+        version=version,
+        mutate=lambda roster: roster["encounters"][STEM].update(
+            {"date_of_service": date_of_service}))
+
+
+def test_the_date_of_service_binds_from_the_reconciled_document(deployment):
+    """No roster DOS: the document must PROVE its own date before it can bind."""
+    from app.contracts.claim_bundle import DOCUMENT_SERVICE_DATE_SOURCE
+    from app.ingestion.source_evidence import EMBEDDED_TEXT_CHANNEL_ID
+
+    assert _run(deployment) == 0
+    bundle = _bundle(deployment, STEM)
+    assert bundle.release_blockers() == (), bundle.release_blockers()
+
+    binding = bundle.context.service_date
+    assert binding.date_of_service == DOS_ISO
+    assert binding.source == DOCUMENT_SERVICE_DATE_SOURCE
+    assert binding.documented_date == DOS_ISO
+    assert binding.document_status == "AGREED"
+    assert binding.document_pages == (1,)
+    assert binding.verified_by_channel_id == EMBEDDED_TEXT_CHANNEL_ID
+    assert binding.page_image_sha256 and all(binding.page_image_sha256)
+
+    # ...and it is the SAME value every consumer saw.
+    assert bundle.context.date_of_service == DOS_ISO
+    assert bundle.encounter.date_of_service == DOS_ISO
+    assert f"DOS={DOS_ISO}" in bundle.audit.audit_trail
+    certificate = bundle.certificate.certificate
+    assert certificate["date_of_service"] == DOS_ISO
+    assert certificate["service_date_binding"]["source"] == \
+        DOCUMENT_SERVICE_DATE_SOURCE
+    assert certificate["service_date_binding"]["document_status"] == "AGREED"
+
+
+def test_a_roster_declared_date_of_service_is_the_authority(deployment):
+    """When the context source declares one, it wins: it is an identifier-resolved
+    fact from an authority, not a reading of a page."""
+    from app.contracts.claim_bundle import CONTEXT_SERVICE_DATE_SOURCE
+
+    _declare_roster_dos(deployment)
+    assert _run(deployment) == 0
+    bundle = _bundle(deployment, STEM)
+
+    assert bundle.release_blockers() == (), bundle.release_blockers()
+    binding = bundle.context.service_date
+    assert binding.source == CONTEXT_SERVICE_DATE_SOURCE
+    assert binding.declared_date == DOS_ISO
+    assert binding.date_of_service == DOS_ISO
+    # The document was still read and still recorded — it just was not the authority.
+    assert binding.documented_date == DOS_ISO
+    assert bundle.encounter.date_of_service == DOS_ISO
+
+
+@pytest.mark.parametrize("perturbed", PERTURBED_DATES)
+def test_a_metadata_only_date_misread_cannot_bind(deployment, monkeypatch,
+                                                  perturbed):
+    """Month, day and year perturbation with NO roster-declared DOS.
+
+    Only the structured metadata field is perturbed; the pages still say the true
+    date. The claim's date can therefore be pointed at no page of the original —
+    which is exactly what a claim date must never be.
+    """
+    _transcription(monkeypatch, dos=perturbed)
+    assert _run(deployment) == 0
+    bundle = _bundle(deployment, STEM)
+
+    binding = bundle.context.service_date
+    assert binding.date_of_service == ""
+    assert binding.documented_date == perturbed
+    assert binding.document_status == "NOT_LOCATED"
+    # No page of the original was ever named for it — the date the claim would
+    # have carried exists only in the metadata field.
+    assert binding.document_pages == ()
+    assert binding.document_span_id == ""
+    assert "written nowhere" in binding.document_detail
+    assert bundle.context.resolution.value != "RESOLVED"
+    assert not bundle.encounter.date_of_service
+    assert bundle.release_blockers()
+    assert deployment.ingest()["recorded"] == 0
+
+
+@pytest.mark.parametrize("perturbed", PERTURBED_DATES)
+def test_a_transcription_wide_date_misread_cannot_bind(deployment, monkeypatch,
+                                                       perturbed):
+    """The harder case: the WHOLE transcription reads the date wrong, metadata and
+    page text alike, so it is self-consistent. Only a reading that is not the
+    transcription's own can detect it — which is what the compiler provides."""
+    _transcription(monkeypatch, page_text=NOTE_TEXT.replace(DOS_ISO, perturbed),
+                   dos=perturbed)
+    assert _run(deployment) == 0
+    bundle = _bundle(deployment, STEM)
+
+    binding = bundle.context.service_date
+    assert binding.date_of_service == ""
+    # BLOCKING either way; see `ServiceDateReconciliationTest` for why an ISO date
+    # (one token) reports as not appearing in the independent reading while a
+    # written date reports as read differently.
+    assert binding.document_status in {"DISAGREED", "NOT_LOCATED"}
+    # Unlike the metadata-only misread, this one WAS anchored to a page of the
+    # original and an independent channel read that page and refused it.
+    assert binding.document_pages == (1,)
+    assert binding.document_span_id
+    assert binding.verified_by_channel_id
+    assert bundle.context.resolution.value != "RESOLVED"
+    assert not bundle.encounter.date_of_service
+    assert bundle.release_blockers()
+    assert deployment.ingest()["recorded"] == 0
+
+
+@pytest.mark.parametrize("perturbed", PERTURBED_DATES)
+def test_a_document_date_that_contradicts_the_roster_is_a_conflict(
+        deployment, monkeypatch, perturbed):
+    """The same three perturbations WITH a roster-declared DOS.
+
+    The roster stays authoritative — so the claim never silently adopts the
+    misread — but two sources naming two service dates is a question for a human,
+    not something to be resolved by preferring either one silently.
+    """
+    _transcription(monkeypatch, page_text=NOTE_TEXT.replace(DOS_ISO, perturbed),
+                   dos=perturbed)
+    _declare_roster_dos(deployment, version="ctx-dos-conflict")
+    assert _run(deployment) == 0
+    bundle = _bundle(deployment, STEM)
+
+    assert bundle.context.resolution.value == "CONFLICT"
+    assert any("date of service" in conflict
+               for conflict in bundle.context.conflicts), bundle.context.conflicts
+    assert bundle.context.service_date.date_of_service == DOS_ISO
+    assert bundle.context.service_date.documented_date == perturbed
+    assert bundle.release_blockers()
+    assert deployment.ingest()["recorded"] == 0
+
+
+def test_the_bound_date_of_service_changes_the_context_fingerprint(deployment):
+    """A different bound date is a different context. If the binding were outside
+    the fingerprint, a claim could be re-dated without invalidating anything."""
+    assert _run(deployment) == 0
+    first = _bundle(deployment, STEM).context
+
+    changed = first.model_copy(update={
+        "service_date": first.service_date.model_copy(
+            update={"date_of_service": "2026-03-21"})})
+    assert changed.compute_fingerprint() != first.fingerprint
+    assert any("fingerprint does not reproduce" in problem
+               for problem in changed.problems()), changed.problems()
+
+
+def test_a_caller_asserted_date_of_service_can_never_reach_a_claim():
+    """The hole the finding names, closed at the contract.
+
+    A date nobody established is recorded as what it is and refused for a
+    RESOLVED context — so it can travel through an audit trail and can never
+    travel onto a claim.
+    """
+    from app.contracts.claim_bundle import (
+        AUTHORITATIVE_FIELD_SOURCE, CALLER_SERVICE_DATE_SOURCE,
+        REQUIRED_ENCOUNTER_CONTEXT, ContextResolution, EncounterContext,
+        ServiceDateBinding)
+
+    sources = {path: AUTHORITATIVE_FIELD_SOURCE
+               for path in REQUIRED_ENCOUNTER_CONTEXT}
+    asserted = EncounterContext(
+        resolution=ContextResolution.RESOLVED, field_sources=sources,
+        service_date=ServiceDateBinding(date_of_service=DOS_ISO,
+                                        source=CALLER_SERVICE_DATE_SOURCE))
+    assert any("never established from the encounter context" in problem
+               for problem in asserted.problems()), asserted.problems()
+
+    undated = EncounterContext(resolution=ContextResolution.RESOLVED,
+                               field_sources=sources)
+    assert any("no date of service is bound" in problem
+               for problem in undated.problems()), undated.problems()
+
+
+def test_the_bound_date_of_service_is_the_only_date_any_consumer_sees():
+    """Eligibility, the service episodes, the graph, the claim result and the
+    certificate must all read ONE value — the point of binding it at all.
+
+    Driven through `code_encounter` directly so the assertion is about the
+    producer's own plumbing rather than about what an artifact happens to expose.
+    """
+    from claude_coder.certificate import build_certificate
+    from tests.test_evidence_graph import _reading, _run as _code_encounter
+
+    bound = "2026-03-14"
+    reading = _reading("excision procedure alpha performed", "right",
+                       "Procedure alpha performed today")
+    result = _code_encounter(
+        reading, reading,
+        service_date_binding={"date_of_service": bound,
+                              "source": "encounter_context"})
+
+    assert result.date_of_service == bound
+    assert result.graph is not None
+    assert result.graph.date_of_service == bound
+    assert {episode.date_of_service for episode in result.graph.episodes} == {bound}
+    assert {intent.date_of_service for intent in result.claim_line_intents} == {bound}
+    certificate = build_certificate(result, "note text")
+    assert certificate["date_of_service"] == bound
+    assert certificate["service_date_binding"]["source"] == "encounter_context"

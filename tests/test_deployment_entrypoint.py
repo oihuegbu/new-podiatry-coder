@@ -115,7 +115,12 @@ def test_retired_consistency_flags_are_refused_not_silently_downgraded():
 # ------------------------------------------------------------------- e2e fixture
 #: Synthetic note. The pipeline's disposition/negation logic turns on LINGUISTIC
 #: markers, never on any clinical term, so nothing here needs to be a real code.
+#: The date of service is WRITTEN ON THE PAGE and reported identically in the
+#: transcription's metadata, so the encounter's DOS binds from the reconciled
+#: document (issue #6 F7-R4) and these tests keep failing for the ONE reason each
+#: of them is about rather than for a missing date.
 NOTE_TEXT = (
+    "Date of service: 2026-03-14. "
     "Procedure: excision of lesion alpha, right site two. "
     "Assessment: condition alpha, right side. "
     "Excision of lesion alpha was performed for condition alpha of the right side. "

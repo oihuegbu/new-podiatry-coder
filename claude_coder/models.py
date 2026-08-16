@@ -286,6 +286,11 @@ class CodingResult:
     # read, but nothing checked the reading). (Issue #6 F6-R6-A, directive §1.)
     source_reconciliation: Any = None
     document_version: str | None = None
+    # WHERE `date_of_service` above came from and how it was proven -- an
+    # `app.contracts.claim_bundle.ServiceDateBinding`, serialized. Bound into the
+    # certificate so the claim's single most date-versioned value is answerable
+    # after the fact instead of being an unattributed string. (Issue #6 F7-R4.)
+    service_date_binding: dict | None = None
     # THE single clinical representation this encounter was decided from -- a
     # `claude_coder.graph.ClinicalGraph`. Extraction fills it, eligibility roles it,
     # retrieval is authorized by it, the certificate binds it and claim assembly reads

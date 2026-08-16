@@ -95,7 +95,15 @@ EXTRACTED_TEXT_SHA = "sha256:" + "c" * 64
 
 #: Synthetic note. Disposition/negation/laterality logic turns on LINGUISTIC
 #: markers, never on any clinical term, so nothing here needs to be real.
+#: The DATE OF SERVICE IS WRITTEN ON THE PAGE, deliberately (issue #6 F7-R4).
+#: The claim's date of service is no longer whatever the vision model reported in
+#: its structured metadata: it binds only when the encounter-context source
+#: declares one, or when the date the document reports is located on a page and
+#: reconciled against an INDEPENDENT reading of that page. A fixture whose note
+#: never states its own date could only ever hold, so the positive path here would
+#: stop proving anything.
 NOTE_TEXT = (
+    f"Date of service: {DOS_ISO}. "
     "Procedure: excision of lesion alpha, right site two. "
     "Assessment: condition alpha, right side. "
     "Excision of lesion alpha was performed for condition alpha of the right side. "

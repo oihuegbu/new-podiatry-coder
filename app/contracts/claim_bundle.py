@@ -374,6 +374,12 @@ class ServiceLine(_CodedLine):
 
 
 class PatientIdentity(_Strict):
+    #: The identifier the context source knows this patient by -- the KEY the
+    #: identity was resolved under, never a value copied out of the record body.
+    #: It exists so every other identity the encounter resolves (above all the
+    #: coverage, which is resolved in its OWN branch) can be checked to belong to
+    #: THIS patient rather than merely to have resolved successfully.
+    patient_id: str = ""
     first_name: str = ""
     last_name: str = ""
     date_of_birth: str = ""
@@ -462,12 +468,88 @@ class CoverageBinding(_Strict):
     """
 
     coverage_id: str = ""
+    #: WHOSE coverage this is, and WHICH payer it names -- carried from the
+    #: coverage record itself so the binding can be checked against the patient
+    #: this encounter resolved independently. A claim that carries one patient's
+    #: demographics with another patient's member id is fully populated, fully
+    #: fingerprinted and wrong; nothing downstream can detect it from the member
+    #: id alone. (Issue #6 F7-R2.)
+    patient_id: str = ""
+    payer_id: str = ""
     effective_start: str = ""
     effective_end: str = ""
     authorization_id: str = ""
     authorization_number: str = ""
     authorization_effective_start: str = ""
     authorization_effective_end: str = ""
+
+
+#: Where a bound date of service came from. Only the first two may support a
+#: release: one is an authoritative encounter-context source, the other is the
+#: original document proven against an independent reading of its own page.
+CONTEXT_SERVICE_DATE_SOURCE = "encounter_context"
+DOCUMENT_SERVICE_DATE_SOURCE = "source_document_reconciled"
+#: A date the caller simply asserted. Recorded as what it is so it can never be
+#: mistaken for either of the above.
+CALLER_SERVICE_DATE_SOURCE = "caller_unverified"
+
+
+class ServiceDateBinding(_Strict):
+    """THE date of service -- one value, one origin, one proof.
+
+    WHY THIS IS A CONTRACT OBJECT AND NOT A STRING (issue #6 F7-R4)
+    ---------------------------------------------------------------
+    The DOS decides which coverage is in force, which billing affiliation the
+    claim is filed under, whether an authorization applies, which edition of the
+    code set is effective, and what the claim itself says the service date was.
+    It was previously taken from the primary vision model's structured metadata
+    and never checked against anything: a one-character misread selected a
+    different coverage, a different affiliation and a different effective code
+    edition, and the resulting context was still fully populated and still
+    fingerprinted -- wrong, but indistinguishable from right.
+
+    So the date is BOUND, once, with its origin recorded next to it, and the
+    same bound value is what every consumer reads. `problems()` refuses the
+    binding a claim may not rest on, rather than leaving the distinction to
+    whichever caller happens to look.
+    """
+
+    #: The bound ISO date. Empty means NO date could be established -- which
+    #: holds the encounter; it never falls back to the caller's assertion.
+    date_of_service: str = ""
+    #: One of the three constants above.
+    source: str = ""
+    #: What the encounter-context source declared for this encounter, if it
+    #: declared one. Authoritative when present: it is an identifier-resolved
+    #: fact, not a reading of a page.
+    declared_date: str = ""
+    #: What the ORIGINAL DOCUMENT's own reading proposed, and how that proposal
+    #: was proven against an INDEPENDENT reading of the page it is written on
+    #: (`app.contracts.source_evidence.reconcile_service_date`). Recorded even
+    #: when the context source is the authority, because a document that states
+    #: a different date than the roster is a conflict a human must settle.
+    documented_date: str = ""
+    document_status: str = ""
+    document_detail: str = ""
+    document_span_id: str = ""
+    document_pages: tuple[int, ...] = ()
+    page_image_sha256: tuple[str, ...] = ()
+    verified_by_channel_id: str = ""
+
+    def problems(self) -> tuple[str, ...]:
+        out: list[str] = []
+        if not self.date_of_service:
+            out.append("no date of service is bound to this encounter, so no "
+                       "coverage, affiliation, authorization or code-activity "
+                       "decision on this claim was made against a known date")
+        elif self.source not in (CONTEXT_SERVICE_DATE_SOURCE,
+                                 DOCUMENT_SERVICE_DATE_SOURCE):
+            out.append(
+                f"the claim's date of service {self.date_of_service!r} was "
+                f"supplied by the caller ({self.source or 'origin unrecorded'}) "
+                f"and never established from the encounter context or "
+                f"reconciled against the original document")
+        return tuple(out)
 
 
 class ResolutionStep(_Strict):
@@ -538,6 +620,10 @@ class EncounterContext(_Strict):
     #: Version/edition of the context source, so a changed roster changes the
     #: fingerprint and invalidates a stale authorization.
     context_version: str = ""
+    #: THE date of service, bound once with its origin and its proof, and read
+    #: by every consumer instead of each subsystem carrying its own copy.
+    #: (Issue #6 F7-R4.)
+    service_date: ServiceDateBinding = Field(default_factory=ServiceDateBinding)
     patient: PatientIdentity = Field(default_factory=PatientIdentity)
     subscriber: SubscriberIdentity = Field(default_factory=SubscriberIdentity)
     payer: PayerIdentity = Field(default_factory=PayerIdentity)
@@ -568,6 +654,16 @@ class EncounterContext(_Strict):
     #: `sha256:<hex>` over everything above. Stored (not only computed) so a
     #: consumer can detect a context edited after certification.
     fingerprint: str = ""
+
+    @property
+    def date_of_service(self) -> str:
+        """The ONE bound date of service. Empty when none could be established.
+
+        A property rather than a second field: two places to read a date from is
+        exactly how different subsystems came to be deciding against different
+        dates in the first place.
+        """
+        return self.service_date.date_of_service
 
     def _identity_payload(self) -> dict[str, Any]:
         data = self.model_dump(mode="json")
@@ -653,6 +749,22 @@ class EncounterContext(_Strict):
                 f"the affiliation in force belongs to provider "
                 f"{self.affiliation.provider_npi!r}, not to this encounter's "
                 f"rendering provider {self.rendering_provider.npi!r}")
+        # The SAME class of defect for the identity pair that decides who the
+        # payer is billed for: patient identity and subscriber coverage are
+        # resolved in separate branches and then combined, so nothing else in the
+        # system can notice that they describe two different people. A claim
+        # carrying one patient's demographics with another patient's member id is
+        # AUTO_READY-shaped and wrong. (Issue #6 F7-R2.)
+        if self.coverage.patient_id and self.patient.patient_id and \
+                self.coverage.patient_id != self.patient.patient_id:
+            out.append(
+                f"the coverage in force belongs to patient "
+                f"{self.coverage.patient_id!r}, not to this encounter's patient "
+                f"{self.patient.patient_id!r}")
+        # A resolved context whose date of service was never established from an
+        # authority or proven against the original document cannot support the
+        # date-versioned decisions the rest of the claim rests on. (F7-R4.)
+        out.extend(self.service_date.problems())
         return tuple(out)
 
 

@@ -155,6 +155,7 @@ def code_encounter(
     model_profiles: dict | None = None,
     source_evidence=None,
     source_reader=None,
+    service_date_binding: dict | None = None,
 ) -> CodingResult:
     """`source_evidence` is a `contracts.source_evidence.SourceEvidenceDocument`: the
     ORIGINAL document as read by more than one channel. Without it the note text is one
@@ -462,6 +463,8 @@ def code_encounter(
     result = CodingResult(
         encounter_id=encounter_id,
         date_of_service=date_of_service,
+        service_date_binding=(dict(service_date_binding)
+                              if service_date_binding else None),
         lines=lines,
         claim_line_intents=intents,
         relations=relations,
