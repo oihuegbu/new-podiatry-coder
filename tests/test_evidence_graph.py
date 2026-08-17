@@ -16,6 +16,11 @@ WHAT THIS PROVES
      enforced by the merge, and a violation is a graph-integrity BLOCK.
   5. `ClaimBundle.GraphReference` is bound to the nodes/edges the RELEASED lines rest
      on, and an unbound native claim line is a release blocker.
+  6. The second reading provides RECALL redundancy, not only axis agreement: a performed
+     service only IT found is proven against the original page and then run through the
+     same ownership, occurrence, dedup, eligibility, retrieval and certificate path as
+     every primary event -- while a reworded duplicate never becomes a second claim line
+     and an event the page contradicts never enters the graph (issue #6 F7-R3).
 
 Everything runs through the real modules. No medical code appears anywhere in this file.
 """
@@ -956,6 +961,437 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
             f"{result.routing}")
 
 
+
+# ---------------------------------------------------------------------------
+# THE EVENT-CANDIDATE UNION (issue #6 F7-R3).
+#
+# The class above proves the second reading detects a disagreement about an event BOTH
+# readings found. These prove the other half of what a second independent reading is
+# for: RECALL. A performed service the primary extractor missed entirely used to be
+# recorded in `unmatched_second` metadata and dropped -- canonical graph, eligible
+# nodes, retrieval and `integrity_problems()` all continued as if the note documented
+# one service, and the claim silently under-coded.
+#
+# Every case here runs through the real `code_encounter`, because the defect was
+# precisely a mechanism that existed and was never wired to anything.
+
+NOTE_UNION = ("Procedure alpha performed today on the left side. "
+              "Procedure beta performed today on the left side. "
+              "Condition alpha addressed today.")
+
+
+def _multi_reading(*events):
+    """One reading of the note, as raw extractor output. `events` are
+    (fact_id, description, verbatim quote) triples."""
+    import json
+    return json.dumps({"facts": [
+        {"fact_id": fact_id, "kind": "procedure", "description": description,
+         "attributes": {"laterality": "left", "performer_id": "actor-1",
+                        "billing_entity_id": "actor-1"},
+         "disposition": "performed_today", "negated": False,
+         "evidence": [quote], "confidence": 0.99}
+        for fact_id, description, quote in events]})
+
+
+def _union_source():
+    """Two DISTINCT synthetic services.
+
+    Deliberately distinct: if a recovered event were wrongly admitted it must show up as
+    a visibly extra claim line, not as one the duplicate-code collapse could quietly
+    absorb. No real medical code appears here.
+    """
+    from claude_coder.data_access import MockSource
+    from claude_coder.models import CandidateCode
+
+    class _ByDescription(MockSource):
+        def retrieve(self, description, system, top_k=20):
+            if system != "cpt":
+                return []
+            if "beta" in (description or "").lower():
+                return [CandidateCode("PROC_Y", "cpt", "Procedure beta, each", 0.9)]
+            return [CandidateCode("PROC_X", "cpt", "Procedure alpha, each", 0.9)]
+
+    return _ByDescription(records={("PROC_X", "cpt"): {"active": True},
+                                   ("PROC_Y", "cpt"): {"active": True}})
+
+
+def _run_union(primary_reading, second_reading, **kwargs):
+    from claude_coder.pipeline import code_encounter
+    return code_encounter(
+        "enc", kwargs.pop("note_text", NOTE_UNION), "2026-03-14",
+        source=kwargs.pop("source", None) or _union_source(),
+        extract_llm=lambda s, u: primary_reading,
+        extract_llm_b=lambda s, u: second_reading,
+        verify_llm=_stub_llm, corroborate_llm=_stub_llm,
+        billing_context=_BILLING, audit_repository=_null_audit(), **kwargs)
+
+
+_PRIMARY_ONE_SERVICE = ("F1", "excision procedure alpha performed",
+                        "Procedure alpha performed today on the left side")
+_SECOND_SAME_SERVICE = ("F1", "procedure alpha performed excision",
+                        "Procedure alpha performed today on the left side")
+_SECOND_EXTRA_SERVICE = ("F2", "procedure beta performed excision",
+                         "Procedure beta performed today on the left side")
+
+
+def _document(vision_text, pdf_lines):
+    """A compiled `SourceEvidenceDocument` whose ORIGINAL page says `pdf_lines` and whose
+    transcription says `vision_text`."""
+    import tempfile
+    from pathlib import Path as _Path
+
+    from app.contracts.source_evidence import PAGE_SEPARATOR
+    from app.ingestion.source_evidence import compile_source_evidence
+    from tests.source_pdf import build_pdf, vision_extraction
+
+    tmp = tempfile.TemporaryDirectory()
+    pdf_path = _Path(tmp.name) / "note.pdf"
+    pdf_path.write_bytes(build_pdf([pdf_lines]))
+    document = compile_source_evidence(
+        pdf_path,
+        vision_extraction([vision_text], metadata={"date_of_service": "2026-03-14"},
+                          page_separator=PAGE_SEPARATOR))
+    return document, tmp
+
+
+class EndToEndEventCandidateUnion(unittest.TestCase):
+
+    def _recovered(self, result):
+        self.assertIsNotNone(result.consensus, "a second reading must be recorded")
+        return list(result.consensus["recovered_events"])
+
+    def _codes(self, result):
+        return sorted(ln.chosen.code for ln in result.lines if ln.chosen)
+
+    # ---- the omission: the exact reproduction the finding was raised on -------------
+    def test_a_service_only_the_second_reading_found_is_recovered_and_billed(self):
+        """Codex F7-R3, reproduced: the primary graph carries ONE eligible performed
+        service; the second reading carries that service plus a second, independently
+        anchored, billable one. The second service must not disappear merely because the
+        primary extractor omitted it."""
+        result = _run_union(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            _multi_reading(_SECOND_SAME_SERVICE, _SECOND_EXTRA_SERVICE))
+
+        recovered = self._recovered(result)
+        self.assertEqual([r["verdict"] for r in recovered], ["admitted"], recovered)
+        node_id = recovered[0]["node_id"]
+        self.assertTrue(node_id, "an admitted event must carry a canonical graph id")
+
+        # It is a NODE of the canonical graph, not a metadata footnote...
+        self.assertIn(node_id, result.graph.nodes)
+        self.assertIn("F1", result.graph.nodes)
+        # ...it went through ELIGIBILITY like every primary event...
+        self.assertIn(node_id, result.graph.eligible_node_ids(),
+                      "a recovered event must be decided by the same eligibility gate")
+        # ...it was RETRIEVED and CODED...
+        self.assertEqual(self._codes(result), ["PROC_X", "PROC_Y"],
+                         "the service the primary extractor missed must reach the claim")
+        # ...and the graph is coherent, which the old silent omission also claimed.
+        self.assertEqual(result.graph.integrity_problems(), ())
+
+    def test_the_old_silent_omission_would_now_be_visible(self):
+        """The control's own value, stated as a comparison: with the union in place the
+        one-service reading and the two-service reading no longer produce the same
+        claim."""
+        one = _run_union(_multi_reading(_PRIMARY_ONE_SERVICE),
+                         _multi_reading(_SECOND_SAME_SERVICE))
+        two = _run_union(_multi_reading(_PRIMARY_ONE_SERVICE),
+                         _multi_reading(_SECOND_SAME_SERVICE, _SECOND_EXTRA_SERVICE))
+        self.assertEqual(self._codes(one), ["PROC_X"])
+        self.assertEqual(self._codes(two), ["PROC_X", "PROC_Y"])
+        self.assertEqual(one.consensus["recovered_events"], [])
+
+    def test_a_recovered_service_is_proven_against_the_original_page(self):
+        """Admission is gated on the SAME original-page reconciliation every released
+        fact must pass -- not on the second model having asserted it."""
+        vision_text = NOTE_UNION
+        document, tmp = _document(
+            vision_text,
+            ["Procedure alpha performed today on the left side.",
+             "Procedure beta performed today on the left side.",
+             "Condition alpha addressed today."])
+        self.addCleanup(tmp.cleanup)
+
+        result = _run_union(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            _multi_reading(_SECOND_SAME_SERVICE, _SECOND_EXTRA_SERVICE),
+            note_text=document.primary_text(), source_evidence=document)
+
+        recovered = self._recovered(result)
+        self.assertEqual([r["verdict"] for r in recovered], ["admitted"], recovered)
+        self.assertIn("original_page_reconciliation", recovered[0]["reason"],
+                      "the ORIGINAL PAGE must be what admitted it")
+        self.assertIn(recovered[0]["node_id"], result.graph.nodes)
+        self.assertEqual(self._codes(result), ["PROC_X", "PROC_Y"])
+
+    # ---- the duplicate: recall must not become double-billing -----------------------
+    def test_a_reworded_duplicate_does_not_create_a_second_claim_line(self):
+        """The second reading re-finds the SAME event in words too different to align.
+
+        It quotes the same passage of the document, which is what makes it the same
+        event -- and an unverified duplicate must never manufacture an extra line.
+        """
+        result = _run_union(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            _multi_reading(("F1", "procedure alpha performed excision",
+                            "Procedure alpha performed today"),
+                           ("F2", "operative removal alpha lesion resection",
+                            "alpha performed today on the left side")))
+
+        recovered = self._recovered(result)
+        self.assertEqual([r["verdict"] for r in recovered],
+                         ["duplicate_of_primary"], recovered)
+        self.assertEqual(recovered[0]["merged_into"], "F1")
+        self.assertEqual(recovered[0]["node_id"], "",
+                         "a duplicate must not be given a graph identity")
+        # Proven on the GRAPH, not only on the line count: the duplicate-code collapse
+        # downstream could hide an extra line, but it cannot hide an extra node.
+        self.assertEqual(sorted(result.graph.nodes), ["F1"])
+        self.assertEqual(self._codes(result), ["PROC_X"])
+        self.assertEqual(len(result.billable_lines), 1, result.billable_lines)
+
+    # ---- the conflict: the page, not the model, decides ------------------------------
+    def test_a_recovered_event_the_page_contradicts_is_excluded_not_added(self):
+        """The second reading finds an event the ORIGINAL PAGE does not support. It must
+        not silently enter the graph -- and the encounter's real service must still
+        bill."""
+        vision_text = ("Procedure alpha performed today, side one. "
+                       "Procedure beta performed today, side one. "
+                       "Condition alpha addressed today.")
+        # The original page says something else exactly where the second reading quoted.
+        document, tmp = _document(
+            vision_text,
+            ["Procedure alpha performed today, side one.",
+             "Procedure gamma performed today, side one.",
+             "Condition alpha addressed today."])
+        self.addCleanup(tmp.cleanup)
+
+        result = _run_union(
+            _multi_reading(("F1", "excision procedure alpha performed",
+                            "Procedure alpha performed today, side one")),
+            _multi_reading(("F1", "procedure alpha performed excision",
+                            "Procedure alpha performed today, side one"),
+                           ("F2", "procedure beta performed excision",
+                            "Procedure beta performed today, side one")),
+            note_text=document.primary_text(), source_evidence=document)
+
+        recovered = self._recovered(result)
+        self.assertEqual([r["verdict"] for r in recovered],
+                         ["rejected_source_contradicted"], recovered)
+        self.assertEqual(recovered[0]["node_id"], "")
+        self.assertEqual(sorted(result.graph.nodes), ["F1"],
+                         "an event the page contradicts must not become a node")
+        self.assertEqual(self._codes(result), ["PROC_X"],
+                         "the documented service must still be coded")
+        self.assertNotIn("PROC_Y", self._codes(result))
+
+    # ---- the unverifiable: neither silently dropped nor silently included ------------
+    def test_an_unverifiable_recovered_event_holds_instead_of_vanishing(self):
+        """No channel can read the page the candidate is quoted from. "We could not
+        check" is never "confirmed" -- and it is never "forget it" either."""
+        from claude_coder.models import Destination, Outcome
+
+        vision_text = NOTE_UNION
+        # An image-only page: nothing in the compiled document can confirm or refute it.
+        document, tmp = _document(vision_text, [])
+        self.addCleanup(tmp.cleanup)
+
+        result = _run_union(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            _multi_reading(_SECOND_SAME_SERVICE, _SECOND_EXTRA_SERVICE),
+            note_text=document.primary_text(), source_evidence=document)
+
+        recovered = self._recovered(result)
+        self.assertEqual([r["verdict"] for r in recovered],
+                         ["held_unverified"], recovered)
+        self.assertEqual(recovered[0]["node_id"], "",
+                         "an unproven event must not silently enter the graph")
+        self.assertEqual(sorted(result.graph.nodes), ["F1"])
+
+        # ...and it did not silently vanish either: it is a gate on the encounter.
+        gate = next(g for g in result.gates
+                    if g.name.startswith("second_reading_event_unverified:"))
+        self.assertIs(gate.outcome, Outcome.UNKNOWN, gate.detail)
+        self.assertTrue(gate.retryable,
+                        "an unread page is a dependency failure, not a coder's judgement")
+        self.assertIsNot(result.destination, Destination.AUTO_READY)
+        self.assertFalse(
+            any(r["destination"] == Destination.REVIEW.value for r in result.routing),
+            f"a page that could not be read must not reach a coder queue: "
+            f"{result.routing}")
+
+    # ---- the binding: a recovered event cannot bypass the certificate ----------------
+    def test_a_recovered_event_is_bound_by_the_certificate_and_the_bundle(self):
+        """It participates in the graph digest and the claim binding exactly like a
+        primary event -- there is no path by which a recovered line is released without
+        the graph that justifies it being attested."""
+        from app.contracts.claim_bundle import (AuthorityBinding, EncounterContext,
+                                                SourceDocument, bundle_from_coding_result)
+
+        result = _run_union(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            _multi_reading(_SECOND_SAME_SERVICE, _SECOND_EXTRA_SERVICE))
+        node_id = self._recovered(result)[0]["node_id"]
+
+        record = result.graph.certificate_record()
+        self.assertIn(node_id, record["node_ids"])
+        self.assertEqual(record["graph_sha256"], result.graph.graph_sha256())
+
+        bundle = bundle_from_coding_result(
+            result, source_document=SourceDocument(filename="n"),
+            context=EncounterContext(), authority=AuthorityBinding())
+        self.assertIn(node_id, bundle.graph.clinical_event_ids,
+                      "a released recovered line must name the graph it rests on")
+        self.assertEqual(bundle.graph.graph_sha256, result.graph.graph_sha256())
+        self.assertFalse(any("not bound to the clinical graph" in b
+                             for b in bundle.release_blockers()),
+                         bundle.release_blockers())
+
+    # ---- the relational context travels with the event -------------------------------
+    def test_a_recovered_component_the_record_calls_part_of_another_is_not_billed_twice(self):
+        """The second reading's own edges naming a recovered event are carried into the
+        graph and validated like primary edges, so an event the record calls PART OF
+        another service is demoted rather than becoming an extra line."""
+        import json
+
+        def _reading_with_part_of():
+            return json.dumps({
+                "facts": [
+                    {"fact_id": "F1", "kind": "procedure",
+                     "description": "procedure alpha performed excision",
+                     "attributes": {"laterality": "left", "performer_id": "actor-1",
+                                    "billing_entity_id": "actor-1"},
+                     "disposition": "performed_today", "negated": False,
+                     "evidence": ["Procedure alpha performed today on the left side"],
+                     "confidence": 0.99},
+                    {"fact_id": "F2", "kind": "procedure",
+                     "description": "procedure beta performed excision",
+                     "attributes": {"laterality": "left", "performer_id": "actor-1",
+                                    "billing_entity_id": "actor-1"},
+                     "disposition": "performed_today", "negated": False,
+                     "evidence": ["Procedure beta performed today on the left side"],
+                     "confidence": 0.99}],
+                "relations": [
+                    {"subject_event_id": "F2", "predicate": "part_of",
+                     "object_event_id": "F1", "state": "asserted",
+                     "evidence_fact_ids": ["F1", "F2"], "confidence": 0.9}]})
+
+        result = _run_union(_multi_reading(_PRIMARY_ONE_SERVICE),
+                            _reading_with_part_of())
+        recovered = self._recovered(result)
+        self.assertEqual([r["verdict"] for r in recovered], ["admitted"], recovered)
+        node_id = recovered[0]["node_id"]
+        # The EDGE came across with it, expressed in canonical graph ids.
+        carried = [e for e in result.graph.edges
+                   if node_id in e.endpoints() and "F1" in e.endpoints()]
+        self.assertTrue(carried, [e.as_record() for e in result.graph.edges])
+        self.assertEqual(result.graph.integrity_problems(), ())
+
+    # ---- failure paths OF THE FIX ITSELF ---------------------------------------------
+    def test_stranding_one_recovered_event_strands_what_depended_on_it(self):
+        """The fix's own cascade. A recovered event held back because one of its edges
+        cannot be carried is no longer in the graph -- so an edge naming it cannot be
+        carried either, and whatever that edge DEMOTED must be held too. Stopping after
+        one pass would admit a component with exactly the PART_OF that suppressed it
+        deleted, which is the extra billable line this control exists to prevent."""
+        import json
+
+        note = ("Procedure alpha performed today on the left side. "
+                "Procedure beta performed today on the left side. "
+                "Procedure delta performed today on the left side. "
+                "Condition alpha addressed today.")
+
+        def _event(fact_id, description, quote):
+            return {"fact_id": fact_id, "kind": "procedure", "description": description,
+                    "attributes": {"laterality": "left", "performer_id": "actor-1",
+                                   "billing_entity_id": "actor-1"},
+                    "disposition": "performed_today", "negated": False,
+                    "evidence": [quote], "confidence": 0.99}
+
+        second = json.dumps({
+            "facts": [
+                _event("F1", "procedure alpha performed excision",
+                       "Procedure alpha performed today on the left side"),
+                _event("F2", "procedure beta performed excision",
+                       "Procedure beta performed today on the left side"),
+                _event("F3", "procedure delta performed excision",
+                       "Procedure delta performed today on the left side"),
+                # Quotes text that is not in the document at all: nothing can place it,
+                # so it never enters the graph and never enters the id mapping.
+                _event("F4", "procedure omega performed excision",
+                       "Procedure omega performed today")],
+            "relations": [
+                {"subject_event_id": "F2", "predicate": "part_of",
+                 "object_event_id": "F3", "state": "asserted",
+                 "evidence_fact_ids": ["F2", "F3"], "confidence": 0.9},
+                {"subject_event_id": "F3", "predicate": "part_of",
+                 "object_event_id": "F4", "state": "asserted",
+                 "evidence_fact_ids": ["F3"], "confidence": 0.9}]})
+
+        result = _run_union(_multi_reading(_PRIMARY_ONE_SERVICE), second,
+                            note_text=note)
+
+        verdicts = {r["second_event_id"]: r["verdict"]
+                    for r in self._recovered(result)}
+        self.assertEqual(verdicts["F4"], "rejected_unanchored", verdicts)
+        self.assertEqual(verdicts["F3"], "held_unverified", verdicts)
+        self.assertEqual(verdicts["F2"], "held_unverified",
+                         f"the cascade must reach the event whose demotion was "
+                         f"deleted: {verdicts}")
+        self.assertEqual(sorted(result.graph.nodes), ["F1"])
+        self.assertEqual(self._codes(result), ["PROC_X"])
+
+    def test_a_recovered_edge_the_relation_kernel_rejects_holds_only_the_recovery(self):
+        """The other failure path of the fix. `validate_relations` fails closed BY
+        RAISING, and at the pipeline boundary a raise is a whole-encounter system hold.
+        A malformed edge from the SECOND reading must take the recovered events out, not
+        the encounter down: the recovered set is validated on a trial copy first."""
+        import json
+        from claude_coder.models import Destination
+
+        # The PRIMARY reading's quotation is not verbatim in the note, so it anchors
+        # nothing -- which makes an edge whose only evidence reference is that event
+        # unbindable, and therefore rejected by the relation kernel.
+        primary = json.dumps({"facts": [
+            {"fact_id": "F1", "kind": "procedure",
+             "description": "excision procedure alpha performed",
+             "attributes": {"laterality": "left", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Procedure omega performed today"], "confidence": 0.99}]})
+        second = json.dumps({
+            "facts": [
+                {"fact_id": "F1", "kind": "procedure",
+                 "description": "procedure alpha performed excision",
+                 "attributes": {"laterality": "left", "performer_id": "actor-1",
+                                "billing_entity_id": "actor-1"},
+                 "disposition": "performed_today", "negated": False,
+                 "evidence": ["Procedure alpha performed today on the left side"],
+                 "confidence": 0.99},
+                {"fact_id": "F2", "kind": "procedure",
+                 "description": "procedure beta performed excision",
+                 "attributes": {"laterality": "left", "performer_id": "actor-1",
+                                "billing_entity_id": "actor-1"},
+                 "disposition": "performed_today", "negated": False,
+                 "evidence": ["Procedure beta performed today on the left side"],
+                 "confidence": 0.99}],
+            "relations": [
+                {"subject_event_id": "F2", "predicate": "part_of",
+                 "object_event_id": "F1", "state": "asserted",
+                 "evidence_fact_ids": ["F1"], "confidence": 0.9}]})
+
+        result = _run_union(primary, second)
+
+        recovered = self._recovered(result)
+        self.assertEqual([r["verdict"] for r in recovered], ["held_unverified"],
+                         recovered)
+        self.assertEqual(recovered[0]["node_id"], "")
+        self.assertNotIn("second-reading-F2", result.graph.nodes)
+        # ...and the ENCOUNTER is not taken down by it.
+        self.assertIsNot(result.destination, Destination.SYSTEM_HOLD)
+        self.assertFalse(any(g.name == "pre_retrieval_integrity" for g in result.gates),
+                         [g.name for g in result.gates])
 
 if __name__ == "__main__":
     unittest.main()

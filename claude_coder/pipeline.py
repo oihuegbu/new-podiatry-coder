@@ -241,10 +241,50 @@ def code_encounter(
         # for the same event aligns and produces no disagreement at all, so nothing can
         # be routed anywhere merely because two models phrased a finding differently.
         consensus = None
+        recovery = None
         if extract_llm_b is not None:
-            consensus, source_evidence = _run_graph_consensus(
+            consensus, source_evidence, recovery = _run_graph_consensus(
                 note_text, facts, billing_context, extract_llm_b, profiles,
                 document_version, source_evidence, source_reader)
+            # ---- RECALL redundancy, not only axis agreement (issue #6 F7-R3) ---------
+            # A performed service the PRIMARY extractor missed entirely used to be
+            # recorded in consensus metadata and dropped, so the encounter proceeded with
+            # an incomplete graph, no integrity complaint, and a silently under-coded
+            # claim. An event the union ADMITTED -- proven against the original page and
+            # found to rest on document text no primary event rests on -- is appended to
+            # the primary fact list HERE, before source reconciliation, eligibility, graph
+            # construction and retrieval. From this line on it is not a recovered event at
+            # all: it is a fact, decided by exactly the code every primary fact is decided
+            # by, with no parallel path that could drift.
+            if recovery.facts:
+                # On a TRIAL copy first. The second reading's edges naming a recovered
+                # event go through the SAME binding and validation as primary edges -- so
+                # a component the record calls PART_OF another service is demoted, not
+                # billed twice -- and that validation fails CLOSED by raising, which at
+                # this function's boundary is a whole-encounter hold. A malformed edge
+                # from the SECOND reading must take the recovered events out, not the
+                # encounter down: if the trial does not validate, the admissions are
+                # withdrawn (recorded, and held by the gate below) and the primary
+                # encounter proceeds exactly as it would have without a second reading.
+                trial_facts = list(facts) + list(recovery.facts)
+                try:
+                    trial_relations = (
+                        _prov.validate_relations(
+                            list(relations) + _prov.bind_relation_evidence(
+                                recovery.relations, trial_facts),
+                            trial_facts, note_text)
+                        if recovery.relations else relations)
+                except _prov.RelationIntegrityError as exc:
+                    recovery.withdraw(
+                        f"the second reading's relational context for this event could "
+                        f"not be validated against the relation kernel "
+                        f"({type(exc).__name__}), so it was not added to the graph")
+                else:
+                    facts.extend(recovery.facts)
+                    relations = trial_relations
+            # Recorded AFTER admission is final, so the audit record and the graph carry
+            # the verdict that actually held -- never an admission the trial withdrew.
+            consensus.recovered_events = recovery.as_records()
             audit_hashes.append(audit_repository.append(
                 encounter_id, "graph_consensus", consensus.as_record()))
         # ---- Source evidence: the transcription is a CANDIDATE reading ---------------
@@ -308,7 +348,10 @@ def code_encounter(
             extraction_schema_version=extracted.schema_version,
             relation_grammar_version=_prov.load_relation_grammar()["version"],
             axis_resolutions=(consensus.resolutions if consensus is not None else ()),
-            unmatched_second_reading=(consensus.unmatched_second
+            # The UNION's verdict on every second-reading-only event, not the raw
+            # unmatched list: an admitted one is already a node above, and the rest are
+            # recorded here with the reason they are not.
+            unmatched_second_reading=(consensus.recovered_events
                                       if consensus is not None else ()))
         graph_problems = clinical_graph.integrity_problems()
         audit_hashes.append(audit_repository.append(
@@ -333,6 +376,16 @@ def code_encounter(
         pre_retrieval_gates.append(GateResult(
             "clinical_graph_integrity", Outcome.BLOCKED, "; ".join(graph_problems),
             "clinical evidence/service graph", retryable=False))
+    # An event an independent reading of the ORIGINAL DOCUMENT reported, that this run
+    # could neither confirm nor refute, must not let the encounter present as a complete
+    # claim -- that is the silent omission this control exists to prevent, one step
+    # later. It is SYSTEM work, not coding work and not a documentation gap: what is
+    # missing is a reading of the page, so it is retryable and never routed to a coder.
+    for _held in (recovery.holds if recovery is not None else ()):
+        pre_retrieval_gates.append(GateResult(
+            f"second_reading_event_unverified:{_held.second_event_id}",
+            Outcome.UNKNOWN, _held.reason,
+            "event-candidate union (product directive section 3)", retryable=True))
     lines = []
     for fact in facts:
         _it = _elig_state.get(fact.fact_id)
@@ -685,18 +738,30 @@ def _system_hold_result(encounter_id: str, date_of_service: str | None,
 
 def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profiles,
                          document_version, source_evidence, source_reader):
-    """Second reading -> axis comparison -> TARGETED original-page verification.
+    """Second reading -> EVENT-CANDIDATE UNION + axis comparison -> TARGETED
+    original-page verification.
 
-    Returns `(report, source_evidence)`. The document is returned because a targeted
-    page verification may have added a paid independent channel to it: carrying that
-    forward means the later release-time escalation never pays to read the same page
+    Returns `(report, source_evidence, recovery)`. The document is returned because a
+    targeted page verification may have added a paid independent channel to it: carrying
+    that forward means the later release-time escalation never pays to read the same page
     twice, and the reconciliation the claim is finally proven against is the strongest
-    reading obtained anywhere in the run.
+    reading obtained anywhere in the run. The `recovery` is the union's decision about
+    every event only the second reading found (`claude_coder.event_union`): the caller
+    appends its facts/edges to the PRIMARY graph inputs, so a service the primary
+    extractor missed is decided by the ordinary pipeline instead of being recorded and
+    dropped (issue #6 F7-R3).
+
+    ONE page reconciliation serves both jobs. The axis comparison needs the pages behind
+    a disagreeing quotation; the union needs the pages behind a candidate new event; both
+    are reconciled together and, when a page cannot be read at all, escalated together --
+    so recovering an event never costs a second paid read of a page this run already
+    bought.
 
     Failure is loud, never silent: anything that goes wrong here propagates to the
     caller's pre-retrieval boundary, which holds the encounter with zero retrieval. A
     second reading that could not be taken must never present as two readings agreeing.
     """
+    from . import event_union as _union
     from . import graph_consensus as _gc
     from . import provenance as _prov
 
@@ -705,24 +770,35 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
         run_id=_SECOND_READING_RUN_ID,
         model_profile=profiles.get("second_extraction"))
     _prov.anchor_facts(note_text, extracted_b.facts, document_version=document_version)
+    # ONE alignment, shared: an event the axis comparison counted as MATCHED must never
+    # also be proposed to the union as a new event, and the only way to guarantee that is
+    # for both to read the same correspondence rather than recompute it.
+    alignment = _gc.align(facts, extracted_b.facts)
     report, primary_by_id, second_by_node = _gc.compare(
-        facts, extracted_b.facts, second_origin=extracted_b.origin)
+        facts, extracted_b.facts, second_origin=extracted_b.origin, alignment=alignment)
+    pairs, _unmatched_primary_facts, unmatched_second_facts = alignment
+    # Identity first, page reads second: only a candidate that rests on document text no
+    # primary event rests on can change the claim, so only those are worth proving.
+    candidates = _union.propose(facts, unmatched_second_facts)
     primary_provider = str((profiles.get("extraction") or {}).get("provider") or "")
     second_provider = str((profiles.get("second_extraction") or {}).get("provider") or "")
     report.independent_providers = bool(
         primary_provider and second_provider and primary_provider != second_provider)
 
     reconciliation = None
-    if source_evidence is not None and report.disagreements:
+    wanted = set(_union.pending_span_ids(candidates))
+    if report.disagreements:
+        wanted |= _gc.disagreement_span_ids(report.disagreements, primary_by_id,
+                                            second_by_node)
+    if source_evidence is not None and wanted:
         from app.contracts.source_evidence import (pages_needing_independent_read,
                                                    reconcile_spans)
-        wanted = _gc.disagreement_span_ids(report.disagreements, primary_by_id,
-                                           second_by_node)
         targets = [t for t in _prov.span_targets(list(facts) + list(extracted_b.facts))
                    if t.span_id in wanted]
         reconciliation = reconcile_spans(source_evidence, targets)
         # TARGETED escalation, exactly as the directive asks: pay for an independent read
-        # of only the pages a disagreeing quotation sits on that no channel could read.
+        # of only the pages a disagreeing quotation -- or a candidate new event -- sits on
+        # that no channel could read.
         if source_reader is not None:
             pages = pages_needing_independent_read(source_evidence, reconciliation,
                                                    wanted)
@@ -733,23 +809,32 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
                     reconciled = reconcile_spans(escalated, targets)
                 except Exception as exc:
                     # A verification that could not run proves nothing, and must not look
-                    # like one: the affected axes stay unresolved and become a query.
+                    # like one: the affected axes stay unresolved and become a query, and
+                    # an unproven candidate event is held rather than admitted.
                     report.escalation_detail = (
                         f"targeted page verification unavailable for pages "
-                        f"{list(pages)} ({type(exc).__name__}); the disagreeing axes "
-                        f"remain unsettled by the original document")
+                        f"{list(pages)} ({type(exc).__name__}); the disagreeing axes and "
+                        f"candidate events remain unsettled by the original document")
                 else:
                     source_evidence = escalated
                     reconciliation = reconciled
                     report.escalated_pages = tuple(pages)
                     report.escalation_detail = (
-                        "disagreeing axes verified against a paid independent read of "
-                        "the original pages")
+                        "disagreeing axes and candidate events verified against a paid "
+                        "independent read of the original pages")
     resolutions = _gc.resolve(list(report.disagreements), primary_by_id, second_by_node,
                               reconciliation)
     _gc.apply_resolutions(primary_by_id, second_by_node, resolutions)
     report.resolutions = tuple(resolutions)
-    return report, source_evidence
+    recovery = _union.admit(
+        candidates, reconciliation=reconciliation,
+        alignment={str(getattr(right, "fact_id", "") or ""):
+                   str(getattr(left, "fact_id", "") or "") for left, right in pairs},
+        second_relations=extracted_b.relations,
+        taken_ids={str(getattr(f, "fact_id", "") or "") for f in facts},
+        id_prefix=f"{_SECOND_READING_RUN_ID}-")
+    report.recovered_events = recovery.as_records()
+    return report, source_evidence, recovery
 
 
 def _model_profile_identity(extract_llm, verify_llm, corroborate_llm,

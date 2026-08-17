@@ -191,11 +191,18 @@ class ConsensusReport:
     axes_compared: int = 0
     disagreements: tuple[AxisDisagreement, ...] = ()
     resolutions: tuple[AxisResolution, ...] = ()
-    #: Events one reading recorded and the other did not. Recorded, never merged: a
-    #: second reading may not add a billable line the primary graph never carried
-    #: through eligibility, ownership and anchoring.
+    #: Events one reading recorded and the other did not, as the ALIGNMENT saw them.
+    #: `unmatched_second` is the raw input to the event-candidate union below, not a
+    #: verdict: what became of each of those events is `recovered_events`.
     unmatched_primary: tuple[dict[str, Any], ...] = ()
     unmatched_second: tuple[dict[str, Any], ...] = ()
+    #: The EVENT-CANDIDATE UNION's verdict on every event only the second reading found
+    #: (`claude_coder.event_union`): admitted into the canonical graph, recognised as a
+    #: reworded duplicate of a primary event, excluded because the original page
+    #: contradicts it, or held because nothing could confirm it. Before this existed, an
+    #: event the primary extractor missed was recorded here and silently dropped, and the
+    #: encounter under-coded with no integrity complaint (issue #6 F7-R3).
+    recovered_events: tuple[dict[str, Any], ...] = ()
     escalated_pages: tuple[int, ...] = ()
     escalation_detail: str = ""
 
@@ -215,6 +222,7 @@ class ConsensusReport:
             "resolutions": [r.as_record() for r in self.resolutions],
             "unmatched_primary": [dict(u) for u in self.unmatched_primary],
             "unmatched_second": [dict(u) for u in self.unmatched_second],
+            "recovered_events": [dict(u) for u in self.recovered_events],
             "escalated_pages": list(self.escalated_pages),
             "escalation_detail": self.escalation_detail,
         }
@@ -306,6 +314,17 @@ def _span_support(fact, reconciliation) -> tuple[bool, str, str, tuple[str, ...]
         if outcome is None or outcome.status not in permitted:
             return False, "", "", span_ids
     return True, PROOF_ORIGINAL_PAGE, text, span_ids
+
+
+def source_support(fact, reconciliation) -> tuple[bool, str, str, tuple[str, ...]]:
+    """THE definition of "the original document backs this reading of this event".
+
+    Public because the EVENT-CANDIDATE UNION (`claude_coder.event_union`) admits a
+    recovered event on exactly this test. Two implementations of "is this reading
+    source-supported?" is precisely how an event the primary extractor missed would be
+    admitted on a weaker bar than the one a corrected axis has to clear.
+    """
+    return _span_support(fact, reconciliation)
 
 
 def _question(disagreement: AxisDisagreement) -> str:
@@ -499,13 +518,20 @@ def disagreement_span_ids(disagreements: list[AxisDisagreement], primary_by_id: 
 
 
 def compare(primary_facts: list, second_facts: list, *,
-            second_origin: Any = None) -> tuple[ConsensusReport, dict, dict]:
+            second_origin: Any = None,
+            alignment: tuple | None = None) -> tuple[ConsensusReport, dict, dict]:
     """Align two readings and list every code-changing axis they disagree on.
 
     Returns the report plus the two id-keyed views the resolver needs, so the caller can
     escalate to the page verifier between comparison and resolution.
+
+    `alignment` accepts an `align()` result the caller already has. The event-candidate
+    union needs the SAME correspondence this comparison used -- an event counted as
+    matched here must not be proposed as a new event there -- so the alignment is
+    computed once and shared rather than recomputed and trusted to agree.
     """
-    pairs, unmatched_primary, unmatched_second = align(primary_facts, second_facts)
+    pairs, unmatched_primary, unmatched_second = (
+        alignment if alignment is not None else align(primary_facts, second_facts))
     disagreements, compared = compare_axes(pairs)
     primary_by_id = {str(getattr(f, "fact_id", "") or ""): f for f in primary_facts}
     second_by_node = {str(getattr(left, "fact_id", "") or ""): right
