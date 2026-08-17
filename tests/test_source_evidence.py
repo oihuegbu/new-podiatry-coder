@@ -47,15 +47,15 @@ from tests.source_pdf import build_pdf, vision_extraction
 # --------------------------------------------------------------------------
 
 
-def _extraction(page_texts, **kwargs):
+def _extraction(page_texts, path=None, **kwargs):
     return vision_extraction(page_texts, metadata={"date_of_service": "2026-03-14"},
-                             page_separator=PAGE_SEPARATOR, **kwargs)
+                             pdf_path=path, page_separator=PAGE_SEPARATOR, **kwargs)
 
 
 def _compile(tmpdir, pdf_pages, vision_pages, **kwargs):
     path = tmpdir / "note.pdf"
     path.write_bytes(build_pdf(pdf_pages))
-    return compile_source_evidence(path, _extraction(vision_pages, **kwargs))
+    return compile_source_evidence(path, _extraction(vision_pages, path, **kwargs))
 
 
 # --------------------------------------------------------------------------
@@ -410,7 +410,7 @@ class PageOutcomeTest(unittest.TestCase):
         path = self.root / "note.pdf"
         path.write_bytes(build_pdf([["alpha beta"], ["gamma delta"]], rotate=[0, 90]))
         document = compile_source_evidence(
-            path, _extraction(["alpha beta", "gamma delta"]))
+            path, _extraction(["alpha beta", "gamma delta"], path))
         self.assertEqual(document.page(2).rotation, 90)
         self.assertIn("rotated:90", document.page(2).flags)
         # Rotation is an observation, not a failure: the page is still readable, so the
@@ -418,10 +418,13 @@ class PageOutcomeTest(unittest.TestCase):
         self.assertTrue(document.page(2).read_by(EMBEDDED_TEXT_CHANNEL_ID).usable)
 
     def test_a_duplicated_page_is_flagged_on_both_pages(self):
-        digest = "sha256:" + "bb" * 32
+        # The SAME rendered bytes on both pages -- which is what a duplicated fax page
+        # is, and now the only way to make two pages share a digest, because the
+        # compiler recomputes each digest from the bytes it was given.
+        same = b"identically-rendered-page"
         document = _compile(self.root, [["alpha beta"], ["alpha beta"]],
                             ["alpha beta", "alpha beta"],
-                            image_digests=[digest, digest])
+                            image_payloads=[same, same])
         self.assertIn("duplicate_of_page:1", document.page(2).flags)
         self.assertTrue(any("renders identically" in a for a in document.anomalies))
 
@@ -464,7 +467,7 @@ class PageOutcomeTest(unittest.TestCase):
     def test_a_transcription_without_pages_is_refused_not_degraded(self):
         path = self.root / "note.pdf"
         path.write_bytes(build_pdf([["alpha beta"]]))
-        payload = _extraction(["alpha beta"])
+        payload = _extraction(["alpha beta"], path)
         payload["page_texts"] = []
         with self.assertRaises(SourceEvidenceCompilationError):
             compile_source_evidence(path, payload)
@@ -472,7 +475,7 @@ class PageOutcomeTest(unittest.TestCase):
     def test_a_compiled_text_that_is_not_what_the_coder_reads_is_refused(self):
         path = self.root / "note.pdf"
         path.write_bytes(build_pdf([["alpha beta"]]))
-        payload = _extraction(["alpha beta"])
+        payload = _extraction(["alpha beta"], path)
         payload["sections"]["full_text"] = "alpha beta gamma"
         with self.assertRaises(SourceEvidenceCompilationError):
             compile_source_evidence(path, payload)
@@ -480,7 +483,7 @@ class PageOutcomeTest(unittest.TestCase):
     def test_an_unopenable_document_yields_no_independent_channel(self):
         path = self.root / "note.pdf"
         path.write_bytes(b"not a pdf at all")
-        document = compile_source_evidence(path, _extraction(["alpha beta"]))
+        document = compile_source_evidence(path, _extraction(["alpha beta"], path))
         self.assertTrue(document.compiler_notes)
         record = _reconcile_one(document, "alpha beta")
         self.assertEqual(record.status, ReconciliationStatus.UNVERIFIABLE)
@@ -580,10 +583,13 @@ class IndependentChannelTest(unittest.TestCase):
 
     def test_a_second_read_from_the_same_vendor_is_not_independent(self):
         from app.contracts.source_evidence import ChannelKind, ReadChannel, build_page_read
-        from app.core.config import LLM_PROVIDER
         document = _compile(self.root, [[]], ["alpha beta gamma delta"])
+        # The vendor that ACTUALLY produced the primary reading, as the compiler
+        # recorded it from the client that answered -- not a configuration setting,
+        # which may describe a call nobody made (issue #6 F7-R5).
         channel = ReadChannel(channel_id="same_vendor_second_pass",
-                              kind=ChannelKind.VISION, provider=LLM_PROVIDER)
+                              kind=ChannelKind.VISION,
+                              provider=document.primary_channel.provider)
         covered = document.with_channel(
             channel, {1: build_page_read("same_vendor_second_pass", 1,
                                          "alpha beta gamma delta")})
@@ -795,3 +801,262 @@ class ServiceDateReconciliationTest(unittest.TestCase):
         self.assertEqual(evidence.status, ReconciliationStatus.UNVERIFIABLE)
         self.assertEqual(evidence.candidate, "")
         self.assertFalse(evidence.reconciled)
+
+
+# --------------------------------------------------------------------------
+# channel and source IDENTITY: derived from what ran, verified from the bytes
+# (issue #6, Codex finding F7-R5)
+# --------------------------------------------------------------------------
+
+class _StubResponse:
+    def __init__(self, payload):
+        from types import SimpleNamespace
+        self.stop_reason = "end_turn"
+        self.content = [SimpleNamespace(type="text", text=payload)]
+        self.usage = SimpleNamespace(input_tokens=1, output_tokens=1)
+
+
+def _transcribe(testcase, pdf_path, page_text, client, *, provider_setting):
+    """Drive the REAL transcriber against `client`, with the generic provider setting
+    deliberately set to `provider_setting`.
+
+    This is the whole point of the regression: the transcriber calls whatever client it
+    was given, and the recorded channel identity must describe THAT call — not the
+    setting, which a deployment is free to point at another vendor entirely.
+    """
+    import json
+    from unittest import mock
+    from PIL import Image
+    from app.core import config as app_config
+    from app.ingestion import pdf_parser
+
+    parsed = {"patient_metadata": {"date_of_service": "2026-03-14"},
+              "sections": {}, "note_category": "other",
+              "procedures_performed_today": [], "imaging_performed_today": [],
+              "supplies_dispensed_today": [], "prior_surgery_info": {},
+              "physician_documented_codes": [],
+              "page_texts": [{"page_number": 1, "status": "extracted",
+                              "text": page_text}]}
+    response = _StubResponse(json.dumps(parsed))
+    client.response = response
+    with mock.patch.object(pdf_parser, "convert_from_path",
+                           return_value=[Image.new("RGB", (2, 2))]), \
+            mock.patch.object(app_config, "LLM_PROVIDER", provider_setting), \
+            mock.patch("app.core.llm_client.get_anthropic_client",
+                       return_value=client), \
+            mock.patch("app.core.llm_client._claude_message_via_batch",
+                       return_value=response):
+        return pdf_parser.extract_from_pdf(pdf_path)
+
+
+class _StubClient:
+    """Stands in for an SDK client object: answers `messages.create(...)`.
+
+    What matters to the identity machinery is the PACKAGE that implements it, which is
+    exactly what a real deployment's client carries and what a configuration setting
+    cannot contradict.
+    """
+
+    def __init__(self, response=None):
+        from types import SimpleNamespace
+        self.response = response
+        self.messages = SimpleNamespace(create=lambda **kwargs: self.response)
+
+
+class _AnthropicLikeClient(_StubClient):
+    """A client object whose implementing package is the Anthropic SDK's."""
+    __module__ = "anthropic._client"
+
+
+class _OpenAILikeClient(_StubClient):
+    __module__ = "openai._client"
+
+
+class _UnknownClient(_StubClient):
+    __module__ = "some.vendor.sdk"
+
+
+class MisdeclaredProviderTest(unittest.TestCase):
+    """The recorded channel identity is the vendor that ANSWERED, not the configured one.
+
+    Before this, the compiler read the primary channel's provider from the generic
+    `LLM_PROVIDER` setting while the transcriber called one vendor unconditionally. Under
+    a deployment configured for the other vendor the recorded identity was simply false,
+    and every independence decision taken against it was a decision about a call that was
+    never made — in BOTH directions.
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.path = self.root / "note.pdf"
+        # An IMAGE-ONLY page: nothing deterministic in the document can prove a
+        # quotation on it, so whether the paid second-vendor read counts as independent
+        # is the ONLY thing standing between the quotation and a hold.
+        self.path.write_bytes(build_pdf([[]]))
+
+    def _compiled(self, client, provider_setting):
+        extraction = _transcribe(self, self.path, "alpha beta gamma delta", client,
+                                 provider_setting=provider_setting)
+        return compile_source_evidence(self.path, extraction)
+
+    def test_the_configured_vendor_does_not_overwrite_the_calling_one(self):
+        document = self._compiled(_AnthropicLikeClient(), "openai")
+        self.assertEqual(document.primary_channel.provider, "claude",
+                         "the identity must name the client that actually answered")
+
+    def test_a_second_vendor_read_is_not_rejected_because_config_named_it(self):
+        """The costly half of the defect: a genuinely independent read held for nothing."""
+        from app.contracts.source_evidence import (ChannelKind, ReadChannel,
+                                                   build_page_read)
+        document = self._compiled(_AnthropicLikeClient(), "openai")
+        channel = ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                              kind=ChannelKind.VISION, provider="openai")
+        covered = document.with_channel(
+            channel, {1: build_page_read(SECONDARY_VISION_CHANNEL_ID, 1,
+                                         "alpha beta gamma delta")},
+            require_independent=True)
+        self.assertEqual(_reconcile_one(covered, "alpha beta gamma").status,
+                         ReconciliationStatus.AGREED)
+
+    def test_a_same_vendor_read_is_not_accepted_because_config_named_another(self):
+        """The dangerous half: the transcription read by the SAME vendor as the second
+        channel, with the setting naming the other one. Independence must fail."""
+        from app.contracts.source_evidence import (ChannelIndependenceError, ChannelKind,
+                                                   ReadChannel, build_page_read)
+        document = self._compiled(_OpenAILikeClient(), "claude")
+        self.assertEqual(document.primary_channel.provider, "openai")
+        channel = ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                              kind=ChannelKind.VISION, provider="openai")
+        with self.assertRaises(ChannelIndependenceError):
+            document.with_channel(
+                channel, {1: build_page_read(SECONDARY_VISION_CHANNEL_ID, 1,
+                                             "alpha beta gamma delta")},
+                require_independent=True)
+
+    def test_an_unidentifiable_client_establishes_no_independence(self):
+        """Fail-closed: 'we cannot tell which vendor answered' is never 'independent'."""
+        from app.contracts.source_evidence import (ChannelIndependenceError, ChannelKind,
+                                                   ReadChannel, build_page_read)
+        document = self._compiled(_UnknownClient(), "claude")
+        self.assertEqual(document.primary_channel.provider, "")
+        self.assertTrue(any("provider could not be established" in note
+                            for note in document.compiler_notes))
+        channel = ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                              kind=ChannelKind.VISION, provider="openai")
+        with self.assertRaises(ChannelIndependenceError):
+            document.with_channel(
+                channel, {1: build_page_read(SECONDARY_VISION_CHANNEL_ID, 1,
+                                             "alpha beta gamma delta")},
+                require_independent=True)
+
+    def test_a_transcription_that_declares_no_channel_identity_is_refused(self):
+        payload = _extraction(["alpha beta gamma delta"], self.path)
+        payload["note_integrity"].pop("vision_channel")
+        with self.assertRaises(SourceEvidenceCompilationError):
+            compile_source_evidence(self.path, payload)
+
+
+class SameProviderIndependentReaderTest(unittest.TestCase):
+    """A reader configured as the independent channel must FAIL CLOSED when it is not."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.path = self.root / "note.pdf"
+        self.path.write_bytes(build_pdf([[]]))
+        self.document = compile_source_evidence(
+            self.path, _extraction(["alpha beta gamma delta"], self.path))
+
+    def _reader(self, client):
+        from unittest import mock
+        from app.ingestion.source_evidence import IndependentVisionReader
+        reader = IndependentVisionReader(
+            self.path, primary_channel=self.document.primary_channel)
+        return reader, mock.patch("app.core.llm_client.get_openai_client",
+                                  return_value=client)
+
+    def test_a_reader_whose_client_is_the_primary_vendor_refuses_before_paying(self):
+        from app.contracts.source_evidence import ChannelIndependenceError
+        self.assertEqual(self.document.primary_channel.provider, "claude")
+        # The reader's client resolves to the SAME vendor that produced the primary
+        # reading — the case a fixed `provider="openai"` label could never notice.
+        reader, patched = self._reader(_AnthropicLikeClient())
+        with patched:
+            with self.assertRaises(ChannelIndependenceError):
+                reader.channel()
+            # ...and nothing is rendered or sent: the refusal happens on identity.
+            with self.assertRaises(ChannelIndependenceError):
+                reader.read_pages((1,))
+
+    def test_a_reader_bound_to_nothing_cannot_establish_independence(self):
+        from app.contracts.source_evidence import ChannelIndependenceError
+        from app.ingestion.source_evidence import IndependentVisionReader
+        from unittest import mock
+        reader = IndependentVisionReader(self.path)
+        with mock.patch("app.core.llm_client.get_openai_client",
+                        return_value=_OpenAILikeClient()):
+            with self.assertRaises(ChannelIndependenceError):
+                reader.channel()
+
+    def test_a_genuinely_independent_reader_is_accepted(self):
+        reader, patched = self._reader(_OpenAILikeClient())
+        with patched:
+            channel = reader.channel()
+        self.assertEqual(channel.provider, "openai")
+        self.assertEqual(channel.channel_id, SECONDARY_VISION_CHANNEL_ID)
+
+
+class SourceDigestVerificationTest(unittest.TestCase):
+    """Source identity is a fact the compiler establishes, not an upstream assertion."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.path = self.root / "note.pdf"
+        self.path.write_bytes(build_pdf([["alpha beta gamma"]]))
+
+    def test_a_document_digest_that_is_not_the_document_is_refused(self):
+        payload = _extraction(["alpha beta gamma"], self.path)
+        payload["note_integrity"]["source_pdf_sha256"] = "sha256:" + "ee" * 32
+        with self.assertRaisesRegex(SourceEvidenceCompilationError,
+                                    "not the same bytes"):
+            compile_source_evidence(self.path, payload)
+
+    def test_the_recorded_digest_is_the_one_the_compiler_computed(self):
+        import hashlib
+        document = compile_source_evidence(
+            self.path, _extraction(["alpha beta gamma"], self.path))
+        self.assertEqual(
+            document.document_sha256,
+            "sha256:" + hashlib.sha256(self.path.read_bytes()).hexdigest())
+
+    def test_a_page_image_digest_that_the_bytes_do_not_produce_is_refused(self):
+        payload = _extraction(["alpha beta gamma"], self.path)
+        payload["note_integrity"]["page_images"][0]["sha256"] = "sha256:" + "ff" * 32
+        with self.assertRaisesRegex(SourceEvidenceCompilationError, "digests to"):
+            compile_source_evidence(self.path, payload)
+
+    def test_a_page_image_digest_with_no_bytes_to_check_it_is_refused(self):
+        payload = _extraction(["alpha beta gamma"], self.path)
+        payload["page_image_bytes"] = {}
+        with self.assertRaisesRegex(SourceEvidenceCompilationError, "cannot verify"):
+            compile_source_evidence(self.path, payload)
+
+    def test_a_swapped_document_is_caught_even_though_the_reading_is_consistent(self):
+        """The end-to-end shape of the defect: the transcription is internally perfect
+        and describes a DIFFERENT file from the one being compiled."""
+        other = self.root / "other.pdf"
+        other.write_bytes(build_pdf([["delta epsilon zeta"]]))
+        payload = _extraction(["alpha beta gamma"], self.path)
+        with self.assertRaises(SourceEvidenceCompilationError):
+            compile_source_evidence(other, payload)

@@ -12,6 +12,9 @@ built from — without adding a build-time dependency to the deployed image.
 """
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 #: Width budget, in characters, before a logical line is wrapped onto the next visual
 #: line. Purely cosmetic — reconciliation is whitespace-tokenized, so wrapping cannot
 #: change what any channel reads — but it keeps the text inside the MediaBox, which is
@@ -80,34 +83,81 @@ def build_pdf(pages: list[list[str]], *, rotate: list[int] | None = None) -> byt
     return bytes(out)
 
 
-def page_images(count: int) -> list[dict]:
+def digest_of(raw: bytes) -> str:
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def rendered_page(index: int) -> bytes:
+    """Stand-in bytes for ONE rendered page image.
+
+    The compiler now RECOMPUTES every page-image digest from the bytes the transcriber
+    hands it (issue #6 F7-R5), so a fixture can no longer assert a digest out of thin
+    air: it must supply bytes that produce the digest it claims. These only have to be
+    distinct per page and stable — nothing reads them as an image.
+    """
+    return f"rendered-page-{index}".encode("utf-8")
+
+
+#: The identity the compiler records for the primary reading. It is the shape
+#: `pdf_parser` declares for the call it actually made — the vendor of the client that
+#: answered, the model that was sent, the prompt digest — and the compiler refuses a
+#: transcription that carries none, because channel independence would then be decided
+#: against a guess. "claude" mirrors the deployed transcriber, so the paid OpenAI page
+#: reader is genuinely independent of it in these suites exactly as in production.
+VISION_CHANNEL = {
+    "provider": "claude",
+    "profile": "test-vision-model",
+    "prompt_sha256": "sha256:" + "11" * 32,
+    "schema_version": "pdf_parser/vision-1",
+    "client": "tests.source_pdf.StubVisionClient",
+}
+
+
+def page_images(payloads: list[bytes]) -> list[dict]:
     """Identity of the rendered page images the vision channel was shown."""
-    return [{"page_number": index, "sha256": f"sha256:{index:064d}",
+    return [{"page_number": index, "sha256": digest_of(raw),
              "width": 2550, "height": 3300}
-            for index in range(1, count + 1)]
+            for index, raw in enumerate(payloads, start=1)]
 
 
 def vision_extraction(page_texts: list[str], *, metadata: dict | None = None,
                       statuses: list[str] | None = None,
-                      document_version: str = "sha256:" + "a1" * 32,
+                      pdf_path: str | Path | None = None,
+                      document_version: str | None = None,
                       extracted_text_sha256: str = "",
-                      image_digests: list[str] | None = None,
+                      image_payloads: list[bytes] | None = None,
+                      vision_channel: dict | None = None,
                       page_separator: str = "\n\n") -> dict:
-    """Exactly the shape `pdf_parser.extract_from_pdf` returns for those pages."""
+    """Exactly the shape `pdf_parser.extract_from_pdf` returns for those pages.
+
+    `pdf_path` is the document this reading is OF. The compiler recomputes that file's
+    digest and refuses a transcription claiming a different one, so any fixture that is
+    actually compiled must say which file it read; `document_version` remains available
+    for the negative case (a claim that deliberately does not match the bytes).
+    """
     statuses = statuses or ["extracted"] * len(page_texts)
-    images = ([{"page_number": index, "sha256": digest, "width": 2550, "height": 3300}
-               for index, digest in enumerate(image_digests, start=1)]
-              if image_digests else page_images(len(page_texts)))
+    payloads = (list(image_payloads) if image_payloads is not None
+                else [rendered_page(index)
+                      for index in range(1, len(page_texts) + 1)])
+    images = page_images(payloads)
+    if document_version is None:
+        document_version = (digest_of(Path(pdf_path).read_bytes())
+                            if pdf_path is not None else "sha256:" + "a1" * 32)
     return {
         "metadata": dict(metadata or {}),
         "sections": {"full_text": page_separator.join(page_texts)},
         "page_texts": [{"page_number": index, "status": status, "text": text}
                        for index, (text, status)
                        in enumerate(zip(page_texts, statuses), start=1)],
+        # The bytes each page-image digest above was taken from. The compiler verifies
+        # rather than trusts, so a fixture supplies them exactly as the parser does.
+        "page_image_bytes": {index: raw
+                             for index, raw in enumerate(payloads, start=1)},
         "note_integrity": {
             "source_pdf_sha256": document_version,
             "extracted_text_sha256": extracted_text_sha256,
             "page_count": len(page_texts),
             "page_images": images,
+            "vision_channel": dict(vision_channel or VISION_CHANNEL),
         },
     }

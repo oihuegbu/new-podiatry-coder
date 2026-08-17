@@ -182,11 +182,18 @@ class ConsensusReport:
     schema_version: str = CONSENSUS_SCHEMA_VERSION
     control_mode: str = "ENFORCED_FAIL_CLOSED"
     second_reading_origin: dict[str, Any] = field(default_factory=dict)
-    #: Did the second reading come from a DIFFERENT declared provider? Recorded, never
-    #: relied upon: nothing here is decided by the two readings agreeing, so a
-    #: same-provider second reading is still a legitimate disagreement detector - but an
-    #: artifact must never imply an independence the run did not have.
+    #: Did the second reading come from a DIFFERENT provider, as declared by the
+    #: callable that made it? Nothing here is decided by the two readings AGREEING, so a
+    #: same-provider second reading is still a legitimate disagreement detector and is
+    #: allowed - but an artifact must never imply an independence the run did not have.
+    #: When the pipeline enables the second reading as its OWN independence control
+    #: (`independence_enforced`), a pair that is not positively different is refused
+    #: before either reading is taken and no report is produced at all (issue #6 F7-R5).
     independent_providers: bool = False
+    #: Was independence a PRECONDITION of this run (the pipeline's control) or an
+    #: observation about a caller-supplied second extractor? The two are different
+    #: claims and a reader of the record must be able to tell them apart.
+    independence_enforced: bool = False
     matched_events: int = 0
     axes_compared: int = 0
     disagreements: tuple[AxisDisagreement, ...] = ()
@@ -216,6 +223,7 @@ class ConsensusReport:
             "control_mode": self.control_mode,
             "second_reading_origin": dict(self.second_reading_origin),
             "independent_providers": self.independent_providers,
+            "independence_enforced": self.independence_enforced,
             "matched_events": self.matched_events,
             "axes_compared": self.axes_compared,
             "disagreements": [d.as_record() for d in self.disagreements],

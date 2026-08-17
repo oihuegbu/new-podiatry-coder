@@ -92,6 +92,20 @@ class InvalidSourceEvidenceDocument(SourceEvidenceError):
     """The payload declares a supported schema but does not satisfy it."""
 
 
+class ChannelIndependenceError(SourceEvidenceError):
+    """A channel that must be INDEPENDENT of the primary reading is not (F7-R5).
+
+    Raised, never recorded-and-continued. A same-kind channel that shares the primary
+    channel's provider -- or whose provider could not be established at all -- cannot be
+    evidence about the primary reading: one vendor agreeing with itself is repetition,
+    not confirmation. Admitting such a channel would put a reading in the document that
+    `reconcile_spans` must not credit, while making the record LOOK independently
+    checked; and paying for it would buy nothing. The correct outcome for "the second
+    channel we obtained is not independent" is a loud stop, exactly as for "no second
+    channel could be obtained".
+    """
+
+
 # --------------------------------------------------------------------------
 # enums
 # --------------------------------------------------------------------------
@@ -418,18 +432,27 @@ class SourceEvidenceDocument(_Strict):
 
     # ------------------------------------------------------- transformations
 
-    def with_channel(self, channel: ReadChannel,
-                     reads: dict[int, PageRead]) -> "SourceEvidenceDocument":
+    def with_channel(self, channel: ReadChannel, reads: dict[int, PageRead],
+                     *, require_independent: bool = False) -> "SourceEvidenceDocument":
         """A COPY carrying one more channel — how a lazily obtained second read is
         added without mutating an already-attested document.
 
         Refuses to replace an existing channel id: a channel whose reads can be
         overwritten is not evidence of anything.
+
+        `require_independent` is set by every caller adding a channel whose PURPOSE is
+        to check the primary reading. It makes independence a checked precondition of
+        entering the document rather than a property the reconciler silently discovers
+        is absent (issue #6 F7-R5): without it, a second read that shares the primary's
+        provider is admitted, contributes nothing, and leaves an audit record naming a
+        channel that proved nothing.
         """
         if self.channel(channel.channel_id) is not None:
             raise InvalidSourceEvidenceDocument(
                 f"channel {channel.channel_id!r} is already part of this document; "
                 f"a second read is a NEW channel, never an overwrite of an old one")
+        if require_independent:
+            require_independent_channel(self, channel)
         pages = tuple(
             page.model_copy(update={"reads": page.reads + (reads[page.page_number],)})
             if page.page_number in reads else page
@@ -491,6 +514,33 @@ def independent_of(channel: ReadChannel, primary: ReadChannel) -> bool:
         return True
     return bool(channel.provider) and bool(primary.provider) and \
         channel.provider != primary.provider
+
+
+def require_independent_channel(document: SourceEvidenceDocument,
+                                channel: ReadChannel) -> None:
+    """Fail closed unless `channel` is genuinely independent of `document`'s primary.
+
+    `independent_of` ANSWERS the question; this one ENFORCES it, and is called by every
+    path that obtains a channel in order to check the primary reading. Both refusals it
+    can raise are the same defect seen from two sides: a reading credited as independent
+    that is not weakens the control silently, and a reading rejected as same-provider
+    that actually is independent holds the encounter for nothing -- which is why the
+    identities being compared must come from the client/callable that ran, not from a
+    configuration setting that may describe a different call (issue #6 F7-R5).
+    """
+    primary = document.primary_channel
+    if primary is None:
+        raise ChannelIndependenceError(
+            f"channel {channel.channel_id!r} cannot be established as independent: the "
+            f"document declares no primary read channel to be independent OF")
+    if not independent_of(channel, primary):
+        raise ChannelIndependenceError(
+            f"channel {channel.channel_id!r} (kind {channel.kind.value}, provider "
+            f"{channel.provider or '<undeclared>'}) is not independent of the primary "
+            f"channel {primary.channel_id!r} (kind {primary.kind.value}, provider "
+            f"{primary.provider or '<undeclared>'}); a reading that shares the primary "
+            f"reading's provider -- or whose provider is not positively established --"
+            f" cannot be evidence about it")
 
 
 def load_document(payload: Any) -> SourceEvidenceDocument:

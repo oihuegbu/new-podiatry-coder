@@ -11,9 +11,15 @@ and the certificate looking exactly like a correct one.
 This module compiles the SAME document into a `SourceEvidenceDocument`
 (`app/contracts/source_evidence.py`) carrying:
 
-    * the original PDF's own digest;
+    * the original PDF's own digest, computed HERE from the bytes this module read
+      and compared against whatever digest the transcription claimed (a disagreement
+      is refused: the reading and the original would not be the same document);
     * the identity of every rendered page image the vision channel was actually
-      shown (taken from the transcriber, not re-derived — see below);
+      shown — recomputed from the rendered bytes the transcriber hands over, never
+      merely restated from it, and refused outright when it cannot be recomputed;
+    * the DECLARED identity of the call that produced the primary reading (the vendor
+      of the client object that answered, the model actually sent, the prompt digest),
+      which is what channel independence is decided on;
     * the PDF's EMBEDDED TEXT LAYER as a second, deterministic read channel, with
       per-word bounding boxes;
     * explicit per-page outcomes for blank, rotated, duplicated, missing and
@@ -54,8 +60,9 @@ from pathlib import Path
 from typing import Any
 
 from app.contracts.source_evidence import (
-    PAGE_SEPARATOR, ChannelKind, PageRead, PageStatus, ReadChannel, SourceEvidenceDocument,
-    SourcePage, SourceToken, build_page_read, normalize_token,
+    PAGE_SEPARATOR, ChannelIndependenceError, ChannelKind, PageRead, PageStatus,
+    ReadChannel, SourceEvidenceDocument, SourcePage, SourceToken, build_page_read,
+    independent_of, normalize_token,
 )
 from app.core.logger import get_logger
 
@@ -211,18 +218,41 @@ def compile_source_evidence(pdf_path: str | Path, extraction: dict) -> SourceEvi
             f"{pdf_path.name}: the transcription carries no per-page text, so no "
             f"quotation can be located on a page of the original document")
 
-    document_sha256 = str(integrity.get("source_pdf_sha256") or "").strip()
-    if not document_sha256:
-        try:
-            document_sha256 = _digest_bytes(pdf_path.read_bytes())
-        except Exception as exc:
-            raise SourceEvidenceCompilationError(
-                f"{pdf_path.name}: the original document's digest is unavailable "
-                f"({type(exc).__name__}: {exc})") from exc
+    # ---- SOURCE IDENTITY IS ESTABLISHED HERE, NOT ACCEPTED HERE (issue #6 F7-R5) --
+    # The document digest is computed from the bytes this compiler itself read. Any
+    # digest the transcriber reported is then COMPARED against it rather than adopted:
+    # a disagreement means the bytes that were transcribed are not the bytes being
+    # compiled, which makes every page attribution in this document -- and every
+    # evidence-span id salted with the document version -- an attribution to the wrong
+    # file, while looking perfectly well-formed.
+    try:
+        document_sha256 = _digest_bytes(pdf_path.read_bytes())
+    except Exception as exc:
+        raise SourceEvidenceCompilationError(
+            f"{pdf_path.name}: the original document's digest is unavailable "
+            f"({type(exc).__name__}: {exc})") from exc
+    claimed_document_sha256 = str(integrity.get("source_pdf_sha256") or "").strip()
+    if claimed_document_sha256 and claimed_document_sha256 != document_sha256:
+        raise SourceEvidenceCompilationError(
+            f"{pdf_path.name}: the transcription reports source-document digest "
+            f"{claimed_document_sha256}, but the document being compiled digests to "
+            f"{document_sha256}; the reading and the original are not the same bytes")
 
     images = {int(entry.get("page_number") or 0): entry
               for entry in (integrity.get("page_images") or [])
               if isinstance(entry, dict)}
+    # The rendered bytes each page-image digest above was taken from, as handed over by
+    # the transcriber that rendered them (`pdf_parser`). Re-rendering the PDF here would
+    # NOT reproduce them -- dpi, poppler build and colour profile all move the digest --
+    # so the honest check is: recompute from the bytes actually received, and refuse to
+    # record any page identity that cannot be recomputed at all.
+    payloads = extraction.get("page_image_bytes") or {}
+    if not isinstance(payloads, dict):
+        raise SourceEvidenceCompilationError(
+            f"{pdf_path.name}: the transcription's rendered-page bytes are "
+            f"{type(payloads).__name__}, not a mapping of page number to bytes")
+    payloads = {int(k): v for k, v in payloads.items()
+                if str(k).lstrip("-").isdigit()}
     embedded, notes = _embedded_text_pages(pdf_path)
     anomalies: list[str] = []
 
@@ -250,7 +280,7 @@ def compile_source_evidence(pdf_path: str | Path, extraction: dict) -> SourceEvi
         flags: list[str] = []
 
         image = images.get(number) or {}
-        image_sha = str(image.get("sha256") or "")
+        image_sha = _verified_image_digest(pdf_path, number, image, payloads)
         if not image_sha:
             anomalies.append(f"page {number}: no rendered-page image identity was "
                              f"recorded by the transcriber")
@@ -316,11 +346,36 @@ def compile_source_evidence(pdf_path: str | Path, extraction: dict) -> SourceEvi
             char_start=cursor, char_end=cursor + len(text)))
         cursor += len(text) + len(PAGE_SEPARATOR)
 
+    # WHO PRODUCED THE PRIMARY READING (issue #6 F7-R5). Taken from the identity the
+    # transcriber DECLARED for the call it actually made -- the client object that
+    # answered and the model that was actually sent -- not from a generic configuration
+    # setting. `pdf_parser` calls one vendor unconditionally, so a deployment whose
+    # generic provider setting named another vendor used to have this record state a
+    # provider no call was made to; every independence decision taken against it
+    # (`contracts.source_evidence.independent_of`) was then a decision about a call that
+    # never happened, in either direction.
+    declared = integrity.get("vision_channel")
+    if not isinstance(declared, dict) or not declared:
+        raise SourceEvidenceCompilationError(
+            f"{pdf_path.name}: the transcription declares no read-channel identity, so "
+            f"the compiler cannot say which vendor produced the primary reading; "
+            f"channel independence would be decided against a guess")
+    primary_channel = ReadChannel(
+        channel_id=PRIMARY_CHANNEL_ID, kind=ChannelKind.VISION,
+        provider=str(declared.get("provider") or ""),
+        profile=str(declared.get("profile") or ""),
+        prompt_sha256=str(declared.get("prompt_sha256") or ""),
+        schema_version=str(declared.get("schema_version") or ""))
+    if not primary_channel.provider:
+        # Fail-closed, and stated: with no established provider, `independent_of` treats
+        # every same-kind channel as NOT independent, so quotations on an image-only
+        # page hold rather than being "proved" by a reading that may share this vendor.
+        notes.append(
+            f"the primary reading's provider could not be established from the client "
+            f"that produced it ({declared.get('client') or 'unidentified client'}); no "
+            f"second vision channel can be credited as independent of it")
     channels = [
-        ReadChannel(channel_id=PRIMARY_CHANNEL_ID, kind=ChannelKind.VISION,
-                    provider=_primary_provider(), profile=_primary_profile(),
-                    prompt_sha256=_primary_prompt_digest(),
-                    schema_version="pdf_parser/vision-1"),
+        primary_channel,
         ReadChannel(channel_id=EMBEDDED_TEXT_CHANNEL_ID, kind=ChannelKind.EMBEDDED_TEXT,
                     provider="pdf", engine=_pdfplumber_identity(),
                     schema_version="embedded-text-1"),
@@ -367,28 +422,40 @@ def _digest_bytes(raw: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
-def _primary_provider() -> str:
-    try:
-        from app.core.config import LLM_PROVIDER
-        return str(LLM_PROVIDER or "")
-    except Exception:                                     # pragma: no cover - config
+def _verified_image_digest(pdf_path: Path, number: int, image: dict,
+                           payloads: dict[int, Any]) -> str:
+    """The digest of page `number`'s rendered image, RECOMPUTED from its bytes.
+
+    Three outcomes, and none of them is "record what upstream said":
+
+      * no digest claimed -> "" (the caller records the missing-identity anomaly);
+      * a digest claimed with no bytes to check it against -> refuse. An identity the
+        compiler cannot verify is not an identity it will attest to, and a released
+        fact resolves to this digest;
+      * a digest claimed that the bytes do not produce -> refuse. Either the digest or
+        the image is not the one the vision channel was shown, and there is no way to
+        tell which, so neither may be certified.
+    """
+    claimed = str(image.get("sha256") or "")
+    if not claimed:
         return ""
-
-
-def _primary_profile() -> str:
-    try:
-        from app.core.config import CLAUDE_MODEL
-        return str(CLAUDE_MODEL or "")
-    except Exception:                                     # pragma: no cover - config
-        return ""
-
-
-def _primary_prompt_digest() -> str:
-    try:
-        from app.ingestion.pdf_parser import EXTRACTION_SYSTEM_PROMPT
-        return _digest(EXTRACTION_SYSTEM_PROMPT)
-    except Exception:                                     # pragma: no cover - import
-        return ""
+    payload = payloads.get(number)
+    if payload is None:
+        raise SourceEvidenceCompilationError(
+            f"{pdf_path.name}: page {number} carries a rendered-page image digest the "
+            f"compiler cannot verify -- the bytes that were rendered were not handed to "
+            f"it -- and an unverified identity is not recorded as one")
+    if not isinstance(payload, (bytes, bytearray)):
+        raise SourceEvidenceCompilationError(
+            f"{pdf_path.name}: page {number}'s rendered image was handed over as "
+            f"{type(payload).__name__}, not bytes, so its digest cannot be recomputed")
+    actual = _digest_bytes(bytes(payload))
+    if actual != claimed:
+        raise SourceEvidenceCompilationError(
+            f"{pdf_path.name}: page {number}'s rendered image digests to {actual}, not "
+            f"the {claimed} the transcriber reported; the page image a released fact "
+            f"would resolve to is not the page image that was read")
+    return actual
 
 
 def _pdfplumber_identity() -> str:
@@ -404,31 +471,77 @@ def _pdfplumber_identity() -> str:
 # --------------------------------------------------------------------------
 
 class IndependentVisionReader:
-    """A second read of specific page images, by a DIFFERENT declared vendor.
+    """A second read of specific page images, by a DIFFERENT ACTUAL vendor.
 
     Used only where option (a) is impossible — an image-only page — and only for the
-    pages carrying a quotation that justified a released line. Independence is a
-    checked property, not a naming convention: `channel()` declares the provider, and
-    `contracts.source_evidence.independent_of` refuses to treat this channel as
-    evidence about the primary one unless that provider differs.
+    pages carrying a quotation that justified a released line.
 
-    Failure is silence, never a fabricated agreement: a page this reader cannot read
-    simply gets no read, and the quotation on it stays UNVERIFIABLE (a hold).
+    Independence is a CHECKED PROPERTY OF THE CALL, not a naming convention and not a
+    configuration setting (issue #6 F7-R5). The provider this channel declares is
+    derived from the client object that performs the read, and it is compared against
+    the primary channel this reader was bound to; if the two are not positively
+    different the reader raises `ChannelIndependenceError` BEFORE any page is paid for,
+    rather than returning a reading nothing may credit. `contracts.source_evidence`
+    then enforces the same property once more at the document boundary
+    (`with_channel(..., require_independent=True)`), because a reader is a caller-
+    supplied object and the document must not depend on callers being well-behaved.
+
+    Failure to READ is silence, never a fabricated agreement: a page this reader cannot
+    read simply gets no read, and the quotation on it stays UNVERIFIABLE (a hold). A
+    failure of INDEPENDENCE is different in kind — it is a misconfigured control, not an
+    unavailable dependency — so it propagates instead of being logged and swallowed.
     """
 
     def __init__(self, pdf_path: str | Path, *, dpi: int = 300,
-                 provider: str = "openai") -> None:
+                 primary_channel: ReadChannel | None = None) -> None:
         self.pdf_path = Path(pdf_path)
         self.dpi = int(dpi)
-        self.provider = str(provider)
+        #: The reading this channel exists to CHECK. Required: a channel with nothing
+        #: to be independent of cannot be established as independent of anything.
+        self.primary_channel = primary_channel
 
     # ---------------------------------------------------------------- identity
     def channel(self) -> ReadChannel:
-        return ReadChannel(
+        """This channel's identity, derived from the client that will perform the read.
+
+        Raises `ChannelIndependenceError` when that client's vendor is not positively
+        different from the primary reading's — which is exactly the case a generic
+        configuration setting used to hide in both directions.
+        """
+        return self._channel_of(self._client())
+
+    def provider(self) -> str:
+        """The vendor of the client object that performs this reader's calls."""
+        return self._provider_of(self._client())
+
+    def _channel_of(self, client) -> ReadChannel:
+        channel = ReadChannel(
             channel_id=SECONDARY_VISION_CHANNEL_ID, kind=ChannelKind.VISION,
-            provider=self.provider, profile=self._model(),
+            provider=self._provider_of(client), profile=self._model(),
             prompt_sha256=_digest(_VISION_PROMPT),
             schema_version="independent-vision-1")
+        if self.primary_channel is None:
+            raise ChannelIndependenceError(
+                f"the independent page reader was not bound to the primary channel it "
+                f"must be independent of, so nothing it reads can be credited as "
+                f"evidence about the primary reading of {self.pdf_path.name}")
+        if not independent_of(channel, self.primary_channel):
+            raise ChannelIndependenceError(
+                f"the independent page reader for {self.pdf_path.name} would call "
+                f"provider {channel.provider or '<unidentified client>'}, which is not "
+                f"positively different from the primary reading's "
+                f"{self.primary_channel.provider or '<undeclared>'}; a second read by "
+                f"the same vendor is repetition, not confirmation")
+        return channel
+
+    def _client(self):
+        from app.core.llm_client import get_openai_client
+        return get_openai_client()
+
+    @staticmethod
+    def _provider_of(client) -> str:
+        from app.core.llm_client import provider_of_client
+        return provider_of_client(client)
 
     def _model(self) -> str:
         try:
@@ -443,6 +556,11 @@ class IndependentVisionReader:
         for number in page_numbers:
             try:
                 text = self._read_page(number)
+            except ChannelIndependenceError:
+                # A control that is not independent is misconfigured, not unavailable.
+                # Degrading it to "this page could not be read" would turn a broken
+                # safety property into an ordinary hold and lose the reason.
+                raise
             except Exception as exc:
                 logger.warning(f"  independent page read failed for page {number} "
                                f"({type(exc).__name__}: {exc}); the quotations on that "
@@ -463,9 +581,12 @@ class IndependentVisionReader:
         return buffer.getvalue()
 
     def _read_page(self, number: int) -> str:
-        from app.core.llm_client import get_openai_client
+        # Re-derived from the object about to be called, so a client that was swapped
+        # after `channel()` declared this reader's identity fails closed instead of
+        # reading the page under an identity that no longer describes it.
+        client = self._client()
+        self._channel_of(client)
         payload = base64.b64encode(self._page_image(number)).decode("utf-8")
-        client = get_openai_client()
         response = client.chat.completions.create(
             model=self._model(),
             messages=[{"role": "user", "content": [

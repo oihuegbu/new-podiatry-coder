@@ -1436,6 +1436,81 @@ class ModelProfileIdentityTest(unittest.TestCase):
         self.assertEqual(p["corroboration_origin"], verify.DISTINCT_ORIGIN)
         self.assertIs(p["independent_providers"], True)
 
+    # ---- issue #6 F7-R5: the identity must describe the call that is MADE -----------
+    def test_a_supplied_extractor_is_recorded_as_itself_not_as_the_configuration(self):
+        """A caller-supplied extractor used to be stamped with the configured provider,
+        which made every comparison against it -- including the two-reading independence
+        fact -- a statement about configuration rather than about the run."""
+        from claude_coder.pipeline import _model_profile_identity
+        p = _model_profile_identity(_from(lambda s, u: "", "provider-a"), None, None,
+                                    _from(lambda s, u: "", "provider-b"))
+        self.assertEqual(p["extraction"]["provider"], "provider-a")
+        self.assertEqual(p["second_extraction"]["provider"], "provider-b")
+
+    def test_an_undeclared_supplied_extractor_claims_no_provider(self):
+        """Fail-closed: "we cannot tell who read the note" is not "the configured
+        vendor read the note"."""
+        from claude_coder.pipeline import _model_profile_identity
+        p = _model_profile_identity(lambda s, u: "", None, None)
+        self.assertEqual(p["extraction"].get("provider", ""), "")
+
+    def test_the_pipelines_own_second_reading_is_still_identified_by_configuration(self):
+        """The control case: when the PIPELINE makes the call, configuration is exactly
+        what selects the model, so it remains the identity."""
+        from app.core import config
+        from claude_coder.pipeline import _model_profile_identity
+        p = _model_profile_identity(None, None, None)
+        self.assertEqual(p["extraction"]["provider"], config.LLM_PROVIDER)
+
+
+class SecondReadingIndependenceTest(unittest.TestCase):
+    """The two-reading control fails closed when it is not, in fact, independent.
+
+    `independent_providers` used to be computed after both readings had been paid for
+    and then only recorded -- so a deployment whose two readings resolved to ONE vendor
+    produced an artifact asserting an independence the run never had (issue #6 F7-R5).
+    """
+
+    def _profiles(self, primary, second):
+        return {"extraction": {"provider": primary},
+                "second_extraction": {"provider": second}}
+
+    def test_a_same_vendor_pair_is_refused_before_the_reading_is_taken(self):
+        from claude_coder.extraction import SecondReadingUnavailable
+        from claude_coder.pipeline import _run_graph_consensus
+        calls = []
+        with self.assertRaises(SecondReadingUnavailable):
+            _run_graph_consensus("note", [], None,
+                                 lambda system, user: calls.append(1) or "{}",
+                                 self._profiles("claude", "claude"),
+                                 None, None, None, enforce_independence=True)
+        self.assertEqual(calls, [],
+                         "a control that cannot be independent must not be paid for")
+
+    def test_an_undeclared_pair_is_refused_too(self):
+        from claude_coder.extraction import SecondReadingUnavailable
+        from claude_coder.pipeline import _run_graph_consensus
+        with self.assertRaises(SecondReadingUnavailable):
+            _run_graph_consensus("note", [], None, lambda system, user: "{}",
+                                 self._profiles("claude", ""),
+                                 None, None, None, enforce_independence=True)
+
+    def test_a_caller_supplied_second_reading_is_recorded_not_enforced(self):
+        """A second extractor a CALLER supplied is a disagreement detector, whose value
+        does not depend on vendor independence. It is recorded, never refused."""
+        from claude_coder.pipeline import _run_graph_consensus
+
+        class _Reached(Exception):
+            pass
+
+        def _extract(system, user):
+            raise _Reached
+
+        with self.assertRaises(_Reached):
+            _run_graph_consensus("note", [], None, _extract,
+                                 self._profiles("claude", "claude"),
+                                 None, None, None, enforce_independence=False)
+
 
 class LearnedIndexTest(unittest.TestCase):
     """The learned verified-resolution index promotes a phrase->code mapping to

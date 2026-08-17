@@ -12,6 +12,11 @@ from app.core.config import CLAUDE_MODEL, CLAUDE_EFFORT
 
 logger = get_logger(__name__)
 
+#: Identity of the request/response shape this transcriber uses. It is declared here,
+#: next to the call it describes, and read by `app.ingestion.source_evidence` -- the
+#: compiler must never restate a channel's identity from its own constants.
+VISION_CHANNEL_SCHEMA_VERSION = "pdf_parser/vision-1"
+
 
 EXTRACTION_SYSTEM_PROMPT = """You are an expert medical document parser specializing in podiatry clinical notes.
 
@@ -158,10 +163,17 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
     # profile all move the digest). Issue #6 F6-R6-A / directive §1.
     image_blocks = []
     page_images = []
+    # The rendered bytes themselves, kept for the compilation step that immediately
+    # follows this call. Without them the Source Evidence Compiler can only RESTATE the
+    # digests below, which makes source identity an upstream assertion rather than a
+    # fact the compiler established (issue #6 F7-R5). They are deliberately NOT part of
+    # `note_integrity`: that record is persisted and compared, and must stay JSON.
+    page_image_bytes = {}
     for index, img in enumerate(images, start=1):
         buffer = BytesIO()
         img.save(buffer, format="PNG")
         raw = buffer.getvalue()
+        page_image_bytes[index] = raw
         b64 = base64.b64encode(raw).decode("utf-8")
         image_blocks.append({
             "type": "image",
@@ -186,7 +198,8 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
     # produce a garbage claim, which is far worse than one loudly FAILED
     # note (observed live before this fix).
     from app.core.llm_client import (
-        get_anthropic_client, _claude_message_via_batch, _RETRYABLE_MARKERS)
+        get_anthropic_client, client_identity, provider_of_client,
+        _claude_message_via_batch, _RETRYABLE_MARKERS)
     from app.core.config import ANTHROPIC_USE_BATCH
     client = get_anthropic_client()
     max_tokens = 8192
@@ -298,6 +311,32 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
         raise RuntimeError(
             f"Vision extraction failed for {pdf_path.name} after 3 attempts: {last_err}")
 
+    # WHICH VENDOR ACTUALLY READ THE PAGES (issue #6 F7-R5). Derived from the client
+    # object that answered and the model that was actually sent -- never from a generic
+    # configuration setting. This function calls Anthropic unconditionally, so a
+    # deployment whose `LLM_PROVIDER` names another vendor would otherwise have the
+    # Source Evidence Compiler record a primary-channel provider that is simply false;
+    # a genuinely independent second-vendor page read would then be rejected as
+    # same-provider, and in the mirror case a same-provider read would be accepted as
+    # independent. Same pattern as `claude_coder.extraction.ExtractionOrigin` and
+    # `claude_coder.verify.declare_model_profile`: identity travels with what ran.
+    vision_channel = {
+        "provider": provider_of_client(client),
+        "profile": str(body.get("model") or ""),
+        "prompt_sha256": "sha256:" + hashlib.sha256(
+            EXTRACTION_SYSTEM_PROMPT.encode("utf-8")).hexdigest(),
+        "schema_version": VISION_CHANNEL_SCHEMA_VERSION,
+        "client": client_identity(client),
+    }
+    if not vision_channel["provider"]:
+        # Loud, and fail-closed downstream: an unestablished provider makes every
+        # same-kind channel non-independent of this one, so quotations hold rather
+        # than being proven by a reading that might share this one's vendor.
+        logger.warning(
+            f"  Vision transcription client {vision_channel['client']} has no "
+            f"recognised provider identity; no second vision channel can be credited "
+            f"as independent of this reading")
+
     usage = {
         "prompt_tokens": response.usage.input_tokens,
         "completion_tokens": response.usage.output_tokens,
@@ -356,6 +395,10 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
         "prior_surgery_info": prior_surgery_info,
         "physician_documented_codes": physician_codes,
         "extraction_usage": usage,
+        # The exact rendered bytes each page image digest below was taken from, so the
+        # compiler recomputes rather than trusts. Keyed by page number; consumed by
+        # `app.ingestion.source_evidence.compile_source_evidence` and not persisted.
+        "page_image_bytes": page_image_bytes,
         "note_integrity": {
             "complete": True,
             "page_count": len(images),
@@ -364,6 +407,9 @@ def extract_from_pdf(pdf_path: str | Path) -> dict:
             "extracted_text_sha256": f"sha256:{text_digest}",
             # Identity of the exact rendered images the vision channel was shown.
             "page_images": page_images,
+            # WHO read them: the provider/profile/prompt/schema of the call that was
+            # actually made, which is what channel independence is decided on.
+            "vision_channel": vision_channel,
             "page_coverage": [
                 {
                     "page_number": int(p["page_number"]),

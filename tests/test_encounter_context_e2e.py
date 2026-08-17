@@ -54,7 +54,7 @@ from tools import claims_registry as reg  # noqa: E402
 # change to the canonical encounter changes both suites at once. `deployment`
 # does not start with `test_`, so pytest treats it as the fixture it is.
 from tests.test_claim_bundle_e2e import (  # noqa: E402
-    AFFILIATION_ID, COVERAGE_ID, DOCUMENT_VERSION, DOS_ISO, ENTITY_ID,
+    AFFILIATION_ID, COVERAGE_ID, DOS_ISO, ENTITY_ID,
     EXTRACTED_TEXT_SHA, FACILITY_ID, NOTE_TEXT, PATIENT_ID, PAYER_ID,
     ROSTER_START, STEM, _valid_npi, _verified_once, deployment,
 )
@@ -180,7 +180,7 @@ def test_the_note_cannot_supply_or_override_a_resolved_identity(deployment,
                             [NOTE_TEXT],
                             metadata={"date_of_service": DOS_ISO,
                                       "provider_npi": impostor},
-                            document_version=DOCUMENT_VERSION,
+                            pdf_path=pdf_path,
                             extracted_text_sha256=EXTRACTED_TEXT_SHA))
     assert _run(deployment) == 0
     bundle = _bundle(deployment, STEM)
@@ -946,7 +946,7 @@ def _transcription(monkeypatch, *, page_text=NOTE_TEXT, dos=DOS_ISO):
     monkeypatch.setattr(entrypoint, "extract_from_pdf", lambda pdf_path:
                         vision_extraction(
                             [page_text], metadata={"date_of_service": dos},
-                            document_version=DOCUMENT_VERSION,
+                            pdf_path=pdf_path,
                             extracted_text_sha256=EXTRACTED_TEXT_SHA))
 
 

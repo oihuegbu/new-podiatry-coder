@@ -71,7 +71,7 @@ from app.contracts.source_evidence import (  # noqa: E402
     ReconciliationStatus)
 from app.ingestion.source_evidence import (  # noqa: E402
     EMBEDDED_TEXT_CHANNEL_ID)
-from tests.source_pdf import build_pdf, vision_extraction  # noqa: E402
+from tests.source_pdf import build_pdf, digest_of, vision_extraction  # noqa: E402
 from tools import claim_submitter as cs  # noqa: E402
 from tools import claims_registry as reg  # noqa: E402
 
@@ -90,7 +90,6 @@ FACILITY_ID = "FAC-E2E-1"
 #: Every time-bound record starts well before the DOS and is open-ended, so a
 #: test that changes a window is changing the ONLY thing under test.
 ROSTER_START = "2020-01-01"
-DOCUMENT_VERSION = "sha256:" + "b" * 64
 EXTRACTED_TEXT_SHA = "sha256:" + "c" * 64
 
 #: Synthetic note. Disposition/negation/laterality logic turns on LINGUISTIC
@@ -109,6 +108,12 @@ NOTE_TEXT = (
     "Excision of lesion alpha was performed for condition alpha of the right side. "
     "Patient denies finding gamma."
 )
+
+#: The ORIGINAL DOCUMENT's identity, computed from the exact bytes this suite writes to
+#: disk. The Source Evidence Compiler recomputes the digest of the file it compiles and
+#: refuses a transcription that claims a different one (issue #6 F7-R5), so a fixture
+#: cannot assert a document identity its document does not have.
+DOCUMENT_VERSION = digest_of(build_pdf([[NOTE_TEXT]]))
 
 #: The encounter's structured participant roster — what `claude_coder` resolves
 #: claim OWNERSHIP against. Distinct from the encounter CONTEXT below: this says
@@ -303,7 +308,7 @@ def deployment(tmp_path, monkeypatch):
     monkeypatch.setattr(entrypoint, "extract_from_pdf", lambda pdf_path:
                         vision_extraction(
                             [NOTE_TEXT], metadata={"date_of_service": DOS_ISO},
-                            document_version=DOCUMENT_VERSION,
+                            pdf_path=pdf_path,
                             extracted_text_sha256=EXTRACTED_TEXT_SHA))
     monkeypatch.setattr(extraction, "_default_llm", lambda system, user: FACTS_JSON)
     monkeypatch.setattr(
@@ -973,7 +978,7 @@ def test_a_misread_page_cannot_reach_the_registry(deployment, monkeypatch):
     monkeypatch.setattr(entrypoint, "extract_from_pdf", lambda pdf_path:
                         vision_extraction(
                             [misread], metadata={"date_of_service": DOS_ISO},
-                            document_version=DOCUMENT_VERSION,
+                            pdf_path=pdf_path,
                             extracted_text_sha256=EXTRACTED_TEXT_SHA))
     from claude_coder import extraction as extraction_module
     monkeypatch.setattr(

@@ -576,7 +576,7 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
         pdf_path.write_bytes(build_pdf([pdf_lines]))
         document = compile_source_evidence(
             pdf_path,
-            vision_extraction([vision_text],
+            vision_extraction([vision_text], pdf_path=pdf_path,
                               metadata={"date_of_service": "2026-03-14"},
                               page_separator=PAGE_SEPARATOR))
 
@@ -769,7 +769,7 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
         pdf_path.write_bytes(build_pdf([pdf_lines]))
         document = compile_source_evidence(
             pdf_path,
-            vision_extraction([vision_text],
+            vision_extraction([vision_text], pdf_path=pdf_path,
                               metadata={"date_of_service": "2026-03-14"},
                               page_separator=PAGE_SEPARATOR))
 
@@ -858,7 +858,7 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
         pdf_path.write_bytes(build_pdf([[]]))
         document = compile_source_evidence(
             pdf_path,
-            vision_extraction([vision_text],
+            vision_extraction([vision_text], pdf_path=pdf_path,
                               metadata={"date_of_service": "2026-03-14"},
                               page_separator=PAGE_SEPARATOR))
 
@@ -918,7 +918,7 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
         pdf_path.write_bytes(build_pdf([[]]))
         document = compile_source_evidence(
             pdf_path,
-            vision_extraction([vision_text],
+            vision_extraction([vision_text], pdf_path=pdf_path,
                               metadata={"date_of_service": "2026-03-14"},
                               page_separator=PAGE_SEPARATOR))
 
@@ -959,6 +959,70 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
             any(r["destination"] == Destination.REVIEW.value for r in result.routing),
             f"a read that could not happen must not send the claim to a coder: "
             f"{result.routing}")
+
+    def test_a_paid_reader_that_is_not_independent_blocks_instead_of_being_credited(self):
+        """Issue #6 F7-R5: the enforcement point, end to end.
+
+        A reader whose channel declares the SAME vendor that produced the primary
+        reading is not a second opinion -- it is the transcription answering its own
+        question. It used to be admitted to the document, contribute a reading nothing
+        could credit, and leave a record naming a channel that proved nothing. It now
+        stops the encounter at the pre-retrieval boundary, and never pays for a page.
+        """
+        import tempfile
+        from pathlib import Path as _Path
+
+        from app.contracts.source_evidence import (
+            ChannelKind, PAGE_SEPARATOR, ReadChannel, build_page_read)
+        from app.ingestion.source_evidence import (
+            SECONDARY_VISION_CHANNEL_ID, compile_source_evidence)
+        from claude_coder.models import Outcome, Verdict
+        from tests.source_pdf import build_pdf, vision_extraction
+
+        vision_text = ("Procedure alpha performed today, side one. "
+                       "Condition alpha addressed today.")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        pdf_path = _Path(tmp.name) / "note.pdf"
+        pdf_path.write_bytes(build_pdf([[]]))
+        document = compile_source_evidence(
+            pdf_path,
+            vision_extraction([vision_text], pdf_path=pdf_path,
+                              metadata={"date_of_service": "2026-03-14"},
+                              page_separator=PAGE_SEPARATOR))
+
+        read_calls = []
+
+        class _SameVendorReader:
+            """Declares the vendor that actually produced the primary reading."""
+
+            def channel(self):
+                return ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                                   kind=ChannelKind.VISION,
+                                   provider=document.primary_channel.provider)
+
+            def read_pages(self, page_numbers):
+                read_calls.append(tuple(page_numbers))
+                return {number: build_page_read(
+                    SECONDARY_VISION_CHANNEL_ID, number, vision_text)
+                    for number in page_numbers}
+
+        result = _run(
+            _reading("excision procedure alpha performed", "right",
+                     "Procedure alpha performed today"),
+            _reading("procedure alpha performed excision", "left",
+                     "Condition alpha addressed today"),
+            note_text=document.primary_text(),
+            source_evidence=document,
+            source_reader=_SameVendorReader())
+
+        self.assertEqual(read_calls, [],
+                         "a channel that cannot be independent must not be paid for")
+        self.assertIsNot(result.verdict, Verdict.AUTO_READY)
+        self.assertFalse(result.billable_lines,
+                         "the encounter must hold with zero retrieval, not release")
+        hold = next(g for g in result.gates if g.outcome is Outcome.UNKNOWN)
+        self.assertTrue(hold.retryable, hold.detail)
 
 
 
@@ -1049,7 +1113,8 @@ def _document(vision_text, pdf_lines):
     pdf_path.write_bytes(build_pdf([pdf_lines]))
     document = compile_source_evidence(
         pdf_path,
-        vision_extraction([vision_text], metadata={"date_of_service": "2026-03-14"},
+        vision_extraction([vision_text], pdf_path=pdf_path,
+                          metadata={"date_of_service": "2026-03-14"},
                           page_separator=PAGE_SEPARATOR))
     return document, tmp
 

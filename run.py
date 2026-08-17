@@ -232,7 +232,12 @@ def read_note(pdf_path: Path) -> dict:
     service_date_evidence = reconcile_service_date(
         source_evidence, dos.isoformat() if dos else "")
     integrity = extraction.get("note_integrity") or {}
-    document_version = str(integrity.get("source_pdf_sha256") or "").strip() or None
+    # The identity every evidence-span id is salted with, taken from the COMPILER's own
+    # digest of the file rather than from the transcription's report of it (issue #6
+    # F7-R5). The compiler has already refused a transcription whose claimed digest is
+    # not the document's, so the two agree whenever both exist -- but the value that
+    # travels onto the claim is the one that was computed from bytes, not asserted.
+    document_version = str(source_evidence.document_sha256 or "").strip() or None
     page_count = integrity.get("page_count")
     return {
         "note_text": note_text,
@@ -252,8 +257,13 @@ def read_note(pdf_path: Path) -> dict:
         "service_date_evidence": service_date_evidence,
         # The PAID second channel, for image-only pages the text layer cannot cover.
         # Constructed here (it needs the PDF) but INVOKED by the pipeline, and only for
-        # the pages carrying a quotation behind a released line.
-        "source_reader": IndependentVisionReader(pdf_path),
+        # the pages carrying a quotation behind a released line. It is BOUND to the
+        # primary channel it must be independent of (issue #6 F7-R5): the reader then
+        # establishes independence against the vendor that actually produced that
+        # reading, and refuses -- loudly, before anything is paid for -- rather than
+        # contributing a reading no reconciliation may credit.
+        "source_reader": IndependentVisionReader(
+            pdf_path, primary_channel=source_evidence.primary_channel),
     }
 
 

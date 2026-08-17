@@ -208,10 +208,15 @@ def code_encounter(
     # supplies its own extractor (every test) opts out, so the deterministic path is
     # unchanged. `config.GRAPH_CONSENSUS=0` disables the control explicitly and the
     # audit record then says only one reading was taken.
+    # Whether the second reading is this pipeline's OWN independence control or a
+    # caller-supplied disagreement detector. Only the former promises independence, so
+    # only the former fails closed when it turns out not to be independent (F7-R5).
+    enforce_second_reading_independence = False
     if extract_llm is None and extract_llm_b is None:
         from app.core import config as _config
         if getattr(_config, "GRAPH_CONSENSUS", True):
             extract_llm_b = extraction.default_second_extract_llm
+            enforce_second_reading_independence = True
     profiles = model_profiles or _model_profile_identity(
         extract_llm, verify_llm, corroborate_llm, extract_llm_b)
 
@@ -245,7 +250,8 @@ def code_encounter(
         if extract_llm_b is not None:
             consensus, source_evidence, recovery = _run_graph_consensus(
                 note_text, facts, billing_context, extract_llm_b, profiles,
-                document_version, source_evidence, source_reader)
+                document_version, source_evidence, source_reader,
+                enforce_independence=enforce_second_reading_independence)
             # ---- RECALL redundancy, not only axis agreement (issue #6 F7-R3) ---------
             # A performed service the PRIMARY extractor missed entirely used to be
             # recorded in consensus metadata and dropped, so the encounter proceeded with
@@ -737,7 +743,8 @@ def _system_hold_result(encounter_id: str, date_of_service: str | None,
 
 
 def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profiles,
-                         document_version, source_evidence, source_reader):
+                         document_version, source_evidence, source_reader, *,
+                         enforce_independence: bool = False):
     """Second reading -> EVENT-CANDIDATE UNION + axis comparison -> TARGETED
     original-page verification.
 
@@ -765,6 +772,31 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
     from . import graph_consensus as _gc
     from . import provenance as _prov
 
+    # ---- INDEPENDENCE IS A PRECONDITION, NOT A FOOTNOTE (issue #6 F7-R5) ------------
+    # `independent_providers` used to be computed after both readings had been taken and
+    # then only recorded, so a deployment whose two readings resolved to ONE vendor
+    # produced an artifact asserting an independence the run never had -- and paid twice
+    # for it. When this reading is the pipeline's own independence control the identities
+    # are compared FIRST, from what each callable declares (`verify.model_profile_of`,
+    # the same primitive the relation graph and code corroboration read), and a pair that
+    # is not positively different stops the encounter at the caller's pre-retrieval
+    # boundary before a token is spent. A caller-supplied second extractor is not this
+    # control -- it is a disagreement detector, whose value does not depend on vendor
+    # independence -- so for it the fact is recorded, exactly as before.
+    primary_provider = str((profiles.get("extraction") or {}).get("provider")
+                           or "").strip().lower()
+    second_provider = str((profiles.get("second_extraction") or {}).get("provider")
+                          or "").strip().lower()
+    independent_providers = bool(primary_provider and second_provider
+                                 and primary_provider != second_provider)
+    if enforce_independence and not independent_providers:
+        raise extraction.SecondReadingUnavailable(
+            f"the second reading of the note is enabled as an INDEPENDENT control, but "
+            f"its provider ({second_provider or 'undeclared'}) is not positively "
+            f"different from the primary reading's ({primary_provider or 'undeclared'})"
+            f"; two readings by one vendor share training data, tokeniser and failure "
+            f"modes, so their agreement is self-confidence rather than confirmation")
+
     extracted_b = extraction.extract_note(
         note_text, extract_llm_b, billing_context,
         run_id=_SECOND_READING_RUN_ID,
@@ -780,10 +812,8 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
     # Identity first, page reads second: only a candidate that rests on document text no
     # primary event rests on can change the claim, so only those are worth proving.
     candidates = _union.propose(facts, unmatched_second_facts)
-    primary_provider = str((profiles.get("extraction") or {}).get("provider") or "")
-    second_provider = str((profiles.get("second_extraction") or {}).get("provider") or "")
-    report.independent_providers = bool(
-        primary_provider and second_provider and primary_provider != second_provider)
+    report.independent_providers = independent_providers
+    report.independence_enforced = bool(enforce_independence)
 
     reconciliation = None
     wanted = set(_union.pending_span_ids(candidates))
@@ -791,8 +821,10 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
         wanted |= _gc.disagreement_span_ids(report.disagreements, primary_by_id,
                                             second_by_node)
     if source_evidence is not None and wanted:
-        from app.contracts.source_evidence import (pages_needing_independent_read,
-                                                   reconcile_spans)
+        from app.contracts.source_evidence import (ChannelIndependenceError,
+                                                   pages_needing_independent_read,
+                                                   reconcile_spans,
+                                                   require_independent_channel)
         targets = [t for t in _prov.span_targets(list(facts) + list(extracted_b.facts))
                    if t.span_id in wanted]
         reconciliation = reconcile_spans(source_evidence, targets)
@@ -804,9 +836,28 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
                                                    wanted)
             if pages:
                 try:
+                    # Identity first, pages second: `channel()` establishes the reading
+                    # vendor from the client that will make the call and refuses if it
+                    # is not independent of the primary channel, so a non-independent
+                    # reader costs nothing and cannot enter the document. The document
+                    # boundary enforces the same property again -- a source reader is a
+                    # caller-supplied object (F7-R5).
+                    channel = source_reader.channel()
+                    # BEFORE the pages are read, not as a side effect of adding them:
+                    # `with_channel`'s own check runs only after its arguments have been
+                    # evaluated, so relying on it alone would still pay for a reading it
+                    # then refuses -- and a caller-supplied reader (unlike this module's
+                    # own `IndependentVisionReader`) does not check itself.
+                    require_independent_channel(source_evidence, channel)
                     escalated = source_evidence.with_channel(
-                        source_reader.channel(), source_reader.read_pages(pages))
+                        channel, source_reader.read_pages(pages),
+                        require_independent=True)
                     reconciled = reconcile_spans(escalated, targets)
+                except ChannelIndependenceError:
+                    # A control that is not independent is MISCONFIGURED, not
+                    # unavailable. Recording it as "verification unavailable" would turn
+                    # a broken safety property into an ordinary hold and hide the reason.
+                    raise
                 except Exception as exc:
                     # A verification that could not run proves nothing, and must not look
                     # like one: the affected axes stay unresolved and become a query, and
@@ -852,7 +903,14 @@ def _model_profile_identity(extract_llm, verify_llm, corroborate_llm,
         return None if fn is None else f"{getattr(fn, '__module__', '')}.{getattr(fn, '__qualname__', type(fn).__name__)}"
 
     profiles = {
-        "extraction": {"callable": callable_name(extract_llm)},
+        # Read from what the CALLABLE declares, for the same reason the verification and
+        # corroboration profiles below are: a caller-supplied extractor used to be
+        # recorded with the configured provider regardless of who it actually was, which
+        # made `independent_providers` a statement about this function's configuration
+        # rather than about the run (issue #6 F7-R5, the same defect round 5 fixed one
+        # entry lower down).
+        "extraction": {"callable": callable_name(extract_llm),
+                       **_verify.model_profile_of(extract_llm)},
         "verification": {"callable": callable_name(verify_llm),
                          **_verify.model_profile_of(verify_llm)},
         "corroboration": {"callable": callable_name(corroborate_llm),
@@ -862,9 +920,14 @@ def _model_profile_identity(extract_llm, verify_llm, corroborate_llm,
     }
     try:
         from app.core import config
-        profiles["extraction"].update({"provider": config.LLM_PROVIDER,
-                                       "model": (config.CLAUDE_MODEL if config.LLM_PROVIDER == "claude"
-                                                 else config.OPENAI_MODEL)})
+        # Configuration identifies the extraction call ONLY when the pipeline itself is
+        # making it (`extract_llm is None` -> `extraction._default_llm`, which reads this
+        # very setting). For a caller-supplied extractor the configured provider
+        # describes a call that is not being made.
+        if extract_llm is None:
+            profiles["extraction"].update({"provider": config.LLM_PROVIDER,
+                                           "model": (config.CLAUDE_MODEL if config.LLM_PROVIDER == "claude"
+                                                     else config.OPENAI_MODEL)})
         # Model/effort detail only for the DEFAULT callables — the only ones whose runtime
         # model this configuration actually selects.
         if verify_llm is _verify.default_verify_llm:

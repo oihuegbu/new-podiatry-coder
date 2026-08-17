@@ -70,6 +70,39 @@ def get_anthropic_client():
     return client
 
 
+#: The canonical provider id for the SDK package that implements a client object.
+#: Independence is decided by comparing provider ids that arrive from several places --
+#: `config.LLM_PROVIDER`, `chat_completion(provider=...)`, `ReadChannel.provider` and
+#: `ExtractionOrigin.provider` -- so a client must resolve to the SAME vocabulary those
+#: use ("claude", not the SDK distribution name "anthropic"), or the comparison is
+#: between two spellings of one vendor and silently reads as independence.
+_CLIENT_PACKAGE_PROVIDER = {"anthropic": "claude", "openai": "openai"}
+
+
+def provider_of_client(client) -> str:
+    """The canonical provider id of the client object that ACTUALLY answers a call.
+
+    Configuration says which vendor a component is SUPPOSED to call; this says which
+    vendor's SDK object is about to be called. The two can disagree -- a component may
+    call one vendor unconditionally while a generic setting names another -- and when
+    they do, an independence decision taken on the configured value is a decision about
+    a call that never happened (issue #6 F7-R5). Every channel identity that feeds
+    `contracts.source_evidence.independent_of` or `claude_coder.verify`'s
+    `corroboration_origin` is therefore derived from the object that ran, exactly as
+    `verify.declare_model_profile` derives a callable's identity from the callable.
+
+    FAIL-CLOSED: an unrecognised client yields "" -- identity unestablished -- which
+    every independence check reads as "not independent", never as "independent".
+    """
+    root = str(getattr(type(client), "__module__", "") or "").split(".")[0]
+    return _CLIENT_PACKAGE_PROVIDER.get(root, "")
+
+
+def client_identity(client) -> str:
+    """The auditable, credential-free identity of a client object (never its keys)."""
+    return f"{type(client).__module__}.{type(client).__qualname__}"
+
+
 # Transient provider-side failures: capacity ("Overloaded"), rate limits and
 # 5xx gateway blips. These are retryable by definition — the request is valid,
 # the service just couldn't take it at that moment. Without retries a single

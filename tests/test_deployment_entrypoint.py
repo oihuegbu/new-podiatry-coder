@@ -59,7 +59,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import run as entrypoint  # noqa: E402  — the exact module the deployment executes
-from tests.source_pdf import build_pdf, vision_extraction  # noqa: E402
+from tests.source_pdf import build_pdf, digest_of, vision_extraction  # noqa: E402
 
 
 # --------------------------------------------------------------- structural wiring
@@ -153,7 +153,9 @@ FACTS_JSON = json.dumps({
 })
 
 STEM = "NOTE_ENTRYPOINT_001"
-DOCUMENT_VERSION = "sha256:" + "a" * 64
+#: Computed from the exact bytes written below: the compiler recomputes the digest of
+#: the document it compiles and refuses a transcription claiming another (F7-R5).
+DOCUMENT_VERSION = digest_of(build_pdf([[NOTE_TEXT]]))
 
 
 class _StubVectorStore:
@@ -195,7 +197,7 @@ def deployment(tmp_path, monkeypatch):
     monkeypatch.setattr(entrypoint, "extract_from_pdf", lambda pdf_path:
                         vision_extraction(
                             [NOTE_TEXT], metadata={"date_of_service": "2026-03-14"},
-                            document_version=DOCUMENT_VERSION))
+                            pdf_path=pdf_path))
     monkeypatch.setattr(extraction, "_default_llm", lambda system, user: FACTS_JSON)
     monkeypatch.setattr(AuthoritativeSource, "_vector_store",
                         lambda self: _StubVectorStore())
