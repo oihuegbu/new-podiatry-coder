@@ -79,8 +79,16 @@ from tools.claims_registry import (REGISTRY_PATH, _claim_key,  # noqa: E402
                                    current_view, load_events)
 
 DEFAULT_RESULTS = ROOT / "output" / "results"
-DEFAULT_CONFIG = ROOT / "data" / "practice_config.json"
-POS_CODES_FILE = ROOT / "data" / "codes" / "pos_codes.json"
+# The 837P submission step is a PRODUCTION reader: `app.release.claim_readiness`
+# imports `load_practice_config` to fingerprint the billing identity onto the readiness
+# certificate.  Both files it reads are DECLARED release sources, so they are resolved
+# through the declaration rather than composed here -- a file a claim depends on cannot
+# exist outside the manifest.  (Directive section 6.)
+
+
+def _declared(source_id):
+    from app.release.source_manifest import declared_source_path
+    return declared_source_path(source_id)
 LEDGER_PATH = ROOT / "data" / "registry" / "submissions.jsonl"
 DRYRUN_DIR = ROOT / "output" / "submissions"
 
@@ -111,9 +119,10 @@ def _valid_pos(value) -> bool:
     """Validate against the checked-in CMS Place of Service source."""
     global _pos_cache
     try:
-        mtime = POS_CODES_FILE.stat().st_mtime_ns
+        pos_file = _declared("pos_codes")
+        mtime = pos_file.stat().st_mtime_ns
         if _pos_cache is None or _pos_cache[0] != mtime:
-            raw = json.loads(POS_CODES_FILE.read_text())
+            raw = json.loads(pos_file.read_text())
             _pos_cache = (mtime, frozenset(str(code) for code in
                                            (raw.get("codes") or {})))
     except (OSError, ValueError):
@@ -131,7 +140,9 @@ _cfg_path_cached: str = ""
 
 
 def config_path() -> Path:
-    return Path(os.getenv("PRACTICE_CONFIG_PATH", str(DEFAULT_CONFIG)))
+    # The declaration performs the SAME `PRACTICE_CONFIG_PATH` resolution, so the path
+    # the certificate hashes and the path this reader opens cannot diverge.
+    return _declared("submission_configuration")
 
 
 def load_practice_config() -> dict:

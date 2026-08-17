@@ -308,10 +308,18 @@ def authority_binding(result, source) -> AuthorityBinding:
                            f"record no authority binding and cannot release")
             fingerprint = {}
     manifest = fingerprint.get("source_manifest") or {}
+    # The compiled database's digest is read out of the SAME manifest the certificate was
+    # built over -- never re-hashed here. Re-hashing would produce a second, independently
+    # timed reading of a file that can change, which is precisely the "certified bytes !=
+    # read bytes" split this binding exists to close. (Directive section 6.)
+    database = next((s for s in (manifest.get("sources") or [])
+                     if isinstance(s, dict)
+                     and s.get("source_id") == "compliance_database"), {})
     return AuthorityBinding(
         data_fingerprint=str(fingerprint.get("fingerprint_sha256") or ""),
         source_manifest_fingerprint=str(manifest.get("manifest_sha256") or ""),
         source_manifest=manifest,
+        database_snapshot_digest=str(database.get("sha256") or ""),
         index_checksum=str(fingerprint.get("codes_checksum") or ""),
         code_counts={k: int(v) for k, v in
                      (fingerprint.get("counts") or {}).items()},

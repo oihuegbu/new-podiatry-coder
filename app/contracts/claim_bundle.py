@@ -870,15 +870,20 @@ class DecisionOutcome(_Strict):
 class AuthorityBinding(_Strict):
     """Exactly which authoritative data and retrieval index produced these codes.
 
-    Directive §6 will bind the promoted database/index snapshot itself here;
-    the fields exist now so that phase fills them in rather than inventing a
-    parallel attestation. `source_manifest` is carried verbatim (opaque) — this
+    Directive §6: `database_snapshot_digest` binds the COMPILED DATABASE the claim was
+    actually answered from. `source_manifest` is carried verbatim (opaque) — this
     contract must not restate the manifest's schema.
     """
 
     data_fingerprint: str = ""
     source_manifest_fingerprint: str = ""
     source_manifest: dict[str, Any] = Field(default_factory=dict)
+    #: SHA-256 of the exact `compliance.db` bytes the NCCI / coverage / code-set queries
+    #: ran against. Separate from `source_manifest_fingerprint` deliberately: that
+    #: identifies the whole declared source SET, while the live edit decision is answered
+    #: by ONE derived database compiled from it. Binding only the raw JSON digests is what
+    #: let a claim be attested to bytes no query ever opened. Absent, the claim holds.
+    database_snapshot_digest: str = ""
     index_build_id: str = ""
     index_checksum: str = ""
     code_counts: dict[str, int] = Field(default_factory=dict)
@@ -891,6 +896,10 @@ class AuthorityBinding(_Strict):
         if not self.source_manifest_fingerprint:
             out.append("no authoritative-source manifest identity is bound to "
                        "this claim")
+        if not self.database_snapshot_digest:
+            out.append("no compiled-database snapshot is bound to this claim; the "
+                       "edit/coverage decisions cannot be traced to the bytes that "
+                       "answered them")
         return tuple(out)
 
 

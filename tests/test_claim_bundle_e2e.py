@@ -1335,3 +1335,55 @@ def test_an_unusable_unit_count_is_refused_not_quietly_billed_as_one():
     with pytest.raises(InvalidClaimBundle) as caught:
         _bundle(2.5)
     assert "whole number" in str(caught.value)
+
+
+# --------------------------------------------------------------------------
+# directive section 6 -- the claim binds the compiled database it queried, and a
+# database that cannot be certified stops the DEPLOYED entrypoint, not just a unit test
+# --------------------------------------------------------------------------
+
+def test_the_artifact_binds_the_compiled_database_the_run_actually_queried(deployment):
+    """`CodeReferenceDB.check_ncci()` answers the live NCCI decision out of
+    `compliance.db`. Before this, the certificate hashed only the raw JSON that database
+    was compiled from -- so the artifact attested to bytes no query ever opened. The
+    binding is asserted THROUGH the real entrypoint, and asserted to agree with the
+    manifest the certificate was built over rather than being an independently re-hashed
+    second reading."""
+    from app.release import source_manifest as sm
+    payload = deployment.run()
+    authority = payload["authority"]
+    digest = authority["database_snapshot_digest"]
+    assert digest.startswith("sha256:"), authority
+    assert digest == sm.compliance_database_identity()["sha256"]
+    record = next(source for source in authority["source_manifest"]["sources"]
+                  if source["source_id"] == "compliance_database")
+    assert record["sha256"] == digest
+    assert record["required"] is True
+    # ... and the claim is releasable WITH it bound, so the assertions below prove the
+    # database is what stops the release rather than something incidental.
+    assert load_bundle(payload).release_blockers() == ()
+
+
+def test_an_uncertifiable_compiled_database_stops_the_deployed_entrypoint(deployment,
+                                                                         monkeypatch,
+                                                                         tmp_path):
+    """THE BOUNDARY CHECK. A unit test proving `check_ncci` raises proves nothing about the
+    deployment if the raise is swallowed on the way out. This runs `run.main` -- the real
+    entrypoint, the real artifact writer, the real release contract -- against a compiled
+    database that is present but not certifiable, and asserts the encounter cannot be
+    released by any path."""
+    from pathlib import Path as _Path
+    from app.release import source_manifest as sm
+    corrupt = tmp_path / "compliance.db"
+    corrupt.write_bytes(b"SQLite format 3\x00" + b"\x00" * 4096)
+    runtime = dict(sm._RUNTIME_SOURCES)
+    runtime["compliance_database"] = lambda p=corrupt: _Path(p)
+    monkeypatch.setattr(sm, "_RUNTIME_SOURCES", runtime)
+
+    payload = deployment.run()
+    if payload.get("processing_error"):
+        return          # failed loudly before a claim existed; nothing was released
+    release = payload["release"]
+    assert release["holds"], payload["release"]
+    assert release["destination"] != "AUTO_READY"
+    assert load_bundle(payload).release_blockers()

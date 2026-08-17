@@ -9,8 +9,9 @@ import re
 import sqlite3
 import calendar
 from datetime import date
-from functools import lru_cache
+import time
 from pathlib import Path
+from typing import Callable
 
 from app.core import config
 
@@ -80,6 +81,55 @@ _AUTHORITATIVE = {
     "descriptor_qualifiers": config.DESCRIPTOR_QUALIFIERS_FILE,
     "autonomous_scopes": config.SCOPE_REGISTRY_FILE,
 }
+
+
+# --- round 7 (directive section 6): the RUNTIME / DERIVED decision-time inputs --------
+# Every entry here is read at DECISION time exactly like the JSON tables above -- most
+# importantly `compliance.db`, the compiled database `CodeReferenceDB.check_ncci()` answers
+# every live NCCI question from.  All six were NAMED by `_authoritative_paths()` (so
+# `build_source_manifest` hashed them) but never DISPOSITIONED, so `required_release_sources`
+# / `optional_release_sources` omitted them -- and `claude_coder.capability.build_manifest()`,
+# the manifest the RELEASE CERTIFICATE is built over, therefore never probed them at all.
+# The certificate attested to raw JSON bytes while the decision was answered by a compiled
+# database nobody hashed: certified bytes != read bytes, the same class round 5/6 closed for
+# the JSON sources.  (Codex F6-R5-A remainder.)
+#
+# Resolved through CALLABLES rather than a literal dict for a reason that is not stylistic:
+# `submission_configuration` is env-overridable (`PRACTICE_CONFIG_PATH`) and must stay
+# late-bound, and no path may freeze whatever `config.DATA_DIR` happened to be at import.
+_RUNTIME_SOURCES: dict[str, Callable[[], Path]] = {
+    "compliance_database": lambda: config.DATA_DIR / "compliance.db",
+    "validator_implementation":
+        lambda: config.BASE_DIR / "app" / "validation" / "validator.py",
+    "scrubber_implementation":
+        lambda: config.BASE_DIR / "app" / "compliance" / "engine.py",
+    "release_gate_implementation":
+        lambda: config.BASE_DIR / "app" / "release" / "claim_readiness.py",
+    "terminology_implementation":
+        lambda: config.BASE_DIR / "app" / "terminology" / "normalizer.py",
+    "submission_configuration": lambda: Path(os.getenv(
+        "PRACTICE_CONFIG_PATH", str(config.DATA_DIR / "practice_config.json"))),
+}
+
+
+def _runtime_paths() -> dict[str, Path]:
+    """The runtime/derived source identities, resolved NOW (never frozen at import)."""
+    return {source_id: Path(resolve())
+            for source_id, resolve in _RUNTIME_SOURCES.items()}
+
+
+def _declared_registry() -> dict[str, Path]:
+    """Every EXPLICITLY declared source identity: the reviewed data tables AND the
+    runtime/derived inputs.
+
+    This -- not `_AUTHORITATIVE` alone -- is the set the disposition invariant covers, the
+    set `declared_source_path` resolves against, and the set `required_release_sources`
+    binds its paths from.  Keeping the runtime block outside that invariant is exactly how
+    `compliance.db` came to be hashed by one manifest and absent from the other.
+    """
+    registry = dict(_AUTHORITATIVE)
+    registry.update(_runtime_paths())
+    return registry
 
 
 class DeclaredSourceUnavailable(RuntimeError):
@@ -177,6 +227,21 @@ _OPTIONAL_SOURCES: dict[str, dict] = {
             "None without it and the E/M leveller then makes NO MDM-based level claim "
             "at all, so absence removes a proposal rather than admitting a higher level",
     },
+    # --- round 7, directive section 6: the RETRIEVAL INDEX identity -----------------
+    # The last production filename literal that reached the release fingerprint without a
+    # declaration.  `data_fingerprint` copies these bytes into the certificate as
+    # `codes_checksum`, and the ClaimBundle carries them as `AuthorityBinding.index_checksum`
+    # -- an attested value composed from a path two modules spelled out by hand.
+    "retrieval_index_checksum": {
+        "path": config.DATA_DIR / "qdrant_store" / "codes_checksum.txt",
+        "role": "content checksum of the built semantic retrieval index",
+        "absence_justification":
+            "the semantic index is a CANDIDATE-GENERATION aid: absence removes candidates "
+            "from retrieval and can never admit one, because every candidate it surfaces "
+            "still has to be entailed by the note and clear every deterministic gate. It "
+            "is also a deployment-built artifact rather than a repository input, so a "
+            "clean build legitimately has none until the index is built",
+    },
     "rule_exercise": {
         "path": config.RULE_EXERCISE_FILE,
         "role": "rule-exercise telemetry for the coding memorandum",
@@ -196,7 +261,11 @@ def _authoritative_paths() -> dict[str, Path]:
     # Their presence, bytes and absence are carried by the CAPABILITY manifest (which the
     # release certificate binds) as `absent-optional` / `degraded_optional`, and when they
     # are present the codes/ sweep below still content-addresses them here.
-    paths = dict(_AUTHORITATIVE)
+    # The runtime/derived inputs belong to the DECLARED registry now rather than being
+    # appended here afterwards: appending them in this one function (and nowhere else) is
+    # what let them be hashed by THIS manifest while staying invisible both to the
+    # disposition invariant and to the certificate's own manifest.  (Directive section 6.)
+    paths = _declared_registry()
     # Bulk discovery is a BACKSTOP for files nobody declared: skip any path an explicit
     # identity above already owns, so one file is never hashed twice under two identities
     # (which would make "which record is this file" ambiguous in the manifest).
@@ -207,21 +276,6 @@ def _authoritative_paths() -> dict[str, Path]:
     for path in sorted((config.DATA_DIR / "rules").glob("*.json")):
         if str(path) not in declared:
             paths.setdefault(f"rules/{path.name}", path)
-    runtime = {
-        "compliance_database": config.DATA_DIR / "compliance.db",
-        "validator_implementation": config.BASE_DIR / "app" / "validation" /
-                                    "validator.py",
-        "scrubber_implementation": config.BASE_DIR / "app" / "compliance" /
-                                   "engine.py",
-        "release_gate_implementation": config.BASE_DIR / "app" / "release" /
-                                       "claim_readiness.py",
-        "terminology_implementation": config.BASE_DIR / "app" /
-                                      "terminology" / "normalizer.py",
-        "submission_configuration": Path(os.getenv(
-            "PRACTICE_CONFIG_PATH",
-            str(config.DATA_DIR / "practice_config.json"))),
-    }
-    paths.update(runtime)
     return paths
 
 
@@ -251,7 +305,7 @@ RELEASE_METADATA_SOURCES = frozenset({
 # Version of the required-source SCHEMA below.  A release attestation records it, so a
 # certificate built against an older/other required-source definition is identifiable
 # rather than silently comparable.  Bump it whenever the required set or a role changes.
-REQUIRED_SOURCE_SCHEMA_VERSION = "release-required-sources-v2"
+REQUIRED_SOURCE_SCHEMA_VERSION = "release-required-sources-v3"
 
 # The COMPLETE set of release-bearing source identities a certifiable release must
 # account for, each with the ROLE it plays.  Absence of any one of these means a claim
@@ -444,6 +498,61 @@ _REQUIRED_RELEASE_SOURCES: dict[str, dict[str, str]] = {
             "publishes an effective window for it, so identity rests on the content "
             "digest (each scope carries its own approval dates and signature)",
     },
+    # --- round 7, directive section 6: the RUNTIME / DERIVED inputs -------------------
+    # `authoritative_paths()` already NAMED all six; not one was dispositioned, so the
+    # capability manifest -- and therefore the release certificate -- carried none of
+    # them.  All six are REQUIRED on the same bar as the tables above: for each, absence
+    # or substitution changes what may be billed while changing nothing the certificate
+    # could see.  None of them is an upstream publication, so each records why its
+    # identity rests on its content digest rather than a release window.
+    "compliance_database": {
+        # THE finding.  `CodeReferenceDB.check_ncci()` answers every live NCCI PTP
+        # question out of this compiled database (2.6M rows, deliberately never held in
+        # memory), and `ComplianceDataStore` answers coverage, global-period, MUE and
+        # code-existence questions out of it too.  Absent or empty, `check_ncci` returned
+        # None -- which every caller reads as "no edit", the PERMISSIVE answer -- while
+        # the certificate went on hashing the raw NCCI JSON the decision never opened.
+        "role": "compiled code/edit/coverage database queried at decision time",
+        "release_metadata_exemption":
+            "a DERIVED build product, not an upstream publication: the effective windows "
+            "it serves belong to the JSON sources it was compiled from, which publish "
+            "them and are separately required here, so its own identity rests on the "
+            "content digest of the exact database bytes that answered the query",
+    },
+    "validator_implementation": {
+        "role": "deterministic claim-validation implementation",
+        "release_metadata_exemption":
+            "release-bearing executable code, not an ingested publication; identity "
+            "rests on the content digest of the module the deployment actually ran",
+    },
+    "scrubber_implementation": {
+        "role": "compliance-scrub implementation",
+        "release_metadata_exemption":
+            "release-bearing executable code, not an ingested publication; identity "
+            "rests on the content digest of the module the deployment actually ran",
+    },
+    "release_gate_implementation": {
+        "role": "claim-readiness release-gate implementation",
+        "release_metadata_exemption":
+            "release-bearing executable code, not an ingested publication; identity "
+            "rests on the content digest of the module the deployment actually ran",
+    },
+    "terminology_implementation": {
+        "role": "clinical-terminology normalization implementation",
+        "release_metadata_exemption":
+            "release-bearing executable code, not an ingested publication; identity "
+            "rests on the content digest of the module the deployment actually ran",
+    },
+    "submission_configuration": {
+        # The billing entity, NPIs and payer routing the 837P is built from.  It is
+        # env-overridable (`PRACTICE_CONFIG_PATH`), so the identity that matters is the
+        # bytes at the path THIS deployment resolved, not a repo default.
+        "role": "billing-entity / submission configuration for the professional claim",
+        "release_metadata_exemption":
+            "deployment-owned configuration resolved per environment, not an ingested "
+            "upstream publication with an effective window; identity rests on the "
+            "content digest of the file the deployment resolved",
+    },
 }
 
 
@@ -457,7 +566,10 @@ def _assert_registry_dispositioned() -> None:
     without deciding what it is fails loudly at the first call, in every consumer.
     """
     dispositioned = set(_REQUIRED_RELEASE_SOURCES) | set(_OPTIONAL_SOURCES)
-    undeclared = sorted(set(_AUTHORITATIVE) - dispositioned)
+    # `_declared_registry()`, not `_AUTHORITATIVE`: the runtime/derived inputs are
+    # declared identities too, and leaving them outside this check is precisely how
+    # `compliance_database` stayed undispositioned while being named by the registry.
+    undeclared = sorted(set(_declared_registry()) - dispositioned)
     if undeclared:
         raise RuntimeError(
             "registered authoritative source(s) with no reviewed disposition (neither "
@@ -498,7 +610,7 @@ def declared_source_path(source_id: str) -> Path:
     than quietly producing a file nobody certifies.  (Codex F6-R5, round 5.)
     """
     _assert_registry_dispositioned()
-    path = _AUTHORITATIVE.get(source_id)
+    path = _declared_registry().get(source_id)
     if path is None:
         entry = _OPTIONAL_SOURCES.get(source_id)
         path = entry["path"] if entry else None
@@ -562,6 +674,157 @@ def declared_table(source_id: str, key: str,
     return table
 
 
+class CompiledDatabaseUnavailable(DeclaredSourceUnavailable):
+    """The compiled compliance database cannot serve as the certified authority.
+
+    Missing, unopenable, truncated/malformed, schema-drifted, EMPTY in a table a decision
+    is answered from, compiled from source bytes other than the ones on disk now, or
+    swapped underneath a process that already bound it -- every one of those raises this
+    instead of resolving to the shape each reader treats as "nothing to report".
+
+    For every decision table below, EMPTY is the PERMISSIVE answer -- "no NCCI edit", "no
+    unit limit", "no coverage policy governs this", "this code does not exist" -- so an
+    empty required table is an integrity failure, never a lookup miss.  This is the same
+    class of hole `declared_document` / `declared_table` closed for the JSON sources; it
+    stayed open for the compiled database because no reader resolved through the
+    declaration at all.  (Directive section 6 / Codex F6-R5-A remainder.)
+    """
+
+
+#: Tables a claim decision is ANSWERED from, and which must therefore be present AND
+#: non-empty for the database to be usable as the certified authority.  These are SCHEMA
+#: names -- no medical code, code family, prefix range or descriptor appears here, so the
+#: no-hardcoded-codes rule is satisfied by construction rather than by exemption.  Kept in
+#: ONE place so the certificate's integrity check and the readers' fail-closed check can
+#: never disagree about what "usable" means.
+REQUIRED_DATABASE_TABLES = ("code_set", "ncci_ptp", "mue", "coverage_policy")
+
+#: {`data_file_fingerprint` row id -> the DECLARED sources that row must describe}.  The
+#: row ids are the database's own schema; the paths are resolved through the declaration
+#: so the staleness check and the manifest can never compare different files.
+_DATABASE_SOURCE_ROWS: dict[str, tuple[str, ...]] = {
+    "icd10_codes": ("icd10_codes",),
+    "cpt_codes": ("cpt_codes",),
+    "hcpcs_codes": ("hcpcs_codes",),
+    "ncci": ("ncci_edits",),
+    "mue": ("mue_limits",),
+    "lcd": ("coverage_policy", "mcd_coverage_cache"),
+}
+
+
+def compliance_database_path() -> Path:
+    """The compiled database's path, resolved through the DECLARATION.
+
+    Every decision-time reader calls this instead of composing `DATA_DIR / "compliance.db"`
+    itself, for the same reason the JSON readers call `declared_source_path`: a file a
+    claim depends on cannot exist outside the manifest.  (Directive section 6.)
+    """
+    return declared_source_path("compliance_database")
+
+
+def compliance_database_identity() -> dict:
+    """{source_id, path, sha256, size} -- the exact BYTES of the compiled database.
+
+    This is what the ClaimBundle binds.  Row counts and ingest timestamps cannot tell two
+    materially different databases apart, and the raw-JSON digests the certificate already
+    carried describe files the NCCI lookup never opened.  Raises rather than returning a
+    partial identity: a release must never be certified against a database nobody can name.
+    """
+    path = compliance_database_path()
+    try:
+        stat = path.stat()
+        digest = sha256_file(path)
+    except OSError as exc:
+        raise CompiledDatabaseUnavailable(
+            f"compiled compliance database unreadable at {path}: {exc}") from exc
+    return {"source_id": "compliance_database", "path": str(path),
+            "sha256": digest, "size": int(stat.st_size)}
+
+
+def _file_identity(paths: list[Path]) -> str:
+    """The identity string `ComplianceDataStore` records when it ingests a source file."""
+    parts = []
+    for path in paths:
+        try:
+            stat = path.stat()
+            parts.append(f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}")
+        except OSError:
+            parts.append(f"{path.name}:missing")
+    return "|".join(parts)
+
+
+def _source_fingerprint_mismatches(conn) -> list[str]:
+    """Sources whose bytes on disk differ from the ones the database was compiled from.
+
+    This is the STALENESS half: a database that opens cleanly and answers every query can
+    still be the wrong database -- built from a previous quarter's edit file while the
+    manifest hashes this quarter's JSON.  The certificate would then attest to inputs the
+    decision did not use, which is the finding.
+    """
+    try:
+        recorded = dict(conn.execute(
+            "SELECT source_id, fingerprint FROM data_file_fingerprint").fetchall())
+    except sqlite3.Error as exc:
+        return [f"compliance_database provenance unavailable: {exc}"]
+    errors = []
+    for row_id, source_ids in _DATABASE_SOURCE_ROWS.items():
+        try:
+            paths = [declared_source_path(sid) for sid in source_ids]
+        except Exception as exc:
+            errors.append(f"compliance_database source {row_id}: "
+                          f"not resolvable from the declaration ({exc})")
+            continue
+        if recorded.get(row_id) != _file_identity(paths):
+            errors.append(f"compliance_database source mismatch: {row_id}")
+    return errors
+
+
+def compliance_database_errors() -> list[str]:
+    """Every reason the compiled database may not be certified as the queried authority.
+
+    Deliberately CHEAP -- no `PRAGMA integrity_check`, which would re-read in full the
+    multi-hundred-megabyte file the manifest is already SHA-256ing.  The digest is what
+    binds IDENTITY; these probes are what catch a database that is present but UNUSABLE:
+    truncated or malformed (SQLite raises on the first read), schema-drifted (a decision
+    table gone), empty where empty is the permissive answer, or compiled from source bytes
+    other than the ones on disk now.
+
+    Returns a LIST rather than raising so `build_manifest` can report every problem at once
+    and set `status = BLOCKED`; the READ path raises `CompiledDatabaseUnavailable` instead.
+    """
+    try:
+        db_path = compliance_database_path()
+    except Exception as exc:
+        return [f"compliance_database: not resolvable from the declaration ({exc})"]
+    if not db_path.exists():
+        return ["compliance_database: absent"]
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        errors: list[str] = []
+        for table in REQUIRED_DATABASE_TABLES:
+            try:
+                # EXISTS stops at the first row, so this is O(1) rather than a count over
+                # 2.6M NCCI rows -- cheap enough to run on every manifest build.
+                populated = conn.execute(
+                    f'SELECT EXISTS(SELECT 1 FROM "{table}")').fetchone()[0]
+            except sqlite3.Error as exc:
+                errors.append(
+                    f"compliance_database: decision table {table!r} unreadable ({exc})")
+                continue
+            if not populated:
+                errors.append(
+                    f"compliance_database: decision table {table!r} is empty; empty is "
+                    f"the permissive answer for it, not a lookup miss")
+        errors.extend(_source_fingerprint_mismatches(conn))
+        return errors
+    except sqlite3.Error as exc:
+        return [f"compliance_database: unusable ({exc})"]
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def required_release_sources() -> dict[str, dict]:
     """{source_id -> {source_id, role, path, release_metadata_required,
     release_metadata_exemption}} for every source a certifiable release must account for.
@@ -578,8 +841,9 @@ def required_release_sources() -> dict[str, dict]:
     """
     _assert_registry_dispositioned()
     spec: dict[str, dict] = {}
+    registry = _declared_registry()
     for source_id, declared in _REQUIRED_RELEASE_SOURCES.items():
-        path = _AUTHORITATIVE.get(source_id)
+        path = registry.get(source_id)
         if path is None:
             raise RuntimeError(
                 f"required release source {source_id!r} is not registered in the "
@@ -616,15 +880,53 @@ def release_window_populated(release) -> bool:
                for key in ("effective_from", "release_effective_from"))
 
 
+#: How far in the past a file's mtime must lie before its digest may be CACHED.
+#:
+#: Filesystem timestamp granularity is coarser than the nanosecond field suggests: two
+#: writes inside one tick produce byte-DIFFERENT files carrying an IDENTICAL
+#: (device, inode, size, mtime) key -- observed directly on this deployment's own
+#: filesystem, where a same-size in-place SQLite `UPDATE` changed the file's bytes and
+#: left `st_mtime_ns` untouched to the nanosecond.  A cache keyed on that tuple then
+#: answers with the FIRST file's digest, and the certificate attests to bytes that are no
+#: longer there -- which is the exact "certified bytes != read bytes" failure this whole
+#: finding is about, reintroduced by the optimisation meant to serve it.
+#:
+#: This is the "racily clean" problem git solves in its index, and this is git's fix: a
+#: file modified within this window of the moment it was hashed is never cached, so the
+#: next attestation re-reads it.  One second covers every filesystem this runs on, and
+#: costs nothing in practice -- the authoritative sources and the compiled database are
+#: written at ingest/build time, long before any claim is certified against them.
+_RACY_MTIME_WINDOW_NS = 1_000_000_000
+
+#: {path -> ((device, inode, size, mtime_ns), digest)} for files proven non-racy.
+_DIGEST_CACHE: dict[str, tuple[tuple, str]] = {}
+
+
+def _file_key(stat) -> tuple:
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
 def sha256_file(path: Path) -> str:
+    """The SHA-256 of a file's exact bytes; cached only where caching is PROVABLY safe."""
     stat = path.stat()
-    return _sha256_cached(str(path), stat.st_mtime_ns, stat.st_size)
+    key, identity = str(path), _file_key(stat)
+    cached = _DIGEST_CACHE.get(key)
+    if cached is not None and cached[0] == identity:
+        return cached[1]
+    started = time.time_ns()
+    digest = _sha256_bytes(path)
+    after = path.stat()
+    if _file_key(after) != identity:
+        # The file changed WHILE it was being hashed, so this digest describes no single
+        # state of it.  Report the bytes actually read and cache NOTHING; the manifest's
+        # own concurrent-writer checks are what escalate this into an error.
+        return digest
+    if after.st_mtime_ns + _RACY_MTIME_WINDOW_NS < started:
+        _DIGEST_CACHE[key] = (identity, digest)
+    return digest
 
 
-@lru_cache(maxsize=256)
-def _sha256_cached(path_text: str, mtime_ns: int, size: int) -> str:
-    """Hash once per immutable filesystem identity; edits invalidate it."""
-    path = Path(path_text)
+def _sha256_bytes(path: Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -649,7 +951,11 @@ def build_source_manifest() -> dict:
                             **_release_metadata(source_id)})
         except Exception as exc:
             errors.append(f"{source_id}: {exc}")
-    errors.extend(_database_source_errors())
+    for error in _database_source_errors():
+        # `_checkpoint_database` above and the source/usability probes below can both
+        # report the same absent database; one identity, one error.
+        if error not in errors:
+            errors.append(error)
     body = {"records": records, "errors": errors}
     body["fingerprint"] = manifest_fingerprint(body)
     return body
@@ -660,8 +966,16 @@ def _checkpoint_database() -> list[str]:
 
     This is a storage checkpoint, not a data change.  If another writer owns
     the WAL, the manifest fails closed instead of hashing a stale main file.
+
+    TOTAL, like every other contributor to `build_source_manifest`: an unresolvable
+    declaration is an ERROR STRING here, never a raise.  The release gate reads the
+    manifest's `errors` and converts them into a structured ERROR outcome; an exception
+    escaping this helper would leave the gate with no outcome to report at all.
     """
-    db_path = config.DATA_DIR / "compliance.db"
+    try:
+        db_path = compliance_database_path()
+    except Exception as exc:
+        return [f"compliance_database: not resolvable from the declaration ({exc})"]
     if not db_path.exists():
         return ["compliance_database: absent"]
     try:
@@ -677,45 +991,30 @@ def _checkpoint_database() -> list[str]:
 
 
 def _database_source_errors() -> list[str]:
-    """Detect a database built from different source-file identities."""
-    db_path = config.DATA_DIR / "compliance.db"
+    """Everything that disqualifies the compiled database, plus the write-race check.
+
+    The USABILITY and STALENESS probes are shared with `compliance_database_errors()` --
+    which the coder's capability manifest also calls -- so the app-side release gate and
+    the certificate can never reach different conclusions about the same database.  The
+    only part that stays here is the concurrent-writer check, because it needs a
+    read-WRITE connection and this manifest has already checkpointed the WAL.
+    """
+    errors = compliance_database_errors()
+    try:
+        db_path = compliance_database_path()
+    except Exception:
+        # Already reported by `compliance_database_errors()` above; see
+        # `_checkpoint_database` for why this is an error string and not a raise.
+        return errors
     if not db_path.exists():
-        return ["compliance_database: absent"]
-    sources = {
-        "icd10_codes": [config.ICD10_FILE],
-        "cpt_codes": [config.CPT_FILE],
-        "hcpcs_codes": [config.HCPCS_FILE],
-        "ncci": [config.NCCI_FILE],
-        "mue": [config.MUE_FILE],
-        "lcd": [config.LCD_FILE, config.MCD_COVERAGE_CACHE_FILE],
-    }
-
-    def identity(paths: list[Path]) -> str:
-        parts = []
-        for path in paths:
-            try:
-                stat = path.stat()
-                parts.append(f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}")
-            except OSError:
-                parts.append(f"{path.name}:missing")
-        return "|".join(parts)
-
+        return errors
     try:
         conn = sqlite3.connect(db_path, timeout=30)
-        rows = conn.execute(
-            "SELECT source_id, fingerprint FROM data_file_fingerprint"
-        ).fetchall()
         busy, frames, checkpointed = conn.execute(
             "PRAGMA wal_checkpoint(PASSIVE)").fetchone()
         conn.close()
     except sqlite3.Error as exc:
-        return [f"compliance_database provenance unavailable: {exc}"]
-    recorded = dict(rows)
-    errors = [
-        f"compliance_database source mismatch: {source_id}"
-        for source_id, paths in sources.items()
-        if recorded.get(source_id) != identity(paths)
-    ]
+        return errors + [f"compliance_database provenance unavailable: {exc}"]
     if busy or frames != checkpointed or frames:
         errors.append("compliance_database changed while manifest was built")
     return errors
@@ -748,7 +1047,14 @@ def _release_metadata(source_id: str) -> dict:
     """
     if source_id not in RELEASE_METADATA_SOURCES:
         return {"effective_from": "", "effective_to": "", "version": ""}
-    db_path = config.DATA_DIR / "compliance.db"
+    try:
+        db_path = compliance_database_path()
+    except Exception:
+        # Release metadata is DESCRIPTIVE; the identity of the data is the digest.  An
+        # unresolvable declaration is reported as a hard error by the disposition
+        # invariant and by `compliance_database_errors()`, so it must not also escape
+        # from this descriptive helper into `build_source_manifest`'s per-record loop.
+        return {"effective_from": "", "effective_to": "", "version": ""}
     if not db_path.exists():
         return {"effective_from": "", "effective_to": "", "version": ""}
     conn = None

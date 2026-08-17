@@ -67,7 +67,13 @@ def _load_synonyms(path) -> dict:
         return {str(k): v for k, v in t.items() if isinstance(v, list)}
     except Exception:
         return {}
-_CHECKSUM_FILE = QDRANT_DIR / "codes_checksum.txt"
+# The retrieval index's content identity reaches the release certificate (as
+# `AuthoritativeSource.data_fingerprint`'s `codes_checksum` and the ClaimBundle's
+# `AuthorityBinding.index_checksum`), so its path comes from the DECLARATION rather
+# than being composed here.  (Directive section 6.)
+def _checksum_file():
+    from app.release.source_manifest import declared_source_path
+    return declared_source_path("retrieval_index_checksum")
 _CODE_SYSTEMS  = ["icd10", "cpt", "hcpcs"]
 
 
@@ -144,12 +150,14 @@ class MedicalCodeVectorStore:
 
     def build_or_load(self, force_rebuild: bool = False) -> None:
         # Checksum dir must always exist regardless of Qdrant mode
-        _CHECKSUM_FILE.parent.mkdir(parents=True, exist_ok=True)
+        checksum_file = _checksum_file()
+        checksum_file.parent.mkdir(parents=True, exist_ok=True)
 
         self._open_client()
 
         current_checksum  = _compute_checksum()
-        stored_checksum   = _CHECKSUM_FILE.read_text().strip() if _CHECKSUM_FILE.exists() else ""
+        stored_checksum   = (checksum_file.read_text().strip()
+                             if checksum_file.exists() else "")
         collections_exist = self._all_collections_exist()
         files_unchanged   = (stored_checksum == current_checksum)
         can_load          = collections_exist and files_unchanged and not force_rebuild
@@ -164,7 +172,7 @@ class MedicalCodeVectorStore:
             else:
                 logger.info("Force rebuild requested — rebuilding Qdrant collections...")
             self._rebuild_via_subprocesses()
-            _CHECKSUM_FILE.write_text(current_checksum)
+            checksum_file.write_text(current_checksum)
 
         # Load the embedding models for query-time search (one query at a time is
         # light — the memory-heavy part is the bulk index build, handled above in

@@ -4,15 +4,29 @@ import calendar
 from datetime import date
 from app.core.config import (
     ICD10_FILE, CPT_FILE, HCPCS_FILE, MUE_FILE,
-    SNOMED_ROOTS_FILE, DATA_DIR,
+    SNOMED_ROOTS_FILE,
 )
 from app.core.logger import get_logger
 from app.compliance.datastore.store import cpt_edition_window
+from app.release.source_manifest import (
+    CompiledDatabaseUnavailable, compliance_database_path)
 
 logger = get_logger(__name__)
 
-_COMPLIANCE_DB_PATH = DATA_DIR / "compliance.db"
 _OPEN = "9999-12-31"
+
+
+def _snapshot_identity(path) -> tuple:
+    """The filesystem identity of the database file this process is reading.
+
+    Device+inode is what distinguishes a REPLACED file from a modified one (an atomic
+    rename keeps the path and changes the inode); size and mtime catch in-place edits.
+    Cheap enough to re-check on every query, which is the point: the certificate binds the
+    digest of the bytes the manifest hashed, so a database swapped underneath a running
+    encounter would otherwise let the claim be attested to bytes it never queried.
+    """
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
 
 class SnomedRootsUnavailable(RuntimeError):
@@ -75,6 +89,10 @@ class CodeReferenceDB:
         self.snomed_root_confidence_cap: float = 0.4
         self._ncci_release_window_loaded = False
         self._ncci_release_window: tuple[date, date] | None = None
+        # The compiled-database snapshot THIS instance bound on its first query.  The
+        # ClaimBundle is bound to one database; a second, different one appearing under
+        # the same path mid-encounter is a stale read, not a fresh one.
+        self._db_snapshot: tuple | None = None
 
     def load_all(self) -> None:
         # Treat one load as one authoritative data snapshot. A subsequent
@@ -82,6 +100,7 @@ class CodeReferenceDB:
         # NCCI release window.
         self._ncci_release_window_loaded = False
         self._ncci_release_window = None
+        self._db_snapshot = None
         self._load_icd10()
         self._load_cpt()
         self._load_hcpcs()
@@ -228,51 +247,111 @@ class CodeReferenceDB:
         d = dos if isinstance(dos, str) else (dos.isoformat() if dos else date.today().isoformat())
         return entry["effective_from"] <= d <= entry["effective_to"]
 
-    def _ncci_release_bounds(self) -> tuple[date, date] | None:
-        """Return the loaded NCCI snapshot quarter, querying SQLite once."""
-        if self._ncci_release_window_loaded:
-            return self._ncci_release_window
-        conn = sqlite3.connect(f"file:{_COMPLIANCE_DB_PATH}?mode=ro", uri=True)
+    def _connect(self):
+        """Open the DECLARED compiled database, FAIL-CLOSED.
+
+        Absent, unopenable or REPLACED-since-this-process-bound-it all raise
+        `CompiledDatabaseUnavailable` rather than propagating a bare `sqlite3.Error` that
+        no caller expects this module to raise, or -- worse -- resolving to the empty
+        result every caller reads as "no edit".  (Directive section 6.)
+        """
         try:
-            row = conn.execute(
-                "SELECT MAX(effective_from) FROM ncci_ptp",
-            ).fetchone()
+            path = compliance_database_path()
+        except Exception as exc:
+            raise CompiledDatabaseUnavailable(
+                f"the compiled compliance database is not resolvable from the "
+                f"release-source declaration: {exc}") from exc
+        try:
+            identity = _snapshot_identity(path)
+        except OSError as exc:
+            raise CompiledDatabaseUnavailable(
+                f"compiled compliance database unreadable at {path}: {exc}") from exc
+        if self._db_snapshot is None:
+            self._db_snapshot = identity
+        elif identity != self._db_snapshot:
+            # STALE: the release certificate is built over the digest of ONE database.  A
+            # file replaced mid-encounter means the bytes that answered this query are not
+            # the bytes the certificate will attest to, so the encounter holds rather than
+            # silently mixing two snapshots.
+            raise CompiledDatabaseUnavailable(
+                f"the compiled compliance database at {path} was replaced while this "
+                f"encounter was being coded; the claim cannot be bound to one snapshot")
+        try:
+            return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        except sqlite3.Error as exc:
+            raise CompiledDatabaseUnavailable(
+                f"compiled compliance database unopenable at {path}: {exc}") from exc
+
+    def _query(self, sql: str, params: tuple = ()):
+        """One fail-closed read.  A malformed/truncated database, a decision table that is
+        no longer there, or any other SQLite failure raises the typed error -- it must
+        never surface as an empty row set, which is the permissive answer."""
+        conn = self._connect()
+        try:
+            # `execute(sql)` when there are no parameters: a parameterless query is a
+            # different call shape, and widening it would redefine the connection
+            # contract every substituted/traced connection is written against.
+            cursor = conn.execute(sql, params) if params else conn.execute(sql)
+            return cursor.fetchone()
+        except sqlite3.Error as exc:
+            raise CompiledDatabaseUnavailable(
+                f"the compiled compliance database could not answer an authoritative "
+                f"query ({exc})") from exc
         finally:
             conn.close()
-        bounds = None
-        if row and row[0]:
-            try:
-                release_date = date.fromisoformat(row[0])
-            except (TypeError, ValueError):
-                pass
-            else:
-                quarter_index = (release_date.month - 1) // 3
-                end_month = (quarter_index + 1) * 3
-                release_end = date(release_date.year, end_month,
-                                   calendar.monthrange(release_date.year, end_month)[1])
-                # The CMS PTP file is CUMULATIVE and RETAINS deleted edits with their
-                # effective_to, so it is an accurate historical record covering the prior
-                # + current year through the release quarter -- not just the release
-                # quarter. check_ncci filters each pair by its own effective window; DOS
-                # beyond the release quarter (future edits we don't hold) still fail closed.
-                start = date(release_date.year - 1, 1, 1)
-                bounds = (start, release_end)
+
+    def _ncci_release_bounds(self) -> tuple[date, date]:
+        """The loaded NCCI snapshot quarter, querying SQLite once.
+
+        FAIL-CLOSED (directive section 6): an absent, unreadable, empty or undated
+        `ncci_ptp` table used to resolve to `None` here, which made `ncci_data_available`
+        answer False and `check_ncci` return None -- "no edit" -- for EVERY pair.  That is
+        the permissive answer, produced by the authority being missing rather than by the
+        authority saying anything.  All four states raise now.
+        """
+        if self._ncci_release_window_loaded:
+            return self._ncci_release_window
+        row = self._query("SELECT MAX(effective_from) FROM ncci_ptp")
+        if not row or not row[0]:
+            raise CompiledDatabaseUnavailable(
+                "the compiled compliance database publishes no NCCI PTP release window "
+                "(the edit table is empty); an empty edit table is indistinguishable at "
+                "every caller from 'this pair has no edit'")
+        try:
+            release_date = date.fromisoformat(row[0])
+        except (TypeError, ValueError) as exc:
+            raise CompiledDatabaseUnavailable(
+                f"the compiled compliance database records an unparseable NCCI release "
+                f"date {row[0]!r}: {exc}") from exc
+        quarter_index = (release_date.month - 1) // 3
+        end_month = (quarter_index + 1) * 3
+        release_end = date(release_date.year, end_month,
+                           calendar.monthrange(release_date.year, end_month)[1])
+        # The CMS PTP file is CUMULATIVE and RETAINS deleted edits with their
+        # effective_to, so it is an accurate historical record covering the prior
+        # + current year through the release quarter -- not just the release
+        # quarter. check_ncci filters each pair by its own effective window; DOS
+        # beyond the release quarter (future edits we don't hold) still fail closed.
+        bounds = (date(release_date.year - 1, 1, 1), release_end)
         self._ncci_release_window = bounds
         self._ncci_release_window_loaded = True
         return bounds
 
     def ncci_data_available(self, dos=None) -> bool:
-        """Return whether the loaded quarterly NCCI snapshot covers DOS."""
+        """Whether the loaded quarterly NCCI snapshot COVERS this DOS.
+
+        False now means exactly one thing -- the authority is readable and does not speak
+        for this date.  "The authority could not be read at all" raises
+        `CompiledDatabaseUnavailable` out of `_ncci_release_bounds`; collapsing the two
+        into the same False is what let an unreadable database read as a clean claim.
+        """
         if dos is None:
             return False
         try:
             d = date.fromisoformat(dos) if isinstance(dos, str) else dos
         except (TypeError, ValueError):
             return False
-        bounds = self._ncci_release_bounds()
-        if bounds is None:
-            return False
-        start, end = bounds
+        start, end = self._ncci_release_bounds()
         return start <= d <= end
 
     def check_ncci(self, code1: str, code2: str, dos=None) -> dict | None:
@@ -281,17 +360,14 @@ class CodeReferenceDB:
             return None
         d = dos if isinstance(dos, str) else dos.isoformat()
         c1, c2 = _norm(code1), _norm(code2)
-        conn = sqlite3.connect(f"file:{_COMPLIANCE_DB_PATH}?mode=ro", uri=True)
-        try:
-            row = conn.execute(
-                "SELECT col1, col2, modifier_indicator FROM ncci_ptp "
-                "WHERE ((col1=? AND col2=?) OR (col1=? AND col2=?)) "
-                "AND effective_from<=? AND effective_to>=? "
-                "ORDER BY effective_from DESC LIMIT 1",
-                (c1, c2, c2, c1, d, d),
-            ).fetchone()
-        finally:
-            conn.close()
+        # None from HERE means the query RAN against a usable snapshot covering this DOS
+        # and this pair carries no edit.  Every failure to run raises instead.
+        row = self._query(
+            "SELECT col1, col2, modifier_indicator FROM ncci_ptp "
+            "WHERE ((col1=? AND col2=?) OR (col1=? AND col2=?)) "
+            "AND effective_from<=? AND effective_to>=? "
+            "ORDER BY effective_from DESC LIMIT 1",
+            (c1, c2, c2, c1, d, d))
         if not row:
             return None
         row_c1, row_c2, modifier = row

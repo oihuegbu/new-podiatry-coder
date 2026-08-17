@@ -247,29 +247,34 @@ def _source_control(result: dict) -> ControlResult:
     if any(not valid_record(r) for r in records):
         return _control("authoritative_sources", ControlOutcome.ERROR,
                         "source manifest contains an invalid record identity")
+    # The mandatory set comes from the SAME versioned declaration the coder's release
+    # fingerprint validates against, so a newly required source cannot be enforced in one
+    # release path and silently absent from the other. A declaration that cannot be
+    # resolved is an ERROR, never an empty (vacuously satisfied) set.
+    # (Codex F6-R5, post-fix review: adjacent instance of the parallel-list drift class.)
+    #
+    # Resolved FIRST, before the live-snapshot comparison below: the comparison rebuilds
+    # the manifest THROUGH this same declaration, so an unresolvable declaration would
+    # surface as manifest drift ("sources changed") and hide the real fault. Its
+    # resolvability is a precondition for every later judgement here, not one of them.
+    #
+    # It is also the ONLY source of the set now. This gate used to ADD the runtime and
+    # implementation identities by hand, on the stated grounds that they "are not part of
+    # the required-source declaration" -- they are, as of directive section 6, every one
+    # of them dispositioned and content-addressed there. A hand-maintained copy of a
+    # declared set is precisely the parallel-list drift this codebase has been bitten by
+    # repeatedly, so the copy is gone rather than merged.
+    try:
+        from app.release.source_manifest import required_release_sources
+        mandatory = set(required_release_sources())
+    except Exception as exc:
+        return _control("authoritative_sources", ControlOutcome.ERROR,
+                        f"required-source declaration is unavailable ({exc})")
     current = build_source_manifest()
     if current.get("fingerprint") != manifest.get("fingerprint"):
         return _control("authoritative_sources", ControlOutcome.BLOCKED,
                         "authoritative sources changed or are not the live snapshot")
     present = {str(r.get("source_id")) for r in records}
-    # Runtime/implementation identities this gate additionally binds (they are not
-    # release-bearing DATA, so they are not part of the required-source declaration).
-    mandatory = {"coverage_policy", "validator_rules",
-                 "compliance_database", "validator_implementation",
-                 "scrubber_implementation", "release_gate_implementation",
-                 "submission_configuration", "terminology_registry",
-                 "terminology_implementation"}
-    # The claim-affecting DATA identities come from the SAME versioned declaration the
-    # coder's release fingerprint validates against, so a newly required source cannot
-    # be enforced in one release path and silently absent from the other. A declaration
-    # that cannot be resolved is an ERROR, never an empty (vacuously satisfied) set.
-    # (Codex F6-R5, post-fix review: adjacent instance of the parallel-list drift class.)
-    try:
-        from app.release.source_manifest import required_release_sources
-        mandatory |= set(required_release_sources())
-    except Exception as exc:
-        return _control("authoritative_sources", ControlOutcome.ERROR,
-                        f"required-source declaration is unavailable ({exc})")
     missing = sorted(mandatory - present)
     if missing:
         return _control("authoritative_sources", ControlOutcome.NOT_CHECKED,

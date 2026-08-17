@@ -22,8 +22,9 @@ from app.core.config import (
     ICD10_FILE, CPT_FILE, HCPCS_FILE, NCCI_FILE, MUE_FILE, LCD_FILE,
     MCD_COVERAGE_CACHE_FILE, GLOBAL_PERIODS_FILE, DATA_DIR, CODES_DIR,
 )
-from app.release.source_manifest import (DeclaredSourceUnavailable, declared_document,
-                                         declared_source_path)
+from app.release.source_manifest import (DeclaredSourceUnavailable,
+                                         compliance_database_path,
+                                         declared_document, declared_source_path)
 
 # Every reference table this store ingests or reads is addressed by its DECLARED
 # release-source identity, never by a filename literal composed here.  Codex F6-R5-A:
@@ -65,7 +66,10 @@ from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
-DB_PATH = DATA_DIR / "compliance.db"
+# The compiled database's location is owned by the DECLARATION, like every other
+# decision-time source -- not composed here as a filename literal, which is exactly
+# how it came to be read by two modules and dispositioned by neither.
+# (Directive section 6.)
 
 # A valid CPT/HCPCS code: 5 chars — 5 digits, 4 digits + letter (CPT III),
 # or letter + 4 digits (HCPCS II). Used to reject copyright/header junk rows.
@@ -167,8 +171,12 @@ def cpt_edition_window(data: dict, entry: dict) -> tuple[str, str, bool]:
 
 
 class ComplianceDataStore:
-    def __init__(self, db_path: Path = DB_PATH):
-        self.db_path = db_path
+    def __init__(self, db_path: Path | None = None):
+        # None (not a module constant evaluated at import) so the DECLARATION is the one
+        # place that says where the compiled database lives; an explicit path is still
+        # accepted for the tools/tests that build a store somewhere else on purpose.
+        self.db_path = (Path(db_path) if db_path is not None
+                        else compliance_database_path())
         self._conn: sqlite3.Connection | None = None
         self._ncci_release_window_loaded = False
         self._ncci_release_window: tuple[date, date] | None = None

@@ -690,6 +690,17 @@ class AuthoritativeSource:
         try:
             edit = db.check_ncci(a, b, dos)      # type: ignore[attr-defined]
         except Exception:
+            # None here means "no directional edit to apply", and that is SAFE only
+            # because of what this function drives: a DEMOTION that can only ever remove
+            # a line from the claim, plus an integral-bundling decision that can only
+            # ever convert an escalation into an exclusion. Neither can bill anything.
+            # The gate that decides RELEASABILITY reads the same authority through
+            # `ncci_indicator` above, which reports AUTHORITY_UNAVAILABLE and holds the
+            # encounter -- and directive section 6's certificate now BLOCKS on an
+            # unusable compiled database independently of either. Raising instead would
+            # abort assembly mid-claim and turn a structured hold into a crash artifact.
+            # (Proved by `test_an_uncertifiable_compiled_database_stops_the_deployed_
+            # entrypoint`, which asserts the hold through the real entrypoint.)
             return None
         if not isinstance(edit, dict):
             return None
@@ -757,8 +768,8 @@ class AuthoritativeSource:
             raise RuntimeError(
                 "authoritative code counts unavailable/empty; cannot fingerprint release")
         try:
-            from app.core.config import DATA_DIR
-            chk = DATA_DIR / "qdrant_store" / "codes_checksum.txt"
+            from app.release.source_manifest import declared_source_path
+            chk = declared_source_path("retrieval_index_checksum")
             if chk.exists():
                 fp["codes_checksum"] = chk.read_text().strip()[:64]
         except Exception:

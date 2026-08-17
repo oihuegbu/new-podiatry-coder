@@ -191,6 +191,24 @@ def build_manifest() -> dict[str, Any]:
         record, errors = _probe(p, req, role, registry, locks, sid)
         sources.append(record)
         integrity_errors.extend(errors)
+    # Directive section 6.  Registering `compliance_database` as a required release source
+    # (above, via the declaration) puts its exact BYTES in the manifest; this puts its
+    # USABILITY in the manifest's STATUS.  Presence and a digest are not enough for a
+    # compiled database the way they are for a JSON table: a database can be present,
+    # digestible and completely unable to answer -- truncated, schema-drifted, missing the
+    # NCCI rows entirely, or compiled from a previous quarter's inputs -- and every one of
+    # those states makes `check_ncci` answer "no edit", the permissive direction. A
+    # present-but-unusable database therefore BLOCKS certification rather than certifying a
+    # claim against a database that answered nothing because it had nothing to answer with.
+    try:
+        from app.release.source_manifest import compliance_database_errors
+        integrity_errors.extend(compliance_database_errors())
+    except Exception as exc:
+        # The check itself failing is indistinguishable, for release purposes, from the
+        # database failing: either way nobody can attest to what answered the query.
+        integrity_errors.append(
+            f"compliance_database: integrity could not be established "
+            f"({type(exc).__name__}: {exc})")
     # Reported by DECLARED IDENTITY, not by filename stem: the hold message names the same
     # identity the declaration, the fingerprint validator and the audit trail use, so
     # "required source(s) missing: coverage_policy" is actionable where "podiatry_lcd" was

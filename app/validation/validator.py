@@ -3,6 +3,9 @@ import os
 import re
 
 from app.rag.code_reference import CodeReferenceDB
+# The shared base of every "this authority is unreadable" error, so one `except`
+# covers the compiled database and the JSON tables alike.
+from app.release.source_manifest import DeclaredSourceUnavailable
 from app.models.schemas import ValidationIssue, DocumentationAudit, EncounterIntegrity
 from app.core.logger import get_logger
 
@@ -150,6 +153,10 @@ class CodingValidator:
         # decision, never a silently vanished issue.
         self._advisory_suppression_corrections: list[dict] = []
         self._dos = None
+        # Latched per validation: the compiled edit authority was unreadable, so every
+        # NCCI-dependent rule below found nothing for a reason that has nothing to do
+        # with the claim.  See `_record_ncci_authority_loss`.
+        self._ncci_authority_lost = False
 
     def _is_em(self, code: str) -> bool:
         """Authoritative service classification; absence fails closed."""
@@ -183,6 +190,7 @@ class CodingValidator:
         self._scrub_advisory_suppressions = []
         self._advisory_suppression_corrections = []
         self._dos = dos
+        self._ncci_authority_lost = False
         # Payer context (parsed from the note's own insurance field via
         # payer_registry) — MUE is Medicare/NCCI policy, so the MUE-0
         # auto-suppression below applies only to payers bound to Original
@@ -666,9 +674,35 @@ class CodingValidator:
                     denial_risk="HIGH",
                 )
 
+    def _record_ncci_authority_loss(self, exc) -> None:
+        """Put an unreadable NCCI edit authority ON THE REPORT, once.
+
+        Every rule below uses an edit to ADD a finding, so an authority failure resolves
+        to "no finding" -- which is indistinguishable from a clean claim.  Raising instead
+        would abort the whole validation and lose every unrelated finding with it.  So the
+        loss is recorded as one HIGH-risk ERROR on the report itself, once per validation,
+        and the dependent rules then stay silent against a report that already says why.
+        (Directive section 6.)
+        """
+        if self._ncci_authority_lost:
+            return
+        self._ncci_authority_lost = True
+        self._add(
+            "ERROR", "", "ncci_data_unavailable",
+            f"The NCCI edit authority could not be read, so no code pair on this claim "
+            f"was checked against it ({exc})",
+            "Restore the compiled compliance database and re-run validation",
+            denial_risk="HIGH",
+            clause="release_available",
+        )
+
     def _ncci(self, code1: str, code2: str):
-        """Date-anchored NCCI lookup used by every validator rule."""
-        return self.db.check_ncci(code1, code2, self._dos)
+        """Date-anchored NCCI lookup used by every validator rule; FAIL-CLOSED."""
+        try:
+            return self.db.check_ncci(code1, code2, self._dos)
+        except DeclaredSourceUnavailable as exc:
+            self._record_ncci_authority_loss(exc)
+            return None
 
     def _check_ncci(self, lines, dos=None):
         codes = [c.get("code", "") for c in lines if c.get("code")]
@@ -683,7 +717,15 @@ class CodingValidator:
                 clause="dos_present",
             )
             return
-        if not self.db.ncci_data_available(dos):
+        try:
+            covers_dos = self.db.ncci_data_available(dos)
+        except DeclaredSourceUnavailable as exc:
+            # Distinct from the branch below on purpose: "the authority is unreadable" and
+            # "the authority is readable and does not cover this DOS" are different
+            # operational facts, and collapsing them hid the first behind the second.
+            self._record_ncci_authority_loss(exc)
+            return
+        if not covers_dos:
             self._add(
                 "ERROR", "", "ncci_data_unavailable",
                 f"No local NCCI release covers date of service {dos}",
@@ -694,7 +736,11 @@ class CodingValidator:
             return
         for i in range(len(codes)):
             for j in range(i + 1, len(codes)):
-                conflict = self.db.check_ncci(codes[i], codes[j], dos)
+                try:
+                    conflict = self.db.check_ncci(codes[i], codes[j], dos)
+                except DeclaredSourceUnavailable as exc:
+                    self._record_ncci_authority_loss(exc)
+                    return
                 if not conflict:
                     continue
 

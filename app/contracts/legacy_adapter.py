@@ -248,6 +248,15 @@ def bundle_from_app_pipeline_result(result: dict[str, Any],
                 (result.get("authoritative_source_manifest") or {})
                 .get("fingerprint") or ""),
             source_manifest=result.get("authoritative_source_manifest") or {},
+            # The app-side manifest publishes `records`; the coder's capability manifest
+            # publishes `sources`. Two shapes, one identity -- read the one this artifact
+            # actually carries rather than inventing a third.
+            database_snapshot_digest=str(next(
+                (r.get("sha256") for r in
+                 ((result.get("authoritative_source_manifest") or {})
+                  .get("records") or [])
+                 if isinstance(r, dict)
+                 and r.get("source_id") == "compliance_database"), "") or ""),
         ),
         certificate=certificate,
         release=ReleaseStatus(

@@ -69,7 +69,14 @@ from tools import flip_triage  # noqa: E402
 
 import os  # noqa: E402
 
-RULES_PATH = ROOT / "data" / "rules" / "validator_rules.json"
+# The deterministic rule pack is a DECLARED release source (`validator_rules`) whose
+# bytes are bound into the release fingerprint.  This module is reachable from the
+# deployment (`app.release.claim_readiness` -> `tools.clinical_auditor` ->
+# `tools.auto_actuate`), so it resolves the pack through the declaration like every
+# other production reader rather than composing its path.  (Directive section 6.)
+from app.release.source_manifest import declared_source_path  # noqa: E402
+
+RULES_PATH = declared_source_path("validator_rules")
 PROPOSALS_DIR = ROOT / "data" / "rules" / "proposals"
 NOTES_DIR = Path(os.getenv("NOTES_DIR", str(ROOT / "doctors_notes")))
 

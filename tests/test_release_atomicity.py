@@ -952,6 +952,14 @@ def test_an_absent_drug_dose_table_holds_rather_than_changing_billed_units():
 _SOURCE_DECLARATION_MODULES = (("app", "core", "config.py"),
                                ("app", "release", "source_manifest.py"))
 
+#: File shapes the release-source declaration OWNS.  Round 5/6 checked `.json` only, which
+#: is why `compliance.db` -- the compiled database every live NCCI decision is answered
+#: from -- was composed as a filename literal in two decision modules and seen by nobody.
+#: Deliberately NOT `.csv`/`.txt`: in this repository those literals name members INSIDE a
+#: downloaded CMS zip archive (`app/compliance/refresh/parsers.py`), not files on disk, so
+#: including them would turn this guard into the suppression list it exists to prevent.
+_DECLARED_SOURCE_SUFFIXES = (".json", ".db", ".sqlite", ".sqlite3")
+
 
 def test_no_decision_module_composes_an_authoritative_filename_literal():
     """Structural guard against the NEXT under-declaration: a claim-affecting module may not
@@ -967,6 +975,13 @@ def test_no_decision_module_composes_an_authoritative_filename_literal():
     literal and so reached the manifest only through the incidental `data/codes/*.json`
     sweep, which cannot distinguish a source that is intentionally absent from one that
     silently disappeared. The scan now covers BOTH trees, recursively.
+
+    Round 7 (directive section 6): the scan also covered only `.json`, and the single most
+    claim-affecting input in the deployment is not JSON -- `app/rag/code_reference.py` and
+    `app/compliance/datastore/store.py` each composed `DATA_DIR / "compliance.db"`, the
+    compiled database every live NCCI lookup is answered from, and this guard could not see
+    either of them.  The shapes the declaration owns are enumerated in
+    `_DECLARED_SOURCE_SUFFIXES` now, rather than being whichever one was checked first.
     """
     import ast
     from pathlib import Path as _Path
@@ -983,13 +998,104 @@ def test_no_decision_module_composes_an_authoritative_filename_literal():
                             for node in ast.walk(parent)}
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                        and node.value.endswith(".json") and "*" not in node.value
+                        and node.value.endswith(_DECLARED_SOURCE_SUFFIXES)
+                        and "*" not in node.value
                         and id(node) not in interpolated):
                     offenders.append(
                         f"{module.relative_to(repo)}:{node.lineno}: {node.value!r}")
     assert not offenders, (
         "authoritative filename literal(s) outside the release-source declaration: "
         + "; ".join(offenders))
+
+
+def _production_tool_modules():
+    """Every `tools/*.py` module the PRODUCTION trees import, transitively.
+
+    DERIVED, never listed: `app/**`, `claude_coder/**` and `run.py` are what the deployment
+    executes, so a `tools` module one of them imports is production code regardless of which
+    directory it lives in -- `app.release.claim_readiness` imports
+    `tools.claim_submitter.load_practice_config` to fingerprint the billing identity onto
+    the readiness certificate, and that module was reading two DECLARED sources out of
+    filename literals of its own.  A hand-maintained list of "the production tools" would be
+    the suppression list this guard exists to prevent; a fixed point over the real import
+    graph cannot go stale.
+    """
+    import ast
+    from pathlib import Path as _Path
+    repo = _Path(__file__).resolve().parent.parent
+    frontier = [repo / "run.py"]
+    for tree_root in (repo / "app", repo / "claude_coder"):
+        frontier.extend(sorted(tree_root.rglob("*.py")))
+    found: set = set()
+    while frontier:
+        module = frontier.pop()
+        try:
+            tree = ast.parse(module.read_text())
+        except (OSError, SyntaxError):
+            continue
+        dotted_names = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("tools"):
+                dotted_names.append(node.module)
+            elif isinstance(node, ast.Import):
+                dotted_names.extend(alias.name for alias in node.names
+                                    if alias.name.startswith("tools"))
+        for dotted in dotted_names:
+            parts = dotted.split(".")
+            if len(parts) < 2:
+                continue
+            candidate = repo.joinpath(*parts).with_suffix(".py")
+            if candidate.is_file() and candidate not in found:
+                found.add(candidate)
+                frontier.append(candidate)
+    return sorted(found)
+
+
+def test_no_production_tool_composes_a_declared_source_filename():
+    """The `tools` half of the same guard -- directive section 6: "the structural guard must
+    cover all production readers and tools".
+
+    Scoped by BASENAME rather than by extension, deliberately: `tools/**` is mostly BUILDERS
+    that legitimately name the files they WRITE, plus offline analysis that names run OUTPUTS
+    (`all_results.json`).  Flagging every `.json` literal there would produce a suppression
+    list, which is the failure mode `test_the_declaration_modules_are_the_only_exempted_ones`
+    guards against.  What is never legitimate is a module the DEPLOYMENT imports naming a
+    file the DECLARATION owns -- the same "read at decision time, certified by nobody" bug,
+    and exactly what `tools/claim_submitter.py` was doing with `practice_config.json` and
+    `pos_codes.json` while `submission_configuration` and `pos_codes` were declared
+    identities the release manifest was hashing somewhere else.
+    """
+    import ast
+    from pathlib import Path as _Path
+    from app.release import source_manifest as sm
+    repo = _Path(__file__).resolve().parent.parent
+    declared = {_Path(path).name for path in sm._declared_registry().values()}
+    declared |= {_Path(entry["path"]).name
+                 for entry in sm.optional_release_sources().values()}
+    assert declared, "the declaration resolved no source names at all"
+    offenders = []
+    for module in _production_tool_modules():
+        tree = ast.parse(module.read_text())
+        interpolated = {id(node) for parent in ast.walk(tree)
+                        if isinstance(parent, ast.JoinedStr)
+                        for node in ast.walk(parent)}
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and _Path(node.value).name in declared
+                    and id(node) not in interpolated):
+                offenders.append(
+                    f"{module.relative_to(repo)}:{node.lineno}: {node.value!r}")
+    assert not offenders, (
+        "production tool(s) composing a DECLARED source's filename instead of resolving it "
+        "through app.release.source_manifest: " + "; ".join(offenders))
+
+
+def test_the_production_tool_scan_actually_reaches_the_submission_step():
+    """Failure path of the guard above: a scan resolving NO modules would pass vacuously
+    forever.  The readiness gate's import of the 837P submission step is the edge that makes
+    `tools` production code, so its presence is asserted rather than assumed."""
+    found = {module.name for module in _production_tool_modules()}
+    assert "claim_submitter.py" in found, sorted(found)
 
 
 def test_the_declaration_modules_are_the_only_exempted_ones():
@@ -1503,3 +1609,381 @@ def test_unreadable_coding_semantics_holds_the_compliance_scrub(monkeypatch, tmp
     assert out.disposition is Disposition.REVIEW
     assert [f for f in out.blocking_findings if f.status is Status.ERROR]
     assert [r for r in out.filter_results if r["status"] == Status.ERROR.value]
+
+
+# ======================================================================================
+# Directive section 6 / Codex F6-R5-A (remainder) -- BIND THE EXACT AUTHORITY QUERIED
+#
+# The finding: `CodeReferenceDB.check_ncci()` answers every live NCCI decision out of
+# `data/compliance.db`.  `authoritative_paths()` NAMED that file (plus five other runtime
+# inputs) but `required_release_sources()` / `optional_release_sources()` dispositioned
+# none of them, so `claude_coder.capability.build_manifest()` -- the manifest the RELEASE
+# CERTIFICATE is built over -- never carried one.  The certificate therefore attested to
+# the raw NCCI JSON while the decision was answered by a compiled database nobody hashed.
+# ======================================================================================
+
+def _repoint_runtime(monkeypatch, source_id, path):
+    """Point a RUNTIME declared identity at `path`, through the declaration, exactly as
+    the release manifest and every reader resolve it."""
+    from pathlib import Path as _Path
+    from app.release import source_manifest as sm
+    runtime = dict(sm._RUNTIME_SOURCES)
+    runtime[source_id] = lambda p=path: _Path(p)
+    monkeypatch.setattr(sm, "_RUNTIME_SOURCES", runtime)
+
+
+def _synthetic_database(path, *, populate=True, fingerprints=True, drop=()):
+    """A structurally real compiled database.
+
+    Carries the decision tables the declaration requires and the source fingerprints the
+    staleness check compares, with SYNTHETIC identifiers only -- no medical code, code
+    family or descriptor appears here, so the fixture cannot silently go stale against the
+    real code sets (and cannot trip the no-hardcoding guard).
+    """
+    import sqlite3
+    from app.release import source_manifest as sm
+    schema = {
+        "code_set": "code TEXT, code_system TEXT, effective_from TEXT, effective_to TEXT",
+        "ncci_ptp": ("col1 TEXT, col2 TEXT, modifier_indicator TEXT, "
+                     "effective_from TEXT, effective_to TEXT"),
+        "mue": "code TEXT, mue_value INTEGER",
+        "coverage_policy": ("policy_id TEXT, effective_from TEXT, effective_to TEXT, "
+                            "temporal_authority INTEGER"),
+    }
+    rows = {
+        "code_set": ("SYNTHETIC_CODE", "SYNTHETIC", "2025-01-01", "9999-12-31"),
+        # Q2 2025: `_ncci_release_bounds` derives the covered window from MAX(effective_from),
+        # so this is what makes the fixture DOS below genuinely covered rather than
+        # accidentally so.
+        "ncci_ptp": ("SYNTHETIC_ONE", "SYNTHETIC_TWO", "0", "2025-04-01",
+                     "9999-12-31"),
+        "mue": ("SYNTHETIC_CODE", 1),
+        "coverage_policy": ("SYNTHETIC_POLICY", "2025-01-01", "9999-12-31", 1),
+    }
+    conn = sqlite3.connect(path)
+    for table, columns in schema.items():
+        if table in drop:
+            continue
+        conn.execute(f"CREATE TABLE {table} ({columns})")
+        if populate:
+            placeholders = ",".join("?" * len(rows[table]))
+            conn.execute(f"INSERT INTO {table} VALUES ({placeholders})", rows[table])
+    conn.execute("CREATE TABLE data_file_fingerprint (source_id TEXT, fingerprint TEXT)")
+    if fingerprints:
+        for row_id, source_ids in sm._DATABASE_SOURCE_ROWS.items():
+            paths = [sm.declared_source_path(sid) for sid in source_ids]
+            conn.execute("INSERT INTO data_file_fingerprint VALUES (?, ?)",
+                         (row_id, sm._file_identity(paths)))
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_every_runtime_input_the_registry_names_is_dispositioned():
+    """THE REPRODUCTION.  `authoritative_paths()` named `compliance_database` and five other
+    runtime inputs; not one was required or reviewed-optional, so the certificate's manifest
+    omitted every one of them while the app-side manifest hashed them."""
+    from app.release import source_manifest as sm
+    required = sm.required_release_sources()
+    optional = sm.optional_release_sources()
+    assert set(sm._declared_registry()) <= set(required) | set(optional)
+    assert set(sm._RUNTIME_SOURCES) <= set(required), (
+        "a runtime input the deployment reads at decision time is not required")
+    for source_id in sm._RUNTIME_SOURCES:
+        assert str(required[source_id]["role"]).strip(), source_id
+    # Named explicitly: this is the one the finding is about.
+    assert "compliance_database" in required
+    assert "compliance_database" in sm.authoritative_paths()
+
+
+def test_the_certificate_manifest_binds_the_compiled_database_bytes():
+    """The fix, end to end at the manifest: the certificate now carries the exact SHA-256 of
+    the database the NCCI lookup actually queries, not only the JSON it was compiled from."""
+    from app.release import source_manifest as sm
+    from claude_coder.capability import build_manifest
+    manifest = build_manifest()
+    record = next(s for s in manifest["sources"]
+                  if s["source_id"] == "compliance_database")
+    assert record["required"] is True and record["present"] is True
+    assert record["sha256"] == sm.compliance_database_identity()["sha256"]
+    assert record["bytes"] > 0
+
+
+def test_a_byte_change_at_identical_row_counts_changes_the_bound_digest(monkeypatch,
+                                                                       tmp_path):
+    """Round 5's "same-count byte mutation still invalidates" property, now for the compiled
+    database: two databases with identical row counts in every decision table must not share
+    an identity, or the certificate cannot tell which one answered the claim."""
+    import sqlite3
+    from app.release import source_manifest as sm
+    db = _synthetic_database(tmp_path / "compliance.db")
+    _repoint_runtime(monkeypatch, "compliance_database", db)
+    before = sm.compliance_database_identity()
+
+    def counts():
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                    for t in sm.REQUIRED_DATABASE_TABLES}
+        finally:
+            conn.close()
+
+    counts_before = counts()
+    conn = sqlite3.connect(db)
+    # Same row, different ANSWER: an edit that no longer bypasses with a modifier.
+    conn.execute("UPDATE ncci_ptp SET modifier_indicator='1'")
+    conn.commit()
+    conn.close()
+    after = sm.compliance_database_identity()
+    assert counts() == counts_before, "the mutation must not change any row count"
+    assert after["sha256"] != before["sha256"], (
+        "a database whose bytes changed kept its identity; the certificate would attest "
+        "to a claim-changing edit table it did not use")
+
+
+def test_a_missing_compiled_database_is_not_certifiable(monkeypatch, tmp_path):
+    from claude_coder.capability import build_manifest
+    _repoint_runtime(monkeypatch, "compliance_database", tmp_path / "absent.db")
+    manifest = build_manifest()
+    assert manifest["status"] == "BLOCKED"
+    assert "compliance_database" in manifest["missing_required"]
+
+
+@pytest.mark.parametrize("kind", ["corrupt", "empty_table", "missing_table", "stale"])
+def test_an_unusable_compiled_database_is_not_certifiable(monkeypatch, tmp_path, kind):
+    """PRESENCE IS NOT USABILITY.  A database can be present and perfectly digestible while
+    being unable to answer -- truncated, schema-drifted, carrying no edit rows, or compiled
+    from a previous release's inputs -- and every one of those states makes `check_ncci`
+    answer "no edit", the permissive direction.  Each must BLOCK, not certify."""
+    import sqlite3
+    from claude_coder.capability import build_manifest
+    db = tmp_path / "compliance.db"
+    if kind == "corrupt":
+        db.write_bytes(b"SQLite format 3\x00" + b"\x00" * 512)
+    elif kind == "empty_table":
+        _synthetic_database(db, populate=False)
+    elif kind == "missing_table":
+        _synthetic_database(db, drop=("ncci_ptp",))
+    else:
+        _synthetic_database(db, fingerprints=False)
+    _repoint_runtime(monkeypatch, "compliance_database", db)
+    manifest = build_manifest()
+    assert manifest["missing_required"] == [], "the file IS present; this is not absence"
+    assert manifest["integrity_errors"], kind
+    assert manifest["status"] == "BLOCKED", kind
+    assert any("compliance_database" in error
+               for error in manifest["integrity_errors"]), manifest["integrity_errors"]
+
+    # ... and the same conclusion has to reach the release decision, not stop at the
+    # manifest: an un-certifiable fingerprint is what actually holds the encounter.
+    from claude_coder.pipeline import _fingerprint_certifiable
+    assert not _fingerprint_certifiable({"counts": {"icd10": 1, "cpt": 1, "hcpcs": 1},
+                                         "source_manifest": manifest})
+
+
+@pytest.mark.parametrize("kind", ["absent", "corrupt", "empty_edits"])
+def test_the_edit_lookup_raises_instead_of_answering_no_edit(monkeypatch, tmp_path, kind):
+    """The READ half.  `check_ncci` returned None -- read by every caller as "this pair
+    carries no edit" -- when the database was absent, unreadable or simply had no rows.
+    That is the permissive answer produced by the authority being GONE rather than by the
+    authority saying anything, so all three raise now."""
+    from app.rag.code_reference import CodeReferenceDB
+    from app.release.source_manifest import CompiledDatabaseUnavailable
+    db = tmp_path / "compliance.db"
+    if kind == "corrupt":
+        db.write_bytes(b"SQLite format 3\x00" + b"\x00" * 512)
+    elif kind == "empty_edits":
+        _synthetic_database(db, populate=False)
+    _repoint_runtime(monkeypatch, "compliance_database", db)
+    ref = CodeReferenceDB()
+    with pytest.raises(CompiledDatabaseUnavailable):
+        ref.ncci_data_available("2025-06-01")
+    ref = CodeReferenceDB()
+    with pytest.raises(CompiledDatabaseUnavailable):
+        ref.check_ncci("SYNTHETIC_ONE", "SYNTHETIC_TWO", "2025-06-01")
+
+
+def test_a_readable_snapshot_that_does_not_cover_the_dos_is_still_just_uncovered(
+        monkeypatch, tmp_path):
+    """Failure path of the fix: "unreadable" and "readable but does not speak for this DOS"
+    are different facts and must stay different.  Turning the second into a raise would hold
+    every off-quarter encounter as an operational failure instead of a data-coverage one."""
+    from app.rag.code_reference import CodeReferenceDB
+    _repoint_runtime(monkeypatch, "compliance_database",
+                     _synthetic_database(tmp_path / "compliance.db"))
+    ref = CodeReferenceDB()
+    assert ref.ncci_data_available("2025-06-01") is True
+    assert ref.ncci_data_available("2019-06-01") is False
+    assert ref.check_ncci("SYNTHETIC_ONE", "SYNTHETIC_TWO", "2019-06-01") is None
+    # ... and a pair the readable, covering snapshot simply has no row for is still None.
+    assert ref.check_ncci("SYNTHETIC_ONE", "SYNTHETIC_NINE", "2025-06-01") is None
+    edit = ref.check_ncci("SYNTHETIC_ONE", "SYNTHETIC_TWO", "2025-06-01")
+    assert edit and edit["modifier"] == "0"
+
+
+def test_a_database_replaced_mid_encounter_reads_as_stale(monkeypatch, tmp_path):
+    """The claim is bound to ONE database snapshot.  A file swapped underneath a running
+    encounter would let the certificate attest to bytes that did not answer the query, so
+    the second read holds instead of silently mixing two snapshots."""
+    from app.rag.code_reference import CodeReferenceDB
+    from app.release.source_manifest import CompiledDatabaseUnavailable
+    db = _synthetic_database(tmp_path / "compliance.db")
+    _repoint_runtime(monkeypatch, "compliance_database", db)
+    ref = CodeReferenceDB()
+    assert ref.check_ncci("SYNTHETIC_ONE", "SYNTHETIC_TWO", "2025-06-01")
+    replacement = _synthetic_database(tmp_path / "replacement.db")
+    db.unlink()
+    replacement.rename(db)
+    with pytest.raises(CompiledDatabaseUnavailable):
+        ref.check_ncci("SYNTHETIC_ONE", "SYNTHETIC_TWO", "2025-06-01")
+
+
+def test_an_unreadable_edit_authority_is_an_error_on_the_validator_report(monkeypatch,
+                                                                         tmp_path):
+    """BOUNDARY: the raise has to land as a finding, not as an exception escaping
+    validation (which would lose every unrelated finding) and not as silence (which is
+    indistinguishable from a clean claim, since every NCCI rule uses an edit to ADD one)."""
+    from app.rag.code_reference import CodeReferenceDB
+    from app.validation.validator import CodingValidator
+    _repoint_runtime(monkeypatch, "compliance_database", tmp_path / "absent.db")
+    validator = CodingValidator(CodeReferenceDB())
+    validator._dos = "2025-06-01"
+    validator._ncci_authority_lost = False
+    validator.issues = []
+    validator._check_ncci([{"code": "SYNTHETIC_ONE"}, {"code": "SYNTHETIC_TWO"}],
+                          "2025-06-01")
+    assert [i for i in validator.issues
+            if getattr(i, "category", "") == "ncci_data_unavailable"], validator.issues
+    # Recorded ONCE, however many pairs consult it.
+    validator._ncci("SYNTHETIC_ONE", "SYNTHETIC_TWO")
+    validator._ncci("SYNTHETIC_TWO", "SYNTHETIC_ONE")
+    assert len([i for i in validator.issues
+                if getattr(i, "category", "") == "ncci_data_unavailable"]) == 1
+
+
+def test_a_claim_with_no_bound_database_snapshot_cannot_release():
+    """The contract half: a bundle that names no compiled-database snapshot is a claim
+    nobody can trace back to the bytes that answered its edit and coverage decisions."""
+    from app.contracts.claim_bundle import AuthorityBinding
+    unbound = AuthorityBinding(data_fingerprint="sha256:" + "a" * 64,
+                               source_manifest_fingerprint="sha256:" + "b" * 64)
+    assert any("compiled-database snapshot" in problem
+               for problem in unbound.problems()), unbound.problems()
+    bound = unbound.model_copy(
+        update={"database_snapshot_digest": "sha256:" + "c" * 64})
+    assert bound.problems() == ()
+
+
+def test_a_same_size_edit_inside_one_timestamp_tick_still_changes_the_digest(tmp_path):
+    """The digest cache the WHOLE attestation rests on must never answer for bytes that are
+    no longer there.
+
+    Found by the compiled-database mutation regression above: `sha256_file` cached on
+    (device, inode, size, mtime_ns), and on this deployment's own filesystem a same-size
+    in-place write leaves all four unchanged -- so the second, byte-different file was
+    attested with the FIRST one's digest. That is precisely the "certified bytes != read
+    bytes" failure this finding is about, reintroduced by the optimisation serving it.
+    Asserted at the mechanism, not only through the database, because every source in the
+    manifest is hashed by this one function.
+    """
+    from app.release.source_manifest import sha256_file
+    target = tmp_path / "same_size.bin"
+    target.write_bytes(b"A" * 4096)
+    first = sha256_file(target)
+    target.write_bytes(b"B" * 4096)          # same size, written within one tick
+    assert target.stat().st_size == 4096
+    assert sha256_file(target) != first, (
+        "a file whose bytes changed kept its digest; a certificate built on this would "
+        "attest to content that is no longer on disk")
+
+
+def test_a_settled_file_is_still_cached_so_the_fix_costs_nothing_in_production(tmp_path,
+                                                                              monkeypatch):
+    """Failure path of the fix above: making every digest uncacheable would re-read every
+    authoritative source (including a ~270 MB database) on every encounter. Only files
+    modified INSIDE the racy window are excluded, and the exclusion is proven by showing a
+    settled file is served from cache -- i.e. from bytes that are no longer read."""
+    from app.release import source_manifest as sm
+    target = tmp_path / "settled.bin"
+    target.write_bytes(b"A" * 4096)
+    # Present the file as having settled long ago, exactly as a source ingested at build
+    # time appears by the time a claim is certified against it.
+    monkeypatch.setattr(sm, "_RACY_MTIME_WINDOW_NS", 0)
+    cached = sm.sha256_file(target)
+    assert str(target) in sm._DIGEST_CACHE
+    sm._DIGEST_CACHE[str(target)] = (sm._file_key(target.stat()), "sha256:" + "e" * 64)
+    assert sm.sha256_file(target) == "sha256:" + "e" * 64 != cached
+
+
+def test_the_source_manifest_stays_total_when_the_declaration_is_broken(monkeypatch):
+    """FAILURE PATH OF THIS FIX.  Resolving the compiled database through the declaration
+    gave `build_source_manifest` two helpers that can RAISE where they previously composed
+    a path and could not.  The release gate reads this manifest's `errors` and converts
+    them into a structured ERROR outcome, so an exception escaping here does not fail
+    closed -- it leaves the gate with no outcome to report at all."""
+    from app.release import source_manifest as sm
+    monkeypatch.setattr(sm, "_REQUIRED_RELEASE_SOURCES",
+                        {"a_source_that_is_not_registered": {"role": "r"}})
+    manifest = sm.build_source_manifest()
+    assert isinstance(manifest.get("errors"), list)
+    assert any("compliance_database" in error for error in manifest["errors"]), manifest
+    assert manifest.get("fingerprint")
+
+
+def test_a_parameterless_authoritative_query_keeps_its_call_shape(monkeypatch, tmp_path):
+    """The release-window lookup takes no parameters.  Routing every read through one
+    fail-closed helper must not widen `execute(sql)` into `execute(sql, ())` -- that is the
+    contract every substituted or traced connection in the temporal-control suite is
+    written against, and widening it silently breaks them all."""
+    from app.rag.code_reference import CodeReferenceDB
+    seen = []
+
+    class _OneArgConnection:
+        def execute(self, sql):
+            seen.append(sql)
+            return self
+
+        def fetchone(self):
+            return ("2026-07-01",)
+
+        def close(self):
+            pass
+
+    _repoint_runtime(monkeypatch, "compliance_database",
+                     _synthetic_database(tmp_path / "compliance.db"))
+    monkeypatch.setattr("app.rag.code_reference.sqlite3.connect",
+                        lambda *a, **k: _OneArgConnection())
+    assert CodeReferenceDB().ncci_data_available("2026-07-01") is True
+    assert seen and all("MAX(effective_from)" in sql for sql in seen)
+
+
+def test_the_readiness_gate_binds_exactly_the_declared_required_set(monkeypatch):
+    """The readiness gate used to ADD the runtime/implementation identities to its mandatory
+    set BY HAND, on the stated grounds that they were "not part of the required-source
+    declaration".  Directive section 6 put every one of them IN the declaration, which turned
+    that hand-maintained copy into exactly the parallel-list drift this codebase keeps being
+    bitten by -- a source added to the declaration would have been enforced by the coder's
+    fingerprint and silently unenforced here.
+
+    Proven BEHAVIOURALLY, not lexically: the gate legitimately names individual code systems
+    elsewhere (the per-claim release-window staleness check), so what matters is that
+    dropping ANY declared required source -- including the ones the hand list never
+    contained -- is reported by identity.
+    """
+    from app.release import source_manifest as sm
+    from app.release.certificate_models import ControlOutcome
+    from app.release.claim_readiness import _source_control
+    base = sm.build_source_manifest()
+    assert base["errors"] == [], base["errors"]
+    for source_id in sorted(sm.required_release_sources()):
+        pruned = {"records": [record for record in base["records"]
+                              if record.get("source_id") != source_id],
+                  "errors": []}
+        pruned["fingerprint"] = sm.manifest_fingerprint(pruned)
+        # The live snapshot has to AGREE with the pruned one, or the drift check answers
+        # first and this proves nothing about the mandatory set.
+        monkeypatch.setattr(sm, "build_source_manifest", lambda m=pruned: m)
+        control = _source_control({"authoritative_source_manifest": pruned})
+        assert control.outcome is ControlOutcome.NOT_CHECKED, (source_id, control)
+        assert source_id in control.reason, (source_id, control.reason)
+        monkeypatch.undo()
