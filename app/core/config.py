@@ -66,6 +66,17 @@ DATA_DIR = BASE_DIR / "data"
 QDRANT_DIR = BASE_DIR / Path(os.getenv("QDRANT_PATH", "data/qdrant_store"))
 QDRANT_URL: str = os.getenv("QDRANT_URL", "")  # if set, connect to Qdrant server; else use local path
 OUTPUT_DIR = BASE_DIR / "output" / "results"
+# The RUN-OUTPUT layout inside OUTPUT_DIR. Declared here, with every other path this
+# deployment composes, rather than as literals in the modules that read and write them:
+# `app/release/attempt_ledger.py`, `run.py`, the claims registry and the 837P submitter
+# must all address the same files, and three copies of a filename convention is how two
+# of them end up addressing different ones. (These are OUTPUTS — nothing here is an
+# authoritative source, and none of them appears in the release-source declaration.)
+RESULT_SUFFIX = "_results.json"          # <document_id>_results.json — the current artifact
+AGGREGATE_RESULTS = "all_results.json"   # the combined corpus view, derived
+ATTEMPT_DIRNAME = "attempts"             # the append-only attempt store + governance marker
+ATTEMPT_POINTER = "current.json"         # the atomic current-attempt pointer
+ATTEMPT_HISTORY = "ledger.jsonl"         # the append-only attempt history
 # Phase-3 durable provenance store (SQLite): a DEDICATED database, separate from the
 # authoritative compliance.db (different lifecycle + retention). Append-only, WAL.
 PROVENANCE_DB = BASE_DIR / Path(os.getenv("PROVENANCE_DB", "output/provenance.db"))

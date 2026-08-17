@@ -753,6 +753,147 @@ def test_stale_authoritative_data_stops_the_dry_run(deployment):
     assert "authoritative data" in stats["docs"][STEM], stats["docs"][STEM]
 
 
+def test_a_failed_re_run_cannot_leave_the_previous_release_submittable(deployment,
+                                                                      monkeypatch):
+    """THE issue #6 F6-R6-B reproduction, driven through the deployed entrypoint.
+
+    A note is coded, verified and dry-run submitted. Then the SAME note is
+    re-processed and the artifact write fails (a full disk: every artifact write
+    raises `OSError(ENOSPC)`; the ledger can still record what happened, which
+    is both the realistic case and the one where the old behaviour looked
+    healthiest — a complete, well-formed, releasable JSON file left sitting
+    exactly where every consumer looks).
+
+    Before the attempt ledger this run left the first attempt's `releasable`
+    artifact untouched, and `tools/claim_submitter.py` — which already held a
+    verified registry event for it — would read it and transmit. The re-run
+    opens an attempt BEFORE it can fail, so the earlier result stops being
+    current at that instant; the failure is then recorded as an explicit FAILED
+    tombstone, the stale artifact is replaced/removed, and the submitter refuses
+    by name instead of transmitting an irreversible claim.
+    """
+    from app.release import attempt_ledger as al
+
+    _verified_once(deployment)
+    assert not load_bundle(deployment.artifact()).release_blockers(), (
+        "precondition: the artifact left by the first attempt is releasable")
+    assert STEM in reg.current_view(reg.load_events(deployment.registry_path)), (
+        "precondition: the registry already carries a verified event for it")
+
+    real = al.atomic_write_json
+
+    def full_disk(path, payload, *, indent=None):
+        # The pointer and the append-only history are tiny and keep working; the
+        # ARTIFACTS are what cannot be written. That is what a full disk looks
+        # like, and it is the only variable this test changes.
+        if isinstance(payload, dict) and payload.get("schema") == al.POINTER_SCHEMA:
+            return real(path, payload, indent=indent)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(al, "atomic_write_json", full_disk)
+    # The entrypoint binds the writer at import, and the aggregate is written
+    # through it: on a full disk that write fails too, which is the case where a
+    # STALE `all_results.json` would otherwise keep offering the superseded
+    # releasable claim after everything else had been invalidated.
+    monkeypatch.setattr(entrypoint, "atomic_write_json", full_disk)
+    assert entrypoint.main([
+        "--billing-context", str(deployment.billing_context_file),
+        "--encounter-context", str(deployment.context_file)]) == 1, (
+            "a note whose artifact cannot be written has not been delivered")
+
+    ok, why = al.consumable(deployment.output_dir, STEM)
+    assert ok is False, "the superseded result is still being served as current"
+    assert "FAILED" in why, why
+    assert not deployment.artifact_path.exists(), (
+        "the previous attempt's releasable artifact is still addressable")
+    assert not (deployment.output_dir / "all_results.json").exists(), (
+        "the aggregate could not be rebuilt and was left in place, still offering "
+        "the superseded releasable claim")
+
+    history = al.AttemptLedger(deployment.output_dir).history(STEM)
+    assert [r["state"] for r in history][-2:] == ["IN_PROGRESS", "FAILED"], (
+        f"the failed attempt left no explicit tombstone: {history}")
+
+    assert deployment.ingest()["recorded"] == 0
+    stats = deployment.dry_run()
+    assert stats["submitted"] == 0
+    assert stats["blocked"] == 1
+    assert "FAILED" in stats["docs"][STEM], stats["docs"][STEM]
+    assert not (deployment.dryrun_dir / f"{STEM}_837p.json").exists()
+
+
+def test_a_batch_that_cannot_even_open_an_attempt_fails_loudly(deployment,
+                                                              monkeypatch):
+    """The failure path of the fix itself, through the entrypoint.
+
+    If the supersession cannot be recorded at all, the note is not attempted —
+    and a batch in which NOTHING could be attempted must exit non-zero. It is
+    also the case where the previous result is least defensible: nothing recorded
+    that it had been superseded, so it is invalidated rather than left
+    addressable.
+    """
+    from app.release import attempt_ledger as al
+
+    _verified_once(deployment)
+    assert deployment.artifact_path.exists()
+
+    def no_space(self, document_id, record):
+        raise al.AttemptWriteError("no space left on device")
+
+    # Restored by hand rather than with `monkeypatch.undo()`: `monkeypatch` is one
+    # function-scoped instance shared with the `deployment` fixture, so undoing it
+    # would also revert the registry path, the dry-run directory and the results
+    # directory this deployment is pinned to.
+    recording = al.AttemptLedger._append_history
+    monkeypatch.setattr(al.AttemptLedger, "_append_history", no_space)
+    assert entrypoint.main([
+        "--billing-context", str(deployment.billing_context_file),
+        "--encounter-context", str(deployment.context_file)]) == 1, (
+            "a batch in which no note could even be attempted reported success")
+
+    monkeypatch.setattr(al.AttemptLedger, "_append_history", recording)
+    assert not deployment.artifact_path.exists()
+    ok, why = al.consumable(deployment.output_dir, STEM)
+    assert ok is False, why
+    stats = deployment.dry_run()
+    assert stats["submitted"] == 0 and stats["blocked"] == 1
+
+
+def test_a_successful_re_run_supersedes_and_stays_submittable(deployment):
+    """The control for the test above: the ledger blocks FAILURE, not re-runs.
+
+    Same entrypoint, same note, nothing injected — the second attempt completes,
+    supersedes the first, and the claim remains verifiable and submittable. So
+    the refusal above is attributable to the failed output and to nothing else.
+    """
+    _verified_once(deployment)
+    from app.release import attempt_ledger as al
+
+    deployment.run()
+
+    ledger = al.AttemptLedger(deployment.output_dir)
+    history = ledger.history(STEM)
+    assert [r["state"] for r in history] == [
+        "IN_PROGRESS", "COMPLETED", "IN_PROGRESS", "COMPLETED"]
+    pointer = ledger.pointer(STEM)
+    assert pointer["state"] == "COMPLETED"
+    assert pointer["attempt_id"] == history[-1]["attempt_id"]
+    assert pointer["document_version"] == \
+        deployment.artifact()["encounter"]["source_document"]["document_version"]
+    assert al.consumable(deployment.output_dir, STEM) == (True, "")
+
+    combined = json.loads(
+        (deployment.output_dir / "all_results.json").read_text())
+    assert [p["encounter"]["document_id"] for p in combined] == [STEM]
+    assert combined[0]["certificate"]["certificate_sha256"] == \
+        deployment.artifact()["certificate"]["certificate_sha256"], (
+            "the aggregate carries a different attempt's attestation than the "
+            "current artifact")
+
+    assert deployment.ingest()["recorded"] == 1
+    assert deployment.dry_run()["submitted"] == 1
+
+
 def test_an_unresolved_encounter_context_never_reaches_the_registry(deployment):
     """No context source configured -> the encounter holds, fail-safe and visibly.
 

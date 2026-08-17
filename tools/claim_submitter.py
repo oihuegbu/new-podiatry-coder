@@ -75,6 +75,7 @@ sys.path.insert(0, str(ROOT))
 
 from loguru import logger  # noqa: E402
 
+from app.release.attempt_ledger import consumable  # noqa: E402
 from tools.claims_registry import (REGISTRY_PATH, _claim_key,  # noqa: E402
                                    current_view, load_events)
 
@@ -886,6 +887,25 @@ def submit_all(results_dir: Path = DEFAULT_RESULTS,
         if docs is not None and doc not in docs:
             continue
         reg_event = view[doc]
+        registry_key = _claim_key({
+            "claim": reg_event.get("claim") or {},
+            "encounter_context_fingerprint": reg_event.get(
+                "encounter_context_fingerprint") or "",
+        })
+        # THE REGISTRY EVENT IS NOT AUTHORIZATION TO READ THE FILE (issue #6
+        # F6-R6-B). A verified event can outlive the artifact it was recorded
+        # from: re-running the note opens a new attempt, and if that attempt
+        # fails to write, the previous — releasable — artifact is still sitting
+        # at this path. Transmission is irreversible, so the current-attempt
+        # pointer is consulted BEFORE the file is opened; anything other than a
+        # COMPLETED current attempt blocks this claim by name.
+        current, why_not = consumable(results_dir, doc)
+        if not current:
+            stats["blocked"] += 1
+            stats["docs"][doc] = f"blocked: {why_not}"
+            if not dry_run:
+                _record_block(doc, registry_key, why_not)
+            continue
         result_file = results_dir / f"{doc}_results.json"
         try:
             result = json.loads(result_file.read_text())
@@ -904,11 +924,6 @@ def submit_all(results_dir: Path = DEFAULT_RESULTS,
                                   f"JSON ({exc})")
             continue
 
-        registry_key = _claim_key({
-            "claim": reg_event.get("claim") or {},
-            "encounter_context_fingerprint": reg_event.get(
-                "encounter_context_fingerprint") or "",
-        })
         try:
             why = _policy_gate(cfg, reg_event, result)
         except Exception as exc:

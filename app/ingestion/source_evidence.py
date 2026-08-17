@@ -422,6 +422,18 @@ def _digest_bytes(raw: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
+def document_digest(raw: bytes) -> str:
+    """THE source-document identity convention, for callers outside this module.
+
+    `document_version` travels from here onto every evidence-span id, onto the
+    ClaimBundle and into the attempt ledger, which opens an attempt against a
+    document version BEFORE this compiler runs (it has to: the supersession must
+    precede any work that can fail). Both readings have to be the same string or
+    that comparison silently never matches, so there is one function.
+    """
+    return _digest_bytes(raw)
+
+
 def _verified_image_digest(pdf_path: Path, number: int, image: dict,
                            payloads: dict[int, Any]) -> str:
     """The digest of page `number`'s rendered image, RECOMPUTED from its bytes.

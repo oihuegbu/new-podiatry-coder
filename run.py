@@ -18,6 +18,26 @@ AUTO_READY encounter arrived at the registry with no diagnosis and no service
 lines and was refused as "pipeline did not succeed". One producer, one contract,
 one consumer vocabulary is the fix; a translation shim on either side is not.
 
+OUTPUT IS AN ATTEMPT, NOT A FILE WRITE — issue #6 F6-R6-B, directive section 7
+--------------------------------------------------------------------------------
+Each note below opens a processing ATTEMPT in `app/release/attempt_ledger.py`
+BEFORE it is processed, and closes it exactly once — COMPLETED, SYSTEM_RETRY or
+FAILED. Opening it is what supersedes the encounter's previous result, so from
+that instant no consumer can be served the older artifact whatever happens next.
+Artifacts are written temp-file + fsync + `os.replace`, never truncate-and-write,
+and an atomic per-encounter pointer is the single race-free answer to "what is
+the current result for this note". The claims registry, the 837P submitter and
+the `all_results.json` aggregate all resolve through that pointer, so a result is
+consumable only while it is the output of a COMPLETED current attempt for the
+exact document version it was opened against.
+
+OPERATIONAL NOTE FOR AN EXISTING OUTPUT DIRECTORY. The results directory becomes
+ledger-governed the first time this entrypoint processes a note into it. Result
+files already sitting there from before have no attempt behind them and are
+refused — by name — until their note is re-run. That is deliberate: adopting them
+would mean minting attempt records for work nothing observed, which is exactly
+the unbacked provenance this ledger exists to make impossible.
+
 The bundle also carries the encounter's billing CONTEXT, which this file used to
 obtain (`read_note` extracts patient metadata) and then discard. It is resolved
 through an `EncounterContextProvider` (`--encounter-context`), never inferred
@@ -135,13 +155,15 @@ from app.contracts.claim_bundle import (
     bundle_from_coding_result, failure_bundle,
 )
 from app.contracts.encounter_context import build_provider
-from app.core.config import NOTES_DIR, OUTPUT_DIR
+from app.core.config import AGGREGATE_RESULTS, NOTES_DIR, OUTPUT_DIR
 from app.core.dates import parse_date_of_service
 from app.core.logger import get_logger
 from app.ingestion.pdf_parser import extract_from_pdf
 from app.contracts.source_evidence import reconcile_service_date
 from app.ingestion.source_evidence import (
-    IndependentVisionReader, compile_source_evidence)
+    IndependentVisionReader, compile_source_evidence, document_digest)
+from app.release.attempt_ledger import (
+    AttemptLedger, AttemptLedgerError, atomic_write_json, resolve_current)
 from claude_coder.data_access import AuthoritativeSource
 from claude_coder.pipeline import code_encounter, render
 
@@ -374,27 +396,50 @@ def failure_payload(pdf_path: Path, exc: Exception) -> dict:
     ).to_payload()
 
 
-def write_result(payload: dict, pdf_path: Path) -> Path:
-    output_file = OUTPUT_DIR / f"{pdf_path.stem}_results.json"
-    with open(output_file, "w") as fh:
-        json.dump(payload, fh, indent=2, default=str)
-    return output_file
+def document_version_of(pdf_path: Path) -> str:
+    """The source document's identity, read from the file BEFORE it is processed.
+
+    An attempt has to be opened — and the previous result superseded — before any
+    work that can fail, so the document version cannot come from the compiler
+    output the way `read_note` gets it. It is the same digest of the same bytes
+    (`app/ingestion/source_evidence.document_digest`), and `AttemptLedger.complete`
+    refuses to publish when the compiled bundle declares a different one, so a
+    document edited mid-attempt fails closed instead of binding a claim to a
+    version the attempt never opened against.
+    """
+    try:
+        return document_digest(pdf_path.read_bytes())
+    except Exception as exc:
+        # Unreadable here means the note is about to fail in `read_note` anyway.
+        # The attempt still opens (with no version), so the prior result is still
+        # superseded and the failure is still recorded.
+        logger.warning(f"  {pdf_path.name}: source document digest unavailable "
+                       f"({type(exc).__name__}: {exc})")
+        return ""
 
 
 def rebuild_all_results() -> None:
-    """Combined output — rebuilt from the per-note files on disk, not from this
-    batch's in-memory list, so a resumed batch (`--start-at`) or a partial
-    failure never overwrites the corpus aggregate with a subset."""
+    """Combined output — the CURRENT COMPLETED attempt of every encounter.
+
+    Rebuilt from disk rather than from this batch's in-memory list, so a resumed
+    batch (`--start-at`) or a partial failure never overwrites the corpus
+    aggregate with a subset — and rebuilt through the attempt ledger rather than
+    a glob, so it can never re-offer a result the ledger has superseded (issue #6
+    F6-R6-B). A note whose newest attempt failed, is still running, or produced
+    only a system-retry tombstone is NOT in here, and the reason it is not is
+    logged rather than left as an unexplained absence.
+    """
+    current = resolve_current(OUTPUT_DIR)
     combined = []
-    for path in sorted(OUTPUT_DIR.glob("*_results.json")):
-        if path.name == "all_results.json":
-            continue
+    for entry in current.results:
         try:
-            combined.append(json.loads(path.read_text()))
+            combined.append(json.loads(entry.path.read_text()))
         except Exception as exc:
-            logger.warning(f"  all_results: skipped unreadable {path.name} ({exc})")
-    with open(OUTPUT_DIR / "all_results.json", "w") as fh:
-        json.dump(combined, fh, indent=2, default=str)
+            logger.warning(f"  all_results: skipped unreadable {entry.path.name} "
+                           f"({exc})")
+    for document_id, reason in sorted(current.refusals.items()):
+        logger.warning(f"  all_results: {document_id} is not current — {reason}")
+    atomic_write_json(OUTPUT_DIR / AGGREGATE_RESULTS, combined, indent=2)
 
 
 # ------------------------------------------------------------- note selection
@@ -604,12 +649,40 @@ def main(argv: list[str] | None = None) -> int:
     logger.info(f"\nProcessing {len(note_files)} clinical note(s)\n")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # THE ATTEMPT LEDGER (issue #6 F6-R6-B, directive section 7). Every note below
+    # opens an attempt BEFORE it is processed, which supersedes whatever this
+    # encounter's previous result was, and closes it exactly once — COMPLETED,
+    # SYSTEM_RETRY or FAILED. Nothing downstream may consume an artifact that is
+    # not the output of a COMPLETED current attempt.
+    ledger = AttemptLedger(OUTPUT_DIR)
+
     payloads = []
     failures = 0
+    #: Notes that never got an attempt open, so they have no payload in
+    #: `payloads` at all. Counted separately because the batch's exit code turns
+    #: on "did EVERY note fail", and a note with no artifact is the most
+    #: complete failure there is — omitting it would report a batch in which
+    #: nothing could even start as a success.
+    unopened = 0
     for pdf_path in note_files:
         logger.info("=" * 70)
         logger.info(f"PROCESSING: {pdf_path.name}")
         logger.info("=" * 70)
+        try:
+            attempt = ledger.begin(pdf_path.stem, document_version_of(pdf_path))
+        except AttemptLedgerError as exc:
+            # The supersession itself could not be recorded. `begin` has already
+            # made the previous result unservable, so nothing stale survives; this
+            # note simply cannot be attempted on this filesystem.
+            failures += 1
+            unopened += 1
+            logger.error(f"FAILED to open a processing attempt for "
+                         f"{pdf_path.name} — {type(exc).__name__}: {exc}")
+            continue
+        logger.info(f"  attempt {attempt.attempt_id} opened for document version "
+                    f"{attempt.document_version or 'UNKNOWN'} (any earlier result "
+                    f"for this note is now superseded)")
+        processing_failure = ""
         try:
             note = read_note(pdf_path)
             if not note["date_of_service"]:
@@ -677,29 +750,71 @@ def main(argv: list[str] | None = None) -> int:
             import traceback
             logger.error(traceback.format_exc())
             payload = failure_payload(pdf_path, exc)
+            processing_failure = f"{type(exc).__name__}: {exc}"
         payloads.append(payload)
         # Its own boundary: a note that coded fine but whose artifact cannot be
         # written has NOT been delivered, and must be counted as a failure rather
-        # than aborting the remaining notes on an I/O problem.
+        # than aborting the remaining notes on an I/O problem. Closing the attempt
+        # is what makes the artifact consumable at all, so an output failure now
+        # leaves an explicit FAILED tombstone instead of the previous result.
         try:
-            logger.info(f"  Saved → {write_result(payload, pdf_path).name}")
+            if processing_failure:
+                saved = ledger.system_retry(attempt, payload,
+                                            error=processing_failure)
+            else:
+                saved = ledger.complete(attempt, payload)
+            logger.info(f"  Saved → {saved.name} "
+                        f"[attempt {attempt.attempt_id} "
+                        f"{'SYSTEM_RETRY' if processing_failure else 'COMPLETED'}]")
         except Exception as exc:
             if not payload.get("processing_error"):
                 failures += 1
             logger.error(f"FAILED to write results for {pdf_path.name} — "
                          f"{type(exc).__name__}: {exc}")
+            try:
+                ledger.fail(attempt, error=f"{type(exc).__name__}: {exc}",
+                            tombstone=failure_payload(pdf_path, exc))
+                logger.error(f"  attempt {attempt.attempt_id} recorded FAILED; no "
+                             f"result for {pdf_path.stem} is consumable")
+            except Exception as tombstone_exc:
+                # The loudest thing left: the ledger could not even record the
+                # failure. `fail` still tried to remove the stale artifact, and
+                # raises here only when that could not be done either.
+                logger.error(
+                    f"  attempt {attempt.attempt_id} could NOT be tombstoned "
+                    f"({type(tombstone_exc).__name__}: {tombstone_exc}); an "
+                    f"earlier result for {pdf_path.stem} may still be addressable "
+                    f"— do not submit this encounter until it is reconciled")
 
     try:
         rebuild_all_results()
     except Exception as exc:   # the aggregate is derived; never lose the summary to it
         logger.error(f"all_results.json could not be rebuilt — "
                      f"{type(exc).__name__}: {exc}")
+        # ...but a derived file that cannot be rebuilt is STALE, and this one
+        # aggregates claims: leaving the previous batch's copy in place would
+        # keep offering a releasable result for a note whose newest attempt just
+        # failed — the same defect one file over (issue #6 F6-R6-B). It is
+        # removed instead; the next successful batch rebuilds it from the ledger.
+        try:
+            (OUTPUT_DIR / AGGREGATE_RESULTS).unlink()
+            logger.error("  the stale all_results.json was removed rather than "
+                         "left offering superseded results")
+        except FileNotFoundError:
+            pass
+        except Exception as remove_exc:
+            logger.error(f"  the stale all_results.json could NOT be removed "
+                         f"({type(remove_exc).__name__}: {remove_exc}); do not "
+                         f"consume it")
 
     logger.info(f"\n{'=' * 70}")
     logger.info("BATCH COMPLETE")
     logger.info(f"{'=' * 70}")
-    logger.info(f"Total: {len(payloads)} | Processed: {len(payloads) - failures} "
-                f"| Failed: {failures}")
+    attempted = len(payloads) + unopened
+    logger.info(f"Total: {attempted} | Processed: {attempted - failures} "
+                f"| Failed: {failures}"
+                + (f" (of which {unopened} could not be opened at all)"
+                   if unopened else ""))
     destinations: dict[str, int] = {}
     for payload in payloads:
         key = (payload.get("release") or {}).get("destination") or "UNKNOWN"
@@ -714,7 +829,7 @@ def main(argv: list[str] | None = None) -> int:
     # an empty success — exit non-zero so a caller/`set -e` script sees it. A
     # partial failure keeps exit 0 (each failure is logged and has its own
     # artifact), matching the prior entrypoint's contract for resumable batches.
-    if failures and failures == len(payloads):
+    if failures and failures == attempted:
         logger.error("Every note in this batch failed to process.")
         return 1
     return 0

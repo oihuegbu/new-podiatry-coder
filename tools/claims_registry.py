@@ -120,6 +120,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from app.release.attempt_ledger import resolve_current  # noqa: E402
+
 REGISTRY_PATH = ROOT / "data" / "registry" / "claims_registry.jsonl"
 DEFAULT_RESULTS = ROOT / "output" / "results"
 DEFAULT_GOLD = ROOT / "benchmark" / "gold"
@@ -532,9 +534,20 @@ def ingest(results_dir: Path, registry_path: Path = REGISTRY_PATH) -> dict:
     stats = {"recorded": 0, "unchanged": 0, "skipped": 0,
              "human_protected": 0, "skip_reasons": {}}
 
-    for f in sorted(results_dir.glob("*_results.json")):
-        if f.name == "all_results.json":
-            continue
+    # WHICH ARTIFACTS EXIST IS NOT WHICH ARTIFACTS ARE CURRENT (issue #6 F6-R6-B).
+    # A result file is ingestible only while it is the output of the encounter's
+    # CURRENT, COMPLETED processing attempt: a note whose newest attempt failed to
+    # write, is still running, or produced a system-retry tombstone must not be
+    # auto-recorded off the file its predecessor left behind. Each refusal is
+    # counted and named in `skip_reasons` exactly like every other skip, so a
+    # superseded note is visible rather than silently absent.
+    current = resolve_current(results_dir)
+    for document_id, reason in sorted(current.refusals.items()):
+        stats["skipped"] += 1
+        stats["skip_reasons"][document_id] = reason
+
+    for entry in current.results:
+        f = entry.path
         result = json.loads(f.read_text())
         doc = str(document_id_of(result) or f.stem.removesuffix("_results"))
 
