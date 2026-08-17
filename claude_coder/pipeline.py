@@ -452,7 +452,8 @@ def code_encounter(
                 else:
                     line = resolution.resolve(
                         RetrievalRequest(_it, fact), source, llm=verify_llm,
-                        corroborate=corroborate_llm, dos=date_of_service)
+                        corroborate=corroborate_llm, dos=date_of_service,
+                        reconciliation=source_reconciliation)
             except Exception as exc:
                 return _system_hold_result(encounter_id, date_of_service,
                                            f"retrieval_execution:{fact.fact_id}", exc, source)
@@ -463,8 +464,36 @@ def code_encounter(
         went_through_pv = (verify_llm is not None
                            and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING,
                                              FactKind.DIAGNOSIS))
-        if (not line.resolved) and line.alternatives and fact.billable and not went_through_pv:
+        # A line that carries a `documentation_gap` was held by a DETERMINISTIC
+        # constraint that failed (an unsupported descriptor interval) or by the tie
+        # policy's targeted provider query. Neither may be overturned by a bounded model
+        # pick: the directive states that the LLM verifier "may not invent a code or
+        # override a failed deterministic constraint," and that a tie is settled by the
+        # document or asked about -- not decided by a model. Arbitration therefore only
+        # ever sees residual ambiguity that no constraint and no page has already
+        # answered. (Before this, a SUPPLY/DRUG line held for an unsupported bounded
+        # measurement went straight to arbitration, which could re-select the very
+        # candidate the interval check had just refused.)
+        if ((not line.resolved) and line.alternatives and fact.billable
+                and not went_through_pv and not line.documentation_gap):
             line = arbitration.arbitrate(line, arbitrate_llm)
+        # AUDIT: a tie that several candidates survived is a claim-affecting decision
+        # in its own right -- which axes distinguished them, what the ORIGINAL DOCUMENT
+        # was proven to say about each, and whether the page settled it or the provider
+        # was asked. Recorded whether the tie released a code or held the line, so the
+        # certificate's audit chain can answer "why not the other candidate?".
+        if line.tie_record:
+            try:
+                audit_hashes.append(audit_repository.append(
+                    encounter_id, "code_tie_resolution",
+                    {"fact_id": fact.fact_id, "intent_id": _it.intent_id,
+                     "released": bool(line.resolved),
+                     "code": (line.chosen.code if line.chosen else ""),
+                     **line.tie_record}))
+            except Exception as exc:              # durable audit is enforced
+                return _system_hold_result(
+                    encounter_id, date_of_service,
+                    f"code_tie_audit_persistence:{fact.fact_id}", exc, source)
         # OBSERVE: feed a propose-then-verify success into the learned index so that,
         # once the same phrase->code is confirmed across enough distinct encounters,
         # it resolves deterministically next time. Real mode only; fail-safe.

@@ -19,7 +19,7 @@ NCCI/MUE/CPT/ICD update changes the answers with zero code change.
 1. [The inversion — why this architecture](#the-inversion)
 2. [Design invariants](#design-invariants)
 3. [Pipeline architecture](#pipeline-architecture)
-4. [The resolution ladder](#the-resolution-ladder)
+4. [The resolution ladder](#the-resolution-ladder) · [the tie policy](#the-tie-policy)
 5. [Diagnosis specificity & Excludes1 (the entailment-is-not-enough fixes)](#diagnosis-specificity--excludes1)
 6. [Claim-shaping mechanics](#claim-shaping-mechanics)
 7. [Release gates](#release-gates)
@@ -151,13 +151,59 @@ grounded in authoritative data; nothing bills on vector rank or model memory.**
 | Rung | Mechanism | When it fires |
 |---|---|---|
 | **Authoritative index** | ICD-10-CM Alphabetic Index (`index_codes`) → SNOMED→ICD map (`snomed_codes`) for diagnoses; CMS Table of Drugs (`drug_index_codes`) → AMA CPT Index (`cpt_index_codes`) → learned index (`learned_index_codes`) → CPT/HCPCS descriptor index (`procedure_index_codes`) for procedures/supplies/drugs | A single, unambiguous authoritative term→code hit. Taken deterministically. |
-| **Structured decision** | `_decide` / `_evaluate`: eliminate candidates that *contradict* documented attributes (wrong laterality, measurement outside the descriptor's interval); rank survivors by recall, then specificity, then concept support. | The index has no clean hit; a retrieval pool exists. |
+| **Structured decision** | `_decide` / `_evaluate`: eliminate candidates that *contradict* documented attributes (wrong laterality, measurement outside the descriptor's interval, inactive on the DOS); select **only** a candidate that uniquely satisfies a documented axis. | The index has no clean hit; a retrieval pool exists. |
+| **Tie policy** | `tiebreak.narrow`: several candidates survive, so re-inspect **only their discriminating axes** against the **original document**; release the one the page uniquely entails, else raise **one targeted provider query**. | Two or more survivors, none uniquely satisfying a documented axis. |
 | **Propose-then-verify** | `verify.propose_codes` (LLM proposes, registry validates) → `verify.select_entailed` (descriptor entailment) → `verify.corroborate` (independent second model). Bounded re-selection on a wrong-concept rejection; a `missing_element` rejection becomes a provider query. | Procedures/imaging, and diagnoses that reach the embedding fallback. The license-clean substitute for the AMA CPT Index. |
-| **Arbitration** | `arbitration.arbitrate`: a single bounded LLM pick over the *retrieved* candidate descriptors — it can never recall or invent a code. | Residual ambiguity for kinds that did **not** go through propose-then-verify. |
+| **Arbitration** | `arbitration.arbitrate`: a single bounded LLM pick over the *retrieved* candidate descriptors — it can never recall or invent a code, and `autonomy` never auto-releases its result. | Residual ambiguity for kinds that did **not** go through propose-then-verify **and** that neither a failed deterministic constraint nor the tie policy has already answered. |
 
 Retrieval is the repo's hybrid dense(bge)+sparse(BM25) RRF store, reused **as
 recall only**: it supplies candidate code identities and a relevance score; the
 authoritative record always supplies the descriptor and the truth.
+
+---
+
+## The tie policy
+
+Product-directive section 4 separates **high-recall candidate generation** from
+**hard code verification**, and states the tie-break as an explicit five-step
+algorithm. `_decide` runs exactly those steps, in that order:
+
+1. **Eliminate** candidates that fail a required constraint — `_evaluate` drops one
+   that contradicts a documented axis, `_active_only` drops one inactive on the DOS,
+   and a descriptor whose bounded measurement interval the documentation cannot
+   support can never be released by any later step.
+2. **Select automatically only if one candidate uniquely satisfies every documented
+   axis** — a unique maximum on `specificity`, which counts the documented axes a
+   descriptor *positively* accounts for.
+3. **Re-inspect only the discriminating axes against the original document.**
+   `tiebreak.discriminating_axes` derives the axes from the tied candidates' own
+   authoritative descriptors — whatever one asserts that the others do not
+   (laterality; a bounded measurement interval; any other descriptor word). Nothing
+   is enumerated by hand, so a new axis is compared the day a descriptor states it.
+4. **Release the candidate the page uniquely entails.** The text an axis is proven
+   against is the text the **original page was proven to say** — the same
+   `graph_consensus.source_support` definition the fact-extraction consensus uses, so
+   a code tie and an extraction disagreement can never be settled on two different
+   standards of evidence.
+5. **Otherwise, one targeted provider query.** The question names the exact axis and
+   both descriptors' words. A line held this way carries a `documentation_gap`, so
+   `autonomy` routes it to `PROVIDER_QUERY` and `recommendations` emits a
+   documentation query — never the generic coder queue, which the directive forbids
+   as the response to a tie or to two models disagreeing.
+
+Three things may therefore **never** select a code, and each has a regression test:
+
+- **retrieval rank** — a score margin used to close a tie; it now only *admits* a
+  candidate to the pool;
+- **lexical token overlap** (`support_score`) — it orders the shortlist and the
+  audit's `alternatives`, and decides nothing;
+- **model agreement** — an entailment the corroborator rejected escalates with a
+  targeted question; the page, not a vote, is what can still settle it.
+
+Every tie that was re-inspected writes a `code_tie_resolution` audit record: the
+axes, what the document was proven to say about each candidate, which axes it left
+unsettled, and the question that went to the provider — so "why not the other
+candidate?" is answerable from the audit chain.
 
 ---
 
@@ -323,7 +369,8 @@ Swap the data files and the answers change with no code change.
 |---|---|
 | `pipeline.py` | Orchestration (`code_encounter`) + all claim-shaping mechanics + `render`. |
 | `extraction.py` | Stage 1 CLU — note → evidence-linked `ClinicalFact`s (code-free prompt). |
-| `resolution.py` | Stage 2 — deterministic resolution ladder, propose-then-verify driver, laterality + specificity upgrades. |
+| `resolution.py` | Stage 2 — deterministic resolution ladder, the tie policy's steps 1–2, propose-then-verify driver, laterality + specificity upgrades. |
+| `tiebreak.py` | Tie policy steps 3–5 — derive the discriminating axes from the tied descriptors, settle them against the original document, else one targeted provider query. |
 | `verify.py` | Propose / select-entailed / corroborate — the license-clean CPT-Index substitute. |
 | `em.py` | E/M leveling from the MDM 2-of-3 grid + descriptor setting/new-vs-established. |
 | `arbitration.py` | Bounded single-LLM pick over *retrieved* descriptors (residual ambiguity only). |

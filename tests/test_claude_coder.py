@@ -747,25 +747,59 @@ class ProcedureIndexTest(unittest.TestCase):
 
 
 class SupportRankingTest(unittest.TestCase):
-    """Mechanic 2 — descriptor↔fact token support breaks a near-tie in recall
-    toward the concept-matching code, and NEVER eliminates a candidate."""
+    """Descriptor↔fact token support ORDERS candidates and NEVER eliminates one.
 
-    def test_support_breaks_near_tie(self):
+    It also never SELECTS one. Product directive section 4 allows lexical/semantic
+    similarity to widen a candidate pool and forbids it from verifying a code, so the
+    near-tie below is settled by what the ORIGINAL DOCUMENT was proven to say — not by
+    which descriptor happens to share more words with the note.
+    """
+
+    _MATCH = CandidateCode("P_MATCH", "cpt", "excision of bursa of the foot", 0.80)
+    _NEIGH = CandidateCode("P_NEIGH", "cpt", "open treatment of fracture", 0.80)
+
+    def _source(self):
         from claude_coder.data_access import MockSource
-        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
-                                         ResolutionMethod)
+        return MockSource(
+            records={("P_MATCH", "cpt"): {"active": True},
+                     ("P_NEIGH", "cpt"): {"active": True}},
+            # neighbour listed first: retrieval ORDER must not decide either
+            retrieval={("*", "cpt"): [self._NEIGH, self._MATCH]})
+
+    def _fact(self, *, anchored):
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        quote = "the bursa was excised"
+        return ClinicalFact(
+            kind=FactKind.PROCEDURE, description="excision of bursa", confidence=0.9,
+            evidence=[EvidenceSpan(quote, start=0, end=len(quote), anchored=anchored,
+                                   span_id=("span-0" if anchored else None))])
+
+    def test_the_document_settles_a_near_tie_toward_the_concept_matching_code(self):
+        """Equal recall, and the neighbour is retrieved first. The page confirms a
+        quotation stating a word only the matching descriptor asserts, so exactly one
+        candidate becomes uniquely entailed and is released."""
+        from app.contracts.source_evidence import (ReconciliationStatus,
+                                                   SourceReconciliation,
+                                                   SpanReconciliation)
+        from claude_coder.models import ResolutionMethod
         from claude_coder.resolution import resolve
-        # equal recall; one descriptor names the documented concept, the other is a
-        # same-score neighbour. Support must pick the concept-matching one.
-        match = CandidateCode("P_MATCH", "cpt", "excision of bursa of the foot", 0.80)
-        neigh = CandidateCode("P_NEIGH", "cpt", "open treatment of fracture", 0.80)
-        src = MockSource(records={("P_MATCH", "cpt"): {"active": True},
-                                  ("P_NEIGH", "cpt"): {"active": True}},
-                         retrieval={("*", "cpt"): [neigh, match]})  # neighbour listed first
-        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="excision of bursa",
-                            evidence=[EvidenceSpan("the bursa was excised")], confidence=0.9)
-        line = resolve(_request(fact), src)
+        reconciliation = SourceReconciliation(spans=(
+            SpanReconciliation(span_id="span-0", status=ReconciliationStatus.AGREED,
+                               pages=(1,)),))
+        line = resolve(_request(self._fact(anchored=True)), self._source(),
+                       reconciliation=reconciliation)
         self.assertEqual(line.chosen.code, "P_MATCH", line.rationale)
+        self.assertIs(line.method, ResolutionMethod.DETERMINISTIC)
+        self.assertIn("tie narrowed against the original document", line.rationale)
+
+    def test_token_overlap_alone_cannot_close_the_same_near_tie(self):
+        """The identical pool and the identical wording, with the quotation NOT anchored
+        to the source. The descriptor/note token overlap is unchanged and still favours
+        the matching code — and nothing is billed, because overlap is not evidence."""
+        from claude_coder.resolution import resolve
+        line = resolve(_request(self._fact(anchored=False)), self._source())
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual({c.code for c in line.alternatives}, {"P_MATCH", "P_NEIGH"})
 
     def test_support_never_eliminates_terse_code(self):
         # a correct but terse/generic descriptor sharing no tokens with the phrasing

@@ -11,15 +11,24 @@ Division of labour, each component doing what it is good at:
 
   • STRUCTURED RULES make the decision. They are agnostic MECHANICS over features
     parsed from the authoritative descriptors — no code is named:
-      – laterality contradiction    → ELIMINATE  (a "left" descriptor, right foot)
-      – measurement out of range     → ELIMINATE  (size 30 vs a "≤16 sq in" code)
-      – specificity                  → RANK       (a code that positively matches
+      – laterality contradiction    → ELIMINATE  (a "left" descriptor, a right-side fact)
+      – measurement out of range     → ELIMINATE  (a documented value outside the
+                                                   descriptor's own interval)
+      – specificity                  → SELECT     (a code that positively matches
                                                    more documented attributes wins,
                                                    per ICD-10-CM specificity rules)
 
-A survivor is chosen deterministically when it is unique, dominates on
-specificity, or clearly leads on recall; otherwise the ambiguity goes to bounded
-arbitration. Every decision carries a per-field rationale (the audit trail).
+A survivor is chosen deterministically ONLY when it is the sole admitted candidate
+or the sole candidate that satisfies a documented axis the others do not. When
+several remain, the directive's tie policy takes over: the axes that actually
+DISCRIMINATE between them are re-inspected against the ORIGINAL DOCUMENT
+(`tiebreak.narrow`), and if the page still does not single one out the line becomes
+ONE targeted provider query — never a similarity tiebreak and never a generic coder
+queue. Every decision carries a per-field rationale (the audit trail).
+
+Recall similarity and lexical token overlap ADMIT and ORDER candidates. Neither
+selects one: the directive allows fuzzy/lexical/semantic retrieval to widen a
+candidate pool and forbids it from verifying a code.
 """
 from __future__ import annotations
 
@@ -28,12 +37,15 @@ from dataclasses import dataclass, field
 
 from .data_access import CodeSource
 from .models import CandidateCode, ClinicalFact, FactKind, Outcome, ResolutionMethod, ResolvedLine
+from . import tiebreak as _tiebreak
 from .ontology import (DescriptorFeatures, measurement_of, parse_descriptor,
                        support_score)
 
 _LATERALITY = {"left", "right", "bilateral"}
-_SCORE_MARGIN = 0.05       # recall lead that settles a pick among relevant candidates
-_RELEVANCE_FLOOR = 0.6     # policy dial: min recall similarity for a deterministic pick
+# NOTE: a `_SCORE_MARGIN` recall lead used to settle a pick among comparable
+# candidates. It is deliberately gone -- a retrieval-score margin is similarity, and
+# similarity may widen the candidate pool but never close a tie (directive section 4).
+_RELEVANCE_FLOOR = 0.6     # policy dial: min recall similarity to ADMIT a candidate
 _RECALL_POOL = 40
 
 
@@ -201,8 +213,16 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
 
 
 def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
-            llm=None, corroborate=None, dos: str | None = None) -> ResolvedLine:
-    """Resolve an eligible retrieval request, never a raw clinical fact."""
+            llm=None, corroborate=None, dos: str | None = None,
+            reconciliation=None) -> ResolvedLine:
+    """Resolve an eligible retrieval request, never a raw clinical fact.
+
+    `reconciliation` is the encounter's `SourceReconciliation` (directive section 1).
+    It is what the TIE POLICY re-inspects a tie's discriminating axes against, so the
+    document -- not a retrieval score, not a model vote -- settles which of several
+    surviving candidates is released. None means no original document accompanied the
+    encounter; the tie policy then falls back to the anchored transcription, exactly as
+    `graph_consensus.source_support` already does for fact axes."""
     from .eligibility import RetrievalRequest
     if not isinstance(request, RetrievalRequest):
         raise TypeError("code retrieval requires an eligible RetrievalRequest")
@@ -238,7 +258,8 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                 and (always_verify or any(_needs_verification(fact, c) for c in cands))):
             seeds.extend(cands)                  # qualified / crosswalk -> confirm downstream
             return None
-        line = _decide(fact, cands, authority=authority, source=source)
+        line = _decide(fact, cands, authority=authority, source=source,
+                       reconciliation=reconciliation)
         return line if line.resolved else None
 
     # AUTHORITATIVE FIRST: for a diagnosis, resolve through the ICD-10-CM
@@ -387,7 +408,8 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
     # an empty recall pool, since a validated proposal can rescue a missed concept.
     if llm is not None and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING,
                                          FactKind.DIAGNOSIS):
-        line = _propose_then_verify(fact, source, pool, llm, corroborate, dos=dos)
+        line = _propose_then_verify(fact, source, pool, llm, corroborate, dos=dos,
+                                    reconciliation=reconciliation)
         # #1 grounding: a DIAGNOSIS that verified only to a residual/catch-all category
         # with no distinctive descriptor overlap is an ungrounded guess (entailment
         # against a catch-all is near-tautological) -- escalate, never bill it verified.
@@ -407,7 +429,8 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
         return ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
                             rationale="no candidate retrieved for the concept")
 
-    return _decide(fact, pool, source=source, dos=dos)
+    return _decide(fact, pool, source=source, dos=dos,
+                   reconciliation=reconciliation)
 
 
 def _strip_laterality(text: str) -> str:
@@ -616,17 +639,45 @@ MAX_RESELECT = 2       # re-selection attempts after a WRONG-CODE (not documenta
 
 def _ranked(fact: ClinicalFact, pool: list[CandidateCode],
             source: CodeSource | None) -> list[_Match]:
-    """Survivors (candidates that contradict no documented attribute) ranked by
-    recall, then (specificity, support) — the latter two only separate candidates
-    of comparable recall. Shared by the deterministic path and propose-then-verify."""
+    """Survivors (candidates that contradict no documented attribute), ORDERED by
+    recall, then (specificity, support). This is an ordering, not a decision: it fixes
+    the shortlist offered to entailment verification and the `alternatives` an audit
+    record shows. `_decide` selects only on a documented axis or on the original
+    document, so no candidate is ever billed because it sorted first."""
     survivors = [m for m in (_evaluate(fact, c, source) for c in pool) if m is not None]
     survivors.sort(key=lambda m: (m.recall, m.specificity, m.support), reverse=True)
     return survivors
 
 
+def _tie_escalation(fact: ClinicalFact, candidates: list[CandidateCode],
+                    reconciliation, reason: str) -> ResolvedLine:
+    """Tie policy step 5 -- turn an unresolved tie into ONE targeted provider query.
+
+    The directive forbids exactly one outcome here: routing the line to generic human
+    coder review because candidates tied or two models disagreed. So the candidates are
+    re-inspected against the ORIGINAL DOCUMENT for the axes that actually distinguish
+    them, and whatever the page could not settle becomes a specific, answerable
+    question about the record -- or, when the descriptors differ on nothing a provider
+    could document, an explicit hold that says exactly that.
+
+    This path never RELEASES a candidate. It is reached only after an entailment
+    verifier or an independent corroborator declined one, and a document-side narrowing
+    must not be able to overturn a safety control that already said no. Its job is to
+    make the escalation SPECIFIC, not to re-open the decision.
+    """
+    tie = _tiebreak.narrow(fact, candidates, reconciliation)
+    return ResolvedLine(
+        fact=fact, chosen=None, alternatives=candidates[:5],
+        method=ResolutionMethod.ABSTAINED,
+        documentation_gap=(tie.provider_question or None),
+        tie_record=tie.as_record(),
+        rationale=f"{reason} -- {tie.detail}")
+
+
 def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
                          pool: list[CandidateCode], llm, corroborate=None,
-                         dos: str | None = None) -> ResolvedLine:
+                         dos: str | None = None,
+                         reconciliation=None) -> ResolvedLine:
     """Recall as candidate GENERATOR, authoritative descriptor + entailment as TRUTH.
     Widen the pool with validated LLM proposals, select the candidate whose OFFICIAL
     descriptor the documentation entails, then (when a corroborator is supplied)
@@ -669,11 +720,13 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
             break
         chosen, why = _verify.select_entailed(fact, cands, source, llm)
         if chosen is None:
-            return ResolvedLine(
-                fact=fact, chosen=None, alternatives=shortlist,
-                method=ResolutionMethod.ABSTAINED,
-                rationale="no candidate's authoritative descriptor is fully entailed by "
-                          "the documentation (verified) — escalate")
+            # Tie policy step 5: nothing was entailed, so the useful output is WHICH
+            # documented fact would settle it -- a targeted provider query naming the
+            # candidates' own discriminating axes, never a generic coder queue.
+            return _tie_escalation(
+                fact, shortlist, reconciliation,
+                "no candidate's authoritative descriptor is fully entailed by the "
+                "documentation (verified)")
         chosen_match = _evaluate(fact, chosen, source)
         if chosen_match is None:
             return ResolvedLine(
@@ -716,11 +769,20 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
                           f"({why2}); confirm it was performed / amend the note, "
                           f"else a less-specific code applies")
         tried.add(chosen.code)                       # wrong code -> try another candidate
-    return ResolvedLine(
-        fact=fact, chosen=None, alternatives=shortlist,
-        method=ResolutionMethod.ABSTAINED,
-        rationale=f"no candidate confirmed by independent second-model verification "
-                  f"after re-selection ({last_reason}) — escalate")
+    # Tie policy step 5, and the case the directive names explicitly: THE MODELS
+    # DISAGREED. That is never a reason to send an otherwise-resolved line to a generic
+    # coder queue. The candidates the two models argued over are re-inspected against
+    # the ORIGINAL DOCUMENT for the axes that actually distinguish them, and what the
+    # page cannot settle becomes one specific question about the record.
+    #
+    # The question is asked about the candidates that were actually SELECTED AND
+    # REJECTED, not about the whole shortlist: the directive asks for ONE targeted
+    # query, and a question naming every code retrieval happened to return is not one.
+    contested = [c for c in shortlist if c.code in tried] or shortlist
+    return _tie_escalation(
+        fact, contested, reconciliation,
+        f"independent second-model verification confirmed no candidate after "
+        f"re-selection ({last_reason})")
 
 
 def _bounded_interval_hold(fact: ClinicalFact,
@@ -796,10 +858,19 @@ def _entailed_line(fact: ClinicalFact, chosen: CandidateCode,
 def _decide(fact: ClinicalFact, pool: list[CandidateCode],
             authority: str | None = None,
             source: CodeSource | None = None,
-            dos: str | None = None) -> ResolvedLine:
-    """Structured decision over a candidate pool: eliminate contradictions,
-    rank by relevance (recall) then specificity, pick deterministically when the
-    leader is clear, else hand the shortlist to arbitration."""
+            dos: str | None = None,
+            reconciliation=None) -> ResolvedLine:
+    """The directive's TIE POLICY over a candidate pool, in its stated order.
+
+      1. ELIMINATE candidates that fail a required constraint (`_evaluate` drops a
+         contradicted axis; `_active_only` drops a code inactive on the DOS).
+      2. SELECT automatically only when ONE candidate uniquely satisfies every
+         documented axis.
+      3. Otherwise RE-INSPECT only the survivors' discriminating axes against the
+         original document (`tiebreak.narrow`).
+      4. RELEASE the candidate the page uniquely entails.
+      5. Otherwise issue ONE targeted provider query -- never a generic coder review
+         because the candidates tied."""
     if source is not None and dos:
         active = _active_only(pool, source, dos)   # Fix3: no DOS-inactive deterministic pick
         if pool and not active:                    # all candidates inactive on the DOS
@@ -815,22 +886,44 @@ def _decide(fact: ClinicalFact, pool: list[CandidateCode],
             method=ResolutionMethod.ABSTAINED,
             rationale="every candidate contradicts a documented attribute")
 
-    top = survivors[0]
-    if top.recall < _RELEVANCE_FLOOR:
-        deterministic = False
-    elif len(survivors) == 1:
-        deterministic = True
-    else:
-        nxt = survivors[1]
-        close = abs(top.recall - nxt.recall) < _SCORE_MARGIN
-        deterministic = (top.recall - nxt.recall >= _SCORE_MARGIN
-                         or (close and (top.specificity, top.support)
-                             > (nxt.specificity, nxt.support)))
-
     tag = f" ({authority})" if authority else ""
-    if deterministic and getattr(top, "interval_unsupported", False):
+
+    # STEP 2 -- automatic selection ONLY when one candidate uniquely satisfies every
+    # documented axis. `specificity` counts the documented axes a descriptor POSITIVELY
+    # accounts for, so a unique maximum is exactly that condition.
+    #
+    # The recall MARGIN and the lexical SUPPORT score that used to decide this are
+    # deliberately gone. Both are SIMILARITY, and the directive is explicit that
+    # lexical/semantic/fuzzy similarity may only WIDEN the candidate pool -- it can
+    # never verify a code, and must never deterministically close a tie between
+    # clinically confusable candidates. Recall still ADMITS a candidate (the pool is a
+    # retrieval product and the floor is where that pool came from); it no longer picks
+    # between admitted ones.
+    admitted = [m for m in survivors if m.recall >= _RELEVANCE_FLOOR]
+    top = None
+    if len(admitted) == 1:
+        top = admitted[0]
+    elif len(admitted) > 1:
+        best = max(m.specificity for m in admitted)
+        leaders = [m for m in admitted if m.specificity == best]
+        if best > 0 and len(leaders) == 1:
+            top = leaders[0]
+
+    # STEPS 3 and 4 -- several candidates still satisfy every documented axis, so
+    # re-inspect ONLY the axes that distinguish them against the ORIGINAL DOCUMENT and
+    # release the one the page uniquely entails.
+    tie = None
+    if top is None and len(admitted) > 1:
+        tie = _tiebreak.narrow(fact, [m.candidate for m in admitted], reconciliation)
+        if tie.winner is not None:
+            top = next(m for m in admitted if m.candidate.code == tie.winner.code)
+
+    if top is not None and top.interval_unsupported:
         # Codex F4-R1: the leader's descriptor requires a bounded measurement its
-        # documentation does not support (dimension-compatible + convertible + in range).
+        # documentation does not support (dimension-compatible + convertible + in
+        # range). Checked for every way a leader can be reached -- unique survivor,
+        # unique specificity, or narrowed against the page. A required constraint that
+        # failed at step 1 may not be resurrected by a later step.
         return ResolvedLine(
             fact=fact, chosen=None, alternatives=[m.candidate for m in survivors[:5]],
             method=ResolutionMethod.ABSTAINED,
@@ -839,13 +932,28 @@ def _decide(fact: ClinicalFact, pool: list[CandidateCode],
                 "of that dimension -- document the measurement or use a less-specific code"),
             rationale="bounded-interval code not supported by a dimension-compatible "
                       "documented measurement -- not billed deterministically")
-    if deterministic:
+    if top is not None:
+        why = ("; ".join(top.rationale) if tie is None else
+               f"{'; '.join(top.rationale)}; tie narrowed against the original "
+               f"document ({tie.proof}): {tie.detail}")
         return ResolvedLine(
             fact=fact, chosen=top.candidate,
-            alternatives=[m.candidate for m in survivors[1:4]],
+            alternatives=[m.candidate for m in survivors if m is not top][:3],
             method=ResolutionMethod.DETERMINISTIC,
-            rationale=f"{'; '.join(top.rationale)}{tag}")
+            tie_record=(tie.as_record() if tie is not None else None),
+            rationale=f"{why}{tag}")
+
+    # STEP 5 -- neither the documented axes nor the page single one out.
+    if tie is None:
+        return ResolvedLine(
+            fact=fact, chosen=None, alternatives=[m.candidate for m in survivors[:5]],
+            method=ResolutionMethod.ABSTAINED,
+            rationale=f"no retrieved candidate clears the relevance floor for a "
+                      f"deterministic decision{tag}")
     return ResolvedLine(
         fact=fact, chosen=None, alternatives=[m.candidate for m in survivors[:5]],
         method=ResolutionMethod.ABSTAINED,
-        rationale=f"{len(survivors)} candidates comparable — arbitration{tag}")
+        documentation_gap=(tie.provider_question or None),
+        tie_record=tie.as_record(),
+        rationale=(f"{len(admitted)} candidates satisfy every documented axis; "
+                   f"{tie.detail}{tag}"))

@@ -192,6 +192,12 @@ class ResolvedLine:
     # set when the line escalated because the best-matching code needs an element
     # the documentation does not state — carries the specific gap for a provider query.
     documentation_gap: str | None = None
+    # The TIE POLICY's record (directive section 4) when several candidates survived
+    # elimination: which axes actually distinguished them, what the ORIGINAL DOCUMENT
+    # was proven to say about each, which axes it left unsettled, and the question that
+    # went to the provider. Present only when a tie was re-inspected, and carried into
+    # the audit trail because "why the alternatives were rejected" is claim-affecting.
+    tie_record: dict | None = None
 
     @property
     def resolved(self) -> bool:
