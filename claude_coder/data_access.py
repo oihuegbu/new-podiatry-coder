@@ -762,6 +762,14 @@ class AuthoritativeSource:
         """
         fp: dict[str, Any] = {"fingerprint_version": "release-data-fingerprint-v2"}
         db = self._reference()                       # load failure raises -> pipeline holds
+        # The identity of the database snapshot that ANSWERED this encounter, taken from
+        # the querying object itself and carried forward into the certificate.  The
+        # manifest below independently re-hashes whatever is at that path NOW; requiring
+        # the two to agree is what turns "the database was replaced after the last query"
+        # from a silent pass into a hold, with no later query obliged to notice it.
+        # Raises if the database cannot be identified at all -- a release must never be
+        # certified against data nobody can name. (Codex F6-R5-A.)
+        fp["database_snapshot"] = snapshot = db.database_snapshot()
         fp["counts"] = {s: len(getattr(db, s, {}) or {})
                         for s in ("icd10", "cpt", "hcpcs")}
         if not all(fp["counts"].get(s) for s in ("icd10", "cpt", "hcpcs")):
@@ -775,7 +783,7 @@ class AuthoritativeSource:
         except Exception:
             pass                                     # codes_checksum is corroborating only
         from .capability import build_manifest, fingerprint_digest  # raises if unavailable
-        manifest = build_manifest()
+        manifest = build_manifest(bound_database=snapshot)
         fp["source_manifest"] = manifest
         fp["fingerprint_sha256"] = fingerprint_digest(fp["counts"], manifest)
         return fp
@@ -1022,7 +1030,8 @@ class MockSource:
         to the required set fails the mock too, instead of leaving tests green against a
         set that no longer exists."""
         from app.release.source_manifest import (
-            REQUIRED_SOURCE_SCHEMA_VERSION, required_release_sources)
+            COMPLIANCE_DATABASE_SOURCE_ID, REQUIRED_SOURCE_SCHEMA_VERSION,
+            required_release_sources)
         from .capability import MANIFEST_VERSION, fingerprint_digest, manifest_digest
         sources = []
         for source_id, spec in required_release_sources().items():
@@ -1042,8 +1051,18 @@ class MockSource:
                     "integrity_errors": [], "status": "OK",
                     "manifest_sha256": manifest_digest(sources)}
         counts = {"icd10": 1, "cpt": 1, "hcpcs": 1}
+        # The compiled database's query-time binding, mirrored from the mock's own record
+        # for it: the real producer propagates the identity of the snapshot that answered
+        # the queries and the validator requires the manifest to agree with it, so a mock
+        # without one would pass a shape production rejects. (Codex F6-R5-A.)
+        database = next(s for s in sources
+                        if s["source_id"] == COMPLIANCE_DATABASE_SOURCE_ID)
         return {"source": "mock", "fingerprint_version": "release-data-fingerprint-v2",
                 "counts": counts, "source_manifest": manifest,
+                "database_snapshot": {"source_id": COMPLIANCE_DATABASE_SOURCE_ID,
+                                      "path": database["path"],
+                                      "sha256": database["sha256"],
+                                      "size": database["bytes"]},
                 "fingerprint_sha256": fingerprint_digest(counts, manifest)}
 
     def qualifying_dx_for(self, code, system="cpt"):

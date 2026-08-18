@@ -1838,6 +1838,234 @@ def test_a_database_replaced_mid_encounter_reads_as_stale(monkeypatch, tmp_path)
         ref.check_ncci("SYNTHETIC_ONE", "SYNTHETIC_TWO", "2025-06-01")
 
 
+# ---- Codex F6-R5-A (round 9): the certificate must attest to the snapshot that ANSWERED
+# the queries, not to whatever is at the path when the certificate is built ------------
+def _mutated_database(path):
+    """A structurally identical synthetic database whose BYTES differ, at unchanged row
+    counts -- an edit that no longer bypasses with a modifier."""
+    import sqlite3
+    db = _synthetic_database(path)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE ncci_ptp SET modifier_indicator='1'")
+    conn.commit()
+    conn.close()
+    return db
+
+
+def _bound_reference(monkeypatch, db):
+    """A `CodeReferenceDB` that has ANSWERED one decision query against `db`."""
+    from app.rag.code_reference import CodeReferenceDB
+    _repoint_runtime(monkeypatch, "compliance_database", db)
+    ref = CodeReferenceDB()
+    assert ref.check_ncci("SYNTHETIC_ONE", "SYNTHETIC_TWO", "2025-06-01"), (
+        "the fixture must actually answer a decision query, or there is no snapshot to bind")
+    return ref
+
+
+def _database_errors(manifest):
+    from app.release.source_manifest import COMPLIANCE_DATABASE_SOURCE_ID
+    return [e for e in manifest["integrity_errors"]
+            if COMPLIANCE_DATABASE_SOURCE_ID in e]
+
+
+def test_the_query_time_snapshot_is_a_content_identity_not_a_stat_tuple(monkeypatch,
+                                                                       tmp_path):
+    """The binding has to be the BYTES.  A filesystem stat tuple is not a content identity
+    (a same-size in-place write can leave it untouched) and it is only consulted when a
+    later query happens to look."""
+    from app.release.source_manifest import (COMPLIANCE_DATABASE_SOURCE_ID,
+                                             compliance_database_identity,
+                                             is_content_digest)
+    ref = _bound_reference(monkeypatch, _synthetic_database(tmp_path / "compliance.db"))
+    bound = ref.database_snapshot()
+    assert bound["source_id"] == COMPLIANCE_DATABASE_SOURCE_ID
+    assert is_content_digest(bound["sha256"])
+    assert bound["sha256"] == compliance_database_identity()["sha256"]
+    assert bound["size"] > 0
+    # ... and it is STABLE: asking again returns the identity bound at the first query,
+    # never a fresh reading of the path.
+    assert ref.database_snapshot() == bound
+
+
+def test_a_database_replaced_after_the_last_query_cannot_be_certified(monkeypatch,
+                                                                     tmp_path):
+    """THE FINDING (F6-R5-A, reopened).  Query the database ONCE, atomically replace it as
+    a legitimate concurrent refresh would, then certify -- with NO second query.
+
+    Nothing re-stats the file after the last query, so the stale-read check in `_connect`
+    is never reached; only an identity captured from the snapshot that ANSWERED the query
+    and carried forward to certification can catch this.  Before the fix, the manifest
+    hashed the replacement and the certificate attested to bytes no decision came from.
+    """
+    import os
+    from claude_coder.capability import build_manifest
+    from claude_coder.pipeline import _fingerprint_certifiable
+    db = _synthetic_database(tmp_path / "compliance.db")
+    ref = _bound_reference(monkeypatch, db)
+    bound = ref.database_snapshot()
+
+    os.replace(_mutated_database(tmp_path / "replacement.db"), db)      # atomic refresh
+    # NO further query happens from here on -- that is the point of the finding.
+
+    manifest = build_manifest(bound_database=bound)
+    record = next(s for s in manifest["sources"]
+                  if s["source_id"] == "compliance_database")
+    assert record["sha256"] != bound["sha256"], (
+        "this record is the REPLACEMENT, independently re-hashed from the path at "
+        "certification time -- which is exactly what the certificate used to attest to")
+    assert manifest["status"] == "BLOCKED"
+    drift = _database_errors(manifest)
+    assert drift, "a database replaced after its last query certified silently"
+    assert any("answered this encounter" in error for error in drift), drift
+    fingerprint = {"counts": {"icd10": 1, "cpt": 1, "hcpcs": 1},
+                   "source_manifest": manifest, "database_snapshot": bound}
+    assert _fingerprint_certifiable(fingerprint) is False
+
+
+def test_an_in_place_rewrite_after_the_last_query_cannot_be_certified(monkeypatch,
+                                                                     tmp_path):
+    """The same hole reached by MUTATION rather than replacement, and the reason the
+    binding cannot be a stat tuple even when something DOES look: this rewrite changes a
+    claim-changing edit while leaving (device, inode, size, mtime) byte-identical -- the
+    racily-clean case `_RACY_MTIME_WINDOW_NS` documents, reproduced deterministically."""
+    import os
+    import sqlite3
+    from app.rag.code_reference import _snapshot_identity
+    from claude_coder.capability import build_manifest
+    db = _synthetic_database(tmp_path / "compliance.db")
+    ref = _bound_reference(monkeypatch, db)
+    bound = ref.database_snapshot()
+    before = db.stat()
+
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE ncci_ptp SET modifier_indicator='1'")
+    conn.commit()
+    conn.close()
+    os.utime(db, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert _snapshot_identity(db) == ref._db_snapshot, (
+        "the fixture must be INVISIBLE to the stat check, or it proves nothing")
+
+    drift = _database_errors(build_manifest(bound_database=bound))
+    assert drift, "an in-place claim-changing rewrite certified silently"
+
+
+def test_an_unchanged_database_certifies_and_reports_no_drift(monkeypatch, tmp_path):
+    """The failure path of the fix itself: a control that fires on a clean run would hold
+    every encounter, which is the same outage as no control at all."""
+    from claude_coder.capability import build_manifest
+    ref = _bound_reference(monkeypatch, _synthetic_database(tmp_path / "compliance.db"))
+    bound = ref.database_snapshot()
+    manifest = build_manifest(bound_database=bound)
+    assert _database_errors(manifest) == []
+    record = next(s for s in manifest["sources"]
+                  if s["source_id"] == "compliance_database")
+    assert record["sha256"] == bound["sha256"] and record["bytes"] == bound["size"]
+
+
+def test_a_certificate_with_no_query_time_binding_is_not_certifiable(monkeypatch,
+                                                                    tmp_path):
+    """A fingerprint that carries no binding at all is not certifiable either: "nobody
+    identified the database when it answered" is not a clean result, and accepting it would
+    let the pre-fix shape (a manifest digest and nothing else) certify exactly as before."""
+    from claude_coder.capability import build_manifest
+    from claude_coder.data_access import MockSource
+    from claude_coder.pipeline import _fingerprint_certifiable
+    from app.release.source_manifest import database_snapshot_drift
+    _repoint_runtime(monkeypatch, "compliance_database",
+                     _synthetic_database(tmp_path / "compliance.db"))
+    assert database_snapshot_drift({}), "an absent binding must be an integrity error"
+    assert database_snapshot_drift({"sha256": "not-a-digest"})
+    assert _database_errors(build_manifest(bound_database={}))
+
+    fingerprint = MockSource().data_fingerprint()
+    assert _fingerprint_certifiable(fingerprint) is True
+    fingerprint.pop("database_snapshot")
+    assert _fingerprint_certifiable(fingerprint) is False
+
+
+def test_a_certificate_whose_record_disagrees_with_the_binding_is_not_certifiable():
+    """Belt and braces at the certification boundary: even a fully self-consistent manifest
+    (digests resealed) may not certify when its record for the database is not the snapshot
+    the queries were answered from."""
+    import claude_coder.capability as cap
+    from claude_coder.data_access import MockSource
+    from claude_coder.pipeline import _fingerprint_certifiable
+    from app.release.source_manifest import COMPLIANCE_DATABASE_SOURCE_ID
+    fingerprint = MockSource().data_fingerprint()
+    record = next(s for s in fingerprint["source_manifest"]["sources"]
+                  if s["source_id"] == COMPLIANCE_DATABASE_SOURCE_ID)
+    record["sha256"] = "sha256:" + "b" * 64
+    manifest = fingerprint["source_manifest"]
+    manifest["manifest_sha256"] = cap.manifest_digest(manifest["sources"])
+    fingerprint["fingerprint_sha256"] = cap.fingerprint_digest(fingerprint["counts"],
+                                                               manifest)
+    assert _fingerprint_certifiable(fingerprint) is False
+
+
+def test_the_producer_propagates_the_binding_into_the_release_fingerprint(monkeypatch,
+                                                                         tmp_path):
+    """END TO END through the REAL producer.  `code_encounter` certifies from
+    `source.data_fingerprint()`; this drives that method itself, so the binding is proven
+    to travel from the querying object into the fingerprint the certificate is built over
+    -- not merely to exist on `CodeReferenceDB`.
+
+    The reference tables are stubbed (the fingerprint only needs their cardinality) so the
+    test costs nothing beyond the synthetic database; the DATABASE path under test is the
+    production one.
+    """
+    import os
+    from claude_coder.data_access import AuthoritativeSource
+    from claude_coder.pipeline import _fingerprint_certifiable
+    db = _synthetic_database(tmp_path / "compliance.db")
+    ref = _bound_reference(monkeypatch, db)
+    ref.icd10, ref.cpt, ref.hcpcs = ({"SYN": {}}, {"SYN": {}}, {"SYN": {}})
+    source = AuthoritativeSource()
+    source._db = ref                       # the instance that answered the decision query
+    bound = ref.database_snapshot()
+
+    clean = source.data_fingerprint()
+    assert clean["database_snapshot"] == bound
+    assert _database_errors(clean["source_manifest"]) == []
+
+    os.replace(_mutated_database(tmp_path / "replacement.db"), db)      # no further query
+    held = source.data_fingerprint()
+    assert held["database_snapshot"] == bound, (
+        "the fingerprint must keep naming the snapshot that answered, not re-read the path")
+    assert any("answered this encounter" in error
+               for error in _database_errors(held["source_manifest"]))
+    assert _fingerprint_certifiable(held) is False
+
+
+def test_the_binding_is_not_silently_reused_across_a_refreshed_snapshot(monkeypatch,
+                                                                       tmp_path):
+    """SHARED-INSTANCE BOUNDARY: one `AuthoritativeSource` (and one `CodeReferenceDB`)
+    serves every note in a batch, so the binding outlives a single encounter by design.
+    A database replaced mid-batch must therefore hold EVERY later encounter too -- the
+    in-memory tables and the bound snapshot are the old edition either way -- rather than
+    quietly re-binding to the new file and certifying the rest of the batch against a
+    database that answered none of it.
+    """
+    import os
+    from app.release.source_manifest import CompiledDatabaseUnavailable
+    from claude_coder.capability import build_manifest
+    db = _synthetic_database(tmp_path / "compliance.db")
+    ref = _bound_reference(monkeypatch, db)
+    bound = ref.database_snapshot()
+    os.replace(_mutated_database(tmp_path / "replacement.db"), db)
+
+    # A later encounter that DOES query holds on the stale read ...
+    with pytest.raises(CompiledDatabaseUnavailable):
+        ref.check_ncci("SYNTHETIC_ONE", "SYNTHETIC_TWO", "2025-06-01")
+    # ... and one that does not query still cannot certify, because the identity it
+    # propagates is still the superseded snapshot.
+    assert ref.database_snapshot() == bound
+    assert _database_errors(build_manifest(bound_database=ref.database_snapshot()))
+    # Only a full reload -- the one place a new authoritative snapshot legitimately
+    # begins -- may rebind, and it drops the old handle with it.
+    ref._release_database_snapshot()
+    assert ref.database_snapshot()["sha256"] != bound["sha256"]
+
+
 def test_an_unreadable_edit_authority_is_an_error_on_the_validator_report(monkeypatch,
                                                                          tmp_path):
     """BOUNDARY: the raise has to land as a finding, not as an exception escaping

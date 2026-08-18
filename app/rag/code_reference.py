@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import calendar
 from datetime import date
@@ -9,11 +10,15 @@ from app.core.config import (
 from app.core.logger import get_logger
 from app.compliance.datastore.store import cpt_edition_window
 from app.release.source_manifest import (
-    CompiledDatabaseUnavailable, compliance_database_path)
+    CompiledDatabaseUnavailable, compliance_database_path, open_database_snapshot)
 
 logger = get_logger(__name__)
 
 _OPEN = "9999-12-31"
+
+
+def _stat_identity(stat) -> tuple:
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
 
 def _snapshot_identity(path) -> tuple:
@@ -21,12 +26,16 @@ def _snapshot_identity(path) -> tuple:
 
     Device+inode is what distinguishes a REPLACED file from a modified one (an atomic
     rename keeps the path and changes the inode); size and mtime catch in-place edits.
-    Cheap enough to re-check on every query, which is the point: the certificate binds the
-    digest of the bytes the manifest hashed, so a database swapped underneath a running
-    encounter would otherwise let the claim be attested to bytes it never queried.
+    Cheap enough to re-check on every query, which is the point: a database swapped
+    underneath a running encounter must not answer half of it.
+
+    This is a LIVENESS check, not the claim's binding, and it cannot be: it only fires when
+    a later query happens to look, and nothing requires one to happen before the
+    certificate is built.  The binding is `CodeReferenceDB.database_snapshot()`, a CONTENT
+    identity read from the handle that served the first query and carried forward into the
+    certificate. (Codex F6-R5-A.)
     """
-    stat = path.stat()
-    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    return _stat_identity(path.stat())
 
 
 class SnomedRootsUnavailable(RuntimeError):
@@ -92,7 +101,17 @@ class CodeReferenceDB:
         # The compiled-database snapshot THIS instance bound on its first query.  The
         # ClaimBundle is bound to one database; a second, different one appearing under
         # the same path mid-encounter is a stale read, not a fresh one.
+        #
+        # `_db_snapshot` is the cheap stat tuple re-checked on every subsequent query;
+        # `_db_identity` is the CONTENT identity of those same bytes, read through
+        # `_db_handle` -- which stays open so nothing else can inherit the inode -- and
+        # propagated into the release certificate, which must match it.  The stat tuple
+        # alone could never be that binding: it is only consulted when another query
+        # happens, and a replacement after the LAST query is exactly the case nobody
+        # looks. (Codex F6-R5-A.)
         self._db_snapshot: tuple | None = None
+        self._db_identity: dict | None = None
+        self._db_handle = None
 
     def load_all(self) -> None:
         # Treat one load as one authoritative data snapshot. A subsequent
@@ -100,7 +119,7 @@ class CodeReferenceDB:
         # NCCI release window.
         self._ncci_release_window_loaded = False
         self._ncci_release_window = None
-        self._db_snapshot = None
+        self._release_database_snapshot()
         self._load_icd10()
         self._load_cpt()
         self._load_hcpcs()
@@ -255,32 +274,86 @@ class CodeReferenceDB:
         no caller expects this module to raise, or -- worse -- resolving to the empty
         result every caller reads as "no edit".  (Directive section 6.)
         """
-        try:
-            path = compliance_database_path()
-        except Exception as exc:
-            raise CompiledDatabaseUnavailable(
-                f"the compiled compliance database is not resolvable from the "
-                f"release-source declaration: {exc}") from exc
-        try:
-            identity = _snapshot_identity(path)
-        except OSError as exc:
-            raise CompiledDatabaseUnavailable(
-                f"compiled compliance database unreadable at {path}: {exc}") from exc
-        if self._db_snapshot is None:
-            self._db_snapshot = identity
-        elif identity != self._db_snapshot:
-            # STALE: the release certificate is built over the digest of ONE database.  A
-            # file replaced mid-encounter means the bytes that answered this query are not
-            # the bytes the certificate will attest to, so the encounter holds rather than
-            # silently mixing two snapshots.
-            raise CompiledDatabaseUnavailable(
-                f"the compiled compliance database at {path} was replaced while this "
-                f"encounter was being coded; the claim cannot be bound to one snapshot")
+        path = self._database_path()
+        if self._db_identity is None:
+            self._bind_database_snapshot()
+        else:
+            try:
+                identity = _snapshot_identity(path)
+            except OSError as exc:
+                raise CompiledDatabaseUnavailable(
+                    f"compiled compliance database unreadable at {path}: {exc}") from exc
+            if identity != self._db_snapshot:
+                # STALE: the release certificate is built over the digest of ONE database.
+                # A file replaced mid-encounter means the bytes that answered this query
+                # are not the bytes the certificate will attest to, so the encounter holds
+                # rather than silently mixing two snapshots.
+                raise CompiledDatabaseUnavailable(
+                    f"the compiled compliance database at {path} was replaced while this "
+                    f"encounter was being coded; the claim cannot be bound to one snapshot")
         try:
             return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         except sqlite3.Error as exc:
             raise CompiledDatabaseUnavailable(
                 f"compiled compliance database unopenable at {path}: {exc}") from exc
+
+    def _database_path(self):
+        """The declared path of the compiled database, as a TYPED failure."""
+        try:
+            return compliance_database_path()
+        except Exception as exc:
+            raise CompiledDatabaseUnavailable(
+                f"the compiled compliance database is not resolvable from the "
+                f"release-source declaration: {exc}") from exc
+
+    def _bind_database_snapshot(self) -> None:
+        """Bind this instance to ONE database snapshot: the content identity of the bytes,
+        read through a handle that is then held open, plus the cheap stat identity every
+        later query is re-checked against.  Both come from the SAME open descriptor, so
+        they cannot describe two different files."""
+        handle, identity = open_database_snapshot()
+        try:
+            stat_identity = _stat_identity(os.fstat(handle.fileno()))
+        except OSError as exc:
+            handle.close()
+            raise CompiledDatabaseUnavailable(
+                f"compiled compliance database unreadable at "
+                f"{identity['path']}: {exc}") from exc
+        self._release_database_snapshot()
+        self._db_handle = handle
+        self._db_identity = identity
+        self._db_snapshot = stat_identity
+
+    def _release_database_snapshot(self) -> None:
+        """Drop the bound snapshot (and its pinning handle).  Called by `load_all`, which
+        is the one place a NEW authoritative snapshot legitimately begins."""
+        handle, self._db_handle = self._db_handle, None
+        self._db_identity = None
+        self._db_snapshot = None
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:
+                pass
+
+    def database_snapshot(self) -> dict:
+        """The CONTENT identity of the compiled-database snapshot this instance's queries
+        are answered from, binding it on first use.
+
+        This is what the release certificate is REQUIRED to match.  It is captured from the
+        handle that served the first query rather than recomputed from whatever is at the
+        path when the certificate is built: those are two facts about two different
+        moments, and a database replaced in between would otherwise let the certificate
+        attest to bytes no coding decision ever saw -- with no later query obliged to
+        happen and notice. (Codex F6-R5-A.)
+
+        Binding HERE as well as in `_connect` means the identity also exists for an
+        encounter that never had to ask the database anything: the certificate names the
+        database either way, so it must name one that was actually opened and read.
+        """
+        if self._db_identity is None:
+            self._bind_database_snapshot()
+        return dict(self._db_identity)
 
     def _query(self, sql: str, params: tuple = ()):
         """One fail-closed read.  A malformed/truncated database, a decision table that is

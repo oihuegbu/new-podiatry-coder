@@ -153,11 +153,22 @@ def fingerprint_digest(counts: dict[str, Any], manifest: dict[str, Any]) -> str:
         + list(manifest.get("sources") or []))
 
 
-def build_manifest() -> dict[str, Any]:
+def build_manifest(bound_database: dict[str, Any] | None = None) -> dict[str, Any]:
     """Probe every authoritative source the coder depends on. Required sources gate
     release (fail closed); optional sources are recorded so their absence is visible
     rather than silently degrading retrieval. Every present source is content-addressed
-    and version-aware so the release certificate identifies the exact bytes used."""
+    and version-aware so the release certificate identifies the exact bytes used.
+
+    `bound_database` is the content identity the QUERYING object captured from the compiled
+    database that actually answered this encounter (`CodeReferenceDB.database_snapshot()`).
+    Every digest below is an independently timed re-hash of whatever is at a path right
+    now, which is a different fact from "the bytes that answered the query": a database
+    replaced between the last query and this build would otherwise be hashed here and
+    attested to by a certificate for decisions it never served. Passing the binding makes
+    that disagreement an integrity error -- i.e. a hold -- instead of a silent pass.
+    Omitted only by callers that are not certifying an encounter (the standalone capability
+    probe), which is why its absence is not itself an error here; the certificate validator
+    is what refuses a fingerprint that carries no binding. (Codex F6-R5-A.)"""
     from app.release.source_manifest import (
         REQUIRED_SOURCE_SCHEMA_VERSION, optional_release_sources,
         required_release_sources)
@@ -209,6 +220,26 @@ def build_manifest() -> dict[str, Any]:
         integrity_errors.append(
             f"compliance_database: integrity could not be established "
             f"({type(exc).__name__}: {exc})")
+    if bound_database is not None:
+        from app.release.source_manifest import (COMPLIANCE_DATABASE_SOURCE_ID,
+                                                 database_snapshot_drift)
+        # Two independent checks, deliberately. The first asks whether the database on disk
+        # is still the snapshot that answered the queries (it re-derives the identity and
+        # compares); the second asks whether the record THIS manifest is about to publish --
+        # the one the certificate carries -- is that same snapshot. A manifest that simply
+        # had no record for the database would otherwise satisfy the first and attest to
+        # nothing.
+        integrity_errors.extend(database_snapshot_drift(bound_database))
+        record = next((s for s in sources
+                       if s.get("source_id") == COMPLIANCE_DATABASE_SOURCE_ID), None)
+        if record is None:
+            integrity_errors.append(
+                f"{COMPLIANCE_DATABASE_SOURCE_ID}: the manifest carries no record for the "
+                f"database this encounter was coded against")
+        elif str(record.get("sha256") or "") != str(bound_database.get("sha256") or ""):
+            integrity_errors.append(
+                f"{COMPLIANCE_DATABASE_SOURCE_ID}: the manifest record identifies bytes "
+                f"other than the snapshot that answered this encounter's queries")
     # Reported by DECLARED IDENTITY, not by filename stem: the hold message names the same
     # identity the declaration, the fingerprint validator and the audit trail use, so
     # "required source(s) missing: coverage_policy" is actionable where "podiatry_lcd" was

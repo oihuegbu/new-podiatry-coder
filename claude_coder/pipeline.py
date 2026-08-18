@@ -53,6 +53,11 @@ def _fingerprint_certifiable(fp) -> bool:
       - a non-empty upstream effective/edition window on every required source the authority
         publishes one for; sources it publishes none for are reviewed exemptions recorded in
         the declaration, not blanks silently accepted;
+      - a `database_snapshot` binding: the content identity the compiled database was
+        bound to when it ANSWERED this encounter, which the manifest's own record for that
+        database must equal. A digest re-read from the path at certification time is a
+        different fact about a different moment, and on its own would certify whatever
+        file happens to be there rather than the one the decisions came from;
       - a `manifest_sha256` that still matches the recorded sources, and a top-level
         `fingerprint_sha256` RECOMPUTED from the canonical counts + manifest and compared —
         pattern-matching its shape accepted an arbitrary all-zero / all-`f` / plausible-but-
@@ -73,8 +78,8 @@ def _fingerprint_certifiable(fp) -> bool:
 
 def _fingerprint_schema_ok(fp) -> bool:
     from app.release.source_manifest import (
-        REQUIRED_SOURCE_SCHEMA_VERSION, release_window_populated,
-        required_release_sources)
+        COMPLIANCE_DATABASE_SOURCE_ID, REQUIRED_SOURCE_SCHEMA_VERSION,
+        is_content_digest, release_window_populated, required_release_sources)
 
     if not isinstance(fp, dict) or not fp:
         return False
@@ -127,6 +132,22 @@ def _fingerprint_schema_ok(fp) -> bool:
         if (spec["release_metadata_required"]
                 and not release_window_populated(s.get("release"))):
             return False
+
+    # The compiled database the certificate attests to must be the SNAPSHOT that answered
+    # this encounter -- the identity the querying object bound and propagated here -- not
+    # an independently timed re-hash of whatever is at that path now. A fingerprint with no
+    # such binding, or one its own manifest record disagrees with, is not certifiable.
+    # (Codex F6-R5-A.)
+    snapshot = fp.get("database_snapshot")
+    if not isinstance(snapshot, dict) or not is_content_digest(snapshot.get("sha256")):
+        return False
+    bound_record = declared.get(COMPLIANCE_DATABASE_SOURCE_ID)
+    if not isinstance(bound_record, dict):
+        return False
+    if str(bound_record.get("sha256") or "") != str(snapshot.get("sha256") or ""):
+        return False
+    if bound_record.get("bytes") != snapshot.get("size"):
+        return False
 
     from .capability import fingerprint_digest, manifest_digest
     if manifest.get("manifest_sha256") != manifest_digest(sources):

@@ -11,7 +11,7 @@ import calendar
 from datetime import date
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from app.core import config
 
@@ -737,8 +737,100 @@ def compliance_database_identity() -> dict:
     except OSError as exc:
         raise CompiledDatabaseUnavailable(
             f"compiled compliance database unreadable at {path}: {exc}") from exc
-    return {"source_id": "compliance_database", "path": str(path),
-            "sha256": digest, "size": int(stat.st_size)}
+    wal_digest, wal_size = _wal_identity(path)
+    return {"source_id": COMPLIANCE_DATABASE_SOURCE_ID, "path": str(path),
+            "sha256": digest, "size": int(stat.st_size),
+            "wal_sha256": wal_digest, "wal_size": wal_size}
+
+
+def open_database_snapshot() -> tuple[Any, dict]:
+    """(open handle, content identity) for the compiled database, identified THROUGH the
+    handle returned -- the snapshot a claim's decisions are answered from.
+
+    A filesystem stat tuple identifies a file only for as long as somebody keeps LOOKING at
+    it.  A database replaced after an encounter's last query and before its certificate is
+    built is never re-stat'ed by anyone, so the certificate ends up attesting to the digest
+    of a file that answered nothing -- and a stat tuple is not a content identity in the
+    first place: a same-size in-place write can leave (device, inode, size, mtime) untouched
+    (see `_RACY_MTIME_WINDOW_NS`, observed on this deployment's own filesystem).
+
+    The identity is therefore taken from the BYTES, read through a descriptor the caller
+    holds open: the open handle pins the inode, so no later file can inherit its
+    (device, inode) and impersonate it, and the digest describes exactly what the
+    connections opened alongside it are reading.  Raises rather than returning a partial
+    identity -- a release must never be certified against a database nobody can name.
+    (Codex F6-R5-A.)
+    """
+    path = compliance_database_path()
+    try:
+        handle = open(path, "rb")
+    except OSError as exc:
+        raise CompiledDatabaseUnavailable(
+            f"compiled compliance database unreadable at {path}: {exc}") from exc
+    started = time.time_ns()
+    try:
+        opened = os.fstat(handle.fileno())
+        digest = _sha256_handle(handle)
+        settled = os.fstat(handle.fileno())
+        wal_digest, wal_size = _wal_identity(path)
+    except OSError as exc:
+        handle.close()
+        raise CompiledDatabaseUnavailable(
+            f"compiled compliance database unreadable at {path}: {exc}") from exc
+    if _file_key(settled) != _file_key(opened):
+        # Rewritten WHILE it was being identified: this digest describes no single state of
+        # it, so there is no snapshot to bind the encounter to.
+        handle.close()
+        raise CompiledDatabaseUnavailable(
+            f"the compiled compliance database at {path} was being rewritten while it was "
+            f"identified; no single set of bytes can be bound to this encounter")
+    if settled.st_mtime_ns + _RACY_MTIME_WINDOW_NS < started:
+        # Same cache and same racily-clean rule as `sha256_file` -- the key carries the
+        # (device, inode) these bytes were read from, so it can only ever be served for
+        # THIS file.  Without it, binding the snapshot costs one extra full re-hash of a
+        # multi-hundred-megabyte database per process.
+        _DIGEST_CACHE[str(path)] = (_file_key(settled), digest)
+    return handle, {"source_id": COMPLIANCE_DATABASE_SOURCE_ID, "path": str(path),
+                    "sha256": digest, "size": int(opened.st_size),
+                    "wal_sha256": wal_digest, "wal_size": wal_size}
+
+
+#: The identity fields a bound snapshot and the file being certified must agree on.
+_SNAPSHOT_IDENTITY_FIELDS = (
+    ("sha256", "content digest"), ("size", "size in bytes"),
+    ("wal_sha256", "write-ahead log digest"), ("wal_size", "write-ahead log size"))
+
+
+def database_snapshot_drift(bound: dict) -> list[str]:
+    """Every reason the database on disk is no longer the snapshot `bound` names.
+
+    The certify-time half of `open_database_snapshot`.  `bound` is the identity captured
+    from the handle that ANSWERED this encounter's queries; this recomputes the same
+    identity from the file the certificate is about to attest to.  Any difference means the
+    decisions and the attestation describe two different databases, which is a HOLD -- and
+    it has to be detectable HERE, with no later query happening to notice it, because
+    nothing requires one to happen at all. (Codex F6-R5-A.)
+
+    Returns a list rather than raising: its callers compose a manifest's `integrity_errors`
+    and must report every problem at once.  An UNBOUND identity is itself an error -- "the
+    database was never identified when it answered" is not a clean result.
+    """
+    if not isinstance(bound, dict) or not is_content_digest(bound.get("sha256")):
+        return [f"{COMPLIANCE_DATABASE_SOURCE_ID}: no content identity was bound when the "
+                f"database answered this encounter, so the certificate cannot be shown to "
+                f"describe the database the decisions were made against"]
+    try:
+        current = compliance_database_identity()
+    except Exception as exc:
+        return [f"{COMPLIANCE_DATABASE_SOURCE_ID}: the bound snapshot can no longer be "
+                f"re-identified ({exc})"]
+    changed = [label for field, label in _SNAPSHOT_IDENTITY_FIELDS
+               if bound.get(field) != current.get(field)]
+    if not changed:
+        return []
+    return [f"{COMPLIANCE_DATABASE_SOURCE_ID}: replaced or rewritten after it answered this "
+            f"encounter's queries ({', '.join(changed)} differ from the bound snapshot); "
+            f"the certificate would attest to bytes no decision was made from"]
 
 
 def _file_identity(paths: list[Path]) -> str:
@@ -926,12 +1018,56 @@ def sha256_file(path: Path) -> str:
     return digest
 
 
-def _sha256_bytes(path: Path) -> str:
+def _sha256_handle(handle) -> str:
+    """The SHA-256 of everything left to read on an ALREADY-OPEN handle.
+
+    The single hashing primitive here: `sha256_file` reaches a file by PATH,
+    `open_database_snapshot` reaches one by an open DESCRIPTOR it then keeps, and the two
+    must produce the same digest for the same bytes -- otherwise the identity bound when
+    the database answered a query could never be compared against the identity the
+    certificate records, which is the whole point of binding it.
+    """
     digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
     return "sha256:" + digest.hexdigest()
+
+
+def _sha256_bytes(path: Path) -> str:
+    with open(path, "rb") as handle:
+        return _sha256_handle(handle)
+
+
+#: The digest of no bytes, so an ABSENT write-ahead log and a zero-length one are ONE
+#: identity -- SQLite creates an empty `-wal` merely because a read-write connection
+#: opened, and that is not a change in what any reader sees.
+_EMPTY_SHA256 = "sha256:" + hashlib.sha256(b"").hexdigest()
+
+#: SQLite's write-ahead log.  This deployment runs the compiled database in WAL mode (the
+#: refresh timer and the pipeline are concurrent openers -- see `ComplianceDataStore.conn`),
+#: and in WAL mode the bytes a reader SEES are the main database file PLUS whatever
+#: committed frames the log still holds.  The main file's digest alone is therefore not the
+#: content that answered a query.  The `-shm` sidecar is deliberately NOT part of the
+#: identity: it is a transient shared-memory index that READERS themselves write to, so
+#: binding it would report drift on every clean run.
+_WAL_SUFFIX = "-wal"
+
+
+def _wal_identity(path: Path) -> tuple[str, int]:
+    """(digest, size) of the write-ahead log beside `path`; absent or empty is one state."""
+    wal = path.with_name(path.name + _WAL_SUFFIX)
+    try:
+        size = wal.stat().st_size
+    except OSError:
+        return _EMPTY_SHA256, 0
+    if not size:
+        return _EMPTY_SHA256, 0
+    try:
+        return sha256_file(wal), int(size)
+    except OSError:
+        # Truncated away between the stat and the read -- a checkpoint, which MOVED those
+        # frames into the main file and is therefore already visible in its digest.
+        return _EMPTY_SHA256, 0
 
 
 def build_source_manifest() -> dict:
@@ -1029,6 +1165,15 @@ def manifest_fingerprint(manifest: dict) -> str:
 
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+#: The declared identity of the compiled database, named ONCE so the query-time binding,
+#: the manifest record and the certificate validator cannot drift onto different spellings.
+COMPLIANCE_DATABASE_SOURCE_ID = "compliance_database"
+
+
+def is_content_digest(value) -> bool:
+    """True for a well-formed `sha256:<64 lowercase hex>` content identity."""
+    return bool(_SHA256_RE.fullmatch(str(value or "")))
 
 
 def valid_record(record: dict) -> bool:
