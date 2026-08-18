@@ -109,10 +109,53 @@ must be able to supersede an older one while that older one is still running;
 that is the whole point of the ledger, and a lock held across the work would
 turn supersession back into waiting.
 
+CRASH ORDERING — WHICH OF A TRANSITION'S TWO WRITES GOES FIRST
+================================================================================
+Serializing writers is not enough. Every transition is at least TWO durable
+writes — the append-only history record and the pointer — and a process can die
+between them with no concurrency involved at all. Which one goes first is
+therefore a correctness decision, and it is NOT the same decision for every
+transition:
+
+  * a transition that REDUCES what is consumable (`begin`, which supersedes the
+    previous result before any work starts) writes the POINTER FIRST. The
+    pointer is the only thing a consumer reads, so moving it is what actually
+    takes the old result out of service. A crash before it means the new attempt
+    never durably started; a crash after it means the old result is already
+    superseded. `begin` used to append its IN_PROGRESS history record first,
+    which left exactly one window — no interleaving required, just ordinary
+    process death — in which a NEWER attempt was durably recorded while the
+    OLDER success was still consumable (issue #6 F8-R2, reopened).
+  * a transition that INCREASES what is consumable (`complete`) writes the
+    pointer LAST, after every byte the consumer will read is fsynced. A crash
+    anywhere earlier leaves the attempt IN_PROGRESS — not consumable, and
+    explicitly not a success.
+
+`fail` and `system_retry` are of the first kind and end at a non-consumable
+state, so every one of their crash windows leaves the encounter IN_PROGRESS at
+worst: nothing they can half-do makes anything consumable.
+
+Pointer-first has one consequence that is handled rather than assumed away: a
+crash between the pointer write and the history append leaves a POINTER-ONLY
+attempt — a sequence number the history never recorded. Sequence allocation
+therefore reads the pointer as well as the history and takes the maximum of
+both, so the next attempt cannot reuse a number the pointer already published.
+
+DEFENSE IN DEPTH — THE HISTORY OUTRANKS A POINTER THAT DISAGREES WITH IT
+================================================================================
 Reads (`resolve_current`, `consumable`) take no lock and need none: the pointer
 moves FIRST on `begin` and LAST on publish, so a pointer naming a COMPLETED
 attempt implies no other attempt has opened, and therefore that no other writer
 can be touching the published artifact it names.
+
+They do NOT, however, trust the pointer alone. An artifact is refused whenever
+the append-only history records a HIGHER sequence than the pointer names, in any
+state. Under correct operation that cannot happen — which is exactly why it is a
+safe check to make — so it costs nothing on every healthy read, and it means a
+future write path that reintroduces the old ordering, an older build, or a
+writer that bypasses this module entirely still cannot leave a superseded claim
+consumable. The history is append-only: a recorded newer attempt cannot be
+un-recorded, so this check can only ever become MORE true.
 
 BOUNDARY: `flock` is a single-host guarantee, which matches this deployment (one
 container, local disk). On a network filesystem shared between hosts its
@@ -289,6 +332,33 @@ def _safe_dirname(document_id: str) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _sequence_of(record: dict) -> int:
+    """The attempt number a ledger or pointer record declares.
+
+    A record whose sequence is missing or is not a whole number is a DAMAGED
+    record, not a zero. The sequence is the only thing that orders attempts
+    against each other, so silently reading an unreadable one as 0 would make
+    the NEWEST attempt look older than every other record — inverting the exact
+    comparison supersession depends on. Same position as `history()` takes on a
+    torn line: damaged is fatal, not skipped.
+    """
+    value = record.get("sequence")
+    if isinstance(value, bool) or value is None:
+        raise AttemptLedgerError(
+            f"attempt record {record.get('attempt_id')!r} declares no sequence "
+            f"number, so it cannot be ordered against the other attempts for "
+            f"this encounter")
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text.lstrip("-").isdigit():
+        raise AttemptLedgerError(
+            f"attempt record {record.get('attempt_id')!r} declares a "
+            f"non-numeric sequence {value!r}, so it cannot be ordered against "
+            f"the other attempts for this encounter")
+    return int(text)
 
 
 # --------------------------------------------------------------------------
@@ -596,6 +666,33 @@ class AttemptLedger:
                 f"current-attempt pointer for {document_id} could not be "
                 f"written: {exc}") from exc
 
+    def _pointer_sequence(self, document_id: str) -> int:
+        """The sequence the current pointer names, or 0 — and NEVER raising.
+
+        Deliberately not `pointer()`. This exists so `begin` can recover from a
+        POINTER-ONLY attempt (a crash between the pointer write and the history
+        append) without ever refusing to open a new attempt: an encounter whose
+        pointer is unreadable has to stay re-runnable, and `begin` is about to
+        replace that pointer anyway — refusing here would wedge the note
+        forever, turning a recoverable partial write into a permanent one.
+
+        Nothing is ever SERVED on the strength of this value; it only raises the
+        floor of the next sequence number. A value that cannot be read therefore
+        costs at most a reused number for an attempt no history recorded, while
+        the strict reader (`_resolve_one`) still refuses to serve anything from
+        a ledger it cannot order.
+        """
+        try:
+            record = json.loads(self._pointer_path(document_id).read_text())
+        except (OSError, ValueError):
+            return 0
+        if not isinstance(record, dict):
+            return 0
+        try:
+            return _sequence_of(record)
+        except AttemptLedgerError:
+            return 0
+
     def _invalidate(self, document_id: str) -> None:
         """Last resort when NOTHING can be written: make the encounter unservable.
 
@@ -625,23 +722,37 @@ class AttemptLedger:
     def begin(self, document_id: str, document_version: str) -> Attempt:
         """Open an attempt — and SUPERSEDE the previous result, before any work.
 
-        Ordering is the point. The pointer moves to IN_PROGRESS first, so from
-        this instant no consumer can be served this encounter's older artifact,
-        whatever happens next: the process can die, the disk can fill, the
-        coder can raise. There is no window in which a new attempt exists and
+        Ordering is the point, and it is the ordering of the WRITES, not just of
+        the transitions. The pointer moves to IN_PROGRESS as this attempt's
+        FIRST durable write, so from that instant no consumer can be served this
+        encounter's older artifact, whatever happens next: the process can be
+        SIGKILLed on the very next statement, the disk can fill, the coder can
+        raise. There is no window in which a new attempt is durably recorded and
         an old success is still current.
 
-        The whole open — read the history, allocate the sequence, append the
-        record, move the pointer — runs under this encounter's exclusive lock.
-        Two attempts opened at once therefore cannot allocate the SAME sequence
-        number, and cannot land their pointer writes in the opposite order to
-        their history appends (which is how an older attempt came to be current
-        while a newer one was still running).
+        Appending the IN_PROGRESS history record first — which is what this did
+        — reopened exactly that window: a crash between the two writes left a
+        recorded newer attempt beside a pointer still naming the previous
+        COMPLETED result, and that result stayed consumable (issue #6 F8-R2).
+        The history record is the fallible write, so it goes SECOND, after the
+        one that takes the old claim out of service.
+
+        The whole open — read the history and the pointer, allocate the
+        sequence, move the pointer, append the record — runs under this
+        encounter's exclusive lock, so two attempts opened at once cannot
+        allocate the same sequence number nor interleave their writes.
+
+        The sequence is allocated from the history AND the pointer, because a
+        crash in the (now much narrower, and now harmless) window between the
+        two writes leaves a pointer-only attempt whose number the history never
+        recorded. Taking the maximum of both is what makes that partial state
+        recoverable instead of a number collision.
         """
         try:
             with self._locked(document_id):
                 records = self.history(document_id)
-                sequence = max((int(r.get("sequence") or 0) for r in records),
+                sequence = max([_sequence_of(r) for r in records]
+                               + [self._pointer_sequence(document_id)],
                                default=0) + 1
                 attempt = Attempt(
                     document_id=str(document_id),
@@ -652,10 +763,13 @@ class AttemptLedger:
                 )
                 entry = self._record(attempt, AttemptState.IN_PROGRESS)
                 try:
-                    self._append_history(document_id, entry)
+                    # The supersession itself, first and alone. Everything after
+                    # this line may fail or die; none of it can bring the
+                    # previous result back.
                     self._write_pointer(
                         document_id,
                         self._pointer_record(attempt, AttemptState.IN_PROGRESS))
+                    self._append_history(document_id, entry)
                 except AttemptLedgerError:
                     # The supersession could not be recorded. The prior pointer/
                     # artifact must not survive as current on the strength of that
@@ -996,6 +1110,25 @@ def _resolve_one(ledger: AttemptLedger,
                        "the note to open one"), None
     state = pointer.get("state")
     attempt_id = str(pointer.get("attempt_id") or "")
+    # DEFENSE IN DEPTH, and deliberately ahead of the state check: the pointer
+    # is not believed about being current when the append-only history proves a
+    # NEWER attempt exists. Under this module's own write ordering that state is
+    # unreachable, which is the point — it is what still refuses a stale claim
+    # if a future write path, an older build, or a writer that never took the
+    # lock reintroduces the ordering bug this check was added for.
+    try:
+        pointed = _sequence_of(pointer)
+        newer = [r for r in history if _sequence_of(r) > pointed]
+    except AttemptLedgerError as exc:
+        return False, str(exc), None
+    if newer:
+        latest = newer[-1]
+        return False, (
+            f"the attempt history records a newer attempt for this encounter "
+            f"({latest.get('attempt_id')}, sequence {_sequence_of(latest)}, "
+            f"{latest.get('state')}) than the current-attempt pointer names "
+            f"({attempt_id}, sequence {pointed}); the pointer is stale, so no "
+            f"result file here can be shown to be current; re-run the note"), None
     if state not in {s.value for s in CONSUMABLE_STATES}:
         return False, (f"the current attempt ({attempt_id}) is {state}, not "
                        f"COMPLETED; any earlier result for this encounter has "

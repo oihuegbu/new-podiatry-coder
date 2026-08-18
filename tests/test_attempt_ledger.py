@@ -26,7 +26,13 @@ WHAT IS PROVEN HERE
     older attempt cannot delete a newer attempt's published result;
   * the per-document transition lock is released on every failure path, and a
     holder that never releases is refused on a deadline rather than waited on
-    forever.
+    forever;
+  * (issue #6 F8-R2, REOPENED) serializing writers was not enough: a process
+    SIGKILLed at EVERY durable-write boundary of every transition never leaves
+    an older claim consumable once a newer attempt exists in any durable form,
+    the pointer-only attempt a crash can leave is recovered without reusing its
+    sequence number, and a consumer refuses a pointer the append-only history
+    proves stale even when that state is written by hand.
 
 No medical code appears in this file; every payload is a synthetic stand-in for
 an artifact shape.
@@ -50,9 +56,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app.release.attempt_ledger import (  # noqa: E402
-    AttemptLedger, AttemptLedgerError, AttemptLockTimeout, AttemptState,
-    AttemptSuperseded, AttemptWriteError, atomic_write_json, consumable,
-    document_version_of, resolve_current)
+    Attempt, AttemptLedger, AttemptLedgerError, AttemptLockTimeout,
+    AttemptState, AttemptSuperseded, AttemptWriteError, atomic_write_json,
+    consumable, document_version_of, resolve_current)
 
 VERSION_1 = "sha256:" + "1" * 64
 VERSION_2 = "sha256:" + "2" * 64
@@ -853,3 +859,347 @@ def test_a_thread_that_never_releases_is_refused_on_a_deadline_too(tmp_path,
     assert ledger.pointer("NOTE_R2G")["attempt_id"] == first.attempt_id
     later = ledger.begin("NOTE_R2G", VERSION_2)
     assert later.sequence == first.sequence + 1
+
+
+# --------------------------------------------------------------------------
+# issue #6 F8-R2 REOPENED — crash ordering, not just writer interleaving
+# --------------------------------------------------------------------------
+#
+# The round-9 lock serializes two LIVE writers. It says nothing about a single
+# process dying between the two durable writes one transition makes. `begin`
+# appended its IN_PROGRESS history record BEFORE moving the pointer, so a crash
+# in that window left a recorded newer attempt beside a pointer still naming the
+# previous COMPLETED result — and that result stayed consumable. The reviewer's
+# reproduction needed no concurrency at all:
+#
+#     complete v1                       pointer -> COMPLETED / v1
+#     begin v2, history append lands     history -> IN_PROGRESS / v2
+#     <process dies here>
+#     re-open as a consumer              consumable() == (True, '')   <- the bug
+#
+# These tests kill a REAL process with SIGKILL at every durable-write boundary
+# of every transition, and separately prove the consumer-side cross-check that
+# refuses a stale pointer even when the ordering is bypassed entirely.
+
+#: Runs one transition for v2 in a child process that SIGKILLs itself when
+#: exactly `kill_at` durable writes have completed. Instruments the two
+#: primitives every durable write in this module goes through — the atomic JSON
+#: writer (artifacts AND the pointer) and the history append — so the boundaries
+#: are discovered from the code under test rather than assumed from it.
+CRASH_CHILD = r"""
+import json, os, signal, sys
+
+(results_dir, document_id, transition, kill_at, ledger_path, version_2,
+ repo_root) = sys.argv[1:8]
+kill_at = int(kill_at)
+sys.path.insert(0, repo_root)
+
+from app.release import attempt_ledger as module
+
+armed = [False]
+writes = []
+
+
+def counted(fn, label):
+    def wrapper(*args, **kwargs):
+        if armed[0] and len(writes) == kill_at:
+            os.kill(os.getpid(), signal.SIGKILL)
+        result = fn(*args, **kwargs)
+        if armed[0]:
+            writes.append(label(args))
+            with open(ledger_path, "w") as fh:
+                fh.write(json.dumps(writes))
+                fh.flush()
+                os.fsync(fh.fileno())
+        return result
+    return wrapper
+
+
+module.atomic_write_json = counted(
+    module.atomic_write_json, lambda args: os.path.basename(str(args[0])))
+module.AttemptLedger._append_history = counted(
+    module.AttemptLedger._append_history, lambda args: "ledger.jsonl")
+
+
+def payload(version):
+    return {"schema_id": "claim_bundle",
+            "encounter": {"document_id": document_id,
+                          "encounter_id": document_id,
+                          "source_document": {"document_version": version}},
+            "release": {"holds": [], "producer_releasable": True}}
+
+
+ledger = module.AttemptLedger(results_dir)
+attempt = None
+if transition != "begin":
+    # setup, deliberately UNCOUNTED: the boundaries under test are the ones
+    # inside the transition named on the command line.
+    attempt = ledger.begin(document_id, version_2)
+armed[0] = True
+if transition == "begin":
+    ledger.begin(document_id, version_2)
+elif transition == "complete":
+    ledger.complete(attempt, payload(version_2))
+elif transition == "system_retry":
+    ledger.system_retry(attempt, {"processing_error": "dependency down"},
+                        error="dependency down")
+elif transition == "fail":
+    ledger.fail(attempt, error="output failed",
+                tombstone={"processing_error": "output failed"})
+else:
+    raise SystemExit("unknown transition " + transition)
+print(json.dumps(writes))
+"""
+
+
+def crash_child(tmp_path, transition, kill_at, document_id="NOTE_R2C"):
+    """A fresh encounter with a COMPLETED, consumable v1 — then the crash."""
+    root = tmp_path / f"{transition}-{kill_at}"
+    root.mkdir()
+    released(AttemptLedger(root), document_id, VERSION_1)
+    assert consumable(root, document_id) == (True, ""), (
+        "precondition: the v1 claim is consumable before the crashing attempt")
+    writes_path = root / "writes.json"
+    proc = subprocess.run(
+        [sys.executable, "-c", CRASH_CHILD, str(root), document_id, transition,
+         str(kill_at), str(writes_path), VERSION_2, str(REPO_ROOT)],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=300)
+    done = json.loads(writes_path.read_text()) if writes_path.exists() else []
+    return root, proc, done
+
+
+def durable_state(root, document_id="NOTE_R2C"):
+    """What survived the kill, read exactly as a fresh consumer would."""
+    ledger = AttemptLedger(root)
+    try:
+        history = ledger.history(document_id)
+    except AttemptLedgerError:
+        history = []
+    try:
+        pointer = ledger.pointer(document_id)
+    except AttemptLedgerError:
+        pointer = None
+    try:
+        declared = json.loads(ledger.published_path(document_id).read_text())[
+            "encounter"]["source_document"]["document_version"]
+    except (OSError, ValueError, KeyError, TypeError):
+        declared = ""
+    ok, why = consumable(root, document_id)
+    return history, pointer, declared, ok, why
+
+
+@pytest.mark.parametrize("transition",
+                         ["begin", "complete", "system_retry", "fail"])
+def test_a_crash_at_every_write_boundary_never_leaves_the_old_claim_consumable(
+        tmp_path, transition):
+    """SIGKILL at EVERY durable-write boundary of EVERY transition.
+
+    The invariant asserted at each one is the module's own, stated as the
+    reviewer stated it: once ANY durable record of the newer attempt exists —
+    in the pointer, in the history, or in both — the previous claim is never
+    consumable again. The boundary count is discovered by running the
+    transition once without killing anything, so a transition that grows a
+    write in future is covered without editing this test.
+    """
+    root, proc, done = crash_child(tmp_path, transition, -1)
+    assert proc.returncode == 0, proc.stderr
+    boundaries = len(done)
+    assert boundaries >= 2, (transition, done)
+    if transition == "begin":
+        assert done == ["current.json", "ledger.jsonl"], (
+            "the POINTER must be the first durable write an attempt makes; "
+            "appending the history record first is the F8-R2 crash window")
+
+    seen_recorded = []
+    for kill_at in range(boundaries + 1):
+        root, proc, done = crash_child(tmp_path, transition, kill_at)
+        if kill_at < boundaries:
+            assert proc.returncode == -9, (
+                f"the child was not killed at boundary {kill_at}: "
+                f"{proc.returncode} {proc.stderr}")
+            assert len(done) == kill_at, (kill_at, done)
+        else:
+            assert proc.returncode == 0, proc.stderr
+
+        history, pointer, declared, ok, why = durable_state(root)
+        recorded = [r for r in history if r["sequence"] >= 2]
+        newer_exists = bool(recorded) or bool(
+            pointer and pointer["sequence"] >= 2)
+        seen_recorded.append(newer_exists)
+
+        assert not (newer_exists and ok and declared == VERSION_1), (
+            f"{transition} killed at boundary {kill_at}: the v1 claim is still "
+            f"consumable while a v2 attempt is durably recorded — pointer="
+            f"{pointer and (pointer['state'], pointer['sequence'])}, newest "
+            f"history={history[-1]['state'] if history else None}")
+        if ok:
+            # the ONLY shape a consumable result may have, checked rather than
+            # assumed: the pointer completed, nothing newer is recorded, and the
+            # published bytes are that attempt's own document version.
+            assert pointer["state"] == AttemptState.COMPLETED.value, why
+            assert not [r for r in history
+                        if r["sequence"] > pointer["sequence"]]
+            assert declared == pointer["document_version"]
+        if transition == "begin":
+            assert newer_exists is (kill_at >= 1), (
+                f"a begin killed at boundary {kill_at} left the supersession "
+                f"unrecorded; pointer={pointer}")
+            if newer_exists:
+                assert ok is False, why
+                assert "IN_PROGRESS" in why, why
+            else:
+                # THE CONTROL the whole test rests on: killed before its first
+                # durable write, the attempt never started and the v1 claim IS
+                # still consumable. Without this the assertions above would be
+                # satisfiable by a harness that simply broke the encounter.
+                assert (ok, why) == (True, "")
+                assert declared == VERSION_1
+
+    assert seen_recorded[0] is (transition != "begin"), seen_recorded
+    assert seen_recorded[-1] is True, (
+        "the harness never produced a durable v2 record — it would pass "
+        "vacuously")
+
+
+def test_a_stale_pointer_is_refused_when_the_history_proves_a_newer_attempt(
+        tmp_path):
+    """The consumer-side cross-check — the second, independent layer.
+
+    Codex's F8-R2 reproduction verbatim, in the state it leaves behind: pointer
+    COMPLETED / v1, newest history record IN_PROGRESS / v2, the v1 artifact
+    still sitting where every consumer reads it. `begin` can no longer PRODUCE
+    that state, so it is written by hand here — which is the point. This is the
+    layer that still refuses if a future write path, an older build, or a script
+    that never took the lock reintroduces the ordering, and it is the only test
+    that can reach it, which is what proves it is not dead code.
+    """
+    ledger = AttemptLedger(tmp_path)
+    published = released(ledger, "NOTE_R2X", VERSION_1)
+    assert consumable(tmp_path, "NOTE_R2X") == (True, "")
+    pointer_before = ledger.pointer("NOTE_R2X")
+
+    ledger._append_history("NOTE_R2X", {
+        "schema": "attempt_record/1",
+        "document_id": "NOTE_R2X",
+        "document_version": VERSION_2,
+        "attempt_id": "0002-c0ffee000000",
+        "sequence": 2,
+        "state": AttemptState.IN_PROGRESS.value,
+        "opened_at": "2026-01-01T00:00:00+00:00",
+        "recorded_at": "2026-01-01T00:00:00+00:00",
+        "error": "",
+    })
+
+    assert ledger.pointer("NOTE_R2X") == pointer_before, (
+        "precondition: the pointer was NOT moved — that is the whole scenario")
+    assert pointer_before["state"] == AttemptState.COMPLETED.value
+    assert ledger.history("NOTE_R2X")[-1]["state"] == AttemptState.IN_PROGRESS.value
+    assert published.exists()
+
+    ok, why = consumable(tmp_path, "NOTE_R2X")
+    assert ok is False, "a recorded newer attempt left the stale claim consumable"
+    assert "0002-c0ffee000000" in why and "sequence 2" in why, why
+    current = resolve_current(tmp_path)
+    assert current.results == ()
+    assert "NOTE_R2X" in current.refusals
+
+    # DISCRIMINATING: the check refuses a pointer the history OUTRANKS, not any
+    # encounter with more than one attempt. A real attempt opened after that
+    # record allocates a number above it and is served normally.
+    later = ledger.begin("NOTE_R2X", VERSION_2)
+    assert later.sequence == 3, later
+    ledger.complete(later, artifact("NOTE_R2X", VERSION_2))
+    assert consumable(tmp_path, "NOTE_R2X") == (True, "")
+
+
+def test_a_pointer_only_attempt_is_recovered_without_reusing_its_sequence(
+        tmp_path):
+    """The partial state pointer-first can leave, and its recovery.
+
+    A crash between the pointer write and the history append leaves an attempt
+    the pointer names and the history never recorded. Nothing is consumable
+    (the pointer is IN_PROGRESS), and the NEXT attempt must not reuse that
+    number: the sequence is what orders attempts, and two attempts sharing one
+    would make the supersession cross-check unable to tell them apart.
+    """
+    ledger = AttemptLedger(tmp_path)
+    published = released(ledger, "NOTE_R2Y", VERSION_1)
+    orphan = Attempt(document_id="NOTE_R2Y", document_version=VERSION_2,
+                     attempt_id="0002-abcdef012345", sequence=2,
+                     opened_at="2026-01-01T00:00:00+00:00")
+    ledger._write_pointer("NOTE_R2Y", ledger._pointer_record(
+        orphan, AttemptState.IN_PROGRESS))
+
+    assert [r["sequence"] for r in ledger.history("NOTE_R2Y")] == [1, 1], (
+        "precondition: the history never recorded attempt 2")
+    ok, why = consumable(tmp_path, "NOTE_R2Y")
+    assert ok is False and "IN_PROGRESS" in why, why
+    assert published.exists()
+
+    recovered = ledger.begin("NOTE_R2Y", VERSION_2)
+    assert recovered.sequence == 3, (
+        "the next attempt reused the sequence a pointer-only attempt already "
+        "published")
+    ledger.complete(recovered, artifact("NOTE_R2Y", VERSION_2))
+    assert consumable(tmp_path, "NOTE_R2Y") == (True, "")
+    assert ledger.pointer("NOTE_R2Y")["sequence"] == 3
+
+
+def test_a_record_that_cannot_be_ordered_is_refused_rather_than_read_as_zero(
+        tmp_path):
+    """An unreadable sequence is a damaged record, not a zero.
+
+    Reading it as 0 would make the NEWEST attempt sort below every other record
+    — inverting the exact comparison supersession depends on — so it refuses,
+    the same position `history()` takes on a torn line.
+    """
+    ledger = AttemptLedger(tmp_path)
+    released(ledger, "NOTE_R2Z", VERSION_1)
+    history = tmp_path / "attempts" / "NOTE_R2Z" / "ledger.jsonl"
+    history.write_text(history.read_text() + json.dumps({
+        "schema": "attempt_record/1", "document_id": "NOTE_R2Z",
+        "attempt_id": "0002-badsequence", "sequence": "not-a-number",
+        "state": AttemptState.IN_PROGRESS.value}) + "\n")
+
+    ok, why = consumable(tmp_path, "NOTE_R2Z")
+    assert ok is False
+    assert "non-numeric sequence" in why, why
+
+
+def test_begin_invalidates_when_the_SUPERSESSION_ITSELF_cannot_be_written(
+        tmp_path, monkeypatch):
+    """The failure path of the write that now goes FIRST.
+
+    Moving the pointer IS the supersession. When that write is the one that
+    fails there is no durable record that the encounter was reopened at all, so
+    — exactly as when the history append fails afterwards — the previous result
+    must not survive on the strength of that failure. Its sibling (the history
+    append failing AFTER the pointer moved) is covered by
+    `test_begin_invalidates_the_previous_result_when_it_cannot_record`; between
+    them both of `begin`'s fallible writes are exercised.
+    """
+    ledger = AttemptLedger(tmp_path)
+    published = released(ledger, "NOTE_R2V", VERSION_1)
+
+    import app.release.attempt_ledger as module
+    real = module.atomic_write_json
+
+    def full_disk(path, payload, *, indent=None):
+        if isinstance(payload, dict) and payload.get("schema") == module.POINTER_SCHEMA:
+            raise OSError(28, "No space left on device")
+        return real(path, payload, indent=indent)
+
+    monkeypatch.setattr(module, "atomic_write_json", full_disk)
+    with pytest.raises(AttemptWriteError):
+        ledger.begin("NOTE_R2V", VERSION_2)
+    monkeypatch.undo()
+
+    assert not published.exists()
+    assert ledger.pointer("NOTE_R2V") is None
+    assert [r["state"] for r in ledger.history("NOTE_R2V")] == [
+        "IN_PROGRESS", "COMPLETED"], (
+        "the refused attempt appended a history record even though its pointer "
+        "never landed — the ordering is what keeps that state unreachable")
+    ok, why = consumable(tmp_path, "NOTE_R2V")
+    assert ok is False
+    assert "the current-attempt pointer for this encounter is gone" in why, why
