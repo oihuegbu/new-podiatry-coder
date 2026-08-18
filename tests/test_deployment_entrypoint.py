@@ -60,6 +60,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import run as entrypoint  # noqa: E402  — the exact module the deployment executes
 from tests.source_pdf import build_pdf, digest_of, vision_extraction  # noqa: E402
+from tests import shortlist_verdict as _sv
 
 
 # --------------------------------------------------------------- structural wiring
@@ -206,14 +207,10 @@ def deployment(tmp_path, monkeypatch):
     # undeclared one; both answer "not entailed", so nothing can be verified anyway.
     monkeypatch.setattr(verify_module, "default_verify_llm",
                         verify_module.declare_model_profile(
-                            lambda system, user: '{"choice": 0, "reason": "stub"}',
-                            provider="openai"))
+                            lambda system, user: _sv.NOTHING_ENTAILED, provider="openai"))
     monkeypatch.setattr(verify_module, "default_corroborate_llm",
                         verify_module.declare_model_profile(
-                            lambda system, user: '{"entailed": false, '
-                                                 '"missing_element": false, '
-                                                 '"reason": "stub"}',
-                            provider="claude"))
+                            lambda system, user: _sv.NOTHING_ENTAILED, provider="claude"))
     # The SECOND INDEPENDENT READING (product directive section 3; phase 4, commit
     # 97f748b). This file keeps its OWN copy of the deployment fixture, so it needs the
     # same substitution for the same reason as `tests/test_claim_bundle_e2e.py`: the

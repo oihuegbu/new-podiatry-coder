@@ -26,6 +26,14 @@ DISCRIMINATE between them are re-inspected against the ORIGINAL DOCUMENT
 ONE targeted provider query — never a similarity tiebreak and never a generic coder
 queue. Every decision carries a per-field rationale (the audit trail).
 
+The MODEL-VERIFIED path (`_propose_then_verify`) runs the SAME policy, with the two
+judging models doing the eliminating instead of the descriptor features: both answer
+about the WHOLE shortlist, a code is released only when exactly ONE candidate is still
+entailed and every other one carries a NAMED elimination, and several standing candidates
+go to the same `tiebreak.narrow` re-inspection and then to ONE targeted provider query.
+Two models agreeing about one candidate is not a proof that it is the only defensible one
+(Codex F8-R1), so agreement alone can no longer release a code.
+
 Recall similarity and lexical token overlap ADMIT and ORDER candidates. Neither
 selects one: the directive allows fuzzy/lexical/semantic retrieval to widen a
 candidate pool and forbids it from verifying a code.
@@ -555,12 +563,17 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
     relatives.sort(key=lambda c: len(concept & tok(_strip_laterality(c.descriptor))),
                    reverse=True)
     shortlist = [line.chosen] + relatives[:6]
-    picked, why = _verify.select_entailed(fact, shortlist, source, llm)
+    judgement = _verify.select_entailed(fact, shortlist, source, llm)
+    picked, why = judgement.chosen, judgement.reason
     if picked is None or picked.code == line.chosen.code:
         return line                                # verifier keeps the unspecified code -> respect it
     corroboration = _verify.corroboration_origin(llm, corroborate)
+    judgements = [judgement]
     if corroborate is not None:
-        ok, why2, _missing = _verify.corroborate(fact, picked, source, corroborate)
+        second = _verify.corroborate(fact, shortlist, source, corroborate)
+        ok = second.entails(picked.code)
+        if ok:
+            judgements.append(second)
         if not ok:
             prior = line.chosen
             line.chosen = None
@@ -574,6 +587,27 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
                 f"code than the unspecified '{prior.code}', but independent verification "
                 f"did not confirm the specific candidate — escalate")
             return line
+    # F8-R1, the adjacent instance: this function also used to adopt whichever ONE relative
+    # the selector named. ICD-10-CM's specificity rule authoritatively eliminates the
+    # ORIGINAL unspecified code (that is this function's entire premise), but it says
+    # nothing about SEVERAL more-specific relatives being equally documented -- and picking
+    # between those is exactly the choice a model may not make alone.
+    offered = [c for c in shortlist if c.code != line.chosen.code]
+    still_entailed, _elim = _uniqueness_view(offered, picked, judgements, {})
+    if len(still_entailed) > 1:
+        prior = line.chosen
+        line.chosen = None
+        line.method = ResolutionMethod.ABSTAINED
+        line.alternatives = still_entailed[:5]
+        line.documentation_gap = (
+            f"the record documents a {lat} side, and {len(still_entailed)} more-specific "
+            f"codes are each entailed by it — document the distinguishing detail")
+        line.rationale = (
+            f"specificity ambiguous — {len(still_entailed)} more-specific codes than the "
+            f"unspecified '{prior.code}' are each still entailed by the documentation "
+            f"({', '.join(c.code for c in still_entailed)}); a model preferring one of "
+            f"them is not evidence the others are wrong — escalate")
+        return line
     line.chosen = picked
     # The SAME independence rule as the propose-then-verify path: this upgrade replaced the
     # resolved code with one a model selected, so it can only carry the grounded VERIFIED
@@ -650,7 +684,8 @@ def _ranked(fact: ClinicalFact, pool: list[CandidateCode],
 
 
 def _tie_escalation(fact: ClinicalFact, candidates: list[CandidateCode],
-                    reconciliation, reason: str) -> ResolvedLine:
+                    reconciliation, reason: str, tie=None,
+                    record: dict | None = None) -> ResolvedLine:
     """Tie policy step 5 -- turn an unresolved tie into ONE targeted provider query.
 
     The directive forbids exactly one outcome here: routing the line to generic human
@@ -661,17 +696,115 @@ def _tie_escalation(fact: ClinicalFact, candidates: list[CandidateCode],
     could document, an explicit hold that says exactly that.
 
     This path never RELEASES a candidate. It is reached only after an entailment
-    verifier or an independent corroborator declined one, and a document-side narrowing
+    verifier or an independent corroborator declined one, or after the shortlist was
+    found to hold MORE THAN ONE still-entailed candidate, and a document-side narrowing
     must not be able to overturn a safety control that already said no. Its job is to
     make the escalation SPECIFIC, not to re-open the decision.
+
+    `tie` lets a caller that has ALREADY narrowed exactly these candidates hand the
+    outcome in instead of paying for a second, identical re-inspection; `record` carries
+    whatever evaluation led here (the uniqueness verdicts) into the SAME audit record, so
+    "why not the other candidate?" is answerable from one place.
     """
-    tie = _tiebreak.narrow(fact, candidates, reconciliation)
+    if tie is None:
+        tie = _tiebreak.narrow(fact, candidates, reconciliation)
+    # A tie the page DID settle, on a candidate the judgements did not both entail, still
+    # leaves a real, answerable question -- narrow only fills `provider_question` when it
+    # gives up, so it is rebuilt here rather than degrading into a bare hold with no owner.
+    question = tie.provider_question
+    if not question and tie.axes and not tie.source_integrity:
+        question = _tiebreak.provider_query(fact, tie.axes)
     return ResolvedLine(
         fact=fact, chosen=None, alternatives=candidates[:5],
         method=ResolutionMethod.ABSTAINED,
-        documentation_gap=(tie.provider_question or None),
-        tie_record=tie.as_record(),
+        documentation_gap=(question or None),
+        tie_record={**(record or {}), **tie.as_record()},
         rationale=f"{reason} -- {tie.detail}")
+
+
+def _uniqueness_view(shortlist: list[CandidateCode], chosen: CandidateCode,
+                     judgements: list, eliminated_earlier: dict[str, str],
+                     ) -> tuple[list[CandidateCode], dict[str, str]]:
+    """Which shortlisted candidates are STILL ENTAILED once every judging model has
+    answered about every one of them, and the NAMED reason each of the others is out.
+
+    Codex F8-R1: two models agreeing about ONE candidate eliminates nothing else. A
+    candidate is out only when EVERY judging model NAMED a reason for ruling it out (or an
+    earlier re-selection round already had it rejected outright). Silence about a
+    candidate, an undeclared verdict, and the two models disagreeing about it all leave it
+    STANDING -- the fail-closed direction, because a standing alternative BLOCKS the
+    release rather than permitting one.
+    """
+    remaining: list[CandidateCode] = []
+    eliminated: dict[str, str] = {}
+    for cand in shortlist:
+        if cand.code == chosen.code:
+            remaining.append(cand)
+            continue
+        prior = eliminated_earlier.get(cand.code, "")
+        if prior:
+            eliminated[cand.code] = prior
+            continue
+        named = [j.elimination_of(cand.code) for j in judgements]
+        if named and all(named):
+            eliminated[cand.code] = "; ".join(dict.fromkeys(named))
+        else:
+            remaining.append(cand)
+    return remaining, eliminated
+
+
+def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
+                       shortlist: list[CandidateCode], judgements: list,
+                       eliminated_earlier: dict[str, str], why: str,
+                       corroboration: str, reconciliation) -> ResolvedLine:
+    """Release ONLY when exactly one shortlisted candidate is still entailed; otherwise
+    hand the survivors to the tie policy the deterministic path already uses.
+
+    This is the SAME "eliminate -> unique -> narrow against the page -> release, else one
+    targeted provider query" algorithm as `_decide`, over the same `tiebreak` module. The
+    only thing that differs is who did the eliminating: there it is the descriptor
+    features, here it is two models' named eliminations. Nothing about "the first model
+    picked this one" is allowed to stand in for uniqueness.
+    """
+    remaining, eliminated = _uniqueness_view(shortlist, chosen, judgements,
+                                             eliminated_earlier)
+    # Candidates eliminated BEFORE the shortlist existed (a failed deterministic
+    # constraint) belong in the same accounting: the record has to show the whole
+    # retrieved pool being disposed of, not only the part the models were shown.
+    for code, ruled_out in eliminated_earlier.items():
+        eliminated.setdefault(code, ruled_out)
+    record = {
+        "stage": "code_selection_uniqueness",
+        "shortlist": [c.code for c in shortlist],
+        "selected": chosen.code,
+        "still_entailed": [c.code for c in remaining],
+        "eliminated": dict(sorted(eliminated.items())),
+        "judgements": [j.as_record() for j in judgements],
+    }
+    if len(remaining) == 1:
+        return _entailed_line(fact, chosen, shortlist, why, corroboration,
+                              uniqueness=record)
+
+    # STEPS 3 and 4 -- several candidates are independently entailed, so the ORIGINAL
+    # DOCUMENT decides, exactly as it does for a deterministic tie.
+    tie = _tiebreak.narrow(fact, remaining, reconciliation)
+    winner = tie.winner
+    if (winner is not None and all(j.entails(winner.code) for j in judgements)
+            and _evaluate(fact, winner) is not None
+            and not _interval_unsupported(fact, parse_descriptor(winner.descriptor))):
+        note = (f"{len(remaining)} candidates remained entailed, and the tie was narrowed "
+                f"against the original document ({tie.proof}): {tie.detail}")
+        return _entailed_line(fact, winner, shortlist,
+                              (f"{why}; {note}" if why else note), corroboration,
+                              uniqueness={**record, **tie.as_record()})
+
+    # STEP 5 -- ONE targeted provider query, never a generic coder queue.
+    return _tie_escalation(
+        fact, remaining, reconciliation,
+        f"{len(remaining)} shortlisted candidates are still entailed by the documentation "
+        f"({', '.join(c.code for c in remaining)}) -- agreement on one of them is not "
+        f"evidence that the others are wrong",
+        tie=tie, record=record)
 
 
 def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
@@ -683,7 +816,14 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     descriptor the documentation entails, then (when a corroborator is supplied)
     require an INDEPENDENT second model to agree before accepting. Escalate if the
     selection finds nothing OR the second model disagrees. Nothing bills on recall
-    alone, and nothing bills on a single model's say-so."""
+    alone, and nothing bills on a single model's say-so.
+
+    Agreement is necessary and NOT sufficient. Both judgements answer about the WHOLE
+    shortlist, and the selected candidate is released only when every OTHER shortlisted
+    candidate carries a NAMED elimination. When more than one candidate is still entailed
+    the line is a TIE, and it goes to the same document-first tie policy the deterministic
+    path uses -- narrowed against the original page, else ONE targeted provider query.
+    (Codex F8-R1: two models agreeing on one candidate never eliminated the rest.)"""
     from . import verify as _verify
     # WHOSE second opinion this run has, decided once from the two callables' declared
     # identities: it governs whether an agreement may be credited as independent
@@ -712,13 +852,23 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     shortlist = _active_only(order, source, dos)[:VERIFY_K]
     if not shortlist and unsupported:
         return _bounded_interval_hold(fact, unsupported)
-    tried: set[str] = set()
+    # code -> the NAMED reason an earlier round's judgement ruled that candidate out.
+    # Keyed by code (not a bare set) because a release now has to be able to say WHY every
+    # alternative is gone, not merely that it was skipped.
+    tried: dict[str, str] = {}
+    # Deterministically eliminated before any model saw them: a required bounded interval
+    # the documentation does not support. Named in the uniqueness record so the audit trail
+    # shows the whole pool being accounted for, not just the part the models judged.
+    constraint_eliminated = {c.code: ("the descriptor requires a bounded measurement the "
+                                      "documentation does not support")
+                             for c in unsupported}
     last_reason = ""
     for _ in range(1 + MAX_RESELECT):
         cands = [c for c in shortlist if c.code not in tried]
         if not cands:
             break
-        chosen, why = _verify.select_entailed(fact, cands, source, llm)
+        primary = _verify.select_entailed(fact, cands, source, llm)
+        chosen, why = primary.chosen, primary.reason
         if chosen is None:
             # Tie policy step 5: nothing was entailed, so the useful output is WHICH
             # documented fact would settle it -- a targeted provider query naming the
@@ -747,15 +897,35 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
                     "of that dimension -- document the measurement or use a less-specific code"),
                 rationale="selected code requires a bounded measurement the documentation "
                           "does not support -- not billed regardless of model agreement")
-        if corroborate is None:                      # no second model configured
-            return _entailed_line(fact, chosen, shortlist, why, corroboration)
-        ok, why2, missing = _verify.corroborate(fact, chosen, source, corroborate)
-        if ok:
-            note = ("independently confirmed" if _independently_corroborated(corroboration)
-                    else "a second opinion agreed, but not from an independent origin")
-            why = f"{why}; {note}" if why else note
-            return _entailed_line(fact, chosen, shortlist, why, corroboration)
-        last_reason = why2
+        judgements = [primary]
+        missing, why2 = False, ""
+        if corroborate is not None:
+            # The second opinion re-judges the WHOLE shortlist under the same contract and
+            # is not told which candidate was picked -- a corroborator asked only "is THIS
+            # one entailed?" cannot notice that another candidate is entailed too, which is
+            # precisely how a non-unique code used to auto-release (Codex F8-R1).
+            second = _verify.corroborate(fact, cands, source, corroborate)
+            if not second.entails(chosen.code):
+                why2 = (second.elimination_of(chosen.code) or second.reason
+                        or "the independent second judgement does not find this "
+                           "descriptor entailed by the documentation")
+                last_reason = why2
+                missing = second.missing_element.get(chosen.code, False)
+                tried[chosen.code] = why2
+            else:
+                judgements.append(second)
+                note = ("independently confirmed"
+                        if _independently_corroborated(corroboration)
+                        else "a second opinion agreed, but not from an independent origin")
+                why = f"{why}; {note}" if why else note
+        if chosen.code not in tried:
+            # Both judgements (or the only one there is) accept the chosen candidate. That
+            # makes it DEFENSIBLE, not UNIQUE -- which is the whole finding -- so release
+            # only if nothing else on the shortlist survived, and otherwise settle it
+            # against the original document through the same tie policy.
+            return _settle_uniqueness(fact, chosen, shortlist, judgements,
+                                      {**constraint_eliminated, **tried}, why,
+                                      corroboration, reconciliation)
         if missing:
             # The code is the right KIND of service but its descriptor requires an
             # element the note does not state. Re-selecting a code that omits the
@@ -768,7 +938,8 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
                           f"requires an element the documentation does not state "
                           f"({why2}); confirm it was performed / amend the note, "
                           f"else a less-specific code applies")
-        tried.add(chosen.code)                       # wrong code -> try another candidate
+        # otherwise: a WRONG code -> `tried` already carries the named reason, so the next
+        # round re-selects from the candidates that remain.
     # Tie policy step 5, and the case the directive names explicitly: THE MODELS
     # DISAGREED. That is never a reason to send an otherwise-resolved line to a generic
     # coder queue. The candidates the two models argued over are re-inspected against
@@ -824,7 +995,8 @@ def _independently_corroborated(corroboration: str) -> bool:
 
 def _entailed_line(fact: ClinicalFact, chosen: CandidateCode,
                    shortlist: list[CandidateCode], why: str,
-                   corroboration: str) -> ResolvedLine:
+                   corroboration: str,
+                   uniqueness: dict | None = None) -> ResolvedLine:
     """The line for a candidate whose AUTHORITATIVE descriptor the verifier found entailed.
 
     VERIFIED is the GROUNDED, autonomy-eligible method, and `autonomy` reads it as "the
@@ -852,6 +1024,7 @@ def _entailed_line(fact: ClinicalFact, chosen: CandidateCode,
         alternatives=[c for c in shortlist if c.code != chosen.code][:4],
         method=(ResolutionMethod.VERIFIED if independent
                 else ResolutionMethod.ARBITRATED),
+        tie_record=({**uniqueness, "released_code": chosen.code} if uniqueness else None),
         rationale=base)
 
 

@@ -16,6 +16,7 @@ from claude_coder.models import CandidateCode
 from claude_coder.pipeline import code_encounter
 import claude_coder.certificate as cert_mod
 import claude_coder.provenance as provenance
+from tests import shortlist_verdict as _sv
 
 _FACTS = ('{"facts":[{"kind":"procedure","description":"excision of lesion",'
           '"attributes":{"performer_id":"actor-1","billing_entity_id":"actor-1"},'
@@ -25,13 +26,7 @@ _NOTE = "excision of lesion performed today"
 _CTX = {"billing_entity_id": "actor-1", "participants": [{"id": "actor-1", "type": "person", "roles": ["performer"]}]}
 
 
-def _sel(system, user):
-    sl = system.lower()
-    if "propose" in sl:
-        return '{"codes":[]}'
-    if "independently" in sl:
-        return '{"entailed":true,"missing_element":false,"reason":"x"}'
-    return '{"choice":1,"reason":"x"}'
+_sel = _sv.judge(pick=1, reason="x")
 
 
 def _src():

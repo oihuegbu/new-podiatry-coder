@@ -26,6 +26,7 @@ from claude_coder.data_access import MockSource
 from claude_coder.models import (CandidateCode, ClinicalFact, Disposition, EvidenceSpan,
                                  FactKind, ResolutionMethod)
 from claude_coder.resolution import resolve
+from tests import shortlist_verdict as _sv
 
 
 # --------------------------------------------------------------------------- helpers
@@ -411,6 +412,186 @@ class TiePolicyEndToEndTest(unittest.TestCase):
         issues = {r["issue"] for r in result.recommendations}
         self.assertIn("documentation_gap", issues)
         self.assertNotIn("coder_review", issues)
+
+
+
+
+# =============================================================================
+# Codex F8-R1 — MODEL AGREEMENT ON ONE CANDIDATE IS NOT CODE-SELECTION UNIQUENESS
+# =============================================================================
+# The reviewer's reproduction: a documented fact states BOTH "component one" and
+# "component two"; candidate A's authoritative descriptor requires component one and
+# candidate B's requires component two, so the documentation independently entails BOTH.
+# The selector picked A, the independent corroborator confirmed A, and A auto-released —
+# even though B was equally entailed and nothing ever eliminated it.
+#
+# The rule these tests pin: a code auto-releases only when EXACTLY ONE shortlisted
+# candidate is still entailed and every other one carries a NAMED elimination. Several
+# still entailed is a TIE, and a tie is settled by the ORIGINAL DOCUMENT or asked about —
+# the same `tiebreak` machinery the deterministic path uses, never a second mechanism.
+
+SYN_A = _cand("SYN_A", "assembly service including component one", 0.90)
+SYN_B = _cand("SYN_B", "assembly service including component two", 0.90)
+
+
+def _judge(entails, prefers=None, declare=True):
+    """A judging model under the shortlist contract.
+
+    `entails(descriptor)` decides which options this model finds entailed; `prefers` picks
+    the one it would code among them. Every other option gets a NAMED elimination, which is
+    what the contract asks for. `declare=False` reproduces a model that answers with a bare
+    pick and says nothing about the rest — the answer that CANNOT establish uniqueness, and
+    must therefore never release on its own.
+    """
+    return _sv.judge(entails=entails, prefer=prefers, declare=declare,
+                     reason="shortlist verdict")
+
+
+def _pinned(fn, provider):
+    """Declare the provider identity, so an agreement can be credited as INDEPENDENT and
+    the released line carries the autonomy-eligible VERIFIED method."""
+    from claude_coder import verify as _verify
+    return _verify.declare_model_profile(fn, provider=provider)
+
+
+_ONE = "component one"
+_TWO = "component two"
+
+
+class SelectionUniquenessTest(unittest.TestCase):
+
+    BOTH_DOCUMENTED = ("assembly service performed, including component one and "
+                       "component two")
+    ONE_DOCUMENTED = "assembly service performed, including component one"
+
+    def _resolve(self, evidence, primary, second):
+        fact = _fact("assembly service", evidence)
+        return resolve(_request(fact), _source(SYN_A, SYN_B),
+                       llm=_pinned(primary, "provider-a"),
+                       corroborate=_pinned(second, "provider-b"),
+                       reconciliation=_agreed("span-0"))
+
+    # ---- the reviewer's exact reproduction ------------------------------------------
+    def test_two_entailed_candidates_do_not_release_even_when_both_models_agree(self):
+        """Codex F8-R1, reproduced end to end through `resolve`: both models judge BOTH
+        descriptors entailed and both would code SYN_A. Before this change that released
+        SYN_A on agreement alone. It must now hold, with the OTHER candidate named."""
+        both = lambda d: True                                   # noqa: E731
+        line = self._resolve(self.BOTH_DOCUMENTED,
+                             _judge(both, prefers=lambda d: _ONE in d),
+                             _judge(both, prefers=lambda d: _ONE in d))
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertIs(line.method, ResolutionMethod.ABSTAINED)
+        self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
+        self.assertEqual(line.tie_record["selected"], "SYN_A")
+        # and it left through the TIE POLICY: one targeted question naming the axis both
+        # descriptors disagree on, not a generic coder queue.
+        self.assertTrue(line.documentation_gap, line.rationale)
+        self.assertIn(tiebreak.AXIS_DESCRIPTOR_TERM, line.documentation_gap)
+        self.assertIn("one", line.documentation_gap)
+        self.assertIn("two", line.documentation_gap)
+
+    def test_the_reviewers_reproduction_holds_the_whole_encounter(self):
+        """The same reproduction through the real entrypoint, because the finding is
+        about what gets BILLED. Nothing may reach the claim, and the encounter must be
+        routed to the provider — not to a coder, and not auto-released."""
+        from claude_coder.autonomy import Destination
+        from claude_coder.pipeline import code_encounter
+        from claude_coder.provenance import NullAuditRepository
+        note = ("Procedure: " + self.BOTH_DOCUMENTED + ". Assessment: condition alpha.")
+        facts = ('{"facts": [{"kind": "procedure", "description": "assembly service",'
+                 ' "attributes": {"performer_id": "actor-1",'
+                 ' "billing_entity_id": "actor-1"},'
+                 ' "disposition": "performed_today", "negated": false,'
+                 ' "evidence": ["' + self.BOTH_DOCUMENTED + '"], "confidence": 0.99,'
+                 ' "axis_confidence": {"occurrence": 0.99, "action": 0.99,'
+                 ' "evidence": 0.99, "temporal": 0.99, "performer": 0.99,'
+                 ' "relationship": 0.99}}]}')
+        both = lambda d: True                                   # noqa: E731
+        result = code_encounter(
+            "enc-f8r1", note, "2026-03-14", source=_source(SYN_A, SYN_B),
+            extract_llm=lambda s, u: facts,
+            arbitrate_llm=lambda s, u: NO_PICK,
+            verify_llm=_pinned(_judge(both, prefers=lambda d: _ONE in d), "provider-a"),
+            corroborate_llm=_pinned(_judge(both, prefers=lambda d: _ONE in d),
+                                    "provider-b"),
+            audit_repository=NullAuditRepository(),
+            billing_context={"billing_entity_id": "actor-1",
+                             "participants": [{"id": "actor-1", "type": "person",
+                                               "roles": ["performer"]}]})
+        self.assertEqual([ln.chosen.code for ln in result.billable_lines], [])
+        (line,) = [ln for ln in result.lines if ln.fact.kind is FactKind.PROCEDURE]
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertTrue(line.documentation_gap, line.rationale)
+        self.assertEqual(result.destination, Destination.PROVIDER_QUERY)
+        issues = {r["issue"] for r in result.recommendations}
+        self.assertIn("documentation_gap", issues)
+        self.assertNotIn("coder_review", issues)
+
+    # ---- the common path must not regress -------------------------------------------
+    def test_a_single_entailed_candidate_still_auto_releases(self):
+        """The overwhelmingly common case: only one shortlisted descriptor survives, both
+        models say so, and the other is eliminated with a NAMED reason. That still
+        releases automatically — tightening uniqueness must not turn the coder off."""
+        only_one = lambda d: _ONE in d                          # noqa: E731
+        line = self._resolve(self.ONE_DOCUMENTED,
+                             _judge(only_one), _judge(only_one))
+        self.assertTrue(line.resolved, line.rationale)
+        self.assertEqual(line.chosen.code, "SYN_A")
+        self.assertIs(line.method, ResolutionMethod.VERIFIED)
+        self.assertIsNone(line.documentation_gap)
+        # the release states WHY the alternative is gone, in the audit record
+        self.assertEqual(line.tie_record["still_entailed"], ["SYN_A"])
+        self.assertTrue(line.tie_record["eliminated"]["SYN_B"])
+        self.assertEqual(line.tie_record["released_code"], "SYN_A")
+
+    def test_a_tie_the_page_settles_releases_through_the_tie_policy(self):
+        """Both models are loose and call BOTH descriptors entailed, but the ORIGINAL
+        DOCUMENT states only one candidate's distinguishing word. The tie policy's step 3
+        narrowing resolves it, so the line still releases — via the document, not via the
+        agreement, and the audit record shows which one settled it."""
+        both = lambda d: True                                   # noqa: E731
+        line = self._resolve(self.ONE_DOCUMENTED,
+                             _judge(both, prefers=lambda d: _ONE in d),
+                             _judge(both, prefers=lambda d: _ONE in d))
+        self.assertTrue(line.resolved, line.rationale)
+        self.assertEqual(line.chosen.code, "SYN_A")
+        self.assertIs(line.method, ResolutionMethod.VERIFIED)
+        self.assertIn("narrowed against the original document", line.rationale)
+        self.assertEqual(line.tie_record["winner"], "SYN_A")
+        self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
+
+    # ---- what "eliminated" has to mean ----------------------------------------------
+    def test_a_bare_pick_cannot_establish_uniqueness_but_a_named_elimination_can(self):
+        """The same shortlist and the same document, judged two ways. When both models
+        NAME why the alternative is out, the line releases. When they answer with a bare
+        pick and say nothing about the alternative, silence is not an elimination and the
+        line holds — the fail-closed default, with no separate code path."""
+        named = _judge(lambda d: _ONE in d)
+        released = self._resolve(self.BOTH_DOCUMENTED, named, _judge(lambda d: _ONE in d))
+        self.assertTrue(released.resolved, released.rationale)
+        self.assertEqual(released.chosen.code, "SYN_A")
+
+        bare = _judge(lambda d: True, prefers=lambda d: _ONE in d, declare=False)
+        held = self._resolve(self.BOTH_DOCUMENTED, bare,
+                             _judge(lambda d: True, prefers=lambda d: _ONE in d,
+                                    declare=False))
+        self.assertIsNone(held.chosen, held.rationale)
+        self.assertEqual(held.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
+        self.assertFalse(
+            held.tie_record["judgements"][0]["declared_shortlist_verdict"])
+
+    def test_the_corroborator_evaluates_the_shortlist_not_only_the_pick(self):
+        """The corroborator's own view of the OTHER candidates has to count. Here it
+        agrees with the pick — the only thing it used to be asked — while independently
+        finding the alternative entailed too. That disagreement leaves the alternative
+        STANDING, so the line holds instead of releasing on the agreement."""
+        line = self._resolve(self.BOTH_DOCUMENTED,
+                             _judge(lambda d: _ONE in d),
+                             _judge(lambda d: True, prefers=lambda d: _ONE in d))
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
+        self.assertTrue(line.documentation_gap)
 
 
 if __name__ == "__main__":

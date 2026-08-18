@@ -38,6 +38,7 @@ from claude_coder import graph, graph_consensus  # noqa: E402
 from claude_coder.models import (ClinicalFact, Disposition, EvidenceSpan,  # noqa: E402
                                  FactKind, Outcome, RelationAssertion,
                                  RelationPredicate, RelationState)
+from tests import shortlist_verdict as _sv
 
 NOTE = (
     "Procedure performed today on the left side. "
@@ -476,13 +477,9 @@ def _mock_source():
                                                 "Procedure alpha, each", 0.9)]})
 
 
-def _stub_llm(system, user):
-    lowered = system.lower()
-    if "propose" in lowered:
-        return '{"codes":[]}'
-    if "independently" in lowered:
-        return '{"entailed":true,"missing_element":false,"reason":"x"}'
-    return '{"choice":1,"reason":"x"}'
+#: Both judging roles: the sole shortlisted candidate is entailed and anything else is
+#: eliminated with a named reason, so the selection is provably unique.
+_stub_llm = _sv.judge(pick=1, reason="x")
 
 
 def _null_audit():

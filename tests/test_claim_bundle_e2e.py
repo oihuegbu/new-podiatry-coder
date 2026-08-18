@@ -42,10 +42,12 @@ WHAT IS SUBSTITUTED, AND WHY IT CANNOT MANUFACTURE THE RESULT
                            test is not an option; the descriptor, activity
                            window, modifiers, units, MUE limit and NCCI status
                            all still come from the authoritative data.
-  the verify/corroborate   answer "this descriptor is entailed". They stand in
-  LLMs                     for two independent model judgements; the pipeline
-                           still requires BOTH, from two declared providers,
-                           before it will mint a VERIFIED line.
+  the verify/corroborate   answer the SHORTLIST contract: option 1 is entailed
+  LLMs                     and every other candidate is eliminated with a named
+                           reason. They stand in for two independent model
+                           judgements; the pipeline still requires BOTH, from two
+                           declared providers, AND that exactly one candidate
+                           survives, before it will mint a VERIFIED line.
 
 NO MEDICAL CODE, PAYER, POS VALUE OR NPI IS HARDCODED. Every one of them is
 selected at runtime from the authoritative data the deployment loads, so this
@@ -74,6 +76,7 @@ from app.ingestion.source_evidence import (  # noqa: E402
 from tests.source_pdf import build_pdf, digest_of, vision_extraction  # noqa: E402
 from tools import claim_submitter as cs  # noqa: E402
 from tools import claims_registry as reg  # noqa: E402
+from tests import shortlist_verdict as _sv
 
 STEM = "NOTE_BUNDLE_E2E_001"
 DOS_ISO = "2026-03-14"
@@ -315,15 +318,15 @@ def deployment(tmp_path, monkeypatch):
         AuthoritativeSource, "_vector_store",
         lambda self: _StubVectorStore({"icd10": diagnosis_code,
                                        "cpt": procedure_code}))
+    # Both judging roles answer the SHORTLIST contract: option 1 is entailed and every
+    # other candidate is eliminated with a named reason. A bare pick would (correctly) not
+    # establish that the released code is the only one the documentation supports.
     monkeypatch.setattr(verify_module, "default_verify_llm",
                         verify_module.declare_model_profile(
-                            lambda system, user:
-                            '{"choice": 1, "reason": "stub"}', provider="openai"))
+                            _sv.judge(pick=1), provider="openai"))
     monkeypatch.setattr(verify_module, "default_corroborate_llm",
                         verify_module.declare_model_profile(
-                            lambda system, user:
-                            '{"entailed": true, "missing_element": false, '
-                            '"reason": "stub"}', provider="claude"))
+                            _sv.judge(pick=1), provider="claude"))
     # The SECOND INDEPENDENT READING (product directive section 3; phase 4, commit
     # 97f748b). Substituted here for exactly the same reason as the two callables
     # above, and it MUST be: `run.main()` calls `code_encounter()` with no extractor,

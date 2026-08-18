@@ -10,24 +10,29 @@ neither of which is ever trusted to emit a billable code from memory:
              read from the record (never from the model). So the model only widens
              the candidate pool; it cannot invent a code or author a descriptor.
 
-  VERIFY   — the model judges whether a candidate code's AUTHORITATIVE descriptor is
-             ENTAILED by the documented facts, by GENERAL principles (any specialty
-             / code set): every distinguishing element the descriptor states — the
-             specific act/service, the structure/site, laterality, count, approach,
-             and qualifiers — must be supported; near-synonyms that denote different
-             acts are distinguished; and a documented specific correctly satisfies an
-             unspecified or "other than …" descriptor. The descriptor is the
-             citation; a code is accepted only when the documentation entails it,
-             else the line escalates. Nothing bills on the model's say-so alone.
+  VERIFY   — the model judges, for EVERY candidate on the shortlist, whether that
+             candidate's AUTHORITATIVE descriptor is ENTAILED by the documented facts,
+             by GENERAL principles (any specialty / code set): every distinguishing
+             element the descriptor states — the specific act/service, the
+             structure/site, laterality, count, approach, and qualifiers — must be
+             supported; near-synonyms that denote different acts are distinguished;
+             and a documented specific correctly satisfies an unspecified or "other
+             than …" descriptor. The descriptor is the citation; a code is accepted
+             only when the documentation entails it, else the line escalates. Nothing
+             bills on the model's say-so alone.
 
-The caller runs these over a ranked candidate pool (retrieval + proposals) and takes
-the first code whose descriptor is verified — grounding every accepted procedure in
-an authoritative descriptor the documentation supports.
+Both judging calls return a `Judgement` over the WHOLE shortlist — what still stands and
+the NAMED reason every other candidate is out — never just a pick. The caller may release
+a code only when exactly ONE candidate is left standing; several standing candidates are a
+TIE, and a tie belongs to the document (`tiebreak`), not to a model's preference. Two
+models agreeing about one candidate says that candidate is defensible; it says nothing
+about the ones neither of them was asked about (Codex F8-R1).
 """
 from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 from typing import Callable
 
 from .data_access import CodeSource
@@ -74,7 +79,7 @@ def default_corroborate_llm(system: str, user: str) -> str:
 
 
 # ---- assertion-origin independence of the corroborating call ----------------------------
-# `select_entailed` and `corroborate` make two judgements about the SAME candidate code.
+# `select_entailed` and `corroborate` make two judgements about the SAME shortlist.
 # Their AGREEMENT is only worth something when the two judgements come from DISTINCT
 # ORIGINS. Two calls into one vendor's model family are one opinion sampled twice — they
 # share training data, tokeniser, alignment and failure modes — so their agreeing is model
@@ -187,12 +192,46 @@ def propose_codes(fact: ClinicalFact, source: CodeSource, llm: LLMFn,
     return out
 
 
+# ---- one verdict shape, answered about the WHOLE shortlist -----------------------------
+# Codex F8-R1: the selector chose ONE candidate, the corroborator was asked about THAT
+# candidate alone, and the two agreeing released it -- while another candidate the same
+# documentation entailed just as well was never evaluated by either model. Agreement on a
+# candidate establishes that it is DEFENSIBLE. It cannot establish that it is the ONLY
+# defensible one, and only the second is a reason to bill without a human.
+#
+# So both judging calls answer the SAME contract about EVERY shortlisted candidate: which
+# ones the documentation still entails, and -- for each of the others -- the NAMED reason
+# it is out (a documented fact its descriptor contradicts, an element the documentation
+# does not state, or the coding rule another option satisfies better). Silence about a
+# candidate is recorded AS silence (`unaccounted`), never read as an elimination.
+
+_SHORTLIST_CONTRACT = """Answer about EVERY numbered option, not only the one you prefer:
+  - "entailed": the numbers of ALL options the documentation FULLY entails and that you
+    cannot eliminate — each one an equally defensible representation of the documented
+    fact. Include an option you did not choose whenever the documentation supports it just
+    as well; listing only your preferred option when another is equally supported is wrong.
+  - "eliminated": one entry for every OTHER option, each NAMING why it is out: the
+    documented fact its descriptor contradicts, the element its descriptor requires that
+    the documentation does not state, or the coding rule that rules it out (for example,
+    another listed option represents the same documented service more completely or more
+    specifically). Set "missing_element": true when the option is the RIGHT KIND of
+    service/condition but its descriptor requires an element/qualifier/finding the
+    documentation does not state (a documentation gap); false when its descriptor denotes
+    a DIFFERENT act, site, condition, or concept (a wrong option).
+  - "choice": the single option you would code, which MUST appear in "entailed"; 0 when no
+    option is both fully supported and an accurate representation.
+Every option number must appear exactly once, in "entailed" or in "eliminated".
+Return JSON only:
+{"choice": <int>, "entailed": [<int>, ...], "reason": "<short>",
+ "eliminated": [{"option": <int>, "reason": "<short>", "missing_element": true|false}, ...]}"""
+
+
 _SELECT_SYSTEM = """You verify medical codes against clinical documentation. You are
 given a documented clinical fact and a NUMBERED list of candidate codes' OFFICIAL
-descriptors. Choose the ONE option whose descriptor the documentation FULLY entails
-AND which most accurately represents the documented fact — applying these
-principles GENERALLY (any specialty; a procedure, service, supply, or DIAGNOSIS;
-any code set; reason from the words, not from examples):
+descriptors. Judge which options' descriptors the documentation FULLY entails, and which
+one most accurately represents the documented fact — applying these principles
+GENERALLY (any specialty; a procedure, service, supply, or DIAGNOSIS; any code set;
+reason from the words, not from examples):
   - EVERY clinically distinguishing element the descriptor states must be supported
     by the documentation: the specific act, service, or CONDITION; the
     structure/site/organ; laterality; count/quantity; approach/technique; acuity,
@@ -211,9 +250,24 @@ any code set; reason from the words, not from examples):
     defined as "other than" a DIFFERENT value; a descriptor naming a value the
     documentation contradicts, or requiring an element it does not state, is NOT
     entailed.
-If NO option is BOTH fully supported AND an accurate representation, choose 0. Judge
-ONLY the descriptor text; use no knowledge of what a code number 'usually' means.
-Return JSON only: {"choice": <int>, "reason": "<short>"}"""
+Judge ONLY the descriptor text; use no knowledge of what a code number 'usually' means.
+""" + _SHORTLIST_CONTRACT
+
+
+_CORROBORATE_SYSTEM = """You INDEPENDENTLY re-judge a shortlist of candidate codes for
+documented care. You are given a documented clinical fact and a NUMBERED list of
+candidate codes' OFFICIAL descriptors. Decide, skeptically and on the descriptor text
+alone, which of them the documentation FULLY ENTAILS, applying general principles (any
+specialty; a procedure, service, supply, or DIAGNOSIS; any code set): every clinically
+distinguishing element the descriptor states — the specific act, service, or CONDITION;
+the structure/site; laterality; count; approach; acuity, stage, or encounter type (e.g.
+acute vs chronic, initial vs subsequent); and any qualifiers or BUNDLED COMPONENTS —
+must be supported; a near-synonym that denotes a DIFFERENT act, condition, or entity
+does not qualify; a documented specific value satisfies an unspecified or "other than …"
+descriptor. If you are not confident the documentation entails an option, do not list it
+as entailed. Judge only the descriptor text; use no knowledge of what a code number
+'usually' means. No other judgement has been shown to you: reach your own.
+""" + _SHORTLIST_CONTRACT
 
 
 def _best_descriptor(source: CodeSource, cand: CandidateCode) -> str:
@@ -224,68 +278,144 @@ def _best_descriptor(source: CodeSource, cand: CandidateCode) -> str:
     return tiers[0] if tiers else cand.descriptor
 
 
-def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
-                    source: CodeSource, llm: LLMFn) -> tuple[CandidateCode | None, str]:
-    """ONE call: among the candidates, the single one whose OFFICIAL descriptor the
-    documentation entails (or None). Judged on the authoritative descriptor text —
-    the citation — not on the code number. A single call over the shortlist keeps
-    the loop cheap (propose + select = 2 LLM calls per procedure)."""
-    if not candidates:
-        return None, "no candidates"
+@dataclass(frozen=True)
+class Judgement:
+    """ONE model's verdict over a WHOLE shortlist.
+
+    `entailed` is what still stands after this model applied every elimination it could;
+    `eliminated` maps each remaining candidate to the reason this model NAMED for ruling
+    it out. `unaccounted` are the candidates it simply did not mention — kept separate on
+    purpose, because "did not say" is not "eliminated", and a release that requires every
+    alternative to carry a named elimination has to be able to tell the two apart.
+
+    `declared` records whether the model answered the shortlist contract at all. An
+    undeclared verdict leaves every other candidate unaccounted, so it cannot establish
+    uniqueness — the fail-closed direction, reached without a special case.
+    """
+
+    chosen: CandidateCode | None = None
+    reason: str = ""
+    entailed: tuple[str, ...] = ()
+    eliminated: dict[str, str] = field(default_factory=dict)
+    missing_element: dict[str, bool] = field(default_factory=dict)
+    declared: bool = False
+    unaccounted: tuple[str, ...] = ()
+
+    def entails(self, code: str) -> bool:
+        return code in self.entailed
+
+    def elimination_of(self, code: str) -> str:
+        """The reason this model NAMED for eliminating `code`, or "" if it did not
+        eliminate it. A candidate this model still entails is never eliminated by it, even
+        if it also appeared in the eliminated list — a self-contradicting verdict leaves
+        the candidate STANDING, which blocks a release rather than allowing one."""
+        if code in self.entailed:
+            return ""
+        return self.eliminated.get(code, "")
+
+    def as_record(self) -> dict:
+        return {"chosen": (self.chosen.code if self.chosen else ""),
+                "declared_shortlist_verdict": self.declared,
+                "entailed": list(self.entailed),
+                "eliminated": dict(sorted(self.eliminated.items())),
+                "missing_element": sorted(k for k, v in self.missing_element.items() if v),
+                "unaccounted": list(self.unaccounted),
+                "reason": self.reason}
+
+
+def _option_code(raw, codes: list[str]) -> str:
+    """The candidate code an OPTION NUMBER refers to ("" when it refers to none).
+
+    Booleans are refused explicitly: in Python `True` is an `int` equal to 1, so a model
+    answering `{"choice": true}` would otherwise silently select the first candidate."""
+    if isinstance(raw, bool):
+        return ""
+    try:
+        i = int(raw)
+    except (TypeError, ValueError):
+        return ""
+    return codes[i - 1] if 1 <= i <= len(codes) else ""
+
+
+def _judgement(ans: dict, candidates: list[CandidateCode]) -> Judgement:
+    """Parse one model answer into a `Judgement`, fail-closed at every branch: an
+    out-of-range option number, a non-list verdict, and an elimination with no stated
+    reason are all read as saying NOTHING about that candidate."""
+    codes = [c.code for c in candidates]
+    by_code = {c.code: c for c in candidates}
+    raw_entailed = ans.get("entailed")
+    declared = isinstance(raw_entailed, list)
+    entailed: list[str] = []
+    if declared:
+        for opt in raw_entailed:
+            code = _option_code(opt, codes)
+            if code and code not in entailed:
+                entailed.append(code)
+    chosen_code = _option_code(ans.get("choice"), codes)
+    if chosen_code and chosen_code not in entailed:
+        entailed.insert(0, chosen_code)      # choosing an option asserts its entailment
+    eliminated: dict[str, str] = {}
+    missing: dict[str, bool] = {}
+    raw_eliminated = ans.get("eliminated")
+    if isinstance(raw_eliminated, list):
+        for item in raw_eliminated:
+            if not isinstance(item, dict):
+                continue
+            code = _option_code(item.get("option"), codes)
+            why = str(item.get("reason") or "").strip()
+            if not code or code in entailed or not why:
+                continue                     # an UNNAMED elimination is not an elimination
+            eliminated[code] = why
+            missing[code] = item.get("missing_element") is True
+    return Judgement(
+        chosen=by_code.get(chosen_code),
+        reason=str(ans.get("reason") or "").strip(),
+        entailed=tuple(entailed), eliminated=eliminated, missing_element=missing,
+        declared=declared,
+        unaccounted=tuple(c for c in codes if c not in entailed and c not in eliminated))
+
+
+def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
+                      source: CodeSource) -> str:
     opts = "\n".join(f"{i + 1}. {_best_descriptor(source, c)}"
                      for i, c in enumerate(candidates))
     ev = " | ".join(s.text for s in fact.evidence)
-    user = (f"DOCUMENTED FACT: {fact.description}\n"
+    return (f"DOCUMENTED FACT: {fact.description}\n"
             f"ATTRIBUTES: {json.dumps(fact.attributes)}\n"
             f"EVIDENCE: {ev}\n\n"
             f"CANDIDATE OFFICIAL DESCRIPTORS:\n{opts}\n\n"
-            f"Which option's descriptor is entailed by the documentation? (0 if none)")
-    ans = _json(llm(_SELECT_SYSTEM, user))
-    choice = ans.get("choice")
-    reason = str(ans.get("reason") or "").strip()
-    if isinstance(choice, int) and 1 <= choice <= len(candidates):
-        return candidates[choice - 1], reason
-    return None, reason
+            f"Which options' descriptors does the documentation entail, which single "
+            f"option would you code (0 if none), and why is each other option out?")
 
 
-_CORROBORATE_SYSTEM = """You INDEPENDENTLY check whether a candidate code is correct
-for documented care. You are given a documented clinical fact and ONE candidate
-code's OFFICIAL descriptor. Decide, skeptically and on the descriptor text alone,
-whether the documentation FULLY ENTAILS that exact descriptor, applying general
-principles (any specialty; a procedure, service, supply, or DIAGNOSIS; any code
-set): every clinically distinguishing element the descriptor states — the specific
-act, service, or CONDITION; the structure/site; laterality; count; approach; acuity,
-stage, or encounter type (e.g. acute vs chronic, initial vs subsequent); and any
-qualifiers or BUNDLED COMPONENTS — must be supported; a near-synonym
-that denotes a DIFFERENT act, condition, or entity does not qualify; a documented
-specific value satisfies an unspecified or "other than …" descriptor.
-If it is NOT entailed, also classify WHY:
-  - "missing_element": true when the code is the RIGHT KIND of service/condition for
-    what was documented, but its descriptor REQUIRES an element/qualifier/finding
-    the documentation does not state (a documentation gap — the note may simply be
-    incomplete);
-  - "missing_element": false when the descriptor denotes a DIFFERENT act, site,
-    condition, or concept than what was documented (a genuinely wrong code).
-If you are not confident the documentation entails it, answer entailed=false. Judge
-only the descriptor text; use no knowledge of what a code number 'usually' means.
-Return JSON only:
-{"entailed": true|false, "missing_element": true|false, "reason": "<short>"}"""
+def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
+                    source: CodeSource, llm: LLMFn) -> Judgement:
+    """ONE call over the whole shortlist: which candidates' OFFICIAL descriptors the
+    documentation entails, which single one this model would code, and the named reason
+    every other candidate is out. Judged on the authoritative descriptor text — the
+    citation — not on the code number.
+
+    Returns the full verdict rather than only the pick, because the caller has to be able
+    to ask whether anything ELSE is still entailed. It is still ONE call over the whole
+    shortlist, so the loop stays at two model calls per fact."""
+    if not candidates:
+        return Judgement(reason="no candidates")
+    return _judgement(
+        _json(llm(_SELECT_SYSTEM, _shortlist_prompt(fact, candidates, source))),
+        candidates)
 
 
-def corroborate(fact: ClinicalFact, candidate: CandidateCode,
-                source: CodeSource, llm: LLMFn) -> tuple[bool, str, bool]:
-    """An INDEPENDENT second-model entailment check on the already-selected code.
-    Returns (entailed, reason, missing_element). `entailed` is True only when this
-    model also finds the documentation fully entails the descriptor — so a code
-    bills only when TWO independent judgements agree. On disagreement,
-    `missing_element` distinguishes a DOCUMENTATION GAP (right kind of code, an
-    element undocumented -> a provider query) from a WRONG CODE (re-select)."""
-    ev = " | ".join(s.text for s in fact.evidence)
-    user = (f"DOCUMENTED FACT: {fact.description}\n"
-            f"ATTRIBUTES: {json.dumps(fact.attributes)}\n"
-            f"EVIDENCE: {ev}\n\n"
-            f"CANDIDATE OFFICIAL DESCRIPTOR: {_best_descriptor(source, candidate)}\n\n"
-            f"Is this descriptor fully entailed by the documentation?")
-    ans = _json(llm(_CORROBORATE_SYSTEM, user))
-    return (ans.get("entailed") is True, str(ans.get("reason") or "").strip(),
-            ans.get("missing_element") is True)
+def corroborate(fact: ClinicalFact, candidates: list[CandidateCode],
+                source: CodeSource, llm: LLMFn) -> Judgement:
+    """The INDEPENDENT second judgement, over the SAME shortlist and the SAME contract.
+
+    It is deliberately NOT told which candidate the first model picked: a corroborator that
+    only re-confirms a supplied answer cannot notice that a DIFFERENT candidate is also
+    entailed, which is exactly the gap this closes. A code therefore bills only when two
+    independent judgements agree BOTH that it is entailed AND that nothing else on the
+    shortlist survives."""
+    if not candidates:
+        return Judgement(reason="no candidates")
+    return _judgement(
+        _json(llm(_CORROBORATE_SYSTEM, _shortlist_prompt(fact, candidates, source))),
+        candidates)

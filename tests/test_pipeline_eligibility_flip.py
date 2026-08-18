@@ -5,6 +5,7 @@ synthetic codes + stub LLMs, no API key."""
 from claude_coder.data_access import MockSource
 from claude_coder.pipeline import code_encounter
 from claude_coder.models import CandidateCode
+from tests import shortlist_verdict as _sv
 
 _FACTS = ('{"facts":[{"kind":"procedure","description":"excision of lesion",'
           '"attributes":{"performer_id":"actor-1","billing_entity_id":"actor-1"},'
@@ -19,13 +20,7 @@ def _src():
                                                               "Excision, lesion, each", 0.9)]})
 
 
-def _sel(system, user):
-    sl = system.lower()
-    if "propose" in sl:
-        return '{"codes":[]}'
-    if "independently" in sl:
-        return '{"entailed":true,"missing_element":false,"reason":"x"}'
-    return '{"choice":1,"reason":"x"}'
+_sel = _sv.judge(pick=1, reason="x")
 
 
 def test_eligible_service_reaches_retrieval_and_resolves():

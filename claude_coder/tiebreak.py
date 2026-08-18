@@ -196,8 +196,13 @@ class TieOutcome:
         }
 
 
-def _question(fact, axes: tuple[AxisProbe, ...]) -> str:
+def provider_query(fact, axes: tuple[AxisProbe, ...]) -> str:
     """ONE targeted provider query naming exactly what the record must state.
+
+    Public because step 5 is reachable from more than one place: a tie the page could
+    not settle (below), and a tie the page settled onto a candidate the entailment
+    judgements did not both accept (`resolution._tie_escalation`). Both owe the
+    provider the SAME question, built once here from the same descriptors.
 
     Assembled from the candidates' own authoritative descriptors, so it asks for the
     real distinguishing fact instead of "please clarify"."""
@@ -287,4 +292,4 @@ def narrow(fact, candidates: list[CandidateCode],
                   "unsettled: " + ", ".join(unsettled))
     return TieOutcome(
         axes=axes, unsettled=unsettled, support=frozen_support, proof=proof,
-        detail=detail, provider_question=_question(fact, axes))
+        detail=detail, provider_question=provider_query(fact, axes))

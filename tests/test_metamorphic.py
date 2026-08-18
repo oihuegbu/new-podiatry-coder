@@ -70,8 +70,8 @@ def test_specificity_upgrade():
     line = ResolvedLine(fact=f, chosen=CandidateCode("RR10", "icd10", "Widgetopathy, unspecified", 1.0),
                         method=ResolutionMethod.VERIFIED)
     out = resolution.refine_diagnosis_specificity(
-        line, src, lambda s, u: '{"choice": 2, "reason":"more specific"}',
-        lambda s, u: '{"entailed": true, "missing_element": false, "reason":"ok"}')
+        line, src, _sv.judge(pick=2, reason="more specific"),
+        _sv.judge(pick=2, reason="ok"))
     assert out.resolved and out.chosen.code == "RR1.9"
 
 
@@ -193,6 +193,7 @@ def test_provider_query_is_self_contained():
 from claude_coder.models import GateResult, Verdict
 from claude_coder.autonomy import (decide, _line_confidence, _ARBITRATED_DISCOUNT,
                                     AUTONOMY_CONFIDENCE, SHAKY_EXTRACTION)
+from tests import shortlist_verdict as _sv
 _GATES_OK = [GateResult(n, Outcome.PASS, "", "") for n in
              ("date_of_service", "verbatim_evidence", "code_active_on_dos",
               "medical_necessity", "ncci_ptp", "mue", "icd_excludes1")]
@@ -298,15 +299,7 @@ def test_snomed_crosswalk_hit_is_verified_not_blindly_trusted():
         return ClinicalFact(FactKind.DIAGNOSIS, "documented thing",
                             evidence=[EvidenceSpan("documented thing")], disposition=Disposition.PERFORMED)
     def stub(entailed):
-        def _s(system, user):
-            sl = system.lower()
-            if "propose" in sl:
-                return '{"codes": []}'
-            if "independently" in sl:                       # corroborate
-                return '{"entailed": %s, "missing_element": false, "reason": "x"}' % (
-                    "true" if entailed else "false")
-            return '{"choice": %d, "reason": "x"}' % (1 if entailed else 0)   # select
-        return _s
+        return _sv.judge(entails=lambda d: bool(entailed), reason="x")
     reject = resolution.resolve(_request(fact()), src, llm=stub(False), corroborate=stub(False))
     assert not reject.resolved                              # crosswalk default not blindly accepted
     accept = resolution.resolve(_request(fact()), src, llm=stub(True), corroborate=stub(True))
@@ -546,13 +539,7 @@ def test_residual_catchall_escalates_through_resolve():
     from claude_coder.models import (ClinicalFact, CandidateCode, EvidenceSpan, FactKind,
                                       ResolutionMethod)
 
-    def stub(system, user):
-        sl = system.lower()
-        if "propose" in sl:
-            return '{"codes": []}'
-        if "independently" in sl:                       # corroborate
-            return '{"entailed": true, "missing_element": false, "reason": "x"}'
-        return '{"choice": 1, "reason": "x"}'           # select the sole candidate
+    stub = _sv.judge(pick=1, reason="x")             # entails the sole candidate
 
     # catch-all descriptor sharing no distinctive term with the condition -> escalate
     src = MockSource(
@@ -708,19 +695,8 @@ def test_llm_proposals_cannot_crowd_out_retrieval():
     fact = ClinicalFact(FactKind.PROCEDURE, "the correct retrieved service",
                         evidence=[EvidenceSpan("the correct retrieved service performed")])
 
-    def stub(system, user):
-        sl = system.lower()
-        if "propose" in sl:
-            return '{"codes": ["P0","P1","P2","P3","P4","P5"]}'
-        if "independently" in sl:
-            return '{"entailed": true, "missing_element": false, "reason": "x"}'
-        choice = 0
-        for ln in user.splitlines():
-            st = ln.strip()
-            num = st.split(".", 1)[0].strip()
-            if num.isdigit() and "retrieved service" in st.lower():
-                choice = int(num); break
-        return json.dumps({"choice": choice, "reason": "retrieved"})
+    stub = _sv.judge(entails=lambda d: "retrieved service" in d.lower(),
+                     propose=["P0", "P1", "P2", "P3", "P4", "P5"], reason="retrieved")
 
     line = resolve(_request(fact), src, llm=stub, corroborate=stub)
     assert line.resolved and line.chosen.code == "RCODE"

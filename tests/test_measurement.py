@@ -8,6 +8,7 @@ from claude_coder.models import CandidateCode, ClinicalFact, Disposition, Eviden
 from claude_coder.resolution import resolve
 from claude_coder.data_access import MockSource
 from claude_coder.models import ResolutionMethod
+from tests import shortlist_verdict as _sv
 
 
 def _request(fact):
@@ -217,12 +218,7 @@ def test_verified_path_cannot_override_unsupported_interval():
                         disposition=Disposition.PERFORMED,
                         evidence=[EvidenceSpan("dressing depth 2 mm")], confidence=0.99)
 
-    def agree(system, _user):
-        if "propose" in system.lower():
-            return '{"codes":[]}'
-        if "independently" in system.lower():
-            return '{"entailed":true,"missing_element":false,"reason":"agree"}'
-        return '{"choice":1,"reason":"agree"}'
+    agree = _sv.judge(pick=1, reason="agree")
 
     line = resolve(_request(fact), src, llm=agree, corroborate=agree)
     assert line.chosen is None and line.documentation_gap
@@ -244,13 +240,7 @@ def test_unsupported_interval_not_billed_via_verified_path():
                         evidence=[EvidenceSpan("excision performed, depth 5 mm")],
                         confidence=0.99)
 
-    def agree(system, user):
-        sl = system.lower()
-        if "propose" in sl:
-            return '{"codes": []}'
-        if "independently" in sl:
-            return '{"entailed": true, "missing_element": false, "reason": "x"}'
-        return '{"choice": 1, "reason": "x"}'
+    agree = _sv.judge(pick=1, reason="x")
 
     corroborated = resolve(_request(fact), src, llm=agree, corroborate=agree)
     assert corroborated.chosen is None and corroborated.documentation_gap

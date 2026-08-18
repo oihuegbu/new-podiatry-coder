@@ -13,6 +13,7 @@ import unittest
 from claude_coder.data_access import MockSource
 from claude_coder.models import CandidateCode, Outcome, ResolutionMethod, Verdict
 from claude_coder.pipeline import code_encounter
+from tests import shortlist_verdict as _sv
 
 
 def _from(fn, provider):
@@ -970,23 +971,11 @@ class ProposeVerifyTest(unittest.TestCase):
                             confidence=0.95)
 
     def _llm(self, propose=(), entail=True):
-        import json
-        import re
-
-        def stub(system, user):
-            if "propose" in system.lower():
-                return json.dumps({"codes": list(propose)})
-            # select_entailed stub: pick the option whose descriptor names the
-            # DOCUMENTED act (alpha) and not the near-synonym (beta).
-            block = user.split("CANDIDATE OFFICIAL DESCRIPTORS:", 1)[-1]
-            opts = re.findall(r"(?m)^(\d+)\.\s+(.*)$", block)
-            if entail:
-                for num, desc in opts:
-                    d = desc.lower()
-                    if "alpha" in d and "beta" not in d:
-                        return json.dumps({"choice": int(num), "reason": "documented act matches"})
-            return json.dumps({"choice": 0, "reason": "none entailed"})
-        return stub
+        # A shortlist verdict, not a bare pick: the option whose descriptor names the
+        # DOCUMENTED act (alpha) is entailed, and the near-synonym (beta) is eliminated
+        # WITH a reason -- which is what makes the surviving candidate provably unique.
+        return _sv.judge(entails=(lambda d: "alpha" in d.lower() and "beta" not in d.lower()) if entail else (lambda d: False),
+                         propose=propose, reason="documented act matches")
 
     def test_rejects_near_synonym_accepts_entailed(self):
         from claude_coder.models import ResolutionMethod
@@ -1030,13 +1019,10 @@ class ProposeVerifyTest(unittest.TestCase):
         self.assertEqual(cands[0].descriptor, self.ALPHA)          # descriptor from the record
 
     def _corroborator(self, confirm, missing=False):
-        import json
-
-        def stub(system, user):
-            return json.dumps({"entailed": bool(confirm),
-                               "missing_element": bool(missing),
-                               "reason": "second opinion"})
-        return stub
+        """The INDEPENDENT judge, answering about the WHOLE shortlist. `confirm` means it
+        finds the documented act (alpha) entailed and eliminates the near-synonym."""
+        return _sv.judge(entails=(lambda d: "alpha" in d.lower() and "beta" not in d.lower()) if confirm else (lambda d: False),
+                         missing_element=missing, reason="second opinion")
 
     def test_corroboration_agreement_accepts(self):
         """CROSS-PROVIDER agreement still works exactly as intended: two DECLARED, distinct
@@ -1078,19 +1064,10 @@ class ProposeVerifyTest(unittest.TestCase):
             retrieval={("*", "cpt"): [CandidateCode("A1", "cpt", d1, 0.9),
                                       CandidateCode("A2", "cpt", d2, 0.8)]})
 
-        def sel(system, user):
-            if "propose" in system.lower():
-                return json.dumps({"codes": []})
-            block = user.split("CANDIDATE OFFICIAL DESCRIPTORS:", 1)[-1]
-            for num, desc in re.findall(r"(?m)^(\d+)\.\s+(.*)$", block):
-                if "alpha" in desc.lower():          # picks first alpha still on the list
-                    return json.dumps({"choice": int(num), "reason": "alpha"})
-            return json.dumps({"choice": 0})
-
-        def corr(system, user):
-            m = re.search(r"CANDIDATE OFFICIAL DESCRIPTOR: (.+)", user)
-            ok = "secondary" in (m.group(1).lower() if m else "")   # confirms only A2
-            return json.dumps({"entailed": ok, "missing_element": False, "reason": "x"})
+        # picks the first alpha still on the list; both forms are entailed for it
+        sel = _sv.judge(entails=lambda d: "alpha" in d.lower(), reason="alpha")
+        # the independent judge entails only A2, so A1 is rejected as a WRONG code
+        corr = _sv.judge(entails=lambda d: "secondary" in d.lower(), reason="x")
 
         fact = ClinicalFact(kind=FactKind.PROCEDURE, description="act alpha",
                             evidence=[EvidenceSpan("act alpha performed")], confidence=0.9)
@@ -1128,17 +1105,10 @@ class CorroborationIndependenceTest(unittest.TestCase):
                             confidence=0.95)
 
     def _select(self):
-        def sel(system, user):
-            if "propose" in system.lower():
-                return json.dumps({"codes": []})
-            return json.dumps({"choice": 1, "reason": "documented act matches"})
-        return sel
+        return _sv.judge(pick=1, reason="documented act matches")
 
     def _corroborator(self, confirm=True):
-        def corr(system, user):
-            return json.dumps({"entailed": bool(confirm), "missing_element": False,
-                               "reason": "second opinion"})
-        return corr
+        return _sv.judge(entails=lambda d: bool(confirm), reason="second opinion")
 
     def _resolve(self, primary_provider, second_provider, confirm=True):
         from claude_coder.resolution import resolve
@@ -1183,14 +1153,7 @@ class CorroborationIndependenceTest(unittest.TestCase):
         literal form of self-agreement."""
         from claude_coder.resolution import resolve
 
-        def both(system, user):
-            sl = system.lower()
-            if "propose" in sl:
-                return json.dumps({"codes": []})
-            if "independently" in sl:
-                return json.dumps({"entailed": True, "missing_element": False, "reason": "x"})
-            return json.dumps({"choice": 1, "reason": "x"})
-        both = _from(both, "provider-a")
+        both = _from(_sv.judge(entails=lambda d: True, reason="x"), "provider-a")
         line = resolve(_request(self._fact()), self._src(), llm=both, corroborate=both)
         self.assertEqual(line.method, ResolutionMethod.ARBITRATED)
 
@@ -1260,15 +1223,8 @@ class CorroborationIndependenceTest(unittest.TestCase):
             records={("QQ000", "icd10"): {"long_description": broad, "active": True},
                      ("QQ011", "icd10"): {"long_description": specific, "active": True}})
 
-        def sel(system, user):
-            if "propose" in system.lower():
-                return json.dumps({"codes": []})
-            import re as _re
-            block = user.split("CANDIDATE OFFICIAL DESCRIPTORS:", 1)[-1]
-            for num, desc in _re.findall(r"(?m)^(\d+)\.\s+(.*)$", block):
-                if "right" in desc.lower():
-                    return json.dumps({"choice": int(num), "reason": "documented side"})
-            return json.dumps({"choice": 0})
+        sel = _sv.judge(entails=lambda d: "right" in d.lower(),
+                        reason="documented side")
 
         def line():
             fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="condition alpha",
@@ -1311,14 +1267,8 @@ class CorroborationIndependenceEndToEndTest(unittest.TestCase):
                 seen.append((kind, record))
                 return "sha256:" + "0" * 64
 
-        def sel(system, user):
-            if "propose" in system.lower():
-                return json.dumps({"codes": []})
-            return json.dumps({"choice": 1, "reason": "documented act"})
-
-        def corr(system, user):
-            return json.dumps({"entailed": True, "missing_element": False,
-                               "reason": "second opinion"})
+        sel = _sv.judge(pick=1, reason="documented act")
+        corr = _sv.judge(entails=lambda d: True, reason="second opinion")
 
         result = code_encounter(
             "enc-independence", NOTE, "2026-03-14", source=_source(),
@@ -1630,13 +1580,7 @@ class LearnedIndexTest(unittest.TestCase):
                             evidence=[EvidenceSpan("a documented service phrase")],
                             confidence=0.95)
 
-        def reject(system, user):
-            sl = system.lower()
-            if "propose" in sl:
-                return '{"codes": []}'
-            if "independently" in sl:
-                return '{"entailed": false, "missing_element": false, "reason": "no"}'
-            return '{"choice": 0, "reason": "none entailed"}'
+        reject = _sv.judge(entails=lambda d: False, reason="none entailed")
 
         line = resolve(_request(fact), src, llm=reject, corroborate=reject)
         self.assertFalse(line.resolved)                       # not billed on learned trust
@@ -1889,19 +1833,8 @@ class DiagnosisVerifyTest(unittest.TestCase):
             retrieval={("*", "icd10"): [CandidateCode("DXW", "icd10", d_wrong, 0.95),
                                         CandidateCode("DXR", "icd10", d_right, 0.80)]})
 
-        def sel(system, user):
-            if "propose" in system.lower():
-                return json.dumps({"codes": []})
-            block = user.split("CANDIDATE OFFICIAL DESCRIPTORS:", 1)[-1]
-            for num, desc in re.findall(r"(?m)^(\d+)\.\s+(.*)$", block):
-                if "alpha" in desc.lower() and "beta" not in desc.lower():
-                    return json.dumps({"choice": int(num), "reason": "documented condition"})
-            return json.dumps({"choice": 0})
-
-        def corr(system, user):
-            m = re.search(r"CANDIDATE OFFICIAL DESCRIPTOR: (.+)", user)
-            ok = "alpha" in (m.group(1).lower() if m else "")
-            return json.dumps({"entailed": ok, "missing_element": False, "reason": "x"})
+        sel = _sv.judge(entails=lambda d: "alpha" in d.lower() and "beta" not in d.lower(), reason="documented condition")
+        corr = _sv.judge(entails=lambda d: "alpha" in d.lower(), reason="x")
 
         fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="condition alpha",
                             evidence=[EvidenceSpan("condition alpha documented")],
