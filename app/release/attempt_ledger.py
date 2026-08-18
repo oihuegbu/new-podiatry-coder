@@ -74,6 +74,50 @@ published artifact must declare the SAME document version the current attempt wa
 opened for. That is what stops an old-document-version success from being served
 as current after the document was revised.
 
+CONCURRENCY — WHY A PER-DOCUMENT LOCK AND NOT JUST AN OWNERSHIP CHECK
+================================================================================
+`_owns()` on its own is a CHECK, not a compare-and-swap. Every terminal
+transition used to check ownership, then write the retained artifact, the
+published artifact, the history record and finally the pointer — with nothing
+holding the encounter still across that span. Interleave two attempts inside
+that gap and the OLDER attempt wins (issue #6 F8-R2)::
+
+    A.begin(v1)                pointer -> A IN_PROGRESS
+    A.complete(...)   _owns(A) -> True                    <- the check passes
+      B.begin(v2)              pointer -> B IN_PROGRESS   <- a NEWER attempt opens
+    A.complete(...)            pointer -> A COMPLETED v1  <- the stale version is current
+
+The pointer WRITE was atomic; the TRANSITION was not, and supersession is a
+property of the transition. So every transition now runs inside an exclusive
+per-document lock spanning the ownership check through the pointer commit, and
+re-verifies ownership one statement before the pointer is replaced. Read the
+pointer, decide, replace it — with nothing able to move it in between. That is
+the swap half of a real compare-and-swap.
+
+`fcntl.flock` on a lock file inside the encounter's own ledger directory, chosen
+over a pid/mtime lockfile for one reason: the kernel releases an flock when the
+holding fd is closed OR the holding process dies, for any reason including
+SIGKILL and a power loss. There is no stale lock to detect, no staleness
+heuristic to get wrong, and no crashed batch that wedges an encounter forever.
+What the kernel cannot bound is how long a LIVE but wedged holder keeps it, so
+acquisition is bounded by `ATTEMPT_LOCK_TIMEOUT_S` and refuses loudly instead of
+hanging a batch.
+
+The lock is held only across a single transition's own writes — milliseconds —
+and NEVER across the coding work between `begin` and `complete`. A newer attempt
+must be able to supersede an older one while that older one is still running;
+that is the whole point of the ledger, and a lock held across the work would
+turn supersession back into waiting.
+
+Reads (`resolve_current`, `consumable`) take no lock and need none: the pointer
+moves FIRST on `begin` and LAST on publish, so a pointer naming a COMPLETED
+attempt implies no other attempt has opened, and therefore that no other writer
+can be touching the published artifact it names.
+
+BOUNDARY: `flock` is a single-host guarantee, which matches this deployment (one
+container, local disk). On a network filesystem shared between hosts its
+semantics are not dependable and this would need a real distributed CAS.
+
 MIGRATION / GOVERNANCE SCOPE
 ================================================================================
 A results directory is *governed* once `attempts/` exists in it — which `run.py`
@@ -88,11 +132,16 @@ return that document to ungoverned reads.
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import fcntl
 import hashlib
 import json
 import os
 import re
 import tempfile
+import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -100,8 +149,8 @@ from enum import Enum
 from pathlib import Path
 
 from app.core.config import (
-    AGGREGATE_RESULTS, ATTEMPT_DIRNAME, ATTEMPT_HISTORY, ATTEMPT_POINTER,
-    RESULT_SUFFIX)
+    AGGREGATE_RESULTS, ATTEMPT_DIRNAME, ATTEMPT_HISTORY, ATTEMPT_LOCK,
+    ATTEMPT_LOCK_TIMEOUT_S, ATTEMPT_POINTER, RESULT_SUFFIX)
 
 #: The run-output layout, from the module that declares every path this deployment
 #: composes (`app/core/config.py`). Named here for readability, never spelled here:
@@ -116,6 +165,8 @@ POINTER_NAME = ATTEMPT_POINTER
 HISTORY_NAME = ATTEMPT_HISTORY
 ARTIFACT_SUFFIX = RESULT_SUFFIX
 AGGREGATE_NAME = AGGREGATE_RESULTS
+LOCK_NAME = ATTEMPT_LOCK
+LOCK_TIMEOUT_S = ATTEMPT_LOCK_TIMEOUT_S
 
 POINTER_SCHEMA = "attempt_pointer/1"
 RECORD_SCHEMA = "attempt_record/1"
@@ -144,6 +195,18 @@ class AttemptWriteError(AttemptLedgerError):
 
 class AttemptSuperseded(AttemptLedgerError):
     """A newer attempt owns this encounter's pointer; this one may not publish."""
+
+
+class AttemptLockError(AttemptLedgerError):
+    """This encounter's transition lock could not be taken, so no transition
+    could be serialized against a concurrent attempt."""
+
+
+class AttemptLockTimeout(AttemptLockError):
+    """The lock is held by someone else and stayed held. A LIVE holder exists —
+    distinguished from `AttemptLockError` because the two demand opposite
+    recoveries: a holder has already superseded any earlier success, whereas a
+    lock that could never exist means nothing recorded the supersession."""
 
 
 # --------------------------------------------------------------------------
@@ -229,6 +292,129 @@ def _now() -> str:
 
 
 # --------------------------------------------------------------------------
+# the per-document transition lock  (issue #6 F8-R2)
+# --------------------------------------------------------------------------
+
+class _DocumentLock:
+    """One process-wide handle for one lock file: an flock plus a thread guard.
+
+    Both halves are load-bearing. `flock` is held by the open FILE DESCRIPTION,
+    not by the process, so two threads that each `open()` the file get
+    independent descriptions and would NOT exclude each other; and a second
+    `open()`+`flock()` in a process that already holds the file exclusively
+    blocks against itself. The re-entrant thread guard therefore provides
+    exclusion between threads and re-entrancy within one, and the flock — taken
+    exactly once, at depth 0 — provides exclusion between processes.
+    """
+
+    __slots__ = ("guard", "fd", "depth")
+
+    def __init__(self) -> None:
+        self.guard = threading.RLock()
+        self.fd: int | None = None
+        self.depth = 0
+
+
+#: lock-file path -> its process-wide handle. Keyed by path so two `AttemptLedger`
+#: instances addressing the same results directory share one handle rather than
+#: opening two descriptions that cannot see each other.
+_LOCKS: dict[str, _DocumentLock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_handle(path: Path) -> _DocumentLock:
+    key = str(path)
+    with _LOCKS_GUARD:
+        handle = _LOCKS.get(key)
+        if handle is None:
+            handle = _DocumentLock()
+            _LOCKS[key] = handle
+        return handle
+
+
+def _flock_until(fd: int, path: Path, timeout: float) -> None:
+    """Take the exclusive flock within `timeout`, or raise. Never blocks forever.
+
+    Non-blocking `flock` in a bounded backoff poll rather than a blocking
+    `LOCK_EX`: a blocking call has no deadline, so one wedged holder would hang
+    an entire batch with no diagnosis and no exit. A refusal names the file and
+    the wait.
+    """
+    deadline = time.monotonic() + max(float(timeout), 0.0)
+    wait = 0.005
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+                raise AttemptLockError(
+                    f"the attempt lock {path} could not be taken: {exc}") from exc
+        if time.monotonic() >= deadline:
+            raise AttemptLockTimeout(
+                f"the attempt lock {path} was still held after {timeout:g}s; "
+                f"another processing attempt for this encounter has not released "
+                f"it. No transition was recorded and nothing here became "
+                f"consumable")
+        time.sleep(wait)
+        wait = min(wait * 2, 0.1)
+
+
+@contextlib.contextmanager
+def _exclusive(path: Path):
+    """Hold `path`'s exclusive lock for the body, or raise. Never yields unlocked.
+
+    Released in a `finally`, so every failure path of every transition — an
+    OSError mid-write, a superseded refusal, a `KeyboardInterrupt` — gives the
+    lock back. Process death gives it back too, by the kernel; that is the whole
+    reason this is an flock and not a lockfile.
+
+    BOTH waits are bounded, not just the flock. Bounding only the flock would
+    have moved the hang up one level rather than removed it: a thread wedged
+    while holding the handle would leave every other thread in this process
+    blocked forever on the guard, having never reached the flock whose wait has
+    a deadline.
+    """
+    handle = _lock_handle(path)
+    timeout = max(float(LOCK_TIMEOUT_S), 0.0)
+    if not handle.guard.acquire(timeout=timeout):
+        raise AttemptLockTimeout(
+            f"the attempt lock {path} was still held by another thread of this "
+            f"process after {timeout:g}s. No transition was recorded and nothing "
+            f"here became consumable")
+    try:
+        if handle.depth == 0:
+            try:
+                fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+            except OSError as exc:
+                raise AttemptLockError(
+                    f"the attempt lock {path} could not be opened: {exc}") from exc
+            try:
+                _flock_until(fd, path, timeout)
+            except BaseException:
+                os.close(fd)
+                raise
+            handle.fd = fd
+        handle.depth += 1
+    except BaseException:
+        handle.guard.release()
+        raise
+    try:
+        yield
+    finally:
+        handle.depth -= 1
+        if handle.depth == 0:
+            fd, handle.fd = handle.fd, None
+            try:
+                if fd is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                if fd is not None:
+                    os.close(fd)
+        handle.guard.release()
+
+
+# --------------------------------------------------------------------------
 # values
 # --------------------------------------------------------------------------
 
@@ -262,10 +448,11 @@ class AttemptLedger:
     """The append-only attempt store for one results directory.
 
     Single-writer by design: one batch process owns a results directory at a
-    time. Concurrency is nonetheless not left to chance — every terminal
-    transition verifies it still OWNS the pointer before moving it, so a second
-    process cannot resurrect an older attempt over a newer one. It refuses
-    (`AttemptSuperseded`) instead.
+    time. Concurrency is nonetheless not left to chance — every transition runs
+    inside this encounter's exclusive interprocess lock and re-verifies that it
+    still OWNS the pointer immediately before moving it, so a second process
+    cannot resurrect an older attempt over a newer one even by interleaving
+    exactly at the old check/write gap. It refuses (`AttemptSuperseded`) instead.
     """
 
     def __init__(self, results_dir) -> None:
@@ -281,6 +468,28 @@ class AttemptLedger:
 
     def _history_path(self, document_id: str) -> Path:
         return self._doc_root(document_id) / HISTORY_NAME
+
+    def _lock_path(self, document_id: str) -> Path:
+        return self._doc_root(document_id) / LOCK_NAME
+
+    @contextlib.contextmanager
+    def _locked(self, document_id: str):
+        """Exclusive access to ONE encounter's ledger, for the span of ONE
+        transition.
+
+        The lock file lives inside that encounter's own ledger directory: the
+        act that creates the store creates the lock that protects it, and two
+        encounters in the same batch never contend with each other.
+        """
+        root = self._doc_root(document_id)
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise AttemptLockError(
+                f"the attempt store for {document_id} could not be created "
+                f"({exc}), so no transition for it can be serialized") from exc
+        with _exclusive(root / LOCK_NAME):
+            yield
 
     def published_path(self, document_id: str) -> Path:
         """Where the CURRENT artifact for this encounter is published.
@@ -421,27 +630,52 @@ class AttemptLedger:
         whatever happens next: the process can die, the disk can fill, the
         coder can raise. There is no window in which a new attempt exists and
         an old success is still current.
+
+        The whole open — read the history, allocate the sequence, append the
+        record, move the pointer — runs under this encounter's exclusive lock.
+        Two attempts opened at once therefore cannot allocate the SAME sequence
+        number, and cannot land their pointer writes in the opposite order to
+        their history appends (which is how an older attempt came to be current
+        while a newer one was still running).
         """
-        records = self.history(document_id)
-        sequence = max((int(r.get("sequence") or 0) for r in records), default=0) + 1
-        attempt = Attempt(
-            document_id=str(document_id),
-            document_version=str(document_version or ""),
-            attempt_id=f"{sequence:04d}-{uuid.uuid4().hex[:12]}",
-            sequence=sequence,
-            opened_at=_now(),
-        )
-        entry = self._record(attempt, AttemptState.IN_PROGRESS)
         try:
-            self._append_history(document_id, entry)
-            self._write_pointer(document_id, self._pointer_record(attempt,
-                                                                 AttemptState.IN_PROGRESS))
-        except AttemptLedgerError:
-            # The supersession could not be recorded. The prior pointer/artifact
-            # must not survive as current on the strength of that failure.
+            with self._locked(document_id):
+                records = self.history(document_id)
+                sequence = max((int(r.get("sequence") or 0) for r in records),
+                               default=0) + 1
+                attempt = Attempt(
+                    document_id=str(document_id),
+                    document_version=str(document_version or ""),
+                    attempt_id=f"{sequence:04d}-{uuid.uuid4().hex[:12]}",
+                    sequence=sequence,
+                    opened_at=_now(),
+                )
+                entry = self._record(attempt, AttemptState.IN_PROGRESS)
+                try:
+                    self._append_history(document_id, entry)
+                    self._write_pointer(
+                        document_id,
+                        self._pointer_record(attempt, AttemptState.IN_PROGRESS))
+                except AttemptLedgerError:
+                    # The supersession could not be recorded. The prior pointer/
+                    # artifact must not survive as current on the strength of that
+                    # failure. Done under the lock, so nothing can interleave with
+                    # the invalidation either.
+                    self._invalidate(document_id)
+                    raise
+                return attempt
+        except AttemptLockTimeout:
+            # A LIVE holder exists. By this ledger's own ordering that holder
+            # already moved the pointer off any earlier success when it opened,
+            # so nothing here is consumable and there is nothing to invalidate.
+            # Destroying the live holder's pointer would be strictly worse than
+            # refusing: it would take a running attempt's own record away.
+            raise
+        except AttemptLockError:
+            # The lock could never be taken at all, so the supersession was never
+            # recorded — the same obligation as a failed history append.
             self._invalidate(document_id)
             raise
-        return attempt
 
     def complete(self, attempt: Attempt, payload: dict) -> Path:
         """Durably store and publish this attempt's artifact, then commit it.
@@ -487,74 +721,117 @@ class AttemptLedger:
         (so even a consumer that knows nothing about this ledger cannot read the
         superseded success), and removed when it cannot. Either way the pointer
         ends FAILED, and a FAILED pointer is not consumable.
+
+        Unless a NEWER attempt has since opened — in which case this attempt owns
+        nothing, and only records its failure in the history.
         """
-        entry = self._record(attempt, AttemptState.FAILED, error=str(error or ""))
-        published: str | None = None
-        if tombstone is not None:
-            try:
-                atomic_write_json(self.published_path(attempt.document_id),
-                                  tombstone, indent=2)
-                published = self.published_path(attempt.document_id).name
-            except OSError:
-                published = None
-        stale: str = ""
-        if published is None:
-            try:
-                self.published_path(attempt.document_id).unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                stale = str(exc)
-        # The tombstone is recorded BEFORE the stale-artifact problem is raised.
-        # Losing the FAILED record because the cleanup failed would leave the
-        # encounter looking merely interrupted, which is the weaker and less
-        # actionable of the two states.
-        entry["artifact"] = published or ""
-        entry["stale_artifact_problem"] = stale
-        self._append_history(attempt.document_id, entry)
-        if self._owns(attempt):
+        with self._locked(attempt.document_id):
+            entry = self._record(attempt, AttemptState.FAILED,
+                                 error=str(error or ""))
+            if not self._owns(attempt):
+                # A NEWER attempt owns this encounter. Its published artifact and
+                # its pointer belong to IT: an older attempt failing late must not
+                # overwrite that artifact with a tombstone, nor — the worse case —
+                # DELETE it when no tombstone was supplied, which would strand a
+                # pointer promising a COMPLETED result whose file is gone. The
+                # failure is still true, so it is appended to the history; the
+                # history records what happened, the pointer records what is
+                # current, and only the owner may move the latter.
+                current = self.pointer(attempt.document_id) or {}
+                entry["artifact"] = ""
+                entry["stale_artifact_problem"] = ""
+                entry["superseded_by"] = str(current.get("attempt_id") or "")
+                self._append_history(attempt.document_id, entry)
+                return
+            published: str | None = None
+            if tombstone is not None:
+                try:
+                    atomic_write_json(self.published_path(attempt.document_id),
+                                      tombstone, indent=2)
+                    published = self.published_path(attempt.document_id).name
+                except OSError:
+                    published = None
+            stale: str = ""
+            if published is None:
+                try:
+                    self.published_path(attempt.document_id).unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    stale = str(exc)
+            # The tombstone is recorded BEFORE the stale-artifact problem is
+            # raised. Losing the FAILED record because the cleanup failed would
+            # leave the encounter looking merely interrupted, which is the weaker
+            # and less actionable of the two states.
+            entry["artifact"] = published or ""
+            entry["stale_artifact_problem"] = stale
+            self._append_history(attempt.document_id, entry)
+            # Same compare-and-swap as a publish: re-verified under the lock, one
+            # statement before the pointer moves.
+            self._require_ownership(attempt, "record a failure")
             self._write_pointer(attempt.document_id,
                                 self._pointer_record(attempt, AttemptState.FAILED,
                                                      artifact=published or "",
                                                      error=str(error or "")))
-        if stale:
-            raise AttemptWriteError(
-                f"{attempt.document_id}: the failed attempt is recorded, but its "
-                f"stale published artifact could neither be replaced nor removed "
-                f"({stale})")
+            if stale:
+                raise AttemptWriteError(
+                    f"{attempt.document_id}: the failed attempt is recorded, but "
+                    f"its stale published artifact could neither be replaced nor "
+                    f"removed ({stale})")
 
     # ------------------------------------------------------------- internals
     def _owns(self, attempt: Attempt) -> bool:
         current = self.pointer(attempt.document_id)
         return bool(current) and current.get("attempt_id") == attempt.attempt_id
 
-    def _publish(self, attempt: Attempt, payload: dict, state: AttemptState,
-                 *, error: str) -> Path:
+    def _require_ownership(self, attempt: Attempt, action: str) -> None:
+        """The COMPARE half of the compare-and-swap. Only ever called under the
+        encounter's lock.
+
+        Re-read immediately before the pointer is replaced, not only on entry.
+        Entry-check-plus-lock is already sufficient against every writer that
+        honours the lock; this is what catches one that does not — an older
+        build, a hand-run script, a future caller that reaches `_write_pointer`
+        by another route — instead of letting it silently win the pointer.
+        """
         if not self._owns(attempt):
             raise AttemptSuperseded(
                 f"{attempt.document_id}: attempt {attempt.attempt_id} no longer "
-                f"owns the current-attempt pointer; refusing to publish over a "
+                f"owns the current-attempt pointer; refusing to {action} over a "
                 f"newer attempt")
-        retained = self._doc_root(attempt.document_id) / f"{attempt.attempt_id}.json"
-        published = self.published_path(attempt.document_id)
-        try:
-            atomic_write_json(retained, payload, indent=2)
-            atomic_write_json(published, payload, indent=2)
-        except OSError as exc:
-            raise AttemptWriteError(
-                f"{attempt.document_id}: attempt {attempt.attempt_id} artifact "
-                f"could not be written ({exc})") from exc
-        entry = self._record(attempt, state, error=error)
-        entry["artifact"] = published.name
-        entry["retained_artifact"] = retained.name
-        entry["artifact_sha256"] = _payload_digest(payload)
-        self._append_history(attempt.document_id, entry)
-        self._write_pointer(
-            attempt.document_id,
-            self._pointer_record(attempt, state, artifact=published.name,
-                                 retained=retained.name, error=error,
-                                 artifact_sha256=entry["artifact_sha256"]))
-        return published
+
+    def _publish(self, attempt: Attempt, payload: dict, state: AttemptState,
+                 *, error: str) -> Path:
+        with self._locked(attempt.document_id):
+            self._require_ownership(attempt, "publish")
+            retained = (self._doc_root(attempt.document_id)
+                        / f"{attempt.attempt_id}.json")
+            published = self.published_path(attempt.document_id)
+            try:
+                atomic_write_json(retained, payload, indent=2)
+                atomic_write_json(published, payload, indent=2)
+            except OSError as exc:
+                raise AttemptWriteError(
+                    f"{attempt.document_id}: attempt {attempt.attempt_id} artifact "
+                    f"could not be written ({exc})") from exc
+            entry = self._record(attempt, state, error=error)
+            entry["artifact"] = published.name
+            entry["retained_artifact"] = retained.name
+            entry["artifact_sha256"] = _payload_digest(payload)
+            self._append_history(attempt.document_id, entry)
+            # The SWAP half, one statement before the pointer moves and under the
+            # same lock the entry check was taken under. If it ever fires, the
+            # published bytes above are this attempt's and the pointer still names
+            # the newer attempt — which is fail-closed: `resolve_current` serves
+            # nothing while a newer attempt is IN_PROGRESS, and that newer attempt
+            # overwrites the published path when it terminates.
+            self._require_ownership(attempt, "commit")
+            self._write_pointer(
+                attempt.document_id,
+                self._pointer_record(attempt, state, artifact=published.name,
+                                     retained=retained.name, error=error,
+                                     artifact_sha256=entry["artifact_sha256"]))
+            return published
 
     def _record(self, attempt: Attempt, state: AttemptState, *,
                 error: str = "") -> dict:

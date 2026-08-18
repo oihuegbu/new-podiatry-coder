@@ -19,16 +19,28 @@ WHAT IS PROVEN HERE
   * a COMPLETED attempt for an OLD document version is refused as current;
   * the atomic writer never truncates a file it fails to replace;
   * a results directory with no attempt store keeps its previous behaviour, so
-    the tools that materialize result files themselves are unaffected.
+    the tools that materialize result files themselves are unaffected;
+  * (issue #6 F8-R2) a NEWER attempt that opens in the exact window between an
+    older attempt's ownership check and its pointer commit still wins — proven
+    for a second thread AND for a second OS process — and a late `fail` from an
+    older attempt cannot delete a newer attempt's published result;
+  * the per-document transition lock is released on every failure path, and a
+    holder that never releases is refused on a deadline rather than waited on
+    forever.
 
 No medical code appears in this file; every payload is a synthetic stand-in for
 an artifact shape.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
+import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -38,9 +50,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app.release.attempt_ledger import (  # noqa: E402
-    AttemptLedger, AttemptLedgerError, AttemptState, AttemptSuperseded,
-    AttemptWriteError, atomic_write_json, consumable, document_version_of,
-    resolve_current)
+    AttemptLedger, AttemptLedgerError, AttemptLockTimeout, AttemptState,
+    AttemptSuperseded, AttemptWriteError, atomic_write_json, consumable,
+    document_version_of, resolve_current)
 
 VERSION_1 = "sha256:" + "1" * 64
 VERSION_2 = "sha256:" + "2" * 64
@@ -427,3 +439,417 @@ def test_the_submitter_blocks_a_superseded_artifact_before_it_reads_it(tmp_path,
     assert stats["blocked"] == 1
     assert "IN_PROGRESS" in stats["docs"]["NOTE_O"], stats["docs"]["NOTE_O"]
     assert not (tmp_path / "submissions").exists()
+
+
+# --------------------------------------------------------------------------
+# issue #6 F8-R2 — an older attempt must never regain "current"
+# --------------------------------------------------------------------------
+#
+# The reviewer's reproduction, verbatim: interleave B's `begin` so it lands
+# immediately AFTER A's ownership check and BEFORE A's writes complete. Before
+# the per-document lock this produced a current pointer of A / COMPLETED / v1 —
+# the STALE document version — while B, the newer attempt, was still running,
+# with a history reading A IN_PROGRESS, B IN_PROGRESS, A COMPLETED.
+#
+# These tests inject at exactly that point (`_owns`, the ownership check itself)
+# rather than at a convenient nearby seam, because the whole finding is about
+# what can happen between that call and the pointer write.
+
+
+def lock_is_free(ledger: AttemptLedger, document_id: str) -> bool:
+    """Is this encounter's transition lock genuinely released?
+
+    A RAW `flock` from a SECOND open file description in this same process. The
+    kernel denies that while any description still holds the lock, so a leaked
+    file descriptor is detected — which re-acquiring through the module's own
+    re-entrant registry would NOT detect, because re-entrancy would simply let
+    the same holder back in.
+    """
+    path = ledger._lock_path(document_id)
+    if not path.exists():
+        return True
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def interleave_at_the_ownership_check(monkeypatch, run_once):
+    """Fire `run_once()` the first time any attempt checks whether it still owns
+    the pointer — the exact instruction the reviewer interleaved at."""
+    import app.release.attempt_ledger as module
+    real_owns = module.AttemptLedger._owns
+    fired = []
+
+    def owns_then_interleave(self, attempt):
+        held = real_owns(self, attempt)
+        if not fired:
+            fired.append(True)
+            run_once()
+        return held
+
+    monkeypatch.setattr(module.AttemptLedger, "_owns", owns_then_interleave)
+    return fired
+
+
+def test_a_newer_attempt_opening_mid_publish_leaves_the_older_one_superseded(
+        tmp_path, monkeypatch):
+    """THE F8-R2 reproduction, in-process: B.begin lands inside A's publish.
+
+    Without the lock, B's `begin` completes inside the window (the join below
+    returns), the pointer moves to B, and A's commit then lands ON TOP of it —
+    A / COMPLETED / v1 becomes current. With it, B blocks until A's transition
+    finishes, so whatever order the lock grants, the LAST word belongs to the
+    newer attempt.
+    """
+    ledger = AttemptLedger(tmp_path)
+    older = ledger.begin("NOTE_R2T", VERSION_1)
+
+    newer = []
+    opened = threading.Event()
+
+    def open_the_newer_attempt():
+        opened.set()
+        newer.append(AttemptLedger(tmp_path).begin("NOTE_R2T", VERSION_2))
+
+    thread = threading.Thread(target=open_the_newer_attempt, daemon=True)
+
+    def interleave():
+        thread.start()
+        assert opened.wait(30), "the interleaved thread never started"
+        # Pre-fix this join RETURNS: B's begin runs to completion right here.
+        thread.join(timeout=1.0)
+
+    interleave_at_the_ownership_check(monkeypatch, interleave)
+
+    try:
+        with contextlib.suppress(AttemptSuperseded):
+            ledger.complete(older, artifact("NOTE_R2T", VERSION_1))
+    finally:
+        thread.join(timeout=30)
+    assert not thread.is_alive(), "the newer attempt never finished opening"
+    assert newer, "the newer attempt never opened"
+
+    pointer = ledger.pointer("NOTE_R2T")
+    assert pointer["attempt_id"] == newer[0].attempt_id, (
+        "the OLDER attempt regained the current pointer over a newer one")
+    assert pointer["state"] == "IN_PROGRESS"
+    assert pointer["document_version"] == VERSION_2, (
+        "the stale document version is current again")
+
+    ok, why = consumable(tmp_path, "NOTE_R2T")
+    assert ok is False, "a stale note version regained consumable status"
+    assert "IN_PROGRESS" in why, why
+    assert resolve_current(tmp_path).results == ()
+
+    # ...and the history cannot read "A IN_PROGRESS, B IN_PROGRESS, A COMPLETED"
+    records = ledger.history("NOTE_R2T")
+    opened_at = min(i for i, r in enumerate(records)
+                    if r["attempt_id"] == newer[0].attempt_id)
+    terminal = [i for i, r in enumerate(records)
+                if r["state"] != AttemptState.IN_PROGRESS.value]
+    assert all(i < opened_at for i in terminal), (
+        f"an attempt reached a terminal state AFTER a newer attempt opened: "
+        f"{[(r['attempt_id'], r['state']) for r in records]}")
+    assert older.attempt_id != newer[0].attempt_id
+
+
+def test_a_newer_attempt_in_a_SECOND_PROCESS_is_not_overwritten_either(tmp_path,
+                                                                      monkeypatch):
+    """The same interleaving across a real process boundary.
+
+    A second thread would be excluded by any in-process lock; the acceptance
+    criterion is an INTERPROCESS one, so the newer attempt here is opened by a
+    separate Python process. The proof that the lock crosses the boundary is
+    that the child is still alive — blocked — a full second after it reached its
+    `begin`, and completes promptly once the parent's transition releases.
+    """
+    ledger = AttemptLedger(tmp_path)
+    older = ledger.begin("NOTE_R2P", VERSION_1)
+    ready = tmp_path / "child-reached-begin"
+    script = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
+        "from pathlib import Path\n"
+        "from app.release.attempt_ledger import AttemptLedger\n"
+        f"ledger = AttemptLedger({str(tmp_path)!r})\n"
+        f"Path({str(ready)!r}).write_text('ready')\n"
+        f"attempt = ledger.begin('NOTE_R2P', {VERSION_2!r})\n"
+        "print(attempt.attempt_id)\n")
+    child = {}
+    out = err = ""
+
+    def interleave():
+        proc = subprocess.Popen([sys.executable, "-c", script],
+                                cwd=str(REPO_ROOT), stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+        child["proc"] = proc
+        deadline = time.monotonic() + 120
+        while not ready.exists() and time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(
+                    f"the child exited before reaching begin: {proc.communicate()}")
+            time.sleep(0.02)
+        assert ready.exists(), "the child never reached its begin"
+        time.sleep(1.0)
+        assert proc.poll() is None, (
+            "a SECOND PROCESS opened a newer attempt inside the older attempt's "
+            "publish window — the lock is not interprocess")
+
+    interleave_at_the_ownership_check(monkeypatch, interleave)
+
+    try:
+        with contextlib.suppress(AttemptSuperseded):
+            ledger.complete(older, artifact("NOTE_R2P", VERSION_1))
+    finally:
+        proc = child.get("proc")
+        if proc is not None:
+            out, err = proc.communicate(timeout=60)
+    assert proc.returncode == 0, err
+    newer_attempt_id = out.strip()
+    assert newer_attempt_id, err
+
+    pointer = ledger.pointer("NOTE_R2P")
+    assert pointer["attempt_id"] == newer_attempt_id, (
+        "the older attempt regained the current pointer over a newer PROCESS")
+    assert pointer["state"] == "IN_PROGRESS"
+    assert pointer["document_version"] == VERSION_2
+    ok, why = consumable(tmp_path, "NOTE_R2P")
+    assert ok is False and "IN_PROGRESS" in why, why
+
+
+def test_a_late_failure_cannot_delete_a_newer_attempts_published_result(tmp_path):
+    """The other half of "an older attempt may not publish over a newer one".
+
+    `fail` used to write (or, with no tombstone, UNLINK) the published path
+    before it ever looked at ownership. A stale attempt failing late therefore
+    deleted a newer attempt's COMPLETED artifact out from under a pointer that
+    still promised it — a completed claim turned into "its artifact is missing".
+    """
+    ledger = AttemptLedger(tmp_path)
+    stale = ledger.begin("NOTE_R2F", VERSION_1)
+    fresh = ledger.begin("NOTE_R2F", VERSION_2)
+    published = ledger.complete(fresh, artifact("NOTE_R2F", VERSION_2))
+    assert consumable(tmp_path, "NOTE_R2F") == (True, "")
+
+    ledger.fail(stale, error="late failure, no tombstone")
+
+    assert published.exists(), (
+        "an older attempt's failure deleted the newer attempt's published result")
+    payload = json.loads(published.read_text())
+    assert payload["encounter"]["source_document"]["document_version"] == VERSION_2
+    assert consumable(tmp_path, "NOTE_R2F") == (True, "")
+    pointer = ledger.pointer("NOTE_R2F")
+    assert pointer["attempt_id"] == fresh.attempt_id
+    assert pointer["state"] == AttemptState.COMPLETED.value
+
+    # and with a tombstone it must not OVERWRITE the newer result either
+    ledger.fail(stale, error="late failure, with tombstone",
+                tombstone={"processing_error": "output failed"})
+    payload = json.loads(published.read_text())
+    assert payload["encounter"]["source_document"]["document_version"] == VERSION_2
+    assert consumable(tmp_path, "NOTE_R2F") == (True, "")
+
+    # the failure is still recorded — the history says what happened, the
+    # pointer says what is current, and only the owner may move the pointer
+    failures = [r for r in ledger.history("NOTE_R2F")
+                if r["attempt_id"] == stale.attempt_id
+                and r["state"] == AttemptState.FAILED.value]
+    assert len(failures) == 2
+    assert all(r["superseded_by"] == fresh.attempt_id for r in failures)
+
+
+def test_the_ordinary_sequential_attempt_is_unaffected_by_the_lock(tmp_path):
+    """The common case: nothing concurrent, and re-runs still work normally."""
+    ledger = AttemptLedger(tmp_path)
+    first = ledger.begin("NOTE_R2S", VERSION_1)
+    ledger.complete(first, artifact("NOTE_R2S", VERSION_1))
+    assert consumable(tmp_path, "NOTE_R2S") == (True, "")
+    assert lock_is_free(ledger, "NOTE_R2S")
+
+    second = ledger.begin("NOTE_R2S", VERSION_2)
+    assert second.sequence == first.sequence + 1
+    assert consumable(tmp_path, "NOTE_R2S")[0] is False
+    published = ledger.complete(second, artifact("NOTE_R2S", VERSION_2))
+    assert consumable(tmp_path, "NOTE_R2S") == (True, "")
+    assert json.loads(published.read_text())["encounter"]["source_document"][
+        "document_version"] == VERSION_2
+    assert lock_is_free(ledger, "NOTE_R2S")
+
+    # a second encounter in the same directory never contends with the first
+    other = ledger.begin("NOTE_R2S_OTHER", VERSION_1)
+    ledger.complete(other, artifact("NOTE_R2S_OTHER", VERSION_1))
+    current = resolve_current(tmp_path)
+    assert sorted(r.document_id for r in current.results) == [
+        "NOTE_R2S", "NOTE_R2S_OTHER"]
+
+
+def test_attempts_opened_at_once_get_distinct_sequences_and_the_last_one_wins(
+        tmp_path):
+    """Concurrent `begin`s used to race on the sequence number too: each read the
+    history, then all wrote. Under the lock they serialize, so the numbers are
+    distinct and the pointer belongs to the one that opened last."""
+    ledger = AttemptLedger(tmp_path)
+    opened = []
+    barrier = threading.Barrier(4, timeout=30)
+
+    def open_one():
+        barrier.wait()
+        opened.append(AttemptLedger(tmp_path).begin("NOTE_R2Q", VERSION_1))
+
+    threads = [threading.Thread(target=open_one, daemon=True) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+        assert not thread.is_alive()
+
+    assert sorted(a.sequence for a in opened) == [1, 2, 3, 4], opened
+    assert len({a.attempt_id for a in opened}) == 4
+    last = max(opened, key=lambda a: a.sequence)
+    assert ledger.pointer("NOTE_R2Q")["attempt_id"] == last.attempt_id
+    assert lock_is_free(ledger, "NOTE_R2Q")
+
+
+def test_the_transition_lock_is_released_on_every_failure_path(tmp_path):
+    """A lock that a failing transition keeps is worse than the bug it fixes: it
+    wedges the encounter for every later attempt. Each terminal transition's
+    failure paths are exercised and the lock checked from a second descriptor."""
+    import app.release.attempt_ledger as module
+
+    ledger = AttemptLedger(tmp_path)
+    stale = ledger.begin("NOTE_R2L", VERSION_1)
+    fresh = ledger.begin("NOTE_R2L", VERSION_2)
+    assert lock_is_free(ledger, "NOTE_R2L"), "begin kept the lock"
+
+    # 1. a refused publish (the superseded path)
+    with pytest.raises(AttemptSuperseded):
+        ledger.complete(stale, artifact("NOTE_R2L", VERSION_1))
+    assert lock_is_free(ledger, "NOTE_R2L"), "a superseded publish kept the lock"
+
+    # 2. a completion refused for a changed document version, before any write
+    with pytest.raises(AttemptWriteError):
+        ledger.complete(fresh, artifact("NOTE_R2L", VERSION_1))
+    assert lock_is_free(ledger, "NOTE_R2L")
+
+    # 3. an artifact write that fails mid-transition (the round-8 fault injection)
+    real = module.atomic_write_json
+    with pytest.MonkeyPatch.context() as patch:
+        def full_disk(path, payload, *, indent=None):
+            if isinstance(payload, dict) and payload.get("schema") == module.POINTER_SCHEMA:
+                return real(path, payload, indent=indent)
+            raise OSError(28, "No space left on device")
+        patch.setattr(module, "atomic_write_json", full_disk)
+        with pytest.raises(AttemptWriteError):
+            ledger.complete(fresh, artifact("NOTE_R2L", VERSION_2))
+        assert lock_is_free(ledger, "NOTE_R2L"), "a failed write kept the lock"
+        with pytest.raises(AttemptWriteError):
+            ledger.system_retry(fresh, artifact("NOTE_R2L", VERSION_2),
+                                error="dependency down")
+        assert lock_is_free(ledger, "NOTE_R2L"), "a failed system_retry kept the lock"
+
+    # 4. a `fail` whose stale artifact can neither be replaced nor removed
+    ledger.complete(fresh, artifact("NOTE_R2L", VERSION_2))
+    with pytest.MonkeyPatch.context() as patch:
+        real_unlink = Path.unlink
+
+        def stubborn(self, *args, **kwargs):
+            if self.name.endswith("NOTE_R2L_results.json"):
+                raise OSError(13, "Permission denied")
+            return real_unlink(self, *args, **kwargs)
+        patch.setattr(Path, "unlink", stubborn)
+        with pytest.raises(AttemptWriteError):
+            ledger.fail(fresh, error="output failed")
+    assert lock_is_free(ledger, "NOTE_R2L"), "a raising fail() kept the lock"
+
+    # 5. a `begin` whose supersession cannot be recorded at all
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(module.AttemptLedger, "_append_history",
+                      lambda self, doc, record: (_ for _ in ()).throw(
+                          AttemptWriteError("no space")))
+        with pytest.raises(AttemptWriteError):
+            ledger.begin("NOTE_R2L", VERSION_2)
+    assert lock_is_free(ledger, "NOTE_R2L"), "a failed begin kept the lock"
+
+    # and the encounter is still usable afterwards — not wedged
+    after = ledger.begin("NOTE_R2L", VERSION_2)
+    ledger.complete(after, artifact("NOTE_R2L", VERSION_2))
+    assert consumable(tmp_path, "NOTE_R2L") == (True, "")
+
+
+def test_a_holder_that_never_releases_is_refused_on_a_deadline(tmp_path,
+                                                               monkeypatch):
+    """The one thing the kernel cannot do for us. An flock dies with its holder,
+    so a crash cannot leave a stale lock — but a LIVE, wedged holder can keep it
+    forever, and a blocking acquire would hang the whole batch with no
+    diagnosis. Acquisition is bounded and refuses by name instead.
+    """
+    import app.release.attempt_ledger as module
+    ledger = AttemptLedger(tmp_path)
+    first = ledger.begin("NOTE_R2W", VERSION_1)
+    ledger.complete(first, artifact("NOTE_R2W", VERSION_1))
+
+    monkeypatch.setattr(module, "LOCK_TIMEOUT_S", 0.2)
+    wedged = os.open(str(ledger._lock_path("NOTE_R2W")), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(wedged, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        started = time.monotonic()
+        with pytest.raises(AttemptLockTimeout) as raised:
+            ledger.begin("NOTE_R2W", VERSION_2)
+        assert time.monotonic() - started < 15, "the acquire was not bounded"
+        assert "still held after" in str(raised.value), raised.value
+    finally:
+        fcntl.flock(wedged, fcntl.LOCK_UN)
+        os.close(wedged)
+
+    # A refused acquire must NOT destroy the live holder's state: a holder that
+    # exists has, by this ledger's ordering, already superseded any earlier
+    # success, so there is nothing to invalidate and a running attempt's own
+    # record must survive.
+    assert ledger.pointer("NOTE_R2W")["attempt_id"] == first.attempt_id
+    # ...and once released, the encounter opens normally again.
+    later = ledger.begin("NOTE_R2W", VERSION_2)
+    assert later.sequence == first.sequence + 1
+
+
+def test_a_thread_that_never_releases_is_refused_on_a_deadline_too(tmp_path,
+                                                                  monkeypatch):
+    """The same bound, one level up. `flock` cannot exclude two threads of one
+    process (it is held by the open file description), so a thread guard does
+    that — and a guard acquired without a deadline would simply relocate the
+    hang the flock deadline exists to remove."""
+    import app.release.attempt_ledger as module
+    ledger = AttemptLedger(tmp_path)
+    first = ledger.begin("NOTE_R2G", VERSION_1)
+    ledger.complete(first, artifact("NOTE_R2G", VERSION_1))
+
+    monkeypatch.setattr(module, "LOCK_TIMEOUT_S", 0.2)
+    holding, release = threading.Event(), threading.Event()
+
+    def wedge():
+        with module._exclusive(ledger._lock_path("NOTE_R2G")):
+            holding.set()
+            release.wait(60)
+
+    thread = threading.Thread(target=wedge, daemon=True)
+    thread.start()
+    try:
+        assert holding.wait(30), "the wedging thread never took the lock"
+        started = time.monotonic()
+        with pytest.raises(AttemptLockTimeout) as raised:
+            ledger.begin("NOTE_R2G", VERSION_2)
+        assert time.monotonic() - started < 15, "the guard acquire was not bounded"
+        assert "another thread of this process" in str(raised.value), raised.value
+    finally:
+        release.set()
+        thread.join(timeout=30)
+    assert not thread.is_alive()
+
+    assert ledger.pointer("NOTE_R2G")["attempt_id"] == first.attempt_id
+    later = ledger.begin("NOTE_R2G", VERSION_2)
+    assert later.sequence == first.sequence + 1

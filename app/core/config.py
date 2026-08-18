@@ -77,6 +77,12 @@ AGGREGATE_RESULTS = "all_results.json"   # the combined corpus view, derived
 ATTEMPT_DIRNAME = "attempts"             # the append-only attempt store + governance marker
 ATTEMPT_POINTER = "current.json"         # the atomic current-attempt pointer
 ATTEMPT_HISTORY = "ledger.jsonl"         # the append-only attempt history
+ATTEMPT_LOCK = "attempt.lock"            # the per-document interprocess transition lock
+# How long a ledger transition waits for the per-document lock before refusing.
+# Every transition holds it only across its own record+pointer commit (never across
+# the coding work itself), so contention is millisecond-scale; a wait this long means
+# a holder is wedged, and refusing loudly beats blocking a batch forever.
+ATTEMPT_LOCK_TIMEOUT_S: float = float(os.getenv("ATTEMPT_LOCK_TIMEOUT_S", "60"))
 # Phase-3 durable provenance store (SQLite): a DEDICATED database, separate from the
 # authoritative compliance.db (different lifecycle + retention). Append-only, WAL.
 PROVENANCE_DB = BASE_DIR / Path(os.getenv("PROVENANCE_DB", "output/provenance.db"))
