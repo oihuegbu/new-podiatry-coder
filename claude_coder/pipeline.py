@@ -268,11 +268,23 @@ def code_encounter(
         # be routed anywhere merely because two models phrased a finding differently.
         consensus = None
         recovery = None
+        recall = None
+        #: reading channel id -> the exact text facts anchored in it were verified
+        #: against. The primary transcription is the implicit "" reading and is never
+        #: listed here (see `provenance.readings_map`).
+        readings: dict[str, str] = {}
         if extract_llm_b is not None:
-            consensus, source_evidence, recovery = _run_graph_consensus(
+            consensus, source_evidence, recovery, recall = _run_graph_consensus(
                 note_text, facts, billing_context, extract_llm_b, profiles,
                 document_version, source_evidence, source_reader,
                 enforce_independence=enforce_second_reading_independence)
+            # Every reading a fact may now be anchored in. The relation kernel re-reads
+            # the document between two endpoint mentions to prove an edge's DIRECTION,
+            # and it can only do that against the string those mentions were verified
+            # in — so a recovered event's edges are proven in the reading that found it,
+            # never mislocated in a transcription that may not contain the passage.
+            if recall is not None:
+                readings[recall.channel_id] = recall.text
             # ---- RECALL redundancy, not only axis agreement (issue #6 F7-R3) ---------
             # A performed service the PRIMARY extractor missed entirely used to be
             # recorded in consensus metadata and dropped, so the encounter proceeded with
@@ -299,7 +311,7 @@ def code_encounter(
                         _prov.validate_relations(
                             list(relations) + _prov.bind_relation_evidence(
                                 recovery.relations, trial_facts),
-                            trial_facts, note_text)
+                            trial_facts, note_text, readings=readings)
                         if recovery.relations else relations)
                 except _prov.RelationIntegrityError as exc:
                     recovery.withdraw(
@@ -321,11 +333,9 @@ def code_encounter(
         # image digest and the region back onto the span. Every deterministic channel
         # already in the document is free, so this runs for every quotation; the PAID
         # channel is escalated to later, and only where it can change the answer.
-        source_targets = _prov.span_targets(facts)
         source_reconciliation = None
         if source_evidence is not None:
-            from app.contracts.source_evidence import reconcile_spans
-            source_reconciliation = reconcile_spans(source_evidence, source_targets)
+            source_reconciliation = _reconcile_readings(source_evidence, facts, recall)
             _prov.apply_reconciliation(facts, source_reconciliation)
             audit_hashes.append(audit_repository.append(
                 encounter_id, "source_evidence_reconciliation",
@@ -620,8 +630,7 @@ def code_encounter(
     result.document_version = document_version
     if (source_evidence is not None and source_reader is not None
             and source_reconciliation is not None):
-        from app.contracts.source_evidence import (
-            pages_needing_independent_read, reconcile_spans)
+        from app.contracts.source_evidence import pages_needing_independent_read
         billed_span_ids = {s.span_id for ln in result.billable_lines
                            for s in (ln.fact.evidence or []) if s.span_id}
         wanted = pages_needing_independent_read(
@@ -640,7 +649,7 @@ def code_encounter(
             if extra and channel is not None:
                 try:
                     escalated = source_evidence.with_channel(channel, extra)
-                    reconciled = reconcile_spans(escalated, source_targets)
+                    reconciled = _reconcile_readings(escalated, facts, recall)
                 except Exception as exc:
                     # A second read that cannot be INCORPORATED proves nothing either.
                     # The first reconciliation stands (those quotations are still
@@ -663,7 +672,8 @@ def code_encounter(
                             encounter_id, date_of_service,
                             "source_evidence_audit_persistence", exc, source)
     result.source_reconciliation = source_reconciliation
-    result.gates = pre_retrieval_gates + gates.run_gates(result, note_text, source)
+    result.gates = pre_retrieval_gates + gates.run_gates(result, note_text, source,
+                                                        readings=readings)
     decide(result, source=source)
     # Actionable documentation guidance for whatever could not be coded confidently.
     from . import recommendations as _recs
@@ -804,6 +814,49 @@ def _system_hold_result(encounter_id: str, date_of_service: str | None,
     return result
 
 
+def _reconcile_readings(document, facts, recall, *, only=None):
+    """Prove every anchored quotation against the ORIGINAL DOCUMENT — each one in the
+    reading its character offsets actually belong to (issue #6 F7-R3).
+
+    A quotation the primary transcription proposed is located by the transcription's own
+    page arithmetic; a quotation an INDEPENDENT reading of the document proposed is
+    located by that reading's. Proving both with one set of offsets would not be a
+    smaller error than proving neither — it would name a page confidently and wrongly.
+    The two records are then ONE record, joined on span id (which is salted with the
+    reading, so the union cannot collide).
+    """
+    from app.contracts.source_evidence import (merge_reconciliations, reconcile_reading,
+                                               reconcile_spans)
+    from . import provenance as _prov
+
+    by_reading = _prov.span_targets_by_reading(facts)
+
+    def _wanted(targets):
+        return [t for t in targets if only is None or t.span_id in only]
+
+    # ALWAYS produced, even with no targets: the record carries the per-page outcomes and
+    # channel identities every downstream gate and certificate reads, and an encounter
+    # with nothing to prove still has to say which pages were read by whom.
+    parts = [reconcile_spans(document, _wanted(by_reading.get("", [])))]
+    if recall is not None:
+        targets = _wanted(by_reading.get(recall.channel_id, []))
+        if targets:
+            parts.append(reconcile_reading(document, targets, recall))
+    # A quotation anchored in a reading this call was not given cannot be located on any
+    # page, and the honest outcome is a loud stop rather than a quietly unreconciled
+    # span. `source_evidence_gate` would already hold such a span as unproven, but a
+    # reading that exists and is not routed is a defect in THIS function, not an
+    # encounter-level fact, and it must not present as one.
+    known = {"", recall.channel_id if recall is not None else ""}
+    stray = sorted(key for key in by_reading if key not in known)
+    if stray:
+        raise RuntimeError(
+            f"evidence is anchored in reading(s) {stray} that this reconciliation was "
+            f"not given; a quotation cannot be proven against a page in a reading "
+            f"nobody supplied")
+    return merge_reconciliations(*parts)
+
+
 def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profiles,
                          document_version, source_evidence, source_reader, *,
                          enforce_independence: bool = False):
@@ -859,11 +912,41 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
             f"; two readings by one vendor share training data, tokeniser and failure "
             f"modes, so their agreement is self-confidence rather than confirmation")
 
+    # ---- THE SECOND READING READS THE DOCUMENT, NOT THE FIRST READING'S TRANSCRIPT ---
+    # Both extractors used to be handed the SAME string: the primary vision
+    # transcription. That makes the second reading a check on what the transcription
+    # CONTAINED and nothing at all on what it LEFT OUT — a service the transcription
+    # never captured is absent from the only text either extractor ever sees, so both
+    # miss it identically and the claim is silently short a line, with every control
+    # reporting clean (issue #6 F7-R3, reopened).
+    #
+    # The compiler already built an independent reading of the ORIGINAL DOCUMENT for
+    # every note, and `recall_channel` is its own answer to which channel may be
+    # evidence about the primary one — the document's own text layer where it exists
+    # (free, deterministic, reproducible from the same bytes forever), a paid page read
+    # where it does not. No new document-reading mechanism is introduced here; what
+    # changes is that the recall extraction is run over THAT reading.
+    #
+    # Falling back to `note_text` when no channel could read a single page is not a
+    # silent degradation: the second reading is then exactly what it was before (a
+    # disagreement detector over one transcript), the fact is recorded on the report,
+    # and every quotation on an unreadable page is already held by source
+    # reconciliation.
+    recall = None
+    if source_evidence is not None:
+        from app.contracts.source_evidence import recall_reading as _recall_reading
+        candidate = _recall_reading(source_evidence)
+        recall = candidate if (candidate is not None and candidate.usable) else None
+    recall_text = recall.text if recall is not None else note_text
     extracted_b = extraction.extract_note(
-        note_text, extract_llm_b, billing_context,
+        recall_text, extract_llm_b, billing_context,
         run_id=_SECOND_READING_RUN_ID,
         model_profile=profiles.get("second_extraction"))
-    _prov.anchor_facts(note_text, extracted_b.facts, document_version=document_version)
+    # Anchored into the reading it was extracted from, and stamped with WHICH reading
+    # that is, so nothing downstream slices the wrong string.
+    _prov.anchor_facts(recall_text, extracted_b.facts, document_version=document_version,
+                       reading_channel_id=(recall.channel_id if recall is not None
+                                           else None))
     # ONE alignment, shared: an event the axis comparison counted as MATCHED must never
     # also be proposed to the union as a new event, and the only way to guarantee that is
     # for both to read the same correspondence rather than recompute it.
@@ -871,11 +954,24 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
     report, primary_by_id, second_by_node = _gc.compare(
         facts, extracted_b.facts, second_origin=extracted_b.origin, alignment=alignment)
     pairs, _unmatched_primary_facts, unmatched_second_facts = alignment
-    # Identity first, page reads second: only a candidate that rests on document text no
-    # primary event rests on can change the claim, so only those are worth proving.
+    # Identity first, page reads second. A candidate is only worth paying to prove when
+    # it could actually change the claim: it must rest on document text no primary event
+    # rests on AND fail to corefer with any primary event. A candidate the record already
+    # carries is settled here, for free, before a page is read (issue #6 F7-R3).
     candidates = _union.propose(facts, unmatched_second_facts)
     report.independent_providers = independent_providers
     report.independence_enforced = bool(enforce_independence)
+    # The recall control's own reach, stated in the durable record: which reading it ran
+    # over, and which pages of the document no reading other than the transcription
+    # covered. On an uncovered page an omitted service remains unrecoverable, and that
+    # has to be a visible property of the run rather than an inference from an empty
+    # recovery list.
+    report.recall_reading_channel_id = (recall.channel_id if recall is not None else "")
+    report.recall_uncovered_pages = (tuple(recall.uncovered_pages)
+                                     if recall is not None
+                                     else tuple(p.page_number
+                                                for p in source_evidence.pages)
+                                     if source_evidence is not None else ())
 
     reconciliation = None
     wanted = set(_union.pending_span_ids(candidates))
@@ -885,11 +981,9 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
     if source_evidence is not None and wanted:
         from app.contracts.source_evidence import (ChannelIndependenceError,
                                                    pages_needing_independent_read,
-                                                   reconcile_spans,
                                                    require_independent_channel)
-        targets = [t for t in _prov.span_targets(list(facts) + list(extracted_b.facts))
-                   if t.span_id in wanted]
-        reconciliation = reconcile_spans(source_evidence, targets)
+        both = list(facts) + list(extracted_b.facts)
+        reconciliation = _reconcile_readings(source_evidence, both, recall, only=wanted)
         # TARGETED escalation, exactly as the directive asks: pay for an independent read
         # of only the pages a disagreeing quotation -- or a candidate new event -- sits on
         # that no channel could read.
@@ -914,7 +1008,12 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
                     escalated = source_evidence.with_channel(
                         channel, source_reader.read_pages(pages),
                         require_independent=True)
-                    reconciled = reconcile_spans(escalated, targets)
+                    # `recall` is deliberately NOT recomputed against the escalated
+                    # document: it is the exact string the second extraction was
+                    # anchored into, and re-deriving it here (the paid channel may now
+                    # cover more pages than the text layer) would move every offset
+                    # those spans were verified at.
+                    reconciled = _reconcile_readings(escalated, both, recall, only=wanted)
                 except ChannelIndependenceError:
                     # A control that is not independent is MISCONFIGURED, not
                     # unavailable. Recording it as "verification unavailable" would turn
@@ -947,7 +1046,7 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
         taken_ids={str(getattr(f, "fact_id", "") or "") for f in facts},
         id_prefix=f"{_SECOND_READING_RUN_ID}-")
     report.recovered_events = recovery.as_records()
-    return report, source_evidence, recovery
+    return report, source_evidence, recovery, recall
 
 
 def _model_profile_identity(extract_llm, verify_llm, corroborate_llm,
@@ -1042,14 +1141,48 @@ def _attach_recommendations(result: CodingResult) -> None:
             item["recommendation"] = rec["recommendation"]
 
 
+def _occurrence_context(result: CodingResult) -> tuple[dict, set]:
+    """What the RECORD says about which events are separate, for occurrence
+    reconciliation: each event's service episode, and every explicitly separated pair."""
+    from .models import RelationPredicate, RelationState
+    episodes: dict[str, str] = {}
+    for intent in (result.claim_line_intents or []):
+        for event_id in (intent.clinical_event_ids or []):
+            if intent.service_episode_id:
+                episodes[str(event_id)] = str(intent.service_episode_id)
+    separated = {frozenset((str(r.subject_event_id), str(r.object_event_id)))
+                 for r in (result.relations or [])
+                 if r.predicate is RelationPredicate.SEPARATE_FROM
+                 and r.state is RelationState.ASSERTED}
+    return episodes, separated
+
+
 def dedup_lines(result: CodingResult) -> None:
-    """Mechanic 4 — two documented phrases that resolve to the SAME code are one
-    billable line, not two. Keep the first occurrence (union its evidence) and
-    exclude the rest from the claim, keeping them in the audit trail. Agnostic: a
-    set-merge on the resolved (code, system), never a named code. Genuinely
-    repeated services are expressed through units/modifiers, not a second
-    identical line, so collapsing here prevents accidental double-billing while
-    the MUE gate still governs unit counts."""
+    """Mechanic 4 — OCCURRENCE RECONCILIATION: two documented mentions that resolve to
+    the SAME authoritative code are one billable line, and are a second BILLABLE
+    OCCURRENCE only when the record says they are.
+
+    This is where procedure identity is finally settled. Two mentions that resolve to
+    one authoritative code describe one procedure by the only authority that can say so
+    — the descriptor set — however differently they were written. Whether that one
+    procedure happened once or twice is a different question, and it is answered here by
+    `claude_coder.coreference`, the same test the event union and eligibility use, on the
+    record's own axes: anatomy, laterality, performer, approach, an explicitly distinct
+    site/session/objective/encounter, an asserted separation, a different episode.
+
+    UNITS ACCUMULATE ONLY FOR AN ESTABLISHED SECOND OCCURRENCE. They used to accumulate
+    whenever the duplicate quoted text the first line had not quoted — so one service
+    described twice in different words became two units — justified by the
+    medically-unlikely-edit ceiling catching anything excessive. A ceiling is a limit on
+    what MAY be billed; it is never evidence that a service was performed twice, and a
+    service whose documented repeat count is two is inside every ceiling that permits
+    two. That reasoning is gone (issue #6 F7-R3, reopened): an unestablished repeat is
+    now one line with the units the record itself states, and the merged mention stays in
+    the audit trail with the reason it did not add an occurrence.
+
+    Agnostic: a set-merge on the resolved (code, system), never a named code."""
+    from . import coreference as _coref
+    episodes, separated = _occurrence_context(result)
     seen: dict[tuple[str, str], ResolvedLine] = {}
     for ln in result.lines:
         if not (ln.resolved and ln.fact.billable and not ln.excluded_reason):
@@ -1059,24 +1192,30 @@ def dedup_lines(result: CodingResult) -> None:
         if keep is None:
             seen[key] = ln
             continue
-        # A duplicate that carries NEW evidence is a separately-documented instance,
-        # not a re-mention: accumulate its units so a repeated service is not
-        # silently dropped (underbilled). The MUE gate caps the total — an
-        # accumulation past the unit limit BLOCKS release, so this can never silently
-        # overbill either. A duplicate whose evidence is already present is a
-        # re-mention of the same event and is simply merged.
-        keep_texts = {s.text for s in keep.fact.evidence}
-        new_spans = [s for s in ln.fact.evidence if s.text not in keep_texts]
+        verdict, reason = _coref.event_verdict(
+            left_kind=keep.fact.kind, right_kind=ln.fact.kind,
+            left_action=keep.fact.description, right_action=ln.fact.description,
+            left_attributes=keep.fact.attributes, right_attributes=ln.fact.attributes,
+            left_episode=episodes.get(str(keep.fact.fact_id)),
+            right_episode=episodes.get(str(ln.fact.fact_id)),
+            explicitly_separated=frozenset(
+                (str(keep.fact.fact_id), str(ln.fact.fact_id))) in separated)
+        # The merged mention's evidence is kept either way: it is what the record says
+        # about this service, and losing it would make the surviving line rest on less
+        # documentation than the encounter actually has.
         keep.fact.evidence = list(keep.fact.evidence) + list(ln.fact.evidence)
-        if new_spans:
+        if _coref.is_additional_occurrence(verdict):
             keep.units += ln.units
-            keep.rationale = (f"{keep.rationale}; merged a separately-documented "
-                              f"repeat — units accumulated (MUE-capped)")
-            ln.excluded_reason = (f"repeat of {ln.chosen.code} — units folded into "
-                                  f"the primary line (MUE governs the total)")
+            keep.rationale = (f"{keep.rationale}; a SECOND DOCUMENTED OCCURRENCE was "
+                              f"folded in — {reason}")
+            ln.excluded_reason = (f"second documented occurrence of {ln.chosen.code} — "
+                                  f"units folded into the primary line ({reason})")
         else:
-            ln.excluded_reason = (f"duplicate of {ln.chosen.code} already on the "
-                                  f"claim — merged into a single line")
+            keep.rationale = (f"{keep.rationale}; a second mention of this service was "
+                              f"merged without adding units — {reason}")
+            ln.excluded_reason = (f"{ln.chosen.code} is already on the claim and the "
+                                  f"record documents no second occurrence — merged into "
+                                  f"a single line ({reason})")
 
 
 def apply_section_applicability(result: CodingResult) -> None:

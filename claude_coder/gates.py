@@ -43,13 +43,27 @@ def dos_gate(result: CodingResult) -> GateResult:
                       f"DOS = {result.date_of_service}", "input contract")
 
 
-def evidence_gate(result: CodingResult, note_text: str) -> GateResult:
-    note = _norm(note_text)
+def evidence_gate(result: CodingResult, note_text: str,
+                  readings: dict[str, str] | None = None) -> GateResult:
+    """Is every billable line quoted VERBATIM from a reading of this document?
+
+    `readings` names the additional readings of the ORIGINAL DOCUMENT this encounter
+    actually took — the document's own text layer, or a paid page read — keyed by
+    channel id. A quotation an independent reading proposed is verbatim in THAT reading
+    and, when the primary transcription omitted the passage, in no other; checking it
+    against the transcription alone would block precisely the service the independent
+    reading exists to recover (issue #6 F7-R3). The bar is unchanged — a quotation must
+    be verbatim in a reading of the original document, never merely plausible — and
+    WHICH reading proved it is recorded separately by source reconciliation, which is
+    what decides whether the page itself backs it.
+    """
+    texts = [_norm(note_text)] + [_norm(t) for t in (readings or {}).values()]
     outcomes: list[Outcome] = []
     misses: list[str] = []
     for ln in result.billable_lines:
         spans = ln.fact.evidence
-        present = any(_norm(s.text) and _norm(s.text) in note for s in spans)
+        present = any(_norm(s.text) and any(_norm(s.text) in note for note in texts)
+                      for s in spans)
         outcomes.append(Outcome.PASS if present else Outcome.BLOCKED)
         if not present:
             misses.append(ln.chosen.code if ln.chosen else ln.fact.description)
@@ -697,14 +711,18 @@ def source_manifest_gate(result: CodingResult) -> GateResult:
     return GateResult("source_manifest", Outcome.PASS, detail, "capability manifest")
 
 
-def run_gates(result: CodingResult, note_text: str, source: CodeSource) -> list[GateResult]:
-    """All mandatory gates. Add a gate here (never a code list) as coverage grows."""
+def run_gates(result: CodingResult, note_text: str, source: CodeSource,
+              readings: dict[str, str] | None = None) -> list[GateResult]:
+    """All mandatory gates. Add a gate here (never a code list) as coverage grows.
+
+    `readings` is every ADDITIONAL reading of the original document this encounter took,
+    keyed by channel id; `note_text` is always the primary transcription."""
     try:
         return [
             source_manifest_gate(result),
             claim_ownership_gate(result),
             dos_gate(result),
-            evidence_gate(result, note_text),
+            evidence_gate(result, note_text, readings),
             source_evidence_gate(result),
             code_active_gate(result, source),
             medical_necessity_gate(result, source),

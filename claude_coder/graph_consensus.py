@@ -210,6 +210,16 @@ class ConsensusReport:
     #: event the primary extractor missed was recorded here and silently dropped, and the
     #: encounter under-coded with no integrity complaint (issue #6 F7-R3).
     recovered_events: tuple[dict[str, Any], ...] = ()
+    #: WHICH READING the recall extraction was actually run over. Empty means it was run
+    #: over the primary transcription -- the pre-F7-R3 behaviour, which can only recover
+    #: what the primary EXTRACTION missed, never what the TRANSCRIPTION missed. A reader
+    #: of this record must be able to tell those two situations apart.
+    recall_reading_channel_id: str = ""
+    #: Pages no independent reading covered, so the recall extraction never saw them.
+    #: This is the control's own blind spot, stated rather than left to be inferred from
+    #: an empty `recovered_events`: on these pages "nothing extra was found" and "nothing
+    #: was looked at" are indistinguishable, and only one of them is evidence.
+    recall_uncovered_pages: tuple[int, ...] = ()
     escalated_pages: tuple[int, ...] = ()
     escalation_detail: str = ""
 
@@ -231,6 +241,8 @@ class ConsensusReport:
             "unmatched_primary": [dict(u) for u in self.unmatched_primary],
             "unmatched_second": [dict(u) for u in self.unmatched_second],
             "recovered_events": [dict(u) for u in self.recovered_events],
+            "recall_reading_channel_id": self.recall_reading_channel_id,
+            "recall_uncovered_pages": list(self.recall_uncovered_pages),
             "escalated_pages": list(self.escalated_pages),
             "escalation_detail": self.escalation_detail,
         }

@@ -68,9 +68,16 @@ def _span_id(document_sha256: str, document_version: str, span: EvidenceSpan,
 
 
 def anchor_span(note_text: str, span: EvidenceSpan, *, start_hint: int | None = None,
-                document_version: str | None = None) -> EvidenceSpan:
+                document_version: str | None = None,
+                reading_channel_id: str | None = None) -> EvidenceSpan:
     """Return a copy of `span` carrying its verified offsets + content hash, or an
-    UNANCHORED copy (anchored=False) when the quote is not verbatim in the source."""
+    UNANCHORED copy (anchored=False) when the quote is not verbatim in the source.
+
+    `reading_channel_id` names WHICH reading of the document `note_text` is, and is
+    carried on the span so a later consumer slices the same string these offsets were
+    verified against. The span id needs no extra salt for it: the id already includes
+    `_sha(note_text)`, so two readings of one document produce different ids for the
+    same quotation by construction."""
     doc_hash = _sha(note_text)
     version = str(document_version or doc_hash)
     hint = span.start if start_hint is None else start_hint
@@ -81,17 +88,40 @@ def anchor_span(note_text: str, span: EvidenceSpan, *, start_hint: int | None = 
             pos = (hint, end)
     if pos is None:
         pos = anchor_offsets(note_text, span.text)
+    reading = str(reading_channel_id or "") or None
     if pos is None:
         return replace(span, start=None, end=None,
                        text_sha256=_sha(span.text), anchored=False,
-                       document_sha256=doc_hash, document_version=version, span_id=None)
+                       document_sha256=doc_hash, document_version=version, span_id=None,
+                       reading_channel_id=reading)
     i, j = pos
     return replace(span, start=i, end=j, text_sha256=_sha(span.text), anchored=True,
                    document_sha256=doc_hash, document_version=version,
-                   span_id=_span_id(doc_hash, version, span, i, j))
+                   span_id=_span_id(doc_hash, version, span, i, j),
+                   reading_channel_id=reading)
 
 
-def anchor_facts(note_text: str, facts: list, document_version: str | None = None) -> list:
+def reading_of(span) -> str:
+    """The reading a span's offsets belong to; "" is the primary transcription.
+
+    ONE accessor, because every consumer that slices a document by a span's offsets has
+    to agree about which string it is slicing, and a second spelling of "unset" is how
+    one of them would end up slicing the wrong one."""
+    return str(getattr(span, "reading_channel_id", "") or "")
+
+
+def readings_map(note_text: str, extra: dict | None = None) -> dict[str, str]:
+    """Every reading of the document currently in play, keyed as `reading_of` keys it."""
+    out = {"": str(note_text or "")}
+    for channel_id, text in (extra or {}).items():
+        key = str(channel_id or "")
+        if key:
+            out[key] = str(text or "")
+    return out
+
+
+def anchor_facts(note_text: str, facts: list, document_version: str | None = None,
+                 reading_channel_id: str | None = None) -> list:
     """Anchor every fact's evidence spans IN PLACE (facts are mutable; spans are frozen,
     so each span is replaced with an anchored copy). Transparent to billing — only adds
     offsets/hash; the span text is unchanged. Repeated quotations are assigned
@@ -119,7 +149,8 @@ def anchor_facts(note_text: str, facts: list, document_version: str | None = Non
                     hint = positions[idx]
                     used[s.text] = idx + 1
             anchored.append(anchor_span(note_text, s, start_hint=hint,
-                                        document_version=document_version))
+                                        document_version=document_version,
+                                        reading_channel_id=reading_channel_id))
         f.evidence = anchored
     return facts
 
@@ -143,6 +174,26 @@ def span_targets(facts: list) -> list:
                                       start=span.start, end=span.end,
                                       fact_id=fact.fact_id))
     return targets
+
+
+def span_targets_by_reading(facts: list) -> dict[str, list]:
+    """The same quotations, GROUPED BY the reading their offsets belong to.
+
+    A quotation an independent reading proposed carries offsets into that reading, so
+    proving it against a page requires the page arithmetic of that reading. Reconciling
+    the two groups with one set of offsets is not a smaller mistake than not reconciling
+    them at all -- it names a page confidently and wrongly (issue #6 F7-R3).
+    """
+    from app.contracts.source_evidence import SpanTarget
+    out: dict[str, list] = {}
+    for fact in facts:
+        for span in (fact.evidence or []):
+            if not span.anchored or not span.span_id:
+                continue
+            out.setdefault(reading_of(span), []).append(
+                SpanTarget(span_id=span.span_id, text=span.text,
+                           start=span.start, end=span.end, fact_id=fact.fact_id))
+    return out
 
 
 def apply_reconciliation(facts: list, reconciliation) -> list:
@@ -438,23 +489,34 @@ MULTIPLY_ASSERTED = "multiply_asserted"
 CORROBORATION_STATUSES = frozenset({SINGLE_ORIGIN, MULTIPLY_ASSERTED})
 
 
-def _usable_span(span, note_text: str, doc_sha: str):
-    """A span may localise an endpoint only when it is anchored to THIS document at exact
-    offsets and its slice still re-verifies. Anything else contributes no position."""
+def _usable_span(span, readings: dict[str, str], shas: dict[str, str]):
+    """A span may localise an endpoint only when it is anchored at exact offsets INTO A
+    READING THIS CALL WAS GIVEN, and its slice still re-verifies against that reading.
+    Anything else contributes no position.
+
+    The reading is looked up rather than assumed: a quotation an independent reading of
+    the document proposed carries that reading's offsets, and re-verifying it against
+    the transcription would either mislocate it or -- for a passage the transcription
+    never contained -- silently drop the only endpoint that could place a recovered
+    event in a relationship (issue #6 F7-R3)."""
     if not getattr(span, "anchored", False) or not getattr(span, "span_id", None):
+        return False
+    reading = reading_of(span)
+    text = readings.get(reading)
+    if text is None:
         return False
     start, end = getattr(span, "start", None), getattr(span, "end", None)
     if not isinstance(start, int) or not isinstance(end, int) or isinstance(start, bool):
         return False
-    if start < 0 or end > len(note_text) or start >= end:
+    if start < 0 or end > len(text) or start >= end:
         return False
-    if getattr(span, "document_sha256", None) not in (None, "", doc_sha):
+    if getattr(span, "document_sha256", None) not in (None, "", shas.get(reading)):
         return False
-    return note_text[start:end] == span.text
+    return text[start:end] == span.text
 
 
-def _directional_proof(rel, subject_spans: list, object_spans: list, note_text: str,
-                       compiled: dict) -> list[str] | None:
+def _directional_proof(rel, subject_spans: list, object_spans: list,
+                       readings: dict[str, str], compiled: dict) -> list[str] | None:
     """The span ids that prove `rel`'s DIRECTION, or None when the document does not state it.
 
     The two endpoints must have DISJOINT verified mentions: one identical passage quoted for
@@ -475,6 +537,13 @@ def _directional_proof(rel, subject_spans: list, object_spans: list, note_text: 
         for b in objs:
             if a.span_id == b.span_id:
                 continue
+            # The two mentions must sit in the SAME reading of the document. There is no
+            # text "between" a passage in one reading and a passage in another, so a
+            # cross-reading pair localises nothing and must never be measured as if it
+            # did (issue #6 F7-R3).
+            if reading_of(a) != reading_of(b):
+                continue
+            note_text = readings.get(reading_of(a)) or ""
             if a.end <= b.start:                       # subject ... link ... object
                 orientation, linking = "subject_first", note_text[a.end:b.start]
             elif b.end <= a.start:                     # object ... link ... subject
@@ -487,7 +556,8 @@ def _directional_proof(rel, subject_spans: list, object_spans: list, note_text: 
 
 
 def reconcile_relations(relations: list[RelationAssertion], facts: list, note_text: str,
-                        *, min_independent_assertions: int | None = None
+                        *, min_independent_assertions: int | None = None,
+                        readings: dict[str, str] | None = None
                         ) -> list[RelationAssertion]:
     """Stamp each edge with the two provenance facts a control may read about it.
 
@@ -528,7 +598,11 @@ def reconcile_relations(relations: list[RelationAssertion], facts: list, note_te
     compiled = _grammar_patterns(grammar)
     threshold = int(grammar["min_independent_assertions"]
                     if min_independent_assertions is None else min_independent_assertions)
-    doc_sha = _sha(note_text or "")
+    # Every reading of the document a span may be anchored in. `note_text` is always the
+    # primary transcription; an independent reading is supplied by the caller that ran
+    # an extraction over it, and is never inferred here.
+    readings = readings_map(note_text, readings)
+    shas = {key: _sha(text) for key, text in readings.items()}
     span_ids_by_event: dict[str, set] = {}
     located_by_event: dict[str, list] = {}
     for f in facts:
@@ -538,7 +612,7 @@ def reconcile_relations(relations: list[RelationAssertion], facts: list, note_te
         span_ids_by_event[fid] = {s.span_id for s in (f.evidence or [])
                                   if getattr(s, "anchored", False) and s.span_id}
         located_by_event[fid] = [s for s in (f.evidence or [])
-                                 if _usable_span(s, note_text or "", doc_sha)]
+                                 if _usable_span(s, readings, shas)]
     out: list[RelationAssertion] = []
     for rel in relations or []:
         status, proof = UNRECONCILED, []
@@ -547,7 +621,7 @@ def reconcile_relations(relations: list[RelationAssertion], facts: list, note_te
                   & span_ids_by_event.get(rel.object_event_id, set()) & cited)
         directional = _directional_proof(
             rel, located_by_event.get(rel.subject_event_id, []),
-            located_by_event.get(rel.object_event_id, []), note_text or "", compiled)
+            located_by_event.get(rel.object_event_id, []), readings, compiled)
         # GROUNDING: only what the document proves. Corroboration is NOT consulted here --
         # that is the whole point of the two axes being separate.
         if directional:
@@ -565,7 +639,8 @@ def reconcile_relations(relations: list[RelationAssertion], facts: list, note_te
 
 
 def validate_relations(relations: list[RelationAssertion], facts: list,
-                       note_text: str) -> list[RelationAssertion]:
+                       note_text: str, *, readings: dict[str, str] | None = None
+                       ) -> list[RelationAssertion]:
     """Validate graph identity before a relation can suppress or separate an event.
 
     Invalid input fails closed rather than being silently dropped, because dropping a
@@ -601,7 +676,8 @@ def validate_relations(relations: list[RelationAssertion], facts: list,
     # UNCERTAIN), THEN record how each surviving edge was reconciled. A release control that
     # requires reconciliation therefore reads a value this deterministic layer wrote, never
     # one the extraction model supplied. (Codex F6-R3.)
-    return reconcile_relations(merge_relations(normalized), facts, note_text)
+    return reconcile_relations(merge_relations(normalized), facts, note_text,
+                               readings=readings)
 
 
 # ---------------------------------------------------- append-only repository seam

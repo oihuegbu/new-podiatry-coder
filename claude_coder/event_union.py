@@ -19,15 +19,29 @@ WHAT IT DECIDES, AND WHAT IT DELIBERATELY DOES NOT
 
 It decides exactly two things about an event only the second reading reported:
 
-  1. IS IT A NEW EVENT AT ALL?  Two readings of one document that describe the same
-     event quote the same passage of it. So the identity test is INDEPENDENT ANCHORING:
-     a candidate is a new event only when at least one of its verbatim quotations sits
-     in a region of the document that NO primary event rests on. A candidate whose every
-     quotation lands inside text the primary graph already reasons about is the same
-     documented event in different words -- the exact "reworded duplicate" that must
-     never become a second claim line -- and is recorded as such, never admitted.
-     Alignment (token overlap, in `graph_consensus.align`) catches the easy case; this
-     catches the case where the two readings simply chose different words.
+  1. IS IT A NEW EVENT AT ALL?  Two tests, and a candidate must clear BOTH.
+
+     INDEPENDENT ANCHORING first: two readings of one document that describe the same
+     event quote the same passage of it, so a candidate whose every quotation lands
+     inside text the primary graph already reasons about is the same documented event in
+     different words -- the exact "reworded duplicate" that must never become a second
+     claim line -- and is recorded as such, never admitted.
+
+     A quotation in a region no primary event rests on then clears the FIRST test only.
+     It is RECALL EVIDENCE that a mention exists somewhere the primary extraction did
+     not look; it is NOT proof that a second occurrence happened, and treating it as
+     proof is what let one event, written twice in two places in different words, become
+     two events (issue #6 F7-R3, reopened). So the candidate is put through the SAME
+     coreference test every other pair of mentions in this pipeline goes through
+     (`claude_coder.coreference`) -- documented action form plus anatomy, laterality,
+     performer and the rest of the record's own distinguishing axes. A candidate that
+     corefers with a primary event is that event, wherever it was quoted from.
+
+     Where coreference is UNDETERMINED the candidate is admitted, deliberately: it may
+     be the service the primary reading missed, and refusing it would reinstate the
+     silent undercoding this module exists to prevent. What it may never do is multiply
+     the claim -- if it turns out to be a re-description, both mentions resolve to one
+     authoritative code and claim assembly makes them one line with one unit.
 
   2. DOES THE ORIGINAL DOCUMENT BACK IT?  Admission is gated on the SAME source-evidence
      reconciliation every other released fact must pass, through the same one definition
@@ -85,24 +99,31 @@ def _clean(value: Any) -> str:
     return "" if value is None else str(value).strip()
 
 
-def _regions(fact) -> tuple[tuple[int, int], ...]:
+def _regions(fact) -> tuple[tuple[str, int, int], ...]:
     """The document regions one reading of one event rests on.
+
+    Each region carries the READING its offsets belong to. Character offsets are only
+    comparable inside one reading of the document: two readings of one page produce two
+    unrelated coordinate systems, so treating an offset from one as an offset in the
+    other would call two unrelated passages the same place -- confidently, and wrongly
+    (issue #6 F7-R3). Regions in different readings simply never overlap, which sends
+    the candidate to the coreference test rather than to a false identity.
 
     Only ANCHORED quotations count: an unanchored quote has no offsets, so it locates
     nothing and can neither establish identity nor be reconciled against a page.
     """
-    out: list[tuple[int, int]] = []
+    out: list[tuple[str, int, int]] = []
     for span in (getattr(fact, "evidence", None) or []):
         if not getattr(span, "anchored", False):
             continue
         start, end = getattr(span, "start", None), getattr(span, "end", None)
         if isinstance(start, int) and isinstance(end, int) and end > start:
-            out.append((start, end))
+            out.append((_clean(getattr(span, "reading_channel_id", "")), start, end))
     return tuple(dict.fromkeys(out))
 
 
-def _overlap(left: tuple[int, int], right: tuple[int, int]) -> bool:
-    return left[0] < right[1] and right[0] < left[1]
+def _overlap(left: tuple[str, int, int], right: tuple[str, int, int]) -> bool:
+    return left[0] == right[0] and left[1] < right[2] and right[1] < left[2]
 
 
 def _span_ids(fact) -> tuple[str, ...]:
@@ -207,6 +228,7 @@ def propose(primary_facts, second_only_facts) -> list[EventCandidate]:
         for region in _regions(fact):
             owners.append((region, fact_id))
 
+    primary = list(primary_facts or [])
     out: list[EventCandidate] = []
     for fact in (second_only_facts or []):
         candidate = EventCandidate(
@@ -233,8 +255,49 @@ def propose(primary_facts, second_only_facts) -> list[EventCandidate]:
                 "every quotation behind this reading sits in document text a primary "
                 "event already rests on, so it is the same documented event in "
                 "different words, not an additional one")
+            out.append(candidate)
+            continue
+        # A NEW REGION IS RECALL EVIDENCE OF A MENTION, NOT OF AN OCCURRENCE. It buys
+        # the candidate the same coreference test everything else takes, never a bypass
+        # of it: an event the record already carries, quoted somewhere else in the same
+        # document, is still that one event.
+        corefers = _corefers_with_primary(fact, primary)
+        if corefers:
+            candidate.verdict = DUPLICATE_OF_PRIMARY
+            candidate.merged_into = corefers
+            candidate.reason = (
+                f"quoted from a region no primary event rests on, but it corefers with "
+                f"primary event {corefers}: the same documented action on the same "
+                f"documented axes, in the same episode. A second place in the record "
+                f"where one event is written about is evidence that the event is "
+                f"documented, never that it happened twice")
         out.append(candidate)
     return out
+
+
+def _corefers_with_primary(fact, primary_facts) -> str:
+    """The primary event this candidate IS, or "" when the record establishes none.
+
+    Delegates the whole judgement to `claude_coder.coreference`, which is also what
+    eligibility and claim assembly consult, so a mention cannot be one event here and
+    two events one stage later. Episodes are not compared: this runs inside ONE
+    encounter on ONE date, so every event here is in the same episode by construction --
+    and passing an episode this module does not have would weaken the test, not
+    strengthen it.
+    """
+    from . import coreference as _coref
+
+    for other in (primary_facts or []):
+        verdict, _reason = _coref.event_verdict(
+            left_kind=getattr(fact, "kind", None),
+            right_kind=getattr(other, "kind", None),
+            left_action=getattr(fact, "description", ""),
+            right_action=getattr(other, "description", ""),
+            left_attributes=getattr(fact, "attributes", None),
+            right_attributes=getattr(other, "attributes", None))
+        if verdict == _coref.SAME_EVENT:
+            return _clean(getattr(other, "fact_id", ""))
+    return ""
 
 
 def pending(candidates) -> list[EventCandidate]:

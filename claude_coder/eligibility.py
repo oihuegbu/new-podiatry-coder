@@ -15,13 +15,19 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from .coreference import DISTINGUISHING_AXES as _DISTINCT_ATTR_AXES
 from .models import ClinicalFact, FactKind, Outcome, RelationPredicate, RelationState
 from .ownership import classify_ownership, fact_ownership
+
+# `_DISTINCT_ATTR_AXES` keeps its historical name because the graph layer reads the
+# eligibility engine's own conflict axes rather than restating them. It IS
+# `coreference.DISTINGUISHING_AXES` -- one list, shared with claim assembly, so what
+# makes two mentions two EVENTS and what makes a repeated code two OCCURRENCES can
+# never drift apart (issue #6 F7-R3).
 
 
 class EligibilityState(str, Enum):
@@ -342,30 +348,34 @@ def _distinctness_facts(fact: ClinicalFact, relations: list) -> list[str]:
 
 
 def _service_key(intent: "ClaimLineIntent"):
-    """Deterministic identity of 'the same performed service': kind + anatomy + laterality
-    + the DISTINCTIVE action tokens. Used only to merge EXACT duplicates -- differently
-    worded services keep separate intents (a merge can drop a line, so it is conservative)."""
-    toks = tuple(sorted(t for t in re.split(r"[^a-z0-9]+", (intent.clinical_action or "").lower())
-                        if len(t) > 3))
+    """Deterministic identity of 'the same performed service': kind + anatomy +
+    laterality + the action's DISTINCTIVE ROOT FORM.
+
+    The action is compared through `coreference.action_form`, not through raw tokens:
+    word order, inflection and documentation filler are how two writers spell one
+    action, and treating them as two services is what let a re-described event become a
+    second intent (issue #6 F7-R3). Merging on this key remains CONSERVATIVE -- a merge
+    can drop a line, so it happens only where the two mentions genuinely resolve to one
+    action form; anything less certain is settled after retrieval, against the
+    authoritative code, by claim assembly.
+    """
+    from . import coreference as _coref
+    toks = tuple(sorted(_coref.action_form(intent.clinical_action)))
     a = intent.attributes or {}
     return (intent.fact_kind, str(a.get("anatomy", "")).lower(),
             str(a.get("laterality", "")).lower(), toks)
 
 
-_DISTINCT_ATTR_AXES = ("performer_id", "performer", "approach", "distinct_site",
-                       "distinct_session", "distinct_objective")
-
-
 def _known_known_conflict(a: "ClaimLineIntent", b: "ClaimLineIntent") -> bool:
     """Two intents conflict on a distinguishing attribute ONLY when BOTH carry a KNOWN
-    value and they differ. Known-plus-missing does NOT conflict (it reconciles). (F5-R1.)"""
-    aa, ba = a.attributes or {}, b.attributes or {}
-    for axis in _DISTINCT_ATTR_AXES:
-        va = str(aa.get(axis, "")).strip().lower()
-        vb = str(ba.get(axis, "")).strip().lower()
-        if va and vb and va != vb:
-            return True
-    return False
+    value and they differ. Known-plus-missing does NOT conflict (it reconciles). (F5-R1.)
+
+    The axis set is `coreference.DISTINGUISHING_AXES` -- the SAME one claim assembly
+    reads when it decides whether a repeated code is a second occurrence. Two spellings
+    of "what makes these two events different" is exactly how an event could be separate
+    enough for two intents and identical enough to merge into extra units."""
+    from . import coreference as _coref
+    return bool(_coref.known_known_differences(a.attributes, b.attributes))
 
 
 def _reconcile_attrs(target: "ClaimLineIntent", src: "ClaimLineIntent") -> None:

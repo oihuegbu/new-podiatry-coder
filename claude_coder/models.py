@@ -75,6 +75,14 @@ class EvidenceSpan:
     region: tuple[float, float, float, float] | None = None
     source_reconciliation: str | None = None
     verified_by_channel_id: str | None = None
+    # WHICH READING OF THE DOCUMENT `start`/`end` are offsets INTO (issue #6 F7-R3).
+    # Empty/None means the primary transcription -- the string the coder reads, and the
+    # only one that existed before independent recall. A quotation proposed by an
+    # independent reading of the document is anchored in THAT reading's own text, so
+    # every consumer that slices a document by these offsets must slice the reading
+    # named here; slicing the transcription instead would silently mislocate it, or
+    # (for a passage the transcription never contained) find nothing at all.
+    reading_channel_id: str | None = None
 
 
 @dataclass

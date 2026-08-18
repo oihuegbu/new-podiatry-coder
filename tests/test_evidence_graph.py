@@ -1219,13 +1219,16 @@ class EndToEndEventCandidateUnion(unittest.TestCase):
         not silently enter the graph -- and the encounter's real service must still
         bill."""
         vision_text = ("Procedure alpha performed today, side one. "
-                       "Procedure beta performed today, side one. "
                        "Condition alpha addressed today.")
-        # The original page says something else exactly where the second reading quoted.
+        # The recall extraction reads the document's own text layer, so its quotations
+        # are verbatim there by construction and a contradiction can only come from a
+        # READING OF THE PAGE. Here the text layer carries a line no reader of the page
+        # image sees -- the transcription does not have it, and the paid independent
+        # read does not find it either.
         document, tmp = _document(
             vision_text,
             ["Procedure alpha performed today, side one.",
-             "Procedure gamma performed today, side one.",
+             "Procedure beta performed today, side one.",
              "Condition alpha addressed today."])
         self.addCleanup(tmp.cleanup)
 
@@ -1236,7 +1239,8 @@ class EndToEndEventCandidateUnion(unittest.TestCase):
                             "Procedure alpha performed today, side one"),
                            ("F2", "procedure beta performed excision",
                             "Procedure beta performed today, side one")),
-            note_text=document.primary_text(), source_evidence=document)
+            note_text=document.primary_text(), source_evidence=document,
+            source_reader=_independent_reader(vision_text))
 
         recovered = self._recovered(result)
         self.assertEqual([r["verdict"] for r in recovered],
@@ -1454,6 +1458,380 @@ class EndToEndEventCandidateUnion(unittest.TestCase):
         self.assertIsNot(result.destination, Destination.SYSTEM_HOLD)
         self.assertFalse(any(g.name == "pre_retrieval_integrity" for g in result.gates),
                          [g.name for g in result.gates])
+
+
+# ---------------------------------------------------------------------------
+# INDEPENDENT DOCUMENT RECALL, AND OCCURRENCE CARDINALITY (issue #6 F7-R3, reopened)
+#
+# The class above proves recall across two extractions. Both of those extractions used
+# to read ONE string -- the primary vision transcription -- so a service the
+# TRANSCRIPTION omitted was invisible to both readings and no amount of second-model
+# recall could reach it. And a mention the two readings worded differently was admitted
+# as a NEW EVENT purely because it was quoted from a document region no primary event
+# rested on, which claim assembly then turned into an extra billable UNIT on the
+# reasoning that a maximum-units edit would catch anything excessive.
+#
+# These cases prove both halves: the recall extraction now reads an INDEPENDENT reading
+# of the original document, and a repeated mention adds a billable occurrence only when
+# the record documents one.
+
+_RECALL_TRANSCRIPT = ("Procedure alpha performed today on the left side. "
+                      "Condition alpha addressed today.")
+#: What the ORIGINAL document actually says -- a service more than the transcription.
+_RECALL_PAGE = ["Procedure alpha performed today on the left side.",
+                "Procedure beta performed today on the left side.",
+                "Condition alpha addressed today."]
+#: The same document, whose extra line RE-DESCRIBES the service already transcribed.
+_REDESCRIBED_PAGE = ["Procedure alpha performed today on the left side.",
+                     "Alpha procedure completed on the left side.",
+                     "Condition alpha addressed today."]
+
+
+def _independent_reader(page_text, calls=None):
+    """A paid page reader from a vendor that is genuinely independent of the primary."""
+    from app.contracts.source_evidence import ChannelKind, ReadChannel, build_page_read
+    from app.ingestion.source_evidence import SECONDARY_VISION_CHANNEL_ID
+
+    class _Reader:
+        def channel(self):
+            return ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                               kind=ChannelKind.VISION, provider="openai")
+
+        def read_pages(self, page_numbers):
+            if calls is not None:
+                calls.append(tuple(page_numbers))
+            return {number: build_page_read(SECONDARY_VISION_CHANNEL_ID, number,
+                                            page_text)
+                    for number in page_numbers}
+
+    return _Reader()
+
+
+def _run_recall(primary_reading, second_llm, **kwargs):
+    """`_run_union`, but with a CALLABLE second extractor so the test can see the text
+    it was actually given."""
+    from claude_coder.pipeline import code_encounter
+    return code_encounter(
+        "enc", kwargs.pop("note_text", NOTE_UNION), "2026-03-14",
+        source=kwargs.pop("source", None) or _union_source(),
+        extract_llm=lambda s, u: primary_reading,
+        extract_llm_b=second_llm,
+        verify_llm=_stub_llm, corroborate_llm=_stub_llm,
+        billing_context=_BILLING, audit_repository=_null_audit(), **kwargs)
+
+
+class IndependentDocumentRecall(unittest.TestCase):
+    """Defect A: the recall extraction must read the DOCUMENT, not the first reading."""
+
+    def _recovered(self, result):
+        self.assertIsNotNone(result.consensus, "a second reading must be recorded")
+        return list(result.consensus["recovered_events"])
+
+    def _codes(self, result):
+        return sorted(ln.chosen.code for ln in result.lines if ln.chosen)
+
+    def test_a_service_the_transcription_itself_omitted_is_recovered(self):
+        """Codex F7-R3 (reopened), reproduced exactly.
+
+        The PRIMARY TRANSCRIPTION -- not merely the primary extraction -- omits a
+        performed service entirely. An independent reading of the original document
+        contains it. Both extractors used to be handed the transcription, so both missed
+        it identically and the claim was silently short a line.
+        """
+        calls = []
+        captured = []
+        document, tmp = _document(_RECALL_TRANSCRIPT, _RECALL_PAGE)
+        self.addCleanup(tmp.cleanup)
+        self.assertNotIn("Procedure beta", document.primary_text(),
+                         "the transcription must genuinely omit the second service")
+
+        second = _multi_reading(_SECOND_SAME_SERVICE, _SECOND_EXTRA_SERVICE)
+
+        def _second_llm(system, user):
+            captured.append(user)
+            return second
+
+        result = _run_recall(
+            _multi_reading(_PRIMARY_ONE_SERVICE), _second_llm,
+            note_text=document.primary_text(), source_evidence=document,
+            source_reader=_independent_reader(" ".join(_RECALL_PAGE), calls))
+
+        # The recall extractor was handed a DIFFERENT reading of the document, and that
+        # reading contains the omitted service.
+        self.assertTrue(captured, "the second extractor must have been called")
+        self.assertIn("Procedure beta performed today on the left side", captured[0],
+                      "the recall extraction must read an independent reading of the "
+                      "document, not the transcription that omitted the service")
+
+        recovered = self._recovered(result)
+        self.assertEqual([r["verdict"] for r in recovered], ["admitted"], recovered)
+        self.assertIn(recovered[0]["node_id"], result.graph.nodes)
+        # A passage the transcription does not contain is settled by an INDEPENDENT
+        # read of the page image, not by the transcription's silence.
+        self.assertEqual(calls, [(1,)],
+                         "the paid read must be aimed at exactly the page carrying the "
+                         "passage the two readings disagree about")
+        self.assertEqual(self._codes(result), ["PROC_X", "PROC_Y"],
+                         "the service the TRANSCRIPTION omitted must reach the claim")
+        self.assertEqual(result.graph.integrity_problems(), ())
+
+    def test_an_unconfirmed_transcription_omission_holds_and_is_never_dropped(self):
+        """The failure path of the recovery: no third reading of the page exists.
+
+        The independent reading carries a passage the transcription does not. One of the
+        two is wrong and nothing available can say which, so the candidate is neither
+        admitted nor discarded -- it holds, loudly, as system work."""
+        from claude_coder.models import Destination, Outcome
+
+        document, tmp = _document(_RECALL_TRANSCRIPT, _RECALL_PAGE)
+        self.addCleanup(tmp.cleanup)
+
+        result = _run_recall(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            lambda s, u: _multi_reading(_SECOND_SAME_SERVICE, _SECOND_EXTRA_SERVICE),
+            note_text=document.primary_text(), source_evidence=document)
+
+        recovered = self._recovered(result)
+        self.assertEqual([r["verdict"] for r in recovered], ["held_unverified"],
+                         recovered)
+        self.assertEqual(recovered[0]["node_id"], "")
+        self.assertEqual(self._codes(result), ["PROC_X"])
+        gate = next(g for g in result.gates
+                    if g.name.startswith("second_reading_event_unverified:"))
+        self.assertIs(gate.outcome, Outcome.UNKNOWN, gate.detail)
+        self.assertTrue(gate.retryable)
+        self.assertIsNot(result.destination, Destination.AUTO_READY)
+
+    def test_a_passage_only_the_text_layer_carries_is_refused_when_the_page_denies_it(self):
+        """The other failure path: the independent reading is the one that is wrong.
+
+        A text layer can carry text no reader of the page would ever see. Two readings
+        of the page image -- the transcription and an independent paid read -- both fail
+        to find the passage, so the candidate is refused rather than admitted, and the
+        encounter's real service still bills."""
+        document, tmp = _document(_RECALL_TRANSCRIPT, _RECALL_PAGE)
+        self.addCleanup(tmp.cleanup)
+
+        result = _run_recall(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            lambda s, u: _multi_reading(_SECOND_SAME_SERVICE, _SECOND_EXTRA_SERVICE),
+            note_text=document.primary_text(), source_evidence=document,
+            # The page image says what the transcription said: no second service.
+            source_reader=_independent_reader(_RECALL_TRANSCRIPT))
+
+        recovered = self._recovered(result)
+        self.assertEqual([r["verdict"] for r in recovered],
+                         ["rejected_source_contradicted"], recovered)
+        self.assertEqual(recovered[0]["node_id"], "")
+        self.assertEqual(sorted(result.graph.nodes), ["F1"])
+        self.assertEqual(self._codes(result), ["PROC_X"])
+
+    def test_a_recovered_event_that_re_describes_an_existing_one_does_not_double_it(self):
+        """Defect A composed with Defect B, which is where an overbill would come from.
+
+        The independent reading carries a passage the transcription omitted -- but it
+        RE-DESCRIBES the service already on the claim in different words. It is recovered
+        (nothing may assume it is a duplicate), it resolves to the same authoritative
+        code, and it therefore becomes ONE line with ONE unit."""
+        document, tmp = _document(_RECALL_TRANSCRIPT, _REDESCRIBED_PAGE)
+        self.addCleanup(tmp.cleanup)
+
+        result = _run_recall(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            lambda s, u: _multi_reading(
+                _SECOND_SAME_SERVICE,
+                ("F2", "procedure alpha removal completed",
+                 "Alpha procedure completed on the left side")),
+            note_text=document.primary_text(), source_evidence=document,
+            source_reader=_independent_reader(" ".join(_REDESCRIBED_PAGE)))
+
+        recovered = self._recovered(result)
+        self.assertEqual([r["verdict"] for r in recovered], ["admitted"], recovered)
+        billable = result.billable_lines
+        self.assertEqual([ln.chosen.code for ln in billable], ["PROC_X"], billable)
+        self.assertEqual(billable[0].units, 1,
+                         f"one service, described twice, is one unit: "
+                         f"{billable[0].rationale}")
+
+    def test_the_recall_reading_and_its_blind_spot_are_in_the_durable_record(self):
+        """The control has to say what it actually read.
+
+        "Nothing extra was found on this page" and "no reading other than the
+        transcription ever covered this page" are different facts and only one of them
+        is evidence, so both the reading used and the pages it could not cover are
+        recorded rather than inferred from an empty recovery list."""
+        from app.ingestion.source_evidence import EMBEDDED_TEXT_CHANNEL_ID
+
+        covered, tmp = _document(_RECALL_TRANSCRIPT, _RECALL_PAGE)
+        self.addCleanup(tmp.cleanup)
+        result = _run_recall(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            lambda s, u: _multi_reading(_SECOND_SAME_SERVICE),
+            note_text=covered.primary_text(), source_evidence=covered)
+        self.assertEqual(result.consensus["recall_reading_channel_id"],
+                         EMBEDDED_TEXT_CHANNEL_ID)
+        self.assertEqual(result.consensus["recall_uncovered_pages"], [])
+
+        # An image-only page: no reading but the transcription covers it, so a service
+        # the transcription omitted there is NOT recoverable — and the record says so.
+        blind, tmp2 = _document(_RECALL_TRANSCRIPT, [])
+        self.addCleanup(tmp2.cleanup)
+        result = _run_recall(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            lambda s, u: _multi_reading(_SECOND_SAME_SERVICE),
+            note_text=blind.primary_text(), source_evidence=blind)
+        self.assertEqual(result.consensus["recall_reading_channel_id"], "",
+                         "no independent reading existed to run recall over")
+        self.assertEqual(result.consensus["recall_uncovered_pages"], [1])
+
+    def test_the_transcription_is_never_recorded_as_its_own_independent_checker(self):
+        """A recall quotation may be CONFIRMED by the transcription, but the merged
+        reconciliation must never list the primary channel among the channels that
+        independently checked the claim — that would attest an independence the run
+        never had."""
+        document, tmp = _document(_RECALL_TRANSCRIPT, _RECALL_PAGE)
+        self.addCleanup(tmp.cleanup)
+
+        result = _run_recall(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            lambda s, u: _multi_reading(_SECOND_SAME_SERVICE, _SECOND_EXTRA_SERVICE),
+            note_text=document.primary_text(), source_evidence=document,
+            source_reader=_independent_reader(" ".join(_RECALL_PAGE)))
+
+        record = result.source_reconciliation
+        self.assertIsNotNone(record)
+        self.assertNotIn(document.primary_channel_id,
+                         record.independent_channel_ids,
+                         f"the transcription cannot be its own authority: "
+                         f"{record.independent_channel_ids}")
+
+
+
+class OccurrenceCardinality(unittest.TestCase):
+    """Defect B: a repeated MENTION is not a repeated SERVICE."""
+
+    def _codes(self, result):
+        return sorted(ln.chosen.code for ln in result.lines if ln.chosen)
+
+    def test_one_event_mentioned_twice_in_different_words_is_one_unit(self):
+        """Codex F7-R3 (reopened), reproduced exactly: one performed event, mentioned
+        twice in different document regions with different wording, same anatomy,
+        laterality, performer and episode, and no stated count, repeat or distinction
+        anywhere in the note.
+
+        The union used to admit the second mention as a new event purely because it was
+        quoted from a region no primary event rested on; both resolved to one code; and
+        claim assembly read "different wording" as a separately documented repeat and
+        billed TWO units, justified by the maximum-units edit permitting two. A maximum
+        is not evidence."""
+        note = ("Procedure alpha performed today on the left side. "
+                "Alpha procedure completed on the left side. "
+                "Condition alpha addressed today.")
+
+        result = _run_union(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            _multi_reading(_SECOND_SAME_SERVICE,
+                           ("F2", "procedure alpha removal completed",
+                            "Alpha procedure completed on the left side")),
+            note_text=note)
+
+        eligible = [i for i in result.claim_line_intents
+                    if i.state is eligibility.EligibilityState.ELIGIBLE_FOR_RETRIEVAL
+                    and i.component is eligibility.ClaimComponent.SERVICE]
+        self.assertEqual(len(eligible), 2,
+                         "both mentions still reach retrieval -- nothing may assume "
+                         "they are one service before the authoritative data says so")
+        billable = result.billable_lines
+        self.assertEqual([ln.chosen.code for ln in billable], ["PROC_X"], billable)
+        self.assertEqual(billable[0].units, 1,
+                         f"one documented service must bill one unit: "
+                         f"{billable[0].rationale}")
+        merged = next(ln for ln in result.lines
+                      if ln.excluded_reason and ln.chosen
+                      and ln.chosen.code == "PROC_X")
+        self.assertIn("no second occurrence", merged.excluded_reason)
+
+    def test_a_second_mention_in_a_new_region_still_takes_the_coreference_test(self):
+        """Region novelty is recall evidence that a MENTION exists, never proof that an
+        OCCURRENCE happened. A mention in a region no primary event rests on, whose
+        documented action and axes are the primary event's, corefers to it."""
+        note = ("Procedure alpha performed today on the left side. "
+                "Alpha procedure completed on the left side. "
+                "Condition alpha addressed today.")
+
+        result = _run_union(
+            _multi_reading(("F1", "alpha excision performed",
+                            "Procedure alpha performed today on the left side")),
+            _multi_reading(("F2", "alpha excised today",
+                            "Alpha procedure completed on the left side")),
+            note_text=note)
+
+        recovered = list(result.consensus["recovered_events"])
+        self.assertEqual([r["verdict"] for r in recovered],
+                         ["duplicate_of_primary"], recovered)
+        self.assertEqual(recovered[0]["merged_into"], "F1")
+        self.assertEqual(recovered[0]["node_id"], "")
+        self.assertEqual(sorted(result.graph.nodes), ["F1"])
+        billable = result.billable_lines
+        self.assertEqual([ln.chosen.code for ln in billable], ["PROC_X"])
+        self.assertEqual(billable[0].units, 1)
+
+    def test_two_services_the_record_distinguishes_remain_two_units(self):
+        """The other direction, which the fix must not break: the record states two
+        different lateralities, so it documents two occurrences and both are billed."""
+        import json
+
+        note = ("Procedure alpha performed today on the left side. "
+                "Alpha procedure completed on the right side. "
+                "Condition alpha addressed today.")
+        primary = json.dumps({"facts": [
+            {"fact_id": "F1", "kind": "procedure",
+             "description": "excision procedure alpha performed",
+             "attributes": {"laterality": "left", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Procedure alpha performed today on the left side"],
+             "confidence": 0.99},
+            {"fact_id": "F2", "kind": "procedure",
+             "description": "procedure alpha removal completed",
+             "attributes": {"laterality": "right", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Alpha procedure completed on the right side"],
+             "confidence": 0.99}]})
+
+        result = _run_union(primary, primary, note_text=note)
+
+        billable = result.billable_lines
+        self.assertEqual([ln.chosen.code for ln in billable], ["PROC_X"], billable)
+        self.assertEqual(billable[0].units, 2,
+                         f"two documented occurrences must bill two units: "
+                         f"{billable[0].rationale}")
+        self.assertIn("laterality", billable[0].rationale)
+
+    def test_a_stated_count_is_the_only_thing_that_multiplies_one_mention(self):
+        """A count the RECORD states is source-anchored cardinality and does bill as
+        such -- it is the only thing that can multiply a single documented mention."""
+        import json
+
+        note = "Procedure alpha performed twice today on the left side."
+        reading = json.dumps({"facts": [
+            {"fact_id": "F1", "kind": "procedure",
+             "description": "excision procedure alpha performed",
+             "attributes": {"laterality": "left", "count": 2,
+                            "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Procedure alpha performed twice today on the left side"],
+             "confidence": 0.99}]})
+
+        result = _run_union(reading, reading, note_text=note)
+
+        billable = result.billable_lines
+        self.assertEqual([ln.chosen.code for ln in billable], ["PROC_X"], billable)
+        self.assertEqual(billable[0].units, 2,
+                         "a count the record states is source-anchored cardinality")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -769,6 +769,68 @@ _SEVERITY = {
 _LOCATION_THRESHOLD = 0.5
 
 
+def _channel_verdicts(document: SourceEvidenceDocument, target: "SpanTarget",
+                      quoted: tuple[str, ...], pages: tuple[int, ...],
+                      page_images: tuple[str, ...],
+                      channels: tuple[ReadChannel, ...]) -> list[SpanReconciliation]:
+    """One verdict per channel that could read EVERY page the quotation sits on.
+
+    Extracted so that the two things that must be proven against a page -- a quotation
+    the PRIMARY reading proposed, and a quotation an INDEPENDENT reading proposed that
+    the primary one may never have contained -- are located, tokenized, aligned, boxed
+    and scored by exactly one implementation. Only the SET of channels asked and the
+    rule for combining their answers differ between the two, and both of those are the
+    caller's, stated at the call site rather than buried here.
+    """
+    candidates: list[SpanReconciliation] = []
+    for channel in channels:
+        reads = [document.page(n).read_by(channel.channel_id) if document.page(n)
+                 else None for n in pages]
+        if any(r is None or not r.usable for r in reads):
+            continue                      # this channel does not cover every page
+        tokens: list[SourceToken] = []
+        page_of_index: list[int] = []
+        for page_number, read in zip(pages, reads):
+            for token in read.tokens:
+                tokens.append(token)
+                page_of_index.append(page_number)
+        independent = tuple(t.normalized for t in tokens)
+        cost, trace = _infix_alignment(quoted, independent)
+        matched = [j for op, _, j in trace if op == "match"]
+        differences = tuple(
+            TokenDifference(
+                kind=("substituted" if op == "substitute"
+                      else "missing_from_independent_read" if op == "delete"
+                      else "absent_from_quotation"),
+                quoted=(quoted[i] if i >= 0 else ""),
+                independent=(independent[j] if j >= 0 else ""),
+                numeric=(is_numeric_token(quoted[i]) if i >= 0 else False)
+                or (is_numeric_token(independent[j]) if j >= 0 else False))
+            for op, i, j in trace if op != "match")
+        share = len(matched) / len(quoted)
+        if cost == 0:
+            status = ReconciliationStatus.AGREED
+            detail = (f"every token of the quotation was read identically by "
+                      f"{channel.channel_id}")
+        elif share >= _LOCATION_THRESHOLD:
+            status = ReconciliationStatus.DISAGREED
+            detail = (f"{channel.channel_id} reads {len(differences)} token(s) of "
+                      f"this quotation differently")
+        else:
+            status = ReconciliationStatus.NOT_LOCATED
+            detail = (f"{channel.channel_id} read page(s) "
+                      f"{', '.join(str(p) for p in pages)} and the quotation does "
+                      f"not appear in that reading")
+        candidates.append(SpanReconciliation(
+            span_id=target.span_id, fact_id=target.fact_id, status=status,
+            pages=pages, page_image_sha256=page_images,
+            verified_by_channel_id=channel.channel_id,
+            verified_text_sha256=tuple(r.text_sha256 for r in reads if r),
+            region=_region_of(tokens, matched, page_of_index),
+            differences=differences, detail=detail))
+    return candidates
+
+
 def reconcile_spans(document: SourceEvidenceDocument,
                     targets: list[SpanTarget] | tuple[SpanTarget, ...],
                     *, control_mode: str = "ENFORCED_FAIL_CLOSED") -> SourceReconciliation:
@@ -804,52 +866,8 @@ def reconcile_spans(document: SourceEvidenceDocument,
                        "reading, so no page of the original document can be named"))
             continue
 
-        candidates: list[SpanReconciliation] = []
-        for channel in independents:
-            reads = [document.page(n).read_by(channel.channel_id) if document.page(n)
-                     else None for n in pages]
-            if any(r is None or not r.usable for r in reads):
-                continue                      # this channel does not cover every page
-            tokens: list[SourceToken] = []
-            page_of_index: list[int] = []
-            for page_number, read in zip(pages, reads):
-                for token in read.tokens:
-                    tokens.append(token)
-                    page_of_index.append(page_number)
-            independent = tuple(t.normalized for t in tokens)
-            cost, trace = _infix_alignment(quoted, independent)
-            matched = [j for op, _, j in trace if op == "match"]
-            differences = tuple(
-                TokenDifference(
-                    kind=("substituted" if op == "substitute"
-                          else "missing_from_independent_read" if op == "delete"
-                          else "absent_from_quotation"),
-                    quoted=(quoted[i] if i >= 0 else ""),
-                    independent=(independent[j] if j >= 0 else ""),
-                    numeric=(is_numeric_token(quoted[i]) if i >= 0 else False)
-                    or (is_numeric_token(independent[j]) if j >= 0 else False))
-                for op, i, j in trace if op != "match")
-            share = len(matched) / len(quoted)
-            if cost == 0:
-                status = ReconciliationStatus.AGREED
-                detail = (f"every token of the quotation was read identically by "
-                          f"{channel.channel_id}")
-            elif share >= _LOCATION_THRESHOLD:
-                status = ReconciliationStatus.DISAGREED
-                detail = (f"{channel.channel_id} reads {len(differences)} token(s) of "
-                          f"this quotation differently")
-            else:
-                status = ReconciliationStatus.NOT_LOCATED
-                detail = (f"{channel.channel_id} read page(s) "
-                          f"{', '.join(str(p) for p in pages)} and the quotation does "
-                          f"not appear in that reading")
-            candidates.append(SpanReconciliation(
-                span_id=target.span_id, fact_id=target.fact_id, status=status,
-                pages=pages, page_image_sha256=page_images,
-                verified_by_channel_id=channel.channel_id,
-                verified_text_sha256=tuple(r.text_sha256 for r in reads if r),
-                region=_region_of(tokens, matched, page_of_index),
-                differences=differences, detail=detail))
+        candidates = _channel_verdicts(document, target, quoted, pages, page_images,
+                                       independents)
         # The worst answer wins (see `_SEVERITY`). Channels that could not read the
         # page at all produced no candidate and therefore contribute nothing — an
         # unreadable channel is not an opinion.
@@ -886,6 +904,261 @@ def reconcile_spans(document: SourceEvidenceDocument,
         spans=tuple(results),
         page_outcomes=page_outcomes,
         document_anomalies=document.anomalies)
+
+
+# --------------------------------------------------------------------------
+# an INDEPENDENT READING of the whole document (issue #6 F7-R3, second reopen)
+# --------------------------------------------------------------------------
+#
+# `reconcile_spans` above proves a quotation the PRIMARY reading already proposed. That
+# makes the second reading a check on what the primary transcription CONTAINED, and
+# nothing at all about what it LEFT OUT: a service the transcription never captured is
+# absent from the only string any extractor was ever given, so every extractor misses
+# it identically and the claim is silently short a line.
+#
+# Recall therefore needs a second reading of the DOCUMENT, not a second model over one
+# transcript. The compiler already builds one for every note -- the document's own
+# embedded text layer, with per-word boxes -- and the paid page reader already exists
+# for pages that layer cannot cover. What was missing is the ability to hand that
+# channel's reading to an extractor as a document in its own right, and then to locate
+# and prove quotations expressed in ITS character offsets rather than the primary's.
+# That is all this section adds.
+
+class ChannelReading(_Strict):
+    """One channel's reading of the WHOLE document, as a single anchorable string.
+
+    Deliberately shaped exactly like `primary_text()` -- the same page separator, the
+    same page-ordered concatenation -- so that a quotation anchored into it is located
+    on a page by the same arithmetic, in this channel's own coordinate space. A page
+    this channel could not usably read contributes an EMPTY segment and is named in
+    `uncovered_pages`: a reading with a hole in it must say where the hole is, because
+    "this channel found no additional service" and "this channel never saw that page"
+    are different answers and only one of them is evidence.
+    """
+
+    channel_id: str
+    text: str = ""
+    #: (page_number, char_start, char_end) of every page inside `text`.
+    page_offsets: tuple[tuple[int, int, int], ...] = ()
+    covered_pages: tuple[int, ...] = ()
+    uncovered_pages: tuple[int, ...] = ()
+
+    @property
+    def usable(self) -> bool:
+        """Is there anything here an extractor could read?"""
+        return bool(self.covered_pages) and bool(self.text.strip())
+
+    def pages_for_offsets(self, start: int | None, end: int | None) -> tuple[int, ...]:
+        """Which page(s) a [start, end) range of THIS reading falls on."""
+        if start is None or end is None or end <= start:
+            return ()
+        return tuple(number for number, first, last in self.page_offsets
+                     if first < end and start < last)
+
+
+def channel_reading(document: SourceEvidenceDocument,
+                    channel_id: str) -> ChannelReading:
+    """Assemble one channel's reading of the document into an anchorable string."""
+    parts: list[str] = []
+    offsets: list[tuple[int, int, int]] = []
+    covered: list[int] = []
+    uncovered: list[int] = []
+    cursor = 0
+    for page in document.pages:
+        read = page.read_by(channel_id)
+        body = read.text if (read is not None and read.usable) else ""
+        (covered if body else uncovered).append(page.page_number)
+        offsets.append((page.page_number, cursor, cursor + len(body)))
+        parts.append(body)
+        cursor += len(body) + len(PAGE_SEPARATOR)
+    return ChannelReading(
+        channel_id=channel_id, text=PAGE_SEPARATOR.join(parts),
+        page_offsets=tuple(offsets), covered_pages=tuple(covered),
+        uncovered_pages=tuple(uncovered))
+
+
+def recall_channel(document: SourceEvidenceDocument) -> ReadChannel | None:
+    """WHICH channel a recall reading should come from, by the document's own rules.
+
+    The candidate set is exactly `independent_channels()` -- the one existing answer to
+    "which readings may be evidence about the primary one" -- so a channel that could
+    not check the transcription can never become the reading that adds to it either.
+    Among those, the widest page coverage wins, and a channel that is a property of the
+    document's bytes rather than of a model breaks ties ahead of one that is not: it is
+    free, deterministic, reproducible from the same file forever, and it cannot invent
+    a service. Ties beyond that fall to channel id so the choice is reproducible.
+    """
+    scored: list[tuple[int, int, str, ReadChannel]] = []
+    for channel in document.independent_channels():
+        reading = channel_reading(document, channel.channel_id)
+        if not reading.usable:
+            continue
+        deterministic = 0 if channel.kind is not ChannelKind.VISION else 1
+        scored.append((-len(reading.covered_pages), deterministic,
+                       channel.channel_id, channel))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: item[:3])
+    return scored[0][3]
+
+
+def recall_reading(document: SourceEvidenceDocument) -> ChannelReading | None:
+    """The independent reading of the document a recall extraction should be run over,
+    or None when no channel other than the transcription could read any page."""
+    channel = recall_channel(document)
+    if channel is None:
+        return None
+    return channel_reading(document, channel.channel_id)
+
+
+def reconcile_reading(document: SourceEvidenceDocument,
+                      targets: list[SpanTarget] | tuple[SpanTarget, ...],
+                      reading: ChannelReading,
+                      *, control_mode: str = "ENFORCED_FAIL_CLOSED"
+                      ) -> SourceReconciliation:
+    """Prove quotations that came from `reading` -- NOT from the primary transcription.
+
+    Two things differ from `reconcile_spans`, and both are forced by what is being
+    asked rather than chosen for convenience:
+
+      * the page is located in the READING's coordinate space, because that is the
+        string these offsets were verified against;
+
+      * the primary transcription's SILENCE cannot refute the quotation. Whether the
+        transcription omitted this passage is the very hypothesis under test, so the
+        channel under test does not get a veto over it. It can only CONFIRM: if the
+        transcription does contain the passage after all, the passage is proven and
+        what the primary reading actually missed was the extraction, not the page.
+
+    Every OTHER channel is a full authority and the worst of their answers wins,
+    exactly as everywhere else -- so two readings that both fail to find the passage
+    refute it, and a lone unsupported reading is never admitted.
+
+    The result when nothing but the transcription could be asked, and it does not
+    contain the passage, is UNVERIFIABLE: two readings of one document disagree about
+    whether a passage is on the page, nothing settled it, and that is system work
+    (obtain a reading of that page) rather than either a confirmation or a refutation.
+    `pages_needing_independent_read` then names exactly those pages.
+    """
+    primary = document.primary_channel
+    primary_id = primary.channel_id if primary is not None else ""
+    checking = tuple(c for c in document.channels
+                     if c.channel_id != reading.channel_id)
+    results: list[SpanReconciliation] = []
+
+    for target in targets:
+        quoted = tokenize(target.text)
+        pages = reading.pages_for_offsets(target.start, target.end)
+        page_images = tuple(
+            (document.page(n).image_sha256 if document.page(n) else "") for n in pages)
+        if not quoted:
+            results.append(SpanReconciliation(
+                span_id=target.span_id, fact_id=target.fact_id,
+                status=ReconciliationStatus.VACUOUS, pages=pages,
+                page_image_sha256=page_images,
+                detail="quotation carries no material token (punctuation only)"))
+            continue
+        if not pages:
+            results.append(SpanReconciliation(
+                span_id=target.span_id, fact_id=target.fact_id,
+                status=ReconciliationStatus.UNVERIFIABLE,
+                detail=(f"quotation has no verified character offsets in the "
+                        f"{reading.channel_id} reading, so no page of the original "
+                        f"document can be named")))
+            continue
+
+        verdicts = _channel_verdicts(document, target, quoted, pages, page_images,
+                                     checking)
+        others = [v for v in verdicts if v.verified_by_channel_id != primary_id]
+        transcription = next(
+            (v for v in verdicts if v.verified_by_channel_id == primary_id), None)
+        best = min(others, key=lambda c: _SEVERITY[c.status], default=None)
+        if best is None and transcription is not None:
+            if transcription.status is ReconciliationStatus.AGREED:
+                best = transcription.model_copy(update={"detail": (
+                    f"the primary transcription contains this passage as well "
+                    f"({transcription.detail}); what the primary reading missed is "
+                    f"the event, not the text")})
+            else:
+                best = SpanReconciliation(
+                    span_id=target.span_id, fact_id=target.fact_id,
+                    status=ReconciliationStatus.UNVERIFIABLE, pages=pages,
+                    page_image_sha256=page_images,
+                    detail=(f"the {reading.channel_id} reading of page(s) "
+                            f"{', '.join(str(p) for p in pages)} carries this passage "
+                            f"and the primary transcription does not; no third reading "
+                            f"of those page(s) was available to settle which is right"))
+        if best is None:
+            missing = ", ".join(str(p) for p in pages)
+            best = SpanReconciliation(
+                span_id=target.span_id, fact_id=target.fact_id,
+                status=ReconciliationStatus.UNVERIFIABLE, pages=pages,
+                page_image_sha256=page_images,
+                detail=(f"no channel other than {reading.channel_id} itself produced a "
+                        f"usable reading of page(s) {missing}; a reading cannot be its "
+                        f"own authority"))
+        results.append(best)
+
+    quoted_pages = {p for r in results for p in r.pages}
+    page_outcomes = tuple({
+        "page_number": page.page_number,
+        "status": page.status.value,
+        "image_sha256": page.image_sha256,
+        "rotation": page.rotation,
+        "flags": list(page.flags),
+        "quoted_from": page.page_number in quoted_pages,
+        "independently_read_by": [c.channel_id for c in checking
+                                  if (page.read_by(c.channel_id) or None)
+                                  and page.read_by(c.channel_id).usable],
+    } for page in document.pages)
+
+    return SourceReconciliation(
+        control_mode=control_mode,
+        document_sha256=document.document_sha256,
+        document_fingerprint=document.fingerprint(),
+        primary_channel_id=primary_id,
+        # The primary channel is ASKED above (it can confirm a recall quotation) but is
+        # never listed here: this field is what a certificate reads as "who
+        # independently checked this", and the transcription is not an independent check
+        # on itself in either direction.
+        independent_channel_ids=tuple(c.channel_id for c in checking
+                                      if c.channel_id != primary_id),
+        spans=tuple(results),
+        page_outcomes=page_outcomes,
+        document_anomalies=document.anomalies)
+
+
+def merge_reconciliations(*parts: "SourceReconciliation | None") -> "SourceReconciliation | None":
+    """One reconciliation record over quotations proven in DIFFERENT readings.
+
+    Every consumer downstream joins on `span_id`, and a span id is salted with the
+    reading it was anchored in, so the union is well defined and collision-free. The
+    FIRST record carrying a given span id wins, so re-reconciling after a paid page
+    read is done by putting the newer record first rather than by mutating an older one.
+    """
+    present = [p for p in parts if p is not None]
+    if not present:
+        return None
+    if len(present) == 1:
+        return present[0]
+    spans: dict[str, SpanReconciliation] = {}
+    for record in present:
+        for span in record.spans:
+            spans.setdefault(span.span_id, span)
+    head = present[0]
+    # The PRIMARY channel is deliberately excluded even though `reconcile_reading` asks
+    # it: it is a legitimate CONFIRMER of a recall quotation, but it is never an
+    # independent check on itself, and a merged record that listed it here would tell a
+    # certificate reader the transcription had independently verified the transcription.
+    channels: list[str] = []
+    for record in present:
+        for channel_id in record.independent_channel_ids:
+            if channel_id and channel_id != head.primary_channel_id \
+                    and channel_id not in channels:
+                channels.append(channel_id)
+    return head.model_copy(update={
+        "spans": tuple(spans.values()),
+        "independent_channel_ids": tuple(channels)})
 
 
 def pages_needing_independent_read(
