@@ -412,34 +412,46 @@ def code_encounter(
             _non_pass = [d for d in _it.decisions if d.outcome is not Outcome.PASS]
             _blocking = _elig.blocking_decisions(_it)
             _r = "; ".join(f"{d.gate}: {d.detail}" for d in _non_pass) or _it.state.value
-            # The one case the directive names explicitly: the ONLY thing standing in the
-            # way is a code-changing axis two independent readings read differently that
-            # the original page could not settle. The record genuinely does not state the
-            # fact, so this becomes ONE precise provider question. Deliberately no
-            # GateResult and no excluded_reason: a gate here would route the encounter to
-            # generic REVIEW, and an excluded_reason would drop the item from routing
-            # entirely -- both of which the directive forbids for this case.
-            _axis_only = bool(_blocking) and all(d.gate == "axis_consensus"
-                                                 for d in _blocking)
+            # WHO must act on each hold is DECLARED by the eligibility engine
+            # (`eligibility._HOLD_OWNERS`), never re-derived here from gate names.
+            #
+            # This used to special-case exactly one gate: `axis_consensus` (a
+            # code-changing axis two independent readings read differently that the
+            # original page could not settle) became a provider question, and EVERY
+            # other unresolved gate fell through to generic REVIEW. Two of those were
+            # the same defect class -- an unsettled PART_OF/SEPARATE_FROM relation, and
+            # a duplicate mention that cannot be assigned to either of two explicitly
+            # distinct services -- both a code-changing fact the record does not state.
+            # One was not a coding question at all: an extracted event with no clinical
+            # action is an unusable graph node, i.e. an integrity state. Declaring the
+            # owner beside the gate is what stops the NEXT gate from inheriting the
+            # coder queue by omission. (Product directive section 8.)
+            _owners = {_elig.hold_owner(d) for d in _blocking}
+            # EVERY blocking hold is a question only the provider can answer -> ONE
+            # precise query. Deliberately no GateResult and no excluded_reason: a gate
+            # here would route the encounter to generic REVIEW, and an excluded_reason
+            # would drop the item from routing entirely -- both forbidden for this case.
+            _query_only = bool(_blocking) and _owners == {_elig.OWNER_PROVIDER_QUERY}
             line = ResolvedLine(
                 fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
-                rationale=(f"held for a targeted provider query ({_r})" if _axis_only
+                rationale=(f"held for a targeted provider query ({_r})" if _query_only
                            else f"diverted before retrieval ({_it.state.value}: {_r})"),
-                excluded_reason=(None if _axis_only
+                excluded_reason=(None if _query_only
                                  else f"eligibility state {_it.state.value}"),
                 documentation_gap=("; ".join(d.detail for d in _blocking)
-                                   if _axis_only else None))
-            if _it.state is _ES.AUTO_HOLD and not _axis_only:
-                actor_unknown = any(d.gate == "actor_ownership"
-                                    and d.outcome is Outcome.UNKNOWN for d in _it.decisions)
-                hard_integrity = any(
-                    d.outcome is Outcome.BLOCKED
-                    and d.gate in ("evidence_required", "actor_ownership")
-                    for d in _it.decisions)
+                                   if _query_only else None))
+            if _it.state is _ES.AUTO_HOLD and not _query_only:
+                # Integrity beats retry beats judgement, and the gate carries that:
+                # an unverifiable state is BLOCKED, an unresolved DEPENDENCY is a
+                # retryable UNKNOWN (SYSTEM_HOLD), and only a hold no declared owner
+                # claims stays the non-retryable UNKNOWN that reaches a coder.
+                _integrity = _elig.OWNER_INTEGRITY in _owners
+                _retryable = (not _integrity and _elig.OWNER_SYSTEM in _owners
+                              and _elig.OWNER_CODER not in _owners)
                 pre_retrieval_gates.append(GateResult(
                     f"eligibility_hold:{fact.fact_id}",
-                    Outcome.BLOCKED if hard_integrity else Outcome.UNKNOWN, _r,
-                    "eligibility-before-retrieval", retryable=actor_unknown))
+                    Outcome.BLOCKED if _integrity else Outcome.UNKNOWN, _r,
+                    "eligibility-before-retrieval", retryable=_retryable))
         elif fact.fact_id != _it.clinical_event_ids[0]:
             line = ResolvedLine(
                 fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,

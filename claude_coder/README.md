@@ -301,6 +301,46 @@ by how well the underlying fact is documented; a single-model `ARBITRATED`
 tie-break is discounted. Verdicts: `AUTO_READY`, `REVIEW_REQUIRED`, `BLOCKED` —
 each with an audit note naming exactly why.
 
+### Deterministic routing — who actually has to act
+
+The verdict says whether the claim releases. The **destination** says *whose work
+it is*, because "not released" collapses four unrelated situations into one queue
+otherwise. Product-directive section 8 names the destinations; `Destination` is the
+producer vocabulary and `contracts.claim_bundle.ReleaseDestination` the canonical one:
+
+| Producer | Canonical | Reached when |
+|---|---|---|
+| `AUTO_READY` | `AUTO_READY` | every hard invariant satisfied; release |
+| `PROVIDER_QUERY` | `AUTO_QUERY` | the **record itself** lacks a code-changing fact — an unsettled fact axis, an unsettled integral-vs-distinct relationship, an unassignable duplicate mention, a descriptor element the note omits, or a named weakest axis the note barely documents |
+| `SYSTEM_HOLD` | `SYSTEM_RETRY` | a **dependency** did not answer — an unavailable authority (NCCI/MUE/coverage/Tabular), an unbound performer identity, an unverified second reading, an audit/persistence failure |
+| `HOLD` | `NON_BILLABLE` | every documented event was disposed of by an explicit rule — not performed / not the patient's / uncertain, or bundled, integral or not separately reportable |
+| `BLOCKED` | `BLOCKED` | a hard gate failed, or the representation contradicts itself (graph integrity, contradicted ownership, an event with no clinical action) |
+| `REVIEW` | `REVIEW` | **residual human judgement only** — see below |
+
+Three rules hold this together and are pinned by
+`tests/test_validation_ladder.py`:
+
+1. **Model disagreement is never a reason to see a coder.** The directive is
+   explicit: "Model disagreement, source refresh failure, index failure, or output
+   failure are system work." A tie between candidates is settled against the
+   original page (`tiebreak.narrow`) or asked about; two readings that differ on a
+   fact axis become one precise question.
+2. **Every eligibility hold declares its owner.** `eligibility._HOLD_OWNERS` maps
+   each `(gate, outcome)` to who must act, so a *new* gate cannot inherit the
+   generic coder queue by omission. `hold_owner` falls back to the coder
+   deliberately (over-escalation is the safe direction), and a guard test fails
+   the build if anything is still relying on that fallback.
+3. **No destination is unreachable.** A named destination nothing routes to is a
+   comment, not a taxonomy — `NON_BILLABLE` was exactly that until phase 8.
+
+What legitimately **remains** a coder's: a modifier-1 NCCI pair with no applied
+distinct-service modifier (is the service genuinely separate?); an Excludes1 pair
+that may be an unrelated-conditions exception; a code chosen by a single model among
+candidates with no independent corroboration (`ARBITRATED`); a resolution the
+documentation leaves ambiguous with no single missing element to ask for; and a
+barely-documented event with no identifiable weakest axis. These are irreducible
+clinical/coding judgement, not defaults.
+
 ---
 
 ## The learned verified-resolution index

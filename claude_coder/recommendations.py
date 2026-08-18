@@ -6,6 +6,8 @@ recommendations from the coding result:
 
   • documentation_gap  — a code fits the service but its descriptor requires an
                          element the note does not state (a provider query);
+  • documentation_clarity — a code WAS grounded, but the note documents the event so
+                         weakly that autonomy stepped back; names the weakest axis;
   • unresolved_service — documentation too thin / ambiguous to select any code;
   • gate_<name>        — a release gate blocked (missing evidence, no supporting
                          diagnosis, missing DOS, inactive code).
@@ -102,6 +104,36 @@ def build_recommendations(result: CodingResult) -> list[dict]:
                     f"No candidate code was retrieved for '{ln.fact.description}' — "
                     f"clarify the exact service/condition (site, laterality, technique, "
                     f"and any product/dose) so it can be coded.")})
+
+    # 2b. RESOLVED lines the note barely documents. `autonomy.decide` steps back from
+    #     these even though the code itself is grounded, because the uncertainty is in
+    #     the DOCUMENTATION, not the code — and when the weakest axis is named it routes
+    #     them to PROVIDER_QUERY. Without an entry here that routed item would carry no
+    #     suggested action, which breaks the self-containment property every routed item
+    #     is supposed to have (`pipeline._attach_recommendations`). Sections 1 and 2 both
+    #     require an UNRESOLVED line, so this class produced nothing at all before.
+    from .autonomy import SHAKY_EXTRACTION
+    for ln in result.billable_lines:
+        if ln.fact.min_confidence >= SHAKY_EXTRACTION:
+            continue
+        axis = ln.fact.weakest_axis
+        code = f"{ln.chosen.system.upper()} {ln.chosen.code}" if ln.chosen else "the code"
+        if axis:
+            action = (f"Confirm and document '{axis}' explicitly for "
+                      f"'{ln.fact.description}'. {code} is grounded in the authoritative "
+                      f"descriptor, but that axis is stated too weakly in the note to "
+                      f"bill it without confirmation.")
+        else:
+            action = (f"'{ln.fact.description}' is documented too weakly to release "
+                      f"automatically even though {code} is grounded. Coder to review "
+                      f"the note against the selected code before billing.")
+        recs.append({
+            "issue": "documentation_clarity", "subject": ln.fact.description,
+            "fact_id": ln.fact.fact_id,
+            "detail": (f"extraction confidence {ln.fact.min_confidence:.2f} < "
+                       f"{SHAKY_EXTRACTION:.2f}"
+                       + (f", weakest axis '{axis}'" if axis else "")),
+            "recommendation": action})
 
     # 3. Gate-based remediation — what to fix to earn release.
     for g in result.gates:

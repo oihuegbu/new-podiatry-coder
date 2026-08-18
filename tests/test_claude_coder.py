@@ -1648,11 +1648,17 @@ class RecommendationsTest(unittest.TestCase):
     """Documentation recommendations are derived agnostically from fact kinds,
     resolution methods, and gate outcomes — no code/term/scenario. Abstract inputs."""
 
-    def _line(self, resolved, doc_gap=None, rationale="r"):
+    def _line(self, resolved, doc_gap=None, rationale="r", confidence=0.99):
+        # `confidence` is explicit because it is claim-affecting here: a resolved line
+        # the note BARELY documents is not a clean line, and it now earns a
+        # `documentation_clarity` recommendation (the suggested action behind the
+        # PROVIDER_QUERY `autonomy.decide` routes it to). The default is a clearly
+        # well-documented fact so "resolved" means resolved.
         from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
                                          ResolutionMethod, ResolvedLine)
         f = ClinicalFact(kind=FactKind.PROCEDURE, description="a documented service",
-                         evidence=[EvidenceSpan("a documented service performed")])
+                         evidence=[EvidenceSpan("a documented service performed")],
+                         confidence=confidence)
         chosen = CandidateCode("PROC_X", "cpt", "d", 0.9) if resolved else None
         return ResolvedLine(fact=f, chosen=chosen,
                             method=(ResolutionMethod.VERIFIED if resolved
@@ -1692,6 +1698,21 @@ class RecommendationsTest(unittest.TestCase):
             CodingResult(encounter_id="e", date_of_service="2026-03-14",
                          lines=[self._line(resolved=True)]))
         self.assertEqual(recs, [])
+
+    def test_a_barely_documented_resolved_line_still_gets_a_suggested_action(self):
+        """The companion of the case above, and the gap this phase's post-fix review
+        found: `autonomy.decide` steps back from a resolved line the note barely
+        documents, but BOTH existing recommendation rules required an UNRESOLVED line,
+        so the routed item carried no suggested action at all."""
+        from claude_coder.autonomy import SHAKY_EXTRACTION
+        from claude_coder.models import CodingResult
+        from claude_coder.recommendations import build_recommendations
+        ln = self._line(resolved=True, confidence=SHAKY_EXTRACTION - 0.01)
+        ln.fact.axis_confidence = {"laterality": SHAKY_EXTRACTION - 0.01}
+        recs = build_recommendations(
+            CodingResult(encounter_id="e", date_of_service="2026-03-14", lines=[ln]))
+        self.assertEqual([r["issue"] for r in recs], ["documentation_clarity"])
+        self.assertIn("laterality", recs[0]["recommendation"])
 
 
 class IntegralBundlingTest(unittest.TestCase):

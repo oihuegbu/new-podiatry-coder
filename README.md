@@ -620,16 +620,26 @@ Every note runs **3 independent times** (`CONSISTENCY_RUNS=3`, the default):
    where a same-scenario neighbor usually exists. Guardrails: a note is
    never its own exemplar, exemplars are framed as examples (never
    lookups), and every deterministic validator layer still runs.
-7. **Calibration dataset** (`tools/calibration_dataset.py`) — the wiring
-   for a future learned confidence model ("does this claim need a human?").
-   Every batch appends/updates one labeled row per note
-   (`data/registry/calibration_dataset.jsonl`): features from the result
-   (claim shape, validation counts, consistency disagreements, exemplar
-   coverage) and labels from the routing verdict, the registry's human
-   verdicts (`human_corrected` — did a coder actually change the claim?),
-   and payer adjudication. The model is worth training once human-verdict
-   rows reach the hundreds; until then the dataset just accumulates so no
-   ground truth is ever lost.
+7. **Calibration dataset** (`tools/calibration_dataset.py`) — rung 8 of the
+   validation ladder (product directive section 9): *calibration by decision
+   class and weakest axis, not one global confidence score*. Every batch
+   appends/updates one row per **current** `ClaimBundle`
+   (`data/registry/calibration_dataset.jsonl`), carrying the exact
+   `(claim, data snapshot, model profiles, document version)` identity, features
+   from the contract itself, the canonical routing **destination** as the
+   calibration bucket, and labels from the registry's human verdicts
+   (`human_corrected`) and the rung-7 outcome ledger. An artifact it cannot
+   calibrate is **refused by name** rather than counted as skipped — the tool
+   previously read the retired `app.pipeline` shape and therefore reported a
+   clean run over an empty dataset.
+
+   **Where real-world evidence attaches** (`app/release/outcome_ledger.py`) —
+   ladder rungs 5-7 (blinded duplicate runs, shadow comparison, denial/
+   remittance/corrected-claim feedback) are *structure only* in this deployment.
+   An observation must name the exact ClaimBundle, data snapshot and model
+   profiles it describes or it is refused, and every unpopulated rung reports
+   `AWAITING_DEPLOYMENT_DATA` rather than a measured zero. No historical corpus
+   is fabricated to make a rung look populated.
 8. **Claim submission** (`tools/claim_submitter.py`) — registry-verified
    claims become real 837P professional claims through the clearinghouse
    adapter (`app/compliance/adapters/stedi.py`, the same swappable
@@ -982,7 +992,7 @@ tools/
 ├── claims_registry.py    append-only ledger of verified billable claims
 ├── claim_submitter.py    registry-verified claims → 837P via clearinghouse
 ├── denial_feedback.py    835/denial ingest + MISSED-class gate
-├── calibration_dataset.py labeled rows for a learned confidence model
+├── calibration_dataset.py calibration rows per decision class / weakest axis
 └── benchmark_ab.py       score pipeline runs against frozen gold claims
 app/validation/graduated/        graduated (proven, trusted) synthesized
                                  templates — app code, no runtime sandbox

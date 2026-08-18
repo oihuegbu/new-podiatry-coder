@@ -61,6 +61,8 @@ def _necessity_authoritatively_met(result: CodingResult, source) -> bool:
 # Which destination wins when several apply: a hard stop first, then an operational
 # retry, then genuine coding judgement, then a provider question, then a do-not-bill
 # hold. A coder (REVIEW) only sees what truly needs a coder.
+# HOLD is the directive's NON_BILLABLE/EXCLUDED bucket and sits last on purpose: it is
+# reached only when nothing else is open, so it can never mask a real block.
 _PRECEDENCE = [Destination.BLOCKED, Destination.SYSTEM_HOLD, Destination.REVIEW,
                Destination.PROVIDER_QUERY, Destination.HOLD]
 
@@ -167,17 +169,47 @@ def decide(result: CodingResult,
 
     billable = result.billable_lines
     if not billable:
-        # A claim with no billable line is normally genuine coding judgement -- but NOT
-        # when every open item is already a precise documentation question whose answer
-        # determines the claim. A coder has nothing to decide there: the record is simply
-        # missing a fact, and sending it to a coder anyway is exactly the generic-review
-        # fallback the product directive forbids (sections 3 and 8). Found by the
-        # evidence-graph acceptance suite: an encounter whose only open item was an
-        # unsettled fact axis reached REVIEW through this catch-all even though every
-        # item on it was a provider query.
+        # A claim with no billable line used to be treated as coding judgement by
+        # default, which is the generic-review fallback the directive forbids (sections
+        # 3 and 8). It is judgement only when nothing else already accounts for the
+        # absence. Two earlier findings came through this one catch-all: an encounter
+        # whose only open item was an unsettled fact axis (a provider query), and an
+        # encounter whose every documented event had been excluded (NON_BILLABLE).
         _open = [r for r in routing if r["blocking"]]
-        if not (_open and all(r["destination"] == Destination.PROVIDER_QUERY.value
-                              for r in _open)):
+        _all_disposed = bool(result.lines) and all(
+            (ln.excluded_reason or not ln.fact.billable) for ln in result.lines)
+        if _open:
+            # Something is ALREADY open, and it is what explains the missing claim --
+            # a provider question, a dependency to retry, a hard stop, or a line a
+            # coder must settle. Adding "no defensible billable line was produced" on
+            # top of it is a second, vaguer coder item for a cause already named, and
+            # it made every SYSTEM_HOLD encounter with no lines look partly like coding
+            # work. The precedence order is unaffected either way; the noise is not.
+            pass
+        elif _all_disposed:
+            # NOTHING is left open and EVERY documented event was disposed of by an
+            # EXPLICIT decision -- either the event is not a claimable occurrence at all
+            # (not performed / not certain / not the patient's, so `fact.billable` is
+            # False) or authoritative claim mechanics excluded it (integral, bundled,
+            # not separately reportable, non-claim evidence). The documented event is
+            # simply not claim-eligible, which is the directive's NON_BILLABLE/EXCLUDED
+            # destination -- there is no judgement left for a coder to make.
+            #
+            # Until now `Destination.HOLD` appeared ONLY in `_PRECEDENCE` and was never
+            # routed to by any path, so this entire class of encounter reached a coder
+            # through the catch-all below. That is the fifth of the directive's five
+            # named destinations, and it was unreachable.
+            for ln in result.lines:
+                route(Destination.HOLD, ln.fact.description,
+                      ln.excluded_reason
+                      or (f"not a claim-eligible event (disposition="
+                          f"{ln.fact.disposition.value}, certain={ln.fact.certain}, "
+                          f"experiencer={ln.fact.experiencer})"),
+                      fact_id=ln.fact.fact_id)
+        else:
+            # Nothing is open and the events were NOT all disposed of -- in practice,
+            # nothing at all was extracted from the document. Unexplained, so a human
+            # looks at it; this is the one thing the catch-all was ever for.
             route(Destination.REVIEW, "claim",
                   "no defensible billable line was produced")
 
@@ -202,7 +234,13 @@ def decide(result: CodingResult,
         elif ln.fact.min_confidence < SHAKY_EXTRACTION:
             _wk = ln.fact.weakest_axis
             _axis = f", weakest axis '{_wk}'" if _wk else ""
-            route(Destination.REVIEW, ln.fact.description,
+            # This floor is on DOCUMENTATION clarity, not on code choice (see the block
+            # comment above). So when the WEAKEST AXIS is named, the open item already IS
+            # a precise question about a specified claim field -- the directive's
+            # AUTO_QUERY -- and not a judgement call a coder owns. With no axis recorded
+            # the concern is diffuse and a coder remains the honest destination.
+            route(Destination.PROVIDER_QUERY if _wk else Destination.REVIEW,
+                  ln.fact.description,
                   f"the note barely documents this event (confidence "
                   f"{ln.fact.min_confidence:.2f} < {SHAKY_EXTRACTION:.2f}{_axis}) — "
                   f"clarify before billing",

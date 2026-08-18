@@ -36,15 +36,26 @@ def _verified_line(fact):
                         method=ResolutionMethod.VERIFIED)
 
 
-def test_weak_axis_routes_to_review_despite_high_overall():
-    """A high scalar (0.99) with a weak performer axis (0.2) must still route to REVIEW —
-    the strong average cannot conceal the weak axis."""
+def test_weak_axis_is_held_and_named_despite_a_high_overall():
+    """A high scalar (0.99) with a weak performer axis (0.2) must still be HELD, and the
+    routed item must name that axis — the strong average cannot conceal the weak one.
+
+    The DESTINATION changed in the directive's phase 8 and the property did not. This
+    floor is on DOCUMENTATION clarity, not on code choice, so a NAMED weak axis is a
+    precise question about a specified claim field (the record does not clearly say who
+    performed the service) — the directive's AUTO_QUERY, not a coder's judgement call.
+    It still blocks release; only who is asked changed. The unnamed-axis case still
+    reaches a coder, and `tests/test_validation_ladder.py` pins both directions.
+    """
     res = CodingResult("enc", "2026-08-01",
                        lines=[_verified_line(_fact(0.99, {"performer": 0.2}))], gates=[])
     decide(res, source=MockSource())
     hits = [r for r in res.routing
-            if r["destination"] == "REVIEW" and "weakest axis 'performer'" in r["reason"]]
+            if r["destination"] == "PROVIDER_QUERY"
+            and "weakest axis 'performer'" in r["reason"]]
     assert hits, res.routing
+    assert all(r["blocking"] for r in hits), "a weak axis must still hold the claim"
+    assert res.verdict.value == "REVIEW_REQUIRED"
 
 
 def test_high_all_axes_not_routed_by_shaky_floor():

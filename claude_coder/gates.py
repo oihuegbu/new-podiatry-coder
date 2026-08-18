@@ -491,6 +491,13 @@ def medical_necessity_gate(result: CodingResult,
                    if ln.fact is not None and ln.fact.fact_id}
     reason_for, disqualified = _necessity_support_relations(result, control)
     holds: list[str] = []
+    # Holds caused by a DEPENDENCY that did not answer, tracked apart from holds
+    # caused by what the note documents. Both stop release, but only one of them is
+    # coding work: an unavailable coverage authority is a retry (SYSTEM_HOLD), and
+    # routing it to a coder is the generic-review fallback the directive forbids
+    # (section 8). This is the same classification `ncci_gate`, `mue_gate` and
+    # `icd_excludes_gate` already make for their own authorities.
+    unavailable: list[str] = []
     bindings: list[dict] = []
     for ln in procs:
         pid = ln.fact.fact_id if ln.fact is not None else None
@@ -515,8 +522,10 @@ def medical_necessity_gate(result: CodingResult,
         if source is not None and ln.chosen is not None:
             try:
                 qualifying = source.qualifying_dx_for(ln.chosen.code, ln.chosen.system)
-            except Exception:
-                holds.append(f"{label}: coverage-policy evaluation unavailable")
+            except Exception as exc:
+                _h = (f"{label}: coverage-policy evaluation unavailable ({exc})")
+                holds.append(_h)
+                unavailable.append(_h)
                 continue
             if qualifying is not None:
                 want = {str(q).replace(".", "").upper() for q in qualifying}
@@ -561,7 +570,10 @@ def medical_necessity_gate(result: CodingResult,
         })
     result.necessity_support = bindings
     if holds:
-        return GateResult("medical_necessity", Outcome.UNKNOWN, "; ".join(holds), authority)
+        # Retryable ONLY when every hold is an unanswered dependency. A mix means the
+        # note itself is also short something, and a retry would not produce it.
+        return GateResult("medical_necessity", Outcome.UNKNOWN, "; ".join(holds),
+                          authority, retryable=len(unavailable) == len(holds))
     return GateResult("medical_necessity", Outcome.PASS,
                       f"{len(procs)} procedure(s) each justified by a record-grounded, "
                       f"anchored diagnosis link in this encounter, and by authoritative "

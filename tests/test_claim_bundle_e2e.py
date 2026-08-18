@@ -1044,7 +1044,6 @@ _LEGACY_SHAPE_READERS = {
     "tools/audit_convergence_loop.py",
     "tools/audit_results.py",
     "tools/auto_actuate.py",
-    "tools/calibration_dataset.py",
     "tools/coder_adjudicator.py",
     "tools/dryrun_layers.py",
     "tools/pack_consolidation.py",
@@ -1059,6 +1058,11 @@ _LEGACY_SHAPE_READERS = {
 _MIGRATED_TO_THE_CONTRACT = {
     "tools/claims_registry.py",
     "tools/claim_submitter.py",
+    # Directive section 9 rung 8 (calibration). It read the retired shape and
+    # therefore measured NOTHING against a bundle artifact while still reporting a
+    # clean run; it is now ClaimBundle-native and refuses a non-bundle artifact by
+    # name instead of counting it as "skipped".
+    "tools/calibration_dataset.py",
 }
 
 

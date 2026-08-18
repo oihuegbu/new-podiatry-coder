@@ -567,6 +567,67 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
 NON_BLOCKING_GATES = frozenset({"diagnosis_linkage"})
 
 
+#: WHO must act on an unresolved eligibility decision, in the product directive's
+#: routing vocabulary (section 8). This exists because "a gate did not clear" says
+#: nothing about whether the work is a coder's, the provider's, or the system's --
+#: and a hold with no declared owner falls through to a generic coder queue, which
+#: is exactly the fallback the directive forbids.
+#:
+#: The owner is keyed on (gate, outcome) because the same gate means different things
+#: at different outcomes: ownership that CONTRADICTS the billing entity is an
+#: integrity state; ownership that was never RESOLVED is context-resolver work.
+#:
+#: These are the directive's destination NAMES rather than models.Destination members
+#: so this module keeps its one-way dependency on models (facts, not routing); the
+#: pipeline translates them.
+OWNER_PROVIDER_QUERY = "PROVIDER_QUERY"   # the record itself lacks a code-changing fact
+OWNER_SYSTEM = "SYSTEM"                   # a dependency did not resolve -> retry
+OWNER_INTEGRITY = "INTEGRITY"             # inconsistent/unverifiable -> BLOCKED
+OWNER_NON_CLAIM = "NON_CLAIM"             # the event is simply not claim-eligible
+OWNER_CODER = "CODER"                     # irreducible coding/clinical judgement
+
+_HOLD_OWNERS: dict[tuple[str, Outcome], str] = {
+    # The event is not an independent claim line at all.
+    ("occurrence", Outcome.BLOCKED): OWNER_NON_CLAIM,
+    ("part_of_demotion", Outcome.BLOCKED): OWNER_NON_CLAIM,
+    # Nothing downstream can be verified against a fact with no anchored evidence, or
+    # one billed by an entity the record says did not perform it.
+    ("evidence_required", Outcome.BLOCKED): OWNER_INTEGRITY,
+    ("actor_ownership", Outcome.BLOCKED): OWNER_INTEGRITY,
+    # An event whose clinical action is empty is an unusable graph node -- neither a
+    # coder nor the provider has anything to act on.
+    ("documentation_minimum", Outcome.UNKNOWN): OWNER_INTEGRITY,
+    # The performer/billing identity was never bound. That is the Encounter Context
+    # Resolver's job, so it is a retry, never a coder queue.
+    ("actor_ownership", Outcome.UNKNOWN): OWNER_SYSTEM,
+    # Every remaining hold has the SAME shape: two readings of the original document
+    # disagreed about a code-changing fact, or the document never states it, and the
+    # page could not settle it. The answer exists only in the provider's head, so it
+    # becomes one precise question -- the directive names model disagreement
+    # explicitly as something that must NOT reach a coder.
+    ("conflict", Outcome.UNKNOWN): OWNER_PROVIDER_QUERY,
+    ("axis_consensus", Outcome.UNKNOWN): OWNER_PROVIDER_QUERY,
+    ("coreference_assignment", Outcome.UNKNOWN): OWNER_PROVIDER_QUERY,
+    ("coreference", Outcome.UNKNOWN): OWNER_PROVIDER_QUERY,
+}
+
+
+def hold_owner(decision: EligibilityDecision) -> str:
+    """Who must act on this unresolved decision (see _HOLD_OWNERS).
+
+    An UNDECLARED (gate, outcome) falls back to OWNER_CODER: over-escalation, the same
+    failure direction NON_BLOCKING_GATES chooses. tests/test_validation_ladder.py pins
+    the declaration so a new gate cannot reach production still relying on that
+    fallback -- it is a safety net, not the routing design.
+    """
+    return _HOLD_OWNERS.get((decision.gate, decision.outcome), OWNER_CODER)
+
+
+def declared_hold_gates() -> frozenset[str]:
+    """Gate names carrying at least one declared owner -- the coverage guard's input."""
+    return frozenset(g for g, _ in _HOLD_OWNERS)
+
+
 def blocking_decisions(intent: ClaimLineIntent) -> list[EligibilityDecision]:
     """The decisions that actually produced this intent's state.
 
