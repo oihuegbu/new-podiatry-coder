@@ -94,3 +94,113 @@ class TerminologyIndex:
     @classmethod
     def load(cls) -> "TerminologyIndex":
         return cls.load_snapshot()[0]
+
+
+# ---- governed concept identity for OPEN clinical vocabulary (issue #6 F7-R3-C) ----
+# `claude_coder.coreference` compares open-vocabulary axis values (anatomy, approach,
+# site, ...) by lexical shape, which can only ever answer "identical string" or "not
+# identical" -- it cannot tell a synonym pair apart from a genuine distinction. This is
+# the authoritative alternative for anatomy: a versioned concept graph (term ->
+# concept, concept -> parent concepts) from SNOMED CT's Body Structure hierarchy,
+# compiled by tools/build_snomed_concept_terms.py. REVIEWED-OPTIONAL, same disposition
+# as every other licensed recall aid on this adapter: absence degrades the axis
+# comparison to its existing conservative behavior, never to a wrong relation.
+
+#: The concept graph resolved BOTH terms to the SAME concept -- a confirmed match.
+CONCEPT_SAME = "same"
+#: One concept is an ancestor of the other -- related, but NOT proof of sameness (a
+#: descendant can be a real, more specific distinction) and NOT proof of a difference
+#: (an ancestor can be the same site described less specifically).
+CONCEPT_RELATED = "ancestor_descendant"
+#: Both terms resolved to concepts, and neither concept is an ancestor of the other --
+#: a genuine, structural opposition the authoritative graph itself asserts.
+CONCEPT_DISJOINT = "disjoint"
+#: Either term did not resolve to a known concept in this graph. Never a relation on
+#: its own -- the caller's existing lexical-identity fallback applies.
+CONCEPT_UNRESOLVED = "unresolved"
+
+
+class ConceptRelationIndex:
+    """SAME / ancestor-descendant / DISJOINT / unresolved for two clinical terms,
+    from an authoritative concept graph -- never from lexical shape.
+
+    No term or concept identity is named here: the graph itself (loaded from data) is
+    the only place clinical vocabulary appears, matching every other terminology index
+    on this adapter.
+    """
+
+    def __init__(self, concepts: dict):
+        self._parents: dict[str, tuple[str, ...]] = {
+            cid: tuple(rec.get("parents") or []) for cid, rec in (concepts or {}).items()}
+        self._exact: dict[str, set[str]] = {}
+        self._despaced: dict[str, set[str]] = {}
+        self._byset: dict[frozenset[str], set[str]] = {}
+        for cid, rec in (concepts or {}).items():
+            for term in rec.get("terms") or []:
+                n = _norm(term)
+                if not n:
+                    continue
+                self._exact.setdefault(n, set()).add(cid)
+                self._despaced.setdefault(n.replace(" ", ""), set()).add(cid)
+                toks = frozenset(_sing(t) for t in n.split() if len(t) > 2)
+                if toks:
+                    self._byset.setdefault(toks, set()).add(cid)
+
+    def candidates(self, term: str) -> set[str]:
+        """Candidate concept ids a clinical term could name -- the SAME matching
+        strategy as `TerminologyIndex.candidates` (exact, compound-word, then
+        order/plural-independent token set), just against concept ids instead of
+        authoritative codes."""
+        n = _norm(term)
+        if not n:
+            return set()
+        if n in self._exact:
+            return set(self._exact[n])
+        despaced = n.replace(" ", "")
+        if despaced in self._despaced:
+            return set(self._despaced[despaced])
+        toks = frozenset(_sing(t) for t in n.split() if len(t) > 2)
+        return set(self._byset.get(toks, set())) if toks else set()
+
+    def _ancestors(self, concept_id: str) -> set[str]:
+        seen: set[str] = set()
+        stack = [concept_id]
+        while stack:
+            cid = stack.pop()
+            for parent in self._parents.get(cid, ()):
+                if parent not in seen:
+                    seen.add(parent)
+                    stack.append(parent)
+        return seen
+
+    def relation(self, term_a: str, term_b: str) -> str:
+        """One of the CONCEPT_* verdicts above for two clinical terms.
+
+        UNRESOLVED whenever either term does not resolve to a known concept in this
+        graph -- including a term resolving to several concepts with no relation among
+        them, which is the term itself being ambiguous within the graph, not a
+        confirmed anything.
+        """
+        a, b = self.candidates(term_a), self.candidates(term_b)
+        if not a or not b:
+            return CONCEPT_UNRESOLVED
+        if a & b:
+            return CONCEPT_SAME
+        for ca in a:
+            ancestors_a = self._ancestors(ca)
+            for cb in b:
+                if cb in ancestors_a or ca in self._ancestors(cb):
+                    return CONCEPT_RELATED
+        return CONCEPT_DISJOINT
+
+    @classmethod
+    def load_snapshot(cls) -> tuple["ConceptRelationIndex", dict]:
+        """(index, content identity of the exact bytes parsed) -- same binding
+        discipline as `TerminologyIndex.load_snapshot`: the identity is captured at
+        the parse because the graph then answers every later relation from memory.
+        """
+        from app.release.source_manifest import (DeclaredSourceUnavailable,
+                                                 declared_document_snapshot)
+        document, identity = declared_document_snapshot("snomed_concept_terms",
+                                                        DeclaredSourceUnavailable)
+        return cls(document.get("concepts", {})), identity

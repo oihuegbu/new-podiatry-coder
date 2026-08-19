@@ -572,6 +572,44 @@ class TerminologyIndexTest(unittest.TestCase):
         self.assertEqual(line.chosen.code, "DX41")     # right-side leaf, not the category
 
 
+class ConceptRelationIndexTest(unittest.TestCase):
+    """SAME / ancestor-descendant / DISJOINT / unresolved for two clinical terms, from
+    a governed concept graph (issue #6 F7-R3-C) -- never from lexical shape. Synthetic
+    concept ids/terms — the mechanics under test are candidate matching (exact,
+    despaced, token-set), ancestor-closure BFS, and the four-way relation verdict, none
+    of which depend on any specific SNOMED concept."""
+
+    def _index(self):
+        from claude_coder.terminology import ConceptRelationIndex
+        # C1 (root) -> C2 -> C3, and an unrelated C9.
+        return ConceptRelationIndex({
+            "C1": {"terms": ["root structure"], "parents": []},
+            "C2": {"terms": ["mid structure", "middle structure"], "parents": ["C1"]},
+            "C3": {"terms": ["leaf structure", "the leaf"], "parents": ["C2"]},
+            "C9": {"terms": ["other structure"], "parents": []},
+        })
+
+    def test_two_synonyms_of_the_same_concept_are_same(self):
+        idx = self._index()
+        self.assertEqual(idx.relation("leaf structure", "the leaf"), "same")
+
+    def test_an_ancestor_and_descendant_are_related_not_same_or_disjoint(self):
+        idx = self._index()
+        self.assertEqual(idx.relation("leaf structure", "mid structure"),
+                         "ancestor_descendant")
+        self.assertEqual(idx.relation("mid structure", "root structure"),
+                         "ancestor_descendant")
+
+    def test_two_concepts_with_no_relation_are_disjoint(self):
+        idx = self._index()
+        self.assertEqual(idx.relation("leaf structure", "other structure"), "disjoint")
+
+    def test_an_unknown_term_is_unresolved_not_a_guessed_relation(self):
+        idx = self._index()
+        self.assertEqual(idx.relation("leaf structure", "no such term"), "unresolved")
+        self.assertEqual(idx.relation("no such term", "leaf structure"), "unresolved")
+
+
 def _line(code, kind, descriptor="d", attrs=None, system="cpt"):
     from claude_coder.models import (ClinicalFact, EvidenceSpan, ResolutionMethod,
                                      ResolvedLine)
@@ -721,6 +759,66 @@ class DedupTest(unittest.TestCase):
         billed = [ln for ln in r.billable_lines if ln.chosen.code == "SAME"]
         self.assertEqual(len(billed), 1)
         self.assertTrue(a.excluded_reason or b.excluded_reason)
+
+    def test_a_governed_concept_source_resolves_a_true_synonym_pair_to_one_unit(self):
+        """Issue #6 F7-R3-C: without a concept source, two mentions worded as genuine
+        synonyms on the anatomy axis hold as UNDETERMINED (see
+        AxisComparisonIsNormalized in test_evidence_graph.py) because lexical shape
+        alone cannot tell a synonym pair from a real distinction. With a governed
+        concept source available and confirming the SAME concept, that ambiguity
+        resolves: one documented service, described twice, is one billed unit."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CodingResult, FactKind
+        from claude_coder.pipeline import dedup_lines
+        from claude_coder.terminology import CONCEPT_SAME
+        a = _line("SAME", FactKind.PROCEDURE, "same procedure",
+                 attrs={"anatomy": "great toe"})
+        b = _line("SAME", FactKind.PROCEDURE, "same procedure",
+                 attrs={"anatomy": "hallux"})
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14", lines=[a, b])
+        src = MockSource(concept_relation={("great toe", "hallux"): CONCEPT_SAME})
+        dedup_lines(r, src)
+        billed = [ln for ln in r.billable_lines if ln.chosen.code == "SAME"]
+        self.assertEqual(len(billed), 1)
+        self.assertEqual(billed[0].units, 1)
+
+    def test_a_governed_concept_source_still_confirms_a_genuinely_disjoint_pair(self):
+        """The same wiring must not turn every ambiguous pair into a merge: a concept
+        source that confirms DISJOINT concepts is a real, authoritative distinction --
+        a second billable occurrence, not a guess in either direction."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CodingResult, FactKind
+        from claude_coder.pipeline import dedup_lines
+        from claude_coder.terminology import CONCEPT_DISJOINT
+        a = _line("SAME", FactKind.PROCEDURE, "same procedure",
+                 attrs={"anatomy": "second toe"})
+        b = _line("SAME", FactKind.PROCEDURE, "same procedure",
+                 attrs={"anatomy": "great toe"})
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14", lines=[a, b])
+        src = MockSource(
+            concept_relation={("second toe", "great toe"): CONCEPT_DISJOINT})
+        dedup_lines(r, src)
+        billed = [ln for ln in r.billable_lines if ln.chosen.code == "SAME"]
+        self.assertEqual(len(billed), 1)
+        self.assertEqual(billed[0].units, 2)
+
+    def test_an_unresolved_concept_source_falls_back_to_the_existing_hold(self):
+        """A concept source that cannot resolve either term (issue #6 F7-R3-C) must
+        degrade to the same conservative hold as having no source at all -- never a
+        wrong merge or a wrong split."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CodingResult, FactKind
+        from claude_coder.pipeline import dedup_lines
+        a = _line("SAME", FactKind.PROCEDURE, "same procedure",
+                 attrs={"anatomy": "great toe"})
+        b = _line("SAME", FactKind.PROCEDURE, "same procedure",
+                 attrs={"anatomy": "hallux"})
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14", lines=[a, b])
+        src = MockSource()  # no concept_relation mapping configured -> unresolved
+        dedup_lines(r, src)
+        billed = [ln for ln in r.billable_lines if ln.chosen.code == "SAME"]
+        self.assertEqual(billed, [],
+                         "an unresolved concept relation must hold, not silently bill")
 
 
 class ProcedureIndexTest(unittest.TestCase):

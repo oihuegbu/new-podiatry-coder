@@ -209,6 +209,8 @@ class CodeSource(Protocol):
 
     def qualifying_dx_for(self, code: str, system: str = "cpt") -> set[str] | None: ...
 
+    def concept_relation(self, term_a: str, term_b: str) -> str: ...
+
 
 # Data-driven signals that a code is NOT a separately reportable line. These are
 # generic terms found in coverage/status fields or the descriptor itself (e.g.
@@ -238,6 +240,7 @@ class AuthoritativeSource:
         self._gp: dict | None = None
         self._idx = None
         self._snomed = None
+        self._concept_relation_index = None
         self._cptidx = None
         self._learned = None
         self._drug = None
@@ -376,6 +379,31 @@ class AuthoritativeSource:
             return set()
         return {c for c in self._snomed.candidates(description)
                 if self.leaf_codes(c, "icd10")}
+
+    def concept_relation(self, term_a: str, term_b: str) -> str:
+        """SAME / ancestor-descendant / DISJOINT / unresolved for two clinical terms,
+        from the authoritative SNOMED CT Body Structure concept graph (issue #6
+        F7-R3-C) -- never from lexical shape. Coreference axis comparison uses this
+        to tell a synonym pair apart from a genuine distinction where lexical shape
+        alone cannot. REVIEWED-OPTIONAL: absence returns `terminology.CONCEPT_
+        UNRESOLVED`, which callers already treat as "cannot establish a relation" --
+        the same conservative direction this axis already defaults to without
+        concept data; see tools/build_snomed_concept_terms.py.
+        """
+        from . import terminology as _term
+        if self._concept_relation_index is None:
+            try:
+                index, identity = _term.ConceptRelationIndex.load_snapshot()
+                self._concept_relation_index = index
+                self._bound_sources.bind(identity)
+            except Exception:
+                # A reviewed-OPTIONAL concept graph: absence can only leave a relation
+                # UNRESOLVED, never assert a wrong one, so it degrades rather than
+                # holding. Nothing is bound in that case -- no bytes were parsed.
+                self._concept_relation_index = False
+        if not self._concept_relation_index:
+            return _term.CONCEPT_UNRESOLVED
+        return self._concept_relation_index.relation(term_a, term_b)
 
     def cpt_index_codes(self, description: str, system: str) -> set[str]:
         """AUTHORITATIVE procedure term -> CPT code, via the AMA CPT Alphabetic
@@ -1007,7 +1035,8 @@ class MockSource:
                  drug_units: dict[str, dict] | None = None,
                  learned_index: dict[str, set] | None = None,
                  excludes1: dict[str, set] | None = None,
-                 coverage: dict[str, set] | None = None) -> None:
+                 coverage: dict[str, set] | None = None,
+                 concept_relation: dict[tuple[str, str], str] | None = None) -> None:
         self._records = records or {}
         self._retrieval = retrieval or {}
         self._ncci = ncci or {}
@@ -1028,6 +1057,7 @@ class MockSource:
         self._coverage = {str(k).replace(".", "").upper():
                           {str(x).replace(".", "").upper() for x in v}
                           for k, v in (coverage or {}).items()}
+        self._concept_relation_map = concept_relation or {}
 
     def global_period(self, code):
         return self._gp.get(code)
@@ -1180,6 +1210,14 @@ class MockSource:
     def qualifying_dx_for(self, code, system="cpt"):
         c = str(code).replace(".", "").upper()
         return set(self._coverage[c]) if c in self._coverage else None
+
+    def concept_relation(self, term_a, term_b):
+        from .terminology import CONCEPT_UNRESOLVED
+        if (term_a, term_b) in self._concept_relation_map:
+            return self._concept_relation_map[(term_a, term_b)]
+        if (term_b, term_a) in self._concept_relation_map:
+            return self._concept_relation_map[(term_b, term_a)]
+        return CONCEPT_UNRESOLVED
 
     def excludes1_refs(self, code, system):
         if system != "icd10" or not self._excl1_data:

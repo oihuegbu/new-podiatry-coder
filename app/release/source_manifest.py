@@ -203,6 +203,17 @@ _OPTIONAL_SOURCES: dict[str, dict] = {
             "AMA-licensed recall aid that cannot be redistributed; absence removes "
             "candidates only and the coder falls back to descriptor/embedding retrieval",
     },
+    "snomed_concept_terms": {
+        "path": config.CODES_DIR / "snomed_concept_terms.json",
+        "role": "SNOMED CT Body Structure concept identity and hierarchy",
+        "absence_justification":
+            "UMLS-licensed concept graph used only to resolve whether two OPEN-"
+            "vocabulary anatomy values are the same, an ancestor/descendant pair, or "
+            "genuinely disjoint concept; absence degrades the axis comparison to its "
+            "existing conservative identity-or-ambiguous behavior (no confirmed "
+            "difference or match is ever asserted from lexical shape alone), never to "
+            "a wrong or fabricated relation",
+    },
     "learned_cpt_index": {
         "path": config.CODES_DIR / "learned_cpt_index.json",
         "role": "learned resolution index",

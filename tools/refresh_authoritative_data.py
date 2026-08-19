@@ -28,6 +28,11 @@ LICENSED (fetched from YOUR configured source — never a public download):
         or place it under data/sources/ (or ~/snomed) — the builder auto-discovers.
       If no release is present, the stage is SKIPPED (not failed) — the coder
       degrades to the ICD Index + retrieval until the release is supplied.
+  • snomed_concept_terms – the SAME RF2 release -> build_snomed_concept_terms.py
+      Body Structure concept identity/hierarchy for open-vocabulary axis comparison
+      (issue #6 F7-R3-C). Same release, same discovery order as snomed_icd10; if no
+      release is present the stage is SKIPPED and axis comparison degrades to its
+      existing lexical-identity-only behavior.
 
 Usage
 -----
@@ -173,6 +178,13 @@ SOURCES: dict[str, dict] = {
         "output": "snomed_icd10_map.json",
         "cadence": "biannual",   # SNOMED CT US edition: Mar / Sep
         "prepare": lambda tmp, args: [PY, "tools/build_snomed_icd10_map.py"],
+    },
+    "snomed_concept_terms": {
+        # Same release as snomed_icd10 -- Body Structure concept identity/hierarchy
+        # for open-vocabulary axis comparison (issue #6 F7-R3-C).
+        "output": "snomed_concept_terms.json",
+        "cadence": "biannual",
+        "prepare": lambda tmp, args: [PY, "tools/build_snomed_concept_terms.py"],
     },
     "icd10cm_index": {
         "output": "icd10cm_index_terms.json",

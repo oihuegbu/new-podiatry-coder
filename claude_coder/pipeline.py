@@ -700,7 +700,7 @@ def code_encounter(
     )
     # Mechanic 4 — collapse duplicate resolved codes into one line before anything
     # downstream reasons about the claim as a set.
-    dedup_lines(result)
+    dedup_lines(result, source)
     # Mechanic 1 — code-type/section applicability (e.g. an anesthesia-section code
     # is not separately reportable by the operating provider).
     apply_section_applicability(result)
@@ -1309,7 +1309,7 @@ def _occurrence_context(result: CodingResult) -> tuple[dict, set]:
     return episodes, separated
 
 
-def dedup_lines(result: CodingResult) -> None:
+def dedup_lines(result: CodingResult, source: CodeSource | None = None) -> None:
     """Mechanic 4 — OCCURRENCE RECONCILIATION: two documented mentions that resolve to
     the SAME authoritative code are one billable line, and are a second BILLABLE
     OCCURRENCE only when the record says they are.
@@ -1381,7 +1381,8 @@ def dedup_lines(result: CodingResult) -> None:
                 left_episode=episodes.get(str(rep.fact.fact_id)),
                 right_episode=episodes.get(str(ln.fact.fact_id)),
                 explicitly_separated=frozenset(
-                    (str(rep.fact.fact_id), str(ln.fact.fact_id))) in separated)
+                    (str(rep.fact.fact_id), str(ln.fact.fact_id))) in separated,
+                source=source)
             # WHY this pair is undetermined matters (Codex F7-R3-C2, exact-SHA
             # re-review): an AMBIGUOUS AXIS (open vocabulary that is not an exact
             # match and not disjoint either -- a possible synonym OR a possible real
@@ -1394,7 +1395,7 @@ def dedup_lines(result: CodingResult) -> None:
             # SAME authoritative code with no documented distinctness, the descriptor
             # set -- not anyone's prose -- has already settled procedure identity.
             axis_ambiguous = bool(_coref.known_known_ambiguous(
-                rep.fact.attributes, ln.fact.attributes))
+                rep.fact.attributes, ln.fact.attributes, source=source))
             verdicts.append((i, verdict, reason, axis_ambiguous))
         same = [v for v in verdicts if v[1] == _coref.SAME_EVENT]
         axis_undetermined = [v for v in verdicts

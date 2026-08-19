@@ -187,8 +187,17 @@ _CANONICAL_LATERALITY = frozenset({"left", "right", "bilateral", "unspecified"})
 #: 'right' actually exclude each other.
 _LATERALITY_DISJOINT_PAIR = frozenset({"left", "right"})
 
+#: Open-vocabulary axes wired to a governed concept source (issue #6 F7-R3-C) when a
+#: `source` is supplied. Only 'anatomy' has an authoritative concept graph in this
+#: codebase today (SNOMED CT Body Structure, tools/build_snomed_concept_terms.py);
+#: the other open axes (approach, distinct_site, distinct_objective,
+#: distinct_encounter) keep the identity-or-ambiguous fallback below until a
+#: comparable governed source exists for them -- never approximated by a lexical
+#: heuristic in the meantime.
+_CONCEPT_GOVERNED_AXES = frozenset({"anatomy"})
 
-def _axis_relation(axis: str, va: str, vb: str) -> str:
+
+def _axis_relation(axis: str, va: str, vb: str, source: Any = None) -> str:
     """SAME_EVENT, DISTINCT_EVENT, or UNDETERMINED for one axis's two stated values.
 
     Identifier axes (performer_id): an id is either the same id or a different one --
@@ -204,10 +213,16 @@ def _axis_relation(axis: str, va: str, vb: str) -> str:
     Everything else -- OPEN vocabulary, or an enumerated axis where either value is
     NOT canonical (the extraction boundary does not enforce the enumeration, so a
     stored value may be an arbitrary string) -- gets the conservative open-vocabulary
-    treatment: an exact match (case/whitespace folded) is the same value; anything
-    else is UNDETERMINED. Lexical shape alone never establishes a confirmed
-    DISTINCT_EVENT for open text (Codex F7-R3-C, exact-SHA re-review, third pass) or
-    for a non-canonical enumerated value it cannot be told apart from.
+    treatment: an exact match (case/whitespace folded) is the same value. For an axis
+    in `_CONCEPT_GOVERNED_AXES`, an inexact match is then put to the governed concept
+    graph (`source.concept_relation`) when a `source` was supplied: a confirmed SAME
+    concept is SAME_EVENT, a confirmed DISJOINT concept is DISTINCT_EVENT, and an
+    ancestor/descendant or unresolved relation -- like every other open axis, and
+    like this axis when no `source` is available at all -- is UNDETERMINED. Lexical
+    shape alone never establishes a confirmed DISTINCT_EVENT for open text (Codex
+    F7-R3-C, exact-SHA re-review, third pass) or for a non-canonical enumerated value
+    it cannot be told apart from; the concept graph is consulted precisely because it
+    is authoritative data, not lexical shape.
     """
     if axis in _IDENTIFIER_AXES:
         return SAME_EVENT if va.lower() == vb.lower() else DISTINCT_EVENT
@@ -219,12 +234,26 @@ def _axis_relation(axis: str, va: str, vb: str) -> str:
         if {a, b} == _LATERALITY_DISJOINT_PAIR:
             return DISTINCT_EVENT
         return UNDETERMINED
-    return SAME_EVENT if va.lower() == vb.lower() else UNDETERMINED
+    if va.lower() == vb.lower():
+        return SAME_EVENT
+    if axis in _CONCEPT_GOVERNED_AXES and source is not None:
+        concept_relation = getattr(source, "concept_relation", None)
+        if callable(concept_relation):
+            from .terminology import CONCEPT_DISJOINT, CONCEPT_SAME
+            try:
+                verdict = concept_relation(va, vb)
+            except Exception:
+                verdict = None
+            if verdict == CONCEPT_SAME:
+                return SAME_EVENT
+            if verdict == CONCEPT_DISJOINT:
+                return DISTINCT_EVENT
+    return UNDETERMINED
 
 
 def known_known_differences(left: dict | None, right: dict | None,
-                            axes: tuple[str, ...] = DISTINGUISHING_AXES
-                            ) -> tuple[str, ...]:
+                            axes: tuple[str, ...] = DISTINGUISHING_AXES,
+                            source: Any = None) -> tuple[str, ...]:
     """The axes on which BOTH mentions state a value and the values are GENUINELY,
     UNAMBIGUOUSLY opposed.
 
@@ -238,12 +267,14 @@ def known_known_differences(left: dict | None, right: dict | None,
     confirmed difference; the reviewer's counterexample showed that is unsafe too --
     a lay term and its clinical synonym for the same structure can share no root at
     all, a pair no stemmer can be expected to unify. Without a versioned terminology-
-    normalization service (this codebase has none for free-text anatomy/approach/site,
-    only code-level synonym indexes keyed to whole clinical phrases, not isolated axis
-    values), the only claim wording alone can safely make about OPEN vocabulary is
-    IDENTITY: an exact match (after case/whitespace folding) is the same documented
-    value; anything else is `known_known_ambiguous`, never promoted to a confirmed
-    difference by disjointness, containment, or any other lexical heuristic.
+    normalization service, the only claim wording alone can safely make about OPEN
+    vocabulary is IDENTITY: an exact match (after case/whitespace folding) is the
+    same documented value. Where a governed concept source IS available (`source`,
+    issue #6 F7-R3-C -- currently `anatomy` only, see `_CONCEPT_GOVERNED_AXES`), an
+    inexact match is put to that authoritative graph rather than left an unresolved
+    guess; anything the graph does not confirm DISJOINT is `known_known_ambiguous`,
+    never promoted to a confirmed difference by disjointness, containment, or any
+    other lexical heuristic.
 
     A CLOSED, small clinical enumeration the record states directly (laterality) has
     an explicit RELATION (`_axis_relation`), not a flat equality test: 'left' vs
@@ -257,41 +288,45 @@ def known_known_differences(left: dict | None, right: dict | None,
     identity-or-ambiguous treatment open vocabulary gets.
 
     Genuine distinctness from OPEN vocabulary (and from a non-canonical enumerated
-    value) is established elsewhere in this system -- an explicit SEPARATE_FROM
-    relation (`explicitly_separated`, checked before this function even runs) or a
-    different service episode -- never by comparing two raw strings.
+    value) is established elsewhere in this system -- the governed concept graph
+    above, an explicit SEPARATE_FROM relation (`explicitly_separated`, checked before
+    this function even runs), or a different service episode -- never by comparing
+    two raw strings.
     """
     a, b = dict(left or {}), dict(right or {})
     out: list[str] = []
     for axis in axes:
         va = str(a.get(axis, "") or "").strip()
         vb = str(b.get(axis, "") or "").strip()
-        if va and vb and _axis_relation(axis, va, vb) == DISTINCT_EVENT:
+        if va and vb and _axis_relation(axis, va, vb, source) == DISTINCT_EVENT:
             out.append(axis)
     return tuple(out)
 
 
 def known_known_ambiguous(left: dict | None, right: dict | None,
-                          axes: tuple[str, ...] = DISTINGUISHING_AXES) -> tuple[str, ...]:
+                          axes: tuple[str, ...] = DISTINGUISHING_AXES,
+                          source: Any = None) -> tuple[str, ...]:
     """The axes on which both mentions state a value whose RELATION
     (`_axis_relation`) is UNDETERMINED -- neither confirmed same nor confirmed
     different.
 
-    For open vocabulary that is an inexact lexical match, this covers the same ground
+    For open vocabulary that is an inexact lexical match and has no governed concept
+    source (or the source cannot resolve either value), this covers the same ground
     it always has (Codex F7-R3, exact-SHA re-review, third pass): raw shape cannot
-    tell a synonym/abbreviation/eponym apart from a real distinction. For the
-    laterality enumeration, it now ALSO covers 'unspecified' or 'bilateral' paired
-    with a single side (Codex F7-R3-C1) -- the record states something, but not
-    something that excludes the other value. A caller deciding whether two mentions
-    are the SAME event must treat any ambiguous axis as blocking that verdict, never
-    as a match.
+    tell a synonym/abbreviation/eponym apart from a real distinction. It also covers
+    an ancestor/descendant concept relation on a governed axis -- related but not
+    proof of either sameness or difference. For the laterality enumeration, it also
+    covers 'unspecified' or 'bilateral' paired with a single side (Codex F7-R3-C1) --
+    the record states something, but not something that excludes the other value. A
+    caller deciding whether two mentions are the SAME event must treat any ambiguous
+    axis as blocking that verdict, never as a match.
     """
     a, b = dict(left or {}), dict(right or {})
     out: list[str] = []
     for axis in axes:
         va = str(a.get(axis, "") or "").strip()
         vb = str(b.get(axis, "") or "").strip()
-        if va and vb and _axis_relation(axis, va, vb) == UNDETERMINED:
+        if va and vb and _axis_relation(axis, va, vb, source) == UNDETERMINED:
             out.append(axis)
     return tuple(out)
 
@@ -320,12 +355,18 @@ def event_verdict(*, left_kind: Any, right_kind: Any,
                   left_action: Any, right_action: Any,
                   left_attributes: dict | None, right_attributes: dict | None,
                   left_episode: Any = None, right_episode: Any = None,
-                  explicitly_separated: bool = False) -> tuple[str, str]:
+                  explicitly_separated: bool = False,
+                  source: Any = None) -> tuple[str, str]:
     """Are these two mentions one event or two? Returns `(verdict, reason)`.
 
     Every DISTINCT_EVENT answer names the documented thing that established it, so an
     extra billed occurrence can always be traced to a statement in the record rather
     than to a heuristic.
+
+    `source` is optional and, when supplied, is consulted for axes in
+    `_CONCEPT_GOVERNED_AXES` (issue #6 F7-R3-C) to tell an inexact lexical match on
+    those axes apart as a governed-SAME, governed-DISJOINT, or still-ambiguous
+    relation instead of defaulting every inexact match straight to `UNDETERMINED`.
     """
     lk = str(getattr(left_kind, "value", left_kind) or "")
     rk = str(getattr(right_kind, "value", right_kind) or "")
@@ -333,7 +374,7 @@ def event_verdict(*, left_kind: Any, right_kind: Any,
         return DISTINCT_EVENT, f"different documented event kind ({lk} vs {rk})"
     if explicitly_separated:
         return DISTINCT_EVENT, "the record explicitly separates these two events"
-    axes = known_known_differences(left_attributes, right_attributes)
+    axes = known_known_differences(left_attributes, right_attributes, source=source)
     if axes:
         return DISTINCT_EVENT, ("the record states different values for "
                                 + ", ".join(axes))
@@ -342,7 +383,7 @@ def event_verdict(*, left_kind: Any, right_kind: Any,
     # the extra wording may be exactly the qualifier that distinguishes two real
     # events, and wording alone cannot settle which. Checked BEFORE the action/episode
     # tests below, because neither of those may override an axis this ambiguous.
-    ambiguous = known_known_ambiguous(left_attributes, right_attributes)
+    ambiguous = known_known_ambiguous(left_attributes, right_attributes, source=source)
     if ambiguous:
         return UNDETERMINED, (
             "the record states related but not identical values for "
