@@ -2495,6 +2495,80 @@ def test_a_cached_policy_source_replaced_after_it_was_read_cannot_be_certified(m
     assert source.qualifying_dx_for("SYNPROC") == {"SYNDX"}
 
 
+def _repoint_optional(monkeypatch, source_id, path):
+    """Point a REVIEWED-OPTIONAL declared identity at `path`. Unlike `_repoint` (which
+    only patches the required-source registry `_AUTHORITATIVE`), an optional source's
+    manifest RECORD is built directly from `_OPTIONAL_SOURCES[source_id]['path']`
+    (`optional_release_sources()`), so that entry has to move too or the reader and the
+    manifest disagree about which file they mean -- not a drift, just two different
+    defaults never repointed to the same place."""
+    from app.release import source_manifest as sm
+    optional = {k: dict(v) for k, v in sm._OPTIONAL_SOURCES.items()}
+    optional[source_id]["path"] = path
+    monkeypatch.setattr(sm, "_OPTIONAL_SOURCES", optional)
+
+
+def test_a_learned_index_hit_replaced_after_it_was_cached_cannot_be_certified(
+        monkeypatch, tmp_path):
+    """THE COUNTEREXAMPLE Codex reproduced against `learned_index_codes` specifically
+    (F6-R5-B, learned-index gap): the promoted crosswalk is parsed ONCE and cached, and
+    the parsed copy keeps contributing a candidate to every later call -- so it carries
+    the exact same defect as the compiled database and the other cached JSON sources,
+    and needs the exact same binding.
+
+    Before the fix: the candidate kept resolving from the stale cache, but
+    `learned_cpt_index` never appeared in `_bound_sources` at all (nothing was bound),
+    so the manifest silently certified whatever bytes happened to be at the path --
+    the replacement -- with no integrity error naming the mismatch.
+    """
+    from claude_coder.capability import build_manifest
+    from claude_coder.data_access import AuthoritativeSource
+    ref, _paths = _loaded_reference(tmp_path, monkeypatch)   # binds cpt_codes etc.
+
+    learned_path = tmp_path / "learned_cpt_index.json"
+    learned_path.write_text(json.dumps({"entries": {
+        "synthetic learned phrase": {"code": "SYNPROC", "system": "cpt",
+                                     "descriptor": "synthetic procedure"},
+    }}))
+    _repoint_optional(monkeypatch, "learned_cpt_index", learned_path)
+
+    source = AuthoritativeSource()
+    source._db = ref                    # the instance that parsed the code tables
+    assert source.learned_index_codes("synthetic learned phrase", "cpt") == {"SYNPROC"}
+    bound = source._bound_sources.identities
+    assert "learned_cpt_index" in bound, bound
+    assert _errors_for(build_manifest(bound_sources=source._bound_sources),
+                       "learned_cpt_index") == []
+
+    # Codex's exact reproduction: an atomic replace with an EMPTIED edition (`_promote`'s
+    # `_editions()` fixture has no "learned_cpt_index" entry, so build it directly here).
+    replacement = tmp_path / "learned_cpt_index-v2.json"
+    replacement.write_text(json.dumps({"entries": {}}))
+    os.replace(replacement, learned_path)
+    # NO further read happens from here on -- that is the point of the finding.
+
+    # The cache still contributes the candidate: this is the finding, not a fixture bug.
+    assert source.learned_index_codes("synthetic learned phrase", "cpt") == {"SYNPROC"}
+    errors = _errors_for(build_manifest(bound_sources=source._bound_sources),
+                         "learned_cpt_index")
+    assert errors, "a learned-index edition replaced after it was cached certified silently"
+    assert any("parsed into memory" in e for e in errors), errors
+    assert source._bound_sources.identities == bound, (
+        "the bound identity must keep naming the bytes that were parsed")
+
+
+def test_an_absent_learned_index_binds_nothing_and_degrades_to_reverification(
+        monkeypatch, tmp_path):
+    """The control: `learned_cpt_index` is REVIEWED-OPTIONAL (no promoted mappings until
+    enough encounters agree), so absence must degrade -- not hold and not fabricate an
+    identity for bytes that were never read."""
+    from claude_coder.data_access import AuthoritativeSource
+    _repoint_optional(monkeypatch, "learned_cpt_index", tmp_path / "absent.json")
+    source = AuthoritativeSource()
+    assert source.learned_index_codes("synthetic learned phrase", "cpt") == set()
+    assert "learned_cpt_index" not in source._bound_sources.identities
+
+
 def test_the_producer_propagates_the_source_bindings_into_the_release_fingerprint(
         monkeypatch, tmp_path):
     """END TO END through the REAL producer.  `code_encounter` certifies from

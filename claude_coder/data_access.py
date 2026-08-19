@@ -432,14 +432,27 @@ class AuthoritativeSource:
         is honored only while the code still exists AND its CURRENT authoritative
         descriptor still matches the descriptor that was verified — so a deleted or
         revised code silently falls back to re-verification instead of resolving to
-        a stale mapping. Empty until mappings are promoted."""
+        a stale mapping. Empty until mappings are promoted.
+
+        Read and bound through the same exact-byte snapshot primitive as every other
+        cached source on this adapter: the parsed copy answers every later call from
+        memory, so the certificate must attest to the bytes that PARSE produced, not a
+        re-hash of whatever is at the path when the manifest is built. Without this, a
+        cached stale edition could keep contributing a candidate after the file was
+        replaced, while the certificate names the replacement's bytes -- the same
+        old-bytes-used/new-bytes-certified defect this binding closes for every other
+        source on this adapter. (Codex F6-R5-B, learned-index gap.)"""
         if getattr(self, "_learned", None) is None:
-            path = _source_path("learned_cpt_index")
             try:
-                import json
-                with open(path) as fh:
-                    self._learned = json.load(fh).get("entries", {}) or {}
+                document, identity = declared_document_snapshot(
+                    "learned_cpt_index", AuthoritativeDataUnavailable)
+                self._learned = document.get("entries", {}) or {}
+                self._bound_sources.bind(identity)
             except Exception:
+                # REVIEWED-OPTIONAL (see docstring): absence/corruption degrades to
+                # re-verification rather than holding, same as every other recall aid on
+                # this adapter -- and nothing is bound, because no bytes were parsed to
+                # attest to.
                 self._learned = {}
         if not self._learned:
             return set()
