@@ -496,7 +496,8 @@ def upgrade_diagnosis_laterality(line: ResolvedLine, source: CodeSource) -> Reso
 
 
 def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
-                                 llm=None, corroborate=None) -> ResolvedLine:
+                                 llm=None, corroborate=None,
+                                 reconciliation=None) -> ResolvedLine:
     """ICD-10-CM 'code to the highest documented specificity'. Entailment is
     NECESSARY BUT NOT SUFFICIENT: an 'unspecified'/NOS descriptor is entailed by
     every case in its concept, so a specific, equally-entailed sibling must win —
@@ -522,7 +523,14 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
 
     Agnostic: 'unspecified' is descriptor text; relatives come from the code's own
     authoritative category leaves; the judgement is the existing entailment
-    machinery. No code or family is named here."""
+    machinery. No code or family is named here.
+
+    `reconciliation` threads the encounter's source-evidence reconciliation into
+    `_uniqueness_view`'s grounded-elimination check (Codex F8-R1, exact-SHA re-review):
+    without it, this sibling selection could not enforce the same original-page proof
+    invariant the primary code-selection path enforces, and a model-named elimination
+    here would fall back to unverified evidence text even when a reconciliation existed
+    and had already rejected it."""
     line = upgrade_diagnosis_laterality(line, source)          # step 1 (cheap)
     fact = line.fact
     if not (line.resolved and fact.kind is FactKind.DIAGNOSIS and line.chosen):
@@ -593,7 +601,8 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
     # nothing about SEVERAL more-specific relatives being equally documented -- and picking
     # between those is exactly the choice a model may not make alone.
     offered = [c for c in shortlist if c.code != line.chosen.code]
-    still_entailed, _elim = _uniqueness_view(fact, offered, picked, judgements, {})
+    still_entailed, _elim = _uniqueness_view(fact, offered, picked, judgements, {},
+                                             reconciliation)
     if len(still_entailed) > 1:
         prior = line.chosen
         line.chosen = None
@@ -738,19 +747,38 @@ def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: Cand
     it.
 
     `narrow` gives up for a THIRD reason that is not a checked-and-inconclusive document: no
-    reconciled page reading could be checked at all (unanchored evidence spans, or no
-    reconciliation was supplied for this call). That is not every fact this resolver ever
-    sees -- most of `resolve`'s callers judge from evidence text with no page-anchoring
-    infrastructure behind it at all -- so treating it as "unverifiable, therefore never
-    grounded" would block the ordinary near-synonym rejection this module has always done.
-    Falling back to the RAW evidence text the judging models themselves were shown is never
-    WEAKER proof than what already grounded their verdict, and it is still real document
-    text, not a model's own prose.
+    reconciled page reading could be checked at all. That reason has TWO different causes,
+    and Codex's exact-SHA re-review found they were being treated alike:
+
+      * genuinely no anchored evidence exists for this fact at all -- unanchored spans, or no
+        reconciliation was ever supplied for this call. Most of `resolve`'s callers judge from
+        evidence text with no page-anchoring infrastructure behind it at all, so treating THIS
+        case as "unverifiable, therefore never grounded" would block the ordinary near-synonym
+        rejection this module has always done. Falling back to the RAW evidence text the
+        judging models themselves were shown is never WEAKER proof than what already grounded
+        their verdict here, because nothing stronger was ever obtainable for this fact.
+      * anchored evidence exists AND a reconciliation was supplied, but it did not confirm this
+        fact's quotations (disagreed, unverifiable, unlocated, or simply never reconciled). That
+        text is exactly what the STRONGER proof mechanism already checked and could not stand
+        behind -- falling back to it anyway launders rejected evidence into a confirmed
+        elimination, which is the same unsafe direction as the original defect, just one layer
+        deeper. This case must never fall back; it is refused exactly like a checked-and-
+        disagreeing document.
+
+    The two are told apart by whether this fact carries any ANCHORED evidence at all: only the
+    first case is a genuine absence of a channel to check against.
     """
     tie = _tiebreak.narrow(fact, [winner, loser], reconciliation)
     if tie.winner is not None and tie.winner.code == winner.code:
         return True, tie.detail
     if not tie.source_integrity:
+        return False, tie.detail
+    anchored = [s for s in (getattr(fact, "evidence", None) or [])
+               if getattr(s, "anchored", False) and str(getattr(s, "span_id", "") or "")]
+    if reconciliation is not None and anchored:
+        # A reconciliation channel exists and was consulted for this fact's own anchored
+        # spans, but did not confirm them -- refuse rather than fall back to the same
+        # unverified text reconciliation already declined to stand behind.
         return False, tie.detail
     text = " ".join(str(getattr(s, "text", "") or "")
                     for s in (getattr(fact, "evidence", None) or []))

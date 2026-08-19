@@ -601,6 +601,24 @@ class SelectionUniquenessTest(unittest.TestCase):
         self.assertTrue(line.documentation_gap, line.rationale)
         self.assertNotIn("SYN_B", line.tie_record["eliminated"])
 
+    def test_a_named_elimination_from_a_disagreed_span_does_not_release(self):
+        """Codex F8-R1, exact-SHA re-review: the raw-evidence-text fallback used to
+        trigger for ANY reason `tiebreak.narrow` gave up, including a reconciliation
+        that explicitly DISAGREED with this fact's only anchored quotation -- laundering
+        rejected source evidence into document-confirmed grounds for an elimination,
+        the same unsafe direction as the original defect one layer deeper. A
+        reconciliation that was actually consulted and did not confirm the span must
+        refuse the elimination outright, never fall back to that same rejected text."""
+        only_one = lambda d: _ONE in d                          # noqa: E731
+        fact = _fact("assembly service", self.ONE_DOCUMENTED)
+        line = resolve(_request(fact), _source(SYN_A, SYN_B),
+                       llm=_pinned(_judge(only_one), "provider-a"),
+                       corroborate=_pinned(_judge(only_one), "provider-b"),
+                       reconciliation=_disagreed("span-0"))
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
+        self.assertNotIn("SYN_B", line.tie_record["eliminated"])
+
     def test_the_corroborator_evaluates_the_shortlist_not_only_the_pick(self):
         """The corroborator's own view of the OTHER candidates has to count. Here it
         agrees with the pick — the only thing it used to be asked — while independently
