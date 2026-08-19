@@ -964,6 +964,61 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
         from app.contracts.source_evidence import recall_reading as _recall_reading
         candidate = _recall_reading(source_evidence)
         recall = candidate if (candidate is not None and candidate.usable) else None
+
+    # ---- PROACTIVELY read pages no independent channel covers, BEFORE extraction runs
+    # (issue #6 F7-R3, round-9 re-review, defect A). A paid vision read of an image-only
+    # page used to happen only LATER, to verify a quotation a candidate event already
+    # rested on -- which means a service the primary TRANSCRIPTION omitted on such a page
+    # could never be proposed in the first place, no matter how independent the second
+    # reading's model calls were: recall extraction never saw the page's text at all.
+    #
+    # The SAME reader used for the later, targeted escalation below is reused here. Its
+    # channel identity is fixed (derived from the client that will perform the read, not
+    # chosen per call -- issue #6 F7-R5), so this is not a second, competing mechanism;
+    # `with_channel` now allows a second call for that identity to WIDEN it to pages it has
+    # not yet read (never to overwrite one it has), so this proactive read and the later
+    # targeted one compose in one document instead of colliding on the same channel id.
+    _recall_page_read_pages: tuple[int, ...] = ()
+    _recall_page_read_detail = ""
+    recall_uncovered = (tuple(recall.uncovered_pages) if recall is not None
+                       else tuple(p.page_number for p in source_evidence.pages)
+                       if source_evidence is not None else ())
+    if source_reader is not None and source_evidence is not None and recall_uncovered:
+        from app.contracts.source_evidence import (ChannelIndependenceError,
+                                                   require_independent_channel)
+        try:
+            # Identity first, pages second -- see the identical reasoning at the later
+            # escalation call below, which this mirrors exactly.
+            channel = source_reader.channel()
+            require_independent_channel(source_evidence, channel)
+            widened = source_evidence.with_channel(
+                channel, source_reader.read_pages(recall_uncovered),
+                require_independent=True)
+        except ChannelIndependenceError:
+            # A control that is not independent is MISCONFIGURED, not unavailable.
+            raise
+        except Exception as exc:
+            _recall_page_read_detail = (
+                f"proactive independent read of page(s) {list(recall_uncovered)} "
+                f"unavailable ({type(exc).__name__}: {exc}); these pages remain "
+                f"recall-uncovered and any service documented only on them is "
+                f"unrecoverable this run")
+        else:
+            source_evidence = widened
+            candidate = _recall_reading(source_evidence)
+            recall = candidate if (candidate is not None and candidate.usable) else recall
+            newly_covered = tuple(p for p in recall_uncovered
+                                  if recall is None or p not in recall.uncovered_pages)
+            if newly_covered:
+                _recall_page_read_pages = newly_covered
+                _recall_page_read_detail = (
+                    f"proactively read page(s) {list(newly_covered)} with an "
+                    f"independent vision channel so recall extraction could see them")
+            else:
+                _recall_page_read_detail = (
+                    f"an independent read of page(s) {list(recall_uncovered)} was "
+                    f"obtained but covered none of them; they remain recall-uncovered")
+
     recall_text = recall.text if recall is not None else note_text
     extracted_b = extraction.extract_note(
         recall_text, extract_llm_b, billing_context,
@@ -993,6 +1048,8 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
     # covered. On an uncovered page an omitted service remains unrecoverable, and that
     # has to be a visible property of the run rather than an inference from an empty
     # recovery list.
+    report.recall_page_read_pages = _recall_page_read_pages
+    report.recall_page_read_detail = _recall_page_read_detail
     report.recall_reading_channel_id = (recall.channel_id if recall is not None else "")
     report.recall_uncovered_pages = (tuple(recall.uncovered_pages)
                                      if recall is not None
@@ -1210,23 +1267,44 @@ def dedup_lines(result: CodingResult) -> None:
     Agnostic: a set-merge on the resolved (code, system), never a named code."""
     from . import coreference as _coref
     episodes, separated = _occurrence_context(result)
-    seen: dict[tuple[str, str], ResolvedLine] = {}
+    keep_by_key: dict[tuple[str, str], ResolvedLine] = {}
+    # Every ESTABLISHED occurrence's own representative mention, per resolved code
+    # (Codex F7-R3, round-9 re-review, defect B). A later mention used to be tested
+    # only against the FIRST line this code was ever seen on, so a third mention that
+    # matched the SECOND (already-distinct) occurrence but not the first one was wrongly
+    # scored as a THIRD distinct occurrence -- e.g. left, right, right-again overcounted
+    # to 3 instead of the documented 2. Testing against every occurrence already
+    # recognized, not only the first, is what a genuine multi-occurrence cluster needs.
+    reps_by_key: dict[tuple[str, str], list[ResolvedLine]] = {}
     for ln in result.lines:
         if not (ln.resolved and ln.fact.billable and not ln.excluded_reason):
             continue
         key = (ln.chosen.code, ln.chosen.system)
-        keep = seen.get(key)
+        keep = keep_by_key.get(key)
         if keep is None:
-            seen[key] = ln
+            keep_by_key[key] = ln
+            reps_by_key[key] = [ln]
             continue
-        verdict, reason = _coref.event_verdict(
-            left_kind=keep.fact.kind, right_kind=ln.fact.kind,
-            left_action=keep.fact.description, right_action=ln.fact.description,
-            left_attributes=keep.fact.attributes, right_attributes=ln.fact.attributes,
-            left_episode=episodes.get(str(keep.fact.fact_id)),
-            right_episode=episodes.get(str(ln.fact.fact_id)),
-            explicitly_separated=frozenset(
-                (str(keep.fact.fact_id), str(ln.fact.fact_id))) in separated)
+        verdicts = [
+            (rep,) + _coref.event_verdict(
+                left_kind=rep.fact.kind, right_kind=ln.fact.kind,
+                left_action=rep.fact.description, right_action=ln.fact.description,
+                left_attributes=rep.fact.attributes, right_attributes=ln.fact.attributes,
+                left_episode=episodes.get(str(rep.fact.fact_id)),
+                right_episode=episodes.get(str(ln.fact.fact_id)),
+                explicitly_separated=frozenset(
+                    (str(rep.fact.fact_id), str(ln.fact.fact_id))) in separated)
+            for rep in reps_by_key[key]]
+        repeats = [v for v in verdicts if not _coref.is_additional_occurrence(v[1])]
+        if repeats:
+            # A repeat of an occurrence already recognized -- any match settles it; the
+            # record states nothing further once one already-counted occurrence agrees.
+            _, verdict, reason = repeats[0]
+        else:
+            # DISTINCT from every occurrence recognized so far -- a new occurrence, and
+            # this mention becomes ITS OWN representative for any later mention.
+            reps_by_key[key].append(ln)
+            _, verdict, reason = verdicts[-1]
         # The merged mention's evidence is kept either way: it is what the record says
         # about this service, and losing it would make the surviving line rest on less
         # documentation than the encounter actually has.
@@ -1237,12 +1315,38 @@ def dedup_lines(result: CodingResult) -> None:
                               f"folded in — {reason}")
             ln.excluded_reason = (f"second documented occurrence of {ln.chosen.code} — "
                                   f"units folded into the primary line ({reason})")
-        else:
-            keep.rationale = (f"{keep.rationale}; a second mention of this service was "
-                              f"merged without adding units — {reason}")
-            ln.excluded_reason = (f"{ln.chosen.code} is already on the claim and the "
-                                  f"record documents no second occurrence — merged into "
-                                  f"a single line ({reason})")
+            continue
+        # A repeated mention of the SAME occurrence. Codex F7-R3, round-9 re-review,
+        # defect C: a count stated on a LATER mention used to be discarded outright,
+        # because only the first-seen line's units ever survived -- so "documented
+        # once, then again as twice" silently billed one. Any mention's stated count is
+        # honored regardless of arrival order; two mentions that each state a
+        # DIFFERENT explicit count is the record disagreeing with itself, which no
+        # guess may resolve, so the line holds instead of picking either one.
+        keep_count = _coref.documented_cardinality(keep.fact.attributes)
+        ln_count = _coref.documented_cardinality(ln.fact.attributes)
+        if keep_count is not None and ln_count is not None and keep_count != ln_count:
+            ln.excluded_reason = (
+                f"{ln.chosen.code} is already on the claim, and the record states "
+                f"conflicting explicit counts for this occurrence "
+                f"({keep_count} vs {ln_count}) — held rather than guessed")
+            keep.chosen = None
+            keep.method = ResolutionMethod.ABSTAINED
+            keep.documentation_gap = (
+                f"the record states two different counts for this documented "
+                f"occurrence ({keep_count} and {ln_count}) — please confirm how many "
+                f"times it was performed")
+            keep.rationale = (f"{keep.rationale}; conflicting documented counts "
+                              f"({keep_count} vs {ln_count}) for one occurrence — "
+                              f"escalate rather than guess")
+            continue
+        if ln.units > keep.units:
+            keep.units = ln.units
+        keep.rationale = (f"{keep.rationale}; a second mention of this service was "
+                          f"merged without adding units — {reason}")
+        ln.excluded_reason = (f"{ln.chosen.code} is already on the claim and the "
+                              f"record documents no second occurrence — merged into "
+                              f"a single line ({reason})")
 
 
 def apply_section_applicability(result: CodingResult) -> None:

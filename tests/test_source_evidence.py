@@ -618,6 +618,42 @@ class IndependentChannelTest(unittest.TestCase):
                 ReadChannel(channel_id=EMBEDDED_TEXT_CHANNEL_ID,
                             kind=ChannelKind.EMBEDDED_TEXT, provider="pdf"), {})
 
+    def test_the_same_channel_may_widen_to_pages_it_has_not_yet_read(self):
+        """Issue #6 F7-R3: the independent vision reader's channel id is fixed (derived
+        from the client, not chosen per call), and the SAME reader legitimately widens
+        its own channel twice in one encounter — once proactively for pages no other
+        channel covers, before recall extraction runs, and again later for whichever
+        specific pages a disagreement or a candidate event turns out to need. A second
+        `with_channel` call for the SAME channel identity must succeed when it only adds
+        pages that channel has not read yet."""
+        from app.contracts.source_evidence import ChannelKind, ReadChannel, build_page_read
+        document = _compile(self.root, [[], []], ["alpha beta", "gamma delta"])
+        channel = ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                              kind=ChannelKind.VISION, provider="openai")
+        once = document.with_channel(
+            channel, {1: build_page_read(SECONDARY_VISION_CHANNEL_ID, 1, "alpha beta")})
+        twice = once.with_channel(
+            channel, {2: build_page_read(SECONDARY_VISION_CHANNEL_ID, 2, "gamma delta")})
+        self.assertEqual(_reconcile_one(twice, "alpha beta").status,
+                         ReconciliationStatus.AGREED)
+        self.assertEqual(_reconcile_one(twice, "gamma delta").status,
+                         ReconciliationStatus.AGREED)
+        # exactly one channel entry, not two -- widening is not a second channel
+        self.assertEqual([c.channel_id for c in twice.channels].count(
+            SECONDARY_VISION_CHANNEL_ID), 1)
+
+    def test_widening_may_not_overwrite_a_page_the_channel_already_read(self):
+        from app.contracts.source_evidence import (
+            ChannelKind, InvalidSourceEvidenceDocument, ReadChannel, build_page_read)
+        document = _compile(self.root, [[]], ["alpha beta"])
+        channel = ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                              kind=ChannelKind.VISION, provider="openai")
+        once = document.with_channel(
+            channel, {1: build_page_read(SECONDARY_VISION_CHANNEL_ID, 1, "alpha beta")})
+        with self.assertRaises(InvalidSourceEvidenceDocument):
+            once.with_channel(
+                channel, {1: build_page_read(SECONDARY_VISION_CHANNEL_ID, 1, "wobble")})
+
     def test_the_paid_second_read_is_scoped_to_pages_that_change_the_answer(self):
         """The cost control, as a test: a page nobody quoted from, and a page already
         independently read, are never paid for again."""

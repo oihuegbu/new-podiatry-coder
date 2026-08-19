@@ -888,7 +888,12 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
         self.assertEqual(read_calls, [(1,)],
                          "the paid read must be aimed at exactly the page the "
                          "disagreeing quotations sit on")
-        self.assertEqual(result.consensus["escalated_pages"], [1])
+        # This page has NO channel at all covering it, so it is read PROACTIVELY as
+        # part of recall (issue #6 F7-R3, defect A) rather than by the later,
+        # disagreement-driven escalation -- one read either way, attributed to
+        # whichever mechanism actually obtained it.
+        self.assertEqual(result.consensus["recall_page_read_pages"], [1])
+        self.assertEqual(result.consensus["escalated_pages"], [])
         laterality = next(r for r in result.consensus["resolutions"]
                           if r["axis"] == "laterality")
         self.assertEqual(laterality["verdict"], "resolved_from_source")
@@ -1707,6 +1712,87 @@ class IndependentDocumentRecall(unittest.TestCase):
 
 
 
+class AxisComparisonIsNormalized(unittest.TestCase):
+    """Codex F7-R3, round-9 re-review, defect D: `known_known_differences` used to
+    compare axis values as raw, lowercased strings, so two spellings of the SAME
+    documented value manufactured a distinguishing axis -- and therefore a false
+    DISTINCT_EVENT verdict, and an extra billed occurrence -- purely from wording."""
+
+    def test_equivalent_free_text_wording_is_not_a_documented_difference(self):
+        from claude_coder import coreference as cr
+        self.assertEqual(
+            cr.known_known_differences({"laterality": "left side"},
+                                       {"laterality": "Left"}), ())
+        self.assertEqual(
+            cr.known_known_differences({"approach": "open approach"},
+                                       {"approach": "Open"}), ())
+
+    def test_genuinely_different_free_text_values_still_differ(self):
+        from claude_coder import coreference as cr
+        self.assertEqual(
+            cr.known_known_differences({"laterality": "left"},
+                                       {"laterality": "right"}), ("laterality",))
+        # A shared, non-distinguishing word ('approach') must not paper over two
+        # genuinely different values -- plain token OVERLAP is not enough; one value's
+        # tokens must be a subset of the other's, or the difference stands.
+        self.assertEqual(
+            cr.known_known_differences({"approach": "first approach"},
+                                       {"approach": "other approach"}), ("approach",))
+
+    def test_identifier_axes_are_never_normalized(self):
+        """An identifier is either the same identifier or it is not -- stemming it
+        could accidentally equate two different performers or split one apart."""
+        from claude_coder import coreference as cr
+        self.assertEqual(
+            cr.known_known_differences({"performer_id": "actor-1"},
+                                       {"performer_id": "actor-11"}),
+            ("performer_id",))
+        self.assertEqual(
+            cr.known_known_differences({"performer_id": "Actor-1"},
+                                       {"performer_id": "actor-1"}), ())
+
+    def test_the_wording_variant_no_longer_overbills_end_to_end(self):
+        """The claim-level reproduction: one event, mentioned twice with LATERALITY
+        worded differently but meaning the same side. Before this fix the raw-string
+        axis compare would have called this a documented difference and billed two
+        units for one performed service."""
+        import json
+
+        note = ("Procedure alpha performed today on the left side. "
+                "Alpha procedure completed on the Left. "
+                "Condition alpha addressed today.")
+        primary = json.dumps({"facts": [
+            {"fact_id": "F1", "kind": "procedure",
+             "description": "excision procedure alpha performed",
+             "attributes": {"laterality": "left side", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Procedure alpha performed today on the left side"],
+             "confidence": 0.99}]})
+        second = json.dumps({"facts": [
+            {"fact_id": "F1", "kind": "procedure",
+             "description": "excision procedure alpha performed",
+             "attributes": {"laterality": "left side", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Procedure alpha performed today on the left side"],
+             "confidence": 0.99},
+            {"fact_id": "F2", "kind": "procedure",
+             "description": "procedure alpha removal completed",
+             # SAME side, worded differently -- "Left" vs "left side".
+             "attributes": {"laterality": "Left", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Alpha procedure completed on the Left"],
+             "confidence": 0.99}]})
+        result = _run_union(primary, second, note_text=note)
+        billable = result.billable_lines
+        self.assertEqual([ln.chosen.code for ln in billable], ["PROC_X"], billable)
+        self.assertEqual(billable[0].units, 1,
+                         f"one service, restated with equivalent laterality wording, "
+                         f"is one unit: {billable[0].rationale}")
+
+
 class OccurrenceCardinality(unittest.TestCase):
     """Defect B: a repeated MENTION is not a repeated SERVICE."""
 
@@ -1831,6 +1917,123 @@ class OccurrenceCardinality(unittest.TestCase):
         self.assertEqual([ln.chosen.code for ln in billable], ["PROC_X"], billable)
         self.assertEqual(billable[0].units, 2,
                          "a count the record states is source-anchored cardinality")
+
+    def test_left_right_and_a_repeat_of_right_bill_two_not_three(self):
+        """Codex F7-R3, round-9 re-review, defect B: comparing every new mention only
+        against the FIRST line this code was ever seen on overcounted a genuine
+        multi-occurrence cluster -- left, right, then a re-description of right used to
+        compare the third mention against LEFT (still the first-seen representative)
+        and add a third, undocumented unit. It must bill the two occurrences the
+        record actually documents, not three."""
+        import json
+
+        note = ("Procedure alpha performed today on the left side. "
+                "Alpha procedure completed on the right side. "
+                "Alpha procedure completed on the right, redone. "
+                "Condition alpha addressed today.")
+        primary = json.dumps({"facts": [
+            {"fact_id": "F1", "kind": "procedure",
+             "description": "excision procedure alpha performed",
+             "attributes": {"laterality": "left", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Procedure alpha performed today on the left side"],
+             "confidence": 0.99},
+            {"fact_id": "F2", "kind": "procedure",
+             "description": "procedure alpha removal completed",
+             "attributes": {"laterality": "right", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Alpha procedure completed on the right side"],
+             "confidence": 0.99},
+            {"fact_id": "F3", "kind": "procedure",
+             "description": "alpha procedure redone",
+             "attributes": {"laterality": "right", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Alpha procedure completed on the right, redone"],
+             "confidence": 0.99}]})
+
+        result = _run_union(primary, primary, note_text=note)
+
+        billable = result.billable_lines
+        self.assertEqual([ln.chosen.code for ln in billable], ["PROC_X"], billable)
+        self.assertEqual(billable[0].units, 2,
+                         f"two documented occurrences (left, right) must bill two "
+                         f"units even with a third re-description of the right one: "
+                         f"{billable[0].rationale}")
+
+    def test_a_count_stated_only_on_a_later_mention_is_not_discarded(self):
+        """Codex F7-R3, round-9 re-review, defect C: only the FIRST-SEEN line's units
+        ever survived dedup, so a count stated on a LATER mention of the same
+        occurrence was silently thrown away -- 'documented once, then again as twice'
+        billed one instead of two. The record's stated count must be honored
+        regardless of which mention it arrives on."""
+        import json
+
+        note = ("Procedure alpha performed today on the left side. "
+                "Alpha procedure completed twice on the left side.")
+        primary = json.dumps({"facts": [
+            {"fact_id": "F1", "kind": "procedure",
+             "description": "excision procedure alpha performed",
+             "attributes": {"laterality": "left", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Procedure alpha performed today on the left side"],
+             "confidence": 0.99},
+            {"fact_id": "F2", "kind": "procedure",
+             "description": "procedure alpha removal completed",
+             "attributes": {"laterality": "left", "count": 2,
+                            "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Alpha procedure completed twice on the left side"],
+             "confidence": 0.99}]})
+
+        result = _run_union(primary, primary, note_text=note)
+
+        billable = result.billable_lines
+        self.assertEqual([ln.chosen.code for ln in billable], ["PROC_X"], billable)
+        self.assertEqual(billable[0].units, 2,
+                         f"a count stated on the second mention must still be "
+                         f"honored: {billable[0].rationale}")
+
+    def test_conflicting_documented_counts_hold_instead_of_guessing(self):
+        """The other direction of defect C: two mentions of the same occurrence each
+        state an EXPLICIT count, and the counts disagree. The record does not agree
+        with itself, and picking either count would be a guess, so the line holds."""
+        import json
+
+        note = ("Procedure alpha performed twice today on the left side. "
+                "Alpha procedure completed three times on the left side.")
+        primary = json.dumps({"facts": [
+            {"fact_id": "F1", "kind": "procedure",
+             "description": "excision procedure alpha performed",
+             "attributes": {"laterality": "left", "count": 2,
+                            "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Procedure alpha performed twice today on the left side"],
+             "confidence": 0.99},
+            {"fact_id": "F2", "kind": "procedure",
+             "description": "procedure alpha removal completed",
+             "attributes": {"laterality": "left", "count": 3,
+                            "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Alpha procedure completed three times on the left side"],
+             "confidence": 0.99}]})
+
+        result = _run_union(primary, primary, note_text=note)
+
+        billable = result.billable_lines
+        self.assertEqual(billable, [], "conflicting documented counts must hold, "
+                                       "never guess either one")
+        held = next(ln for ln in result.lines
+                    if ln.documentation_gap and "different counts" in
+                    ln.documentation_gap)
+        self.assertIn("2", held.documentation_gap)
+        self.assertIn("3", held.documentation_gap)
 
 
 if __name__ == "__main__":

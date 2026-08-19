@@ -220,6 +220,14 @@ class ConsensusReport:
     #: an empty `recovered_events`: on these pages "nothing extra was found" and "nothing
     #: was looked at" are indistinguishable, and only one of them is evidence.
     recall_uncovered_pages: tuple[int, ...] = ()
+    #: Pages an independent vision channel was proactively read for, BEFORE extraction,
+    #: because no other channel covered them (issue #6 F7-R3, round-9 re-review: reading
+    #: them only later, to verify a quotation a candidate event already rested on, cannot
+    #: recover a service the primary transcription omitted on such a page in the first
+    #: place). Disjoint from `recall_uncovered_pages` by construction -- a page here was
+    #: successfully covered and so is no longer counted as uncovered.
+    recall_page_read_pages: tuple[int, ...] = ()
+    recall_page_read_detail: str = ""
     escalated_pages: tuple[int, ...] = ()
     escalation_detail: str = ""
 
@@ -243,6 +251,8 @@ class ConsensusReport:
             "recovered_events": [dict(u) for u in self.recovered_events],
             "recall_reading_channel_id": self.recall_reading_channel_id,
             "recall_uncovered_pages": list(self.recall_uncovered_pages),
+            "recall_page_read_pages": list(self.recall_page_read_pages),
+            "recall_page_read_detail": self.recall_page_read_detail,
             "escalated_pages": list(self.escalated_pages),
             "escalation_detail": self.escalation_detail,
         }

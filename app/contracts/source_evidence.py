@@ -434,11 +434,24 @@ class SourceEvidenceDocument(_Strict):
 
     def with_channel(self, channel: ReadChannel, reads: dict[int, PageRead],
                      *, require_independent: bool = False) -> "SourceEvidenceDocument":
-        """A COPY carrying one more channel — how a lazily obtained second read is
-        added without mutating an already-attested document.
+        """A COPY carrying one more channel, OR MORE PAGES read by a channel already
+        part of this document — how a lazily obtained read is added without mutating an
+        already-attested document.
 
-        Refuses to replace an existing channel id: a channel whose reads can be
-        overwritten is not evidence of anything.
+        A reader may legitimately need to widen ITS OWN channel's coverage twice within
+        one encounter — once to proactively cover pages no other channel could read
+        before recall extraction runs (issue #6 F7-R3), and again later for whichever
+        specific pages a disagreeing quotation or a candidate event turns out to sit on
+        (F7-R5's targeted escalation) — and `ReadChannel.channel_id` is a fixed identity
+        derived from the client, not something a caller can vary per call. Refusing a
+        SECOND call to the same channel id outright would force one of those two callers
+        to fail every time the other one had already run.
+
+        What must never happen is a REWRITE: refuses a channel whose declared identity
+        would change (kind, provider, profile — everything but page coverage), and
+        refuses to touch a page this channel has already read. A channel or a page whose
+        read can be overwritten is not evidence of anything; ADDING pages it has not yet
+        read is a different act, and the one an incremental escalation needs.
 
         `require_independent` is set by every caller adding a channel whose PURPOSE is
         to check the primary reading. It makes independence a checked precondition of
@@ -447,18 +460,29 @@ class SourceEvidenceDocument(_Strict):
         provider is admitted, contributes nothing, and leaves an audit record naming a
         channel that proved nothing.
         """
-        if self.channel(channel.channel_id) is not None:
-            raise InvalidSourceEvidenceDocument(
-                f"channel {channel.channel_id!r} is already part of this document; "
-                f"a second read is a NEW channel, never an overwrite of an old one")
+        existing = self.channel(channel.channel_id)
+        if existing is not None:
+            already_read = {p.page_number for p in self.pages
+                            if p.read_by(channel.channel_id)}
+            if existing != channel or not reads or (set(reads) & already_read):
+                raise InvalidSourceEvidenceDocument(
+                    f"channel {channel.channel_id!r} is already part of this document; "
+                    f"its declared identity may never change, and a page it already "
+                    f"read may never be overwritten — only pages it has not yet read "
+                    f"may be added to it")
+            if require_independent:
+                require_independent_channel(self, channel)
+            return self.model_copy(update={"pages": self._pages_with_reads(reads)})
         if require_independent:
             require_independent_channel(self, channel)
-        pages = tuple(
+        return self.model_copy(update={"channels": self.channels + (channel,),
+                                       "pages": self._pages_with_reads(reads)})
+
+    def _pages_with_reads(self, reads: dict[int, PageRead]) -> tuple["SourcePage", ...]:
+        return tuple(
             page.model_copy(update={"reads": page.reads + (reads[page.page_number],)})
             if page.page_number in reads else page
             for page in self.pages)
-        return self.model_copy(update={"channels": self.channels + (channel,),
-                                       "pages": pages})
 
     # ----------------------------------------------------------- serialization
 

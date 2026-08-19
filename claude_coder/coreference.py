@@ -151,20 +151,55 @@ def action_identity(left: Any, right: Any) -> str:
     return UNDETERMINED
 
 
+#: Axes carrying a STABLE IDENTIFIER (a system key, not free clinical text): compared
+#: literally, never normalized. An identifier is either the same identifier or it is
+#: not; stemming one could accidentally equate two different ids or split one in half.
+_IDENTIFIER_AXES = frozenset({"performer_id"})
+
+
 def known_known_differences(left: dict | None, right: dict | None,
                             axes: tuple[str, ...] = DISTINGUISHING_AXES
                             ) -> tuple[str, ...]:
-    """The axes on which BOTH mentions state a value and the values differ.
+    """The axes on which BOTH mentions state a value and the values GENUINELY differ.
 
     Known-plus-missing is NOT a difference: one reading recording an axis the other left
     blank is an incomplete reading, not a second event.
+
+    Nor is a lexical restatement of the SAME value (Codex F7-R3, round-9 re-review,
+    defect D): raw string inequality treated 'left side' as different from 'Left',
+    manufacturing a documented difference -- and therefore a billable second occurrence
+    -- out of two writers' wording rather than out of anything the record actually
+    distinguishes. An identifier axis is still compared literally (normalizing an id is
+    never correct). A free-text axis is compared on the SAME normalized root tokens
+    `action_form` reduces the clinical action to, and two values are the SAME documented
+    value when one's tokens are a SUBSET of the other's -- one writer simply adding a
+    qualifier word ('side', 'approach') the other omitted is not a second, contradicting
+    value. Two values that each carry a token the OTHER does not (neither is a subset of
+    the other) are a genuine documented difference: plain overlap is not enough, or
+    'first approach' and 'other approach' would compare equal on the shared word
+    'approach' alone. The authoritative descriptor set, never this axis check, is what
+    ultimately settles whether restated wording means one service or two.
     """
     a, b = dict(left or {}), dict(right or {})
     out: list[str] = []
     for axis in axes:
-        va = str(a.get(axis, "") or "").strip().lower()
-        vb = str(b.get(axis, "") or "").strip().lower()
-        if va and vb and va != vb:
+        va = str(a.get(axis, "") or "").strip()
+        vb = str(b.get(axis, "") or "").strip()
+        if not (va and vb):
+            continue
+        if axis in _IDENTIFIER_AXES:
+            if va.lower() != vb.lower():
+                out.append(axis)
+            continue
+        fa, fb = action_form(va), action_form(vb)
+        if fa and fb:
+            if not (fa <= fb or fb <= fa):
+                out.append(axis)
+        elif va.lower() != vb.lower():
+            # Either value normalized away to nothing (e.g. below the stem floor) --
+            # fall back to a literal compare rather than reading "no signal either way"
+            # as agreement, and rather than letting an empty set's vacuous subset
+            # relationship manufacture an agreement neither value actually states.
             out.append(axis)
     return tuple(out)
 
