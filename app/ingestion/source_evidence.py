@@ -283,10 +283,13 @@ def compile_source_evidence(pdf_path: str | Path, extraction: dict) -> SourceEvi
     for entry in ordered:
         number = int(entry.get("page_number") or 0)
         text = str(entry.get("text") or "")
-        primary = build_page_read(PRIMARY_CHANNEL_ID, number, text,
-                                  status=(PageStatus.BLANK
-                                          if str(entry.get("status") or "") == "blank"
-                                          else None))
+        primary = build_page_read(
+            PRIMARY_CHANNEL_ID, number, text,
+            status=(PageStatus.BLANK
+                    if str(entry.get("status") or "") == "blank" else None),
+            detail=("the primary transcriber's own structured page status "
+                    "declared this page blank"
+                    if str(entry.get("status") or "") == "blank" else ""))
         reads = [primary]
         flags: list[str] = []
 

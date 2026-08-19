@@ -228,6 +228,13 @@ class ConsensusReport:
     #: successfully covered and so is no longer counted as uncovered.
     recall_page_read_pages: tuple[int, ...] = ()
     recall_page_read_detail: str = ""
+    #: Durable, per-page provenance for every uncovered page EXEMPTED from the
+    #: recall-coverage gate as genuinely blank: the exempting channel and its own
+    #: validated `detail`/`text_sha256` (Codex F7-R3-A, exact-SHA re-review, fourth
+    #: pass -- BLANK, MISSING and UNREADABLE must never be byte-equivalent in the
+    #: record; naming the specific read that justified an exemption, not just a
+    #: boolean gate outcome, is what makes that distinction durable).
+    recall_blank_pages: tuple[dict[str, Any], ...] = ()
     escalated_pages: tuple[int, ...] = ()
     escalation_detail: str = ""
 
@@ -253,6 +260,7 @@ class ConsensusReport:
             "recall_uncovered_pages": list(self.recall_uncovered_pages),
             "recall_page_read_pages": list(self.recall_page_read_pages),
             "recall_page_read_detail": self.recall_page_read_detail,
+            "recall_blank_pages": [dict(p) for p in self.recall_blank_pages],
             "escalated_pages": list(self.escalated_pages),
             "escalation_detail": self.escalation_detail,
         }

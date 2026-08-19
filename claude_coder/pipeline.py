@@ -479,10 +479,16 @@ def code_encounter(
         from app.contracts.source_evidence import independent_of as _independent_of
         primary_channel = source_evidence.primary_channel
 
-        def _image_verified_blank(page_number: int) -> bool:
+        def _blank_verifying_read(page_number: int):
+            """The independent, image-capable read that positively certified this
+            page BLANK, or None. Returned (not just a bool) so the exempting read's
+            own channel/detail/digest -- already validated non-empty by
+            `build_page_read` -- can be named in the durable record rather than only
+            implied by a boolean gate outcome (Codex F7-R3-A, exact-SHA re-review,
+            fourth pass)."""
             page = source_evidence.page(page_number)
             if page is None or primary_channel is None:
-                return False
+                return None
             for read in page.reads:
                 if (read.channel_id == source_evidence.primary_channel_id
                         or read.status is not _PageStatus.BLANK):
@@ -491,11 +497,19 @@ def code_encounter(
                 if (channel is not None
                         and channel.kind in (_ChannelKind.VISION, _ChannelKind.OCR)
                         and _independent_of(channel, primary_channel)):
-                    return True
-            return False
+                    return read
+            return None
 
+        # Durable, per-page provenance for every page exempted as blank -- the
+        # channel and its own validated detail, not merely a boolean the gate
+        # consumed and discarded (Codex F7-R3-A, exact-SHA re-review, fourth pass).
+        consensus.recall_blank_pages = tuple(
+            {"page": p, "channel_id": read.channel_id, "detail": read.detail,
+             "text_sha256": read.text_sha256}
+            for p in consensus.recall_uncovered_pages
+            for read in [_blank_verifying_read(p)] if read is not None)
         _blocking_pages = [p for p in consensus.recall_uncovered_pages
-                           if not _image_verified_blank(p)]
+                           if _blank_verifying_read(p) is None]
         if _blocking_pages:
             pre_retrieval_gates.append(GateResult(
                 "recall_page_coverage", Outcome.UNKNOWN,

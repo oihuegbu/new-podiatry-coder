@@ -1688,6 +1688,87 @@ class IndependentDocumentRecall(unittest.TestCase):
         gate = next(g for g in result.gates if g.name == "recall_page_coverage")
         self.assertIs(gate.outcome, Outcome.UNKNOWN, gate.detail)
 
+    def test_a_caller_supplied_reader_cannot_manufacture_blank_from_silence(self):
+        """Codex F7-R3-A, exact-SHA re-review, fourth pass: the earlier fix only
+        changed `IndependentVisionReader`, this project's own production reader --
+        but `claude_coder.pipeline` explicitly accepts ANY caller-supplied
+        `source_reader` as a boundary object, and the SHARED `build_page_read`
+        builder itself still inferred BLANK from an empty response with no explicit
+        status. A third-party reader that reproduces exactly the old
+        `build_page_read(channel, page, "")` call -- never intending to assert
+        blankness, just naively passing along an empty API response -- must still
+        be held, not silently exempted, because the shared builder now refuses to
+        infer BLANK at all."""
+        from app.contracts.source_evidence import ChannelKind, ReadChannel, build_page_read
+        from app.ingestion.source_evidence import SECONDARY_VISION_CHANNEL_ID
+        from claude_coder.models import Destination, Outcome
+
+        class _NaiveThirdPartyReader:
+            """Not `IndependentVisionReader` -- an independent implementation of the
+            `source_reader` protocol, exactly as `claude_coder.pipeline` allows."""
+
+            def channel(self):
+                return ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                                   kind=ChannelKind.VISION, provider="openai")
+
+            def read_pages(self, page_numbers):
+                # The exact old exploit: an empty response handed to the shared
+                # builder with no explicit status, never intending to assert BLANK.
+                return {n: build_page_read(SECONDARY_VISION_CHANNEL_ID, n, "")
+                       for n in page_numbers}
+
+        document, tmp = _document(_RECALL_TRANSCRIPT, [])   # image-only page
+        self.addCleanup(tmp.cleanup)
+
+        result = _run_recall(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            lambda s, u: _multi_reading(_SECOND_SAME_SERVICE),
+            note_text=document.primary_text(), source_evidence=document,
+            source_reader=_NaiveThirdPartyReader())
+
+        self.assertEqual(result.consensus["recall_uncovered_pages"], [1])
+        self.assertNotEqual(result.destination, Destination.AUTO_READY)
+        gate = next(g for g in result.gates if g.name == "recall_page_coverage")
+        self.assertIs(gate.outcome, Outcome.UNKNOWN, gate.detail)
+
+    def test_a_genuinely_certified_blank_page_does_not_hold_and_is_recorded(self):
+        """The control's negative path: a reader that POSITIVELY certifies a page
+        BLANK -- with real provenance, as `build_page_read` now requires -- is
+        correctly exempt, and the exemption's own channel/detail is durably
+        recorded (Codex F7-R3-A, exact-SHA re-review, fourth pass), not just an
+        opaque gate outcome."""
+        from app.contracts.source_evidence import (ChannelKind, PageStatus,
+                                                    ReadChannel, build_page_read)
+        from app.ingestion.source_evidence import SECONDARY_VISION_CHANNEL_ID
+        from claude_coder.models import Destination
+
+        class _CertifiedBlankReader:
+            def channel(self):
+                return ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                                   kind=ChannelKind.VISION, provider="openai")
+
+            def read_pages(self, page_numbers):
+                return {n: build_page_read(
+                    SECONDARY_VISION_CHANNEL_ID, n, "", status=PageStatus.BLANK,
+                    detail="deterministic detector confirmed no marks on the page")
+                       for n in page_numbers}
+
+        document, tmp = _document(_RECALL_TRANSCRIPT, [])   # image-only page
+        self.addCleanup(tmp.cleanup)
+
+        result = _run_recall(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            lambda s, u: _multi_reading(_SECOND_SAME_SERVICE),
+            note_text=document.primary_text(), source_evidence=document,
+            source_reader=_CertifiedBlankReader())
+
+        gate_names = {g.name for g in result.gates}
+        self.assertNotIn("recall_page_coverage", gate_names)
+        (blank_page,) = result.consensus["recall_blank_pages"]
+        self.assertEqual(blank_page["page"], 1)
+        self.assertEqual(blank_page["channel_id"], SECONDARY_VISION_CHANNEL_ID)
+        self.assertIn("detector confirmed", blank_page["detail"])
+
     def test_an_unconfirmed_transcription_omission_holds_and_is_never_dropped(self):
         """The failure path of the recovery: no third reading of the page exists.
 

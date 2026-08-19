@@ -1205,6 +1205,13 @@ def pages_needing_independent_read(
     return tuple(sorted(n for n in wanted if document.page(n) is not None))
 
 
+class InvalidPageReadError(ValueError):
+    """A caller asked this shared builder to certify a `PageRead` whose status is
+    not consistent with its own content -- most importantly, BLANK with no
+    assertion/detector provenance, which is exactly what an empty-response silent
+    inference used to produce (Codex F7-R3-A, exact-SHA re-review, fourth pass)."""
+
+
 def build_page_read(channel_id: str, page_number: int, text: str,
                     *, tokens: list[SourceToken] | None = None,
                     status: PageStatus | None = None,
@@ -1214,13 +1221,46 @@ def build_page_read(channel_id: str, page_number: int, text: str,
     Centralised so every producer — the PDF text layer, the vision transcription and
     any second model read — hashes and tokenizes identically. Two producers computing
     "the same" digest differently is the drift class this codebase keeps finding.
+
+    This is also the ONE place a claim-affecting BLANK finding can be minted, which is
+    why it validates rather than merely records (Codex F7-R3-A, exact-SHA re-review,
+    fourth pass). The earlier bug was not confined to one reader: this shared builder
+    itself inferred BLANK from empty text whenever a caller omitted `status`, so ANY
+    caller — including a caller-supplied `source_reader`, which `claude_coder.pipeline`
+    explicitly allows as a boundary object it does not control the implementation of —
+    could manufacture a positive blank finding from silence without ever intending to.
+
+    Two invariants are now enforced at this ONE choke point, not left to callers to
+    remember:
+      * Empty text with NO explicit `status` is UNREADABLE, never inferred BLANK. A
+        producer that means to certify a page as genuinely blank must say so.
+      * A `status=BLANK` claim MUST carry non-empty `detail` naming the assertion or
+        detector that established it, and MUST carry no text/tokens (a blank page has
+        nothing to attest to). Either violation raises `InvalidPageReadError` rather
+        than silently accepting an unexplained or self-contradicting positive finding
+        — fail closed at the boundary, not downstream at the gate that trusts it.
+      * A `status=READ` claim must carry at least one token — READ means usable
+        content was actually obtained, not merely "no problem was noticed".
     """
     body = str(text or "")
     if tokens is None:
         tokens = [SourceToken(text=piece, normalized=normalize_token(piece))
                   for piece in body.split() if normalize_token(piece)]
     if status is None:
-        status = PageStatus.READ if tokens else PageStatus.BLANK
+        status = PageStatus.UNREADABLE if not tokens else PageStatus.READ
+    if status is PageStatus.BLANK and (tokens or body.strip()):
+        raise InvalidPageReadError(
+            f"page {page_number} read on channel {channel_id!r} claims BLANK but "
+            f"carries text/tokens -- a blank page has no content to attest to")
+    if status is PageStatus.BLANK and not detail.strip():
+        raise InvalidPageReadError(
+            f"page {page_number} read on channel {channel_id!r} claims BLANK with "
+            f"no assertion/detector provenance in `detail` -- a blank finding must "
+            f"say WHY it was certified blank, never just that it was")
+    if status is PageStatus.READ and not tokens:
+        raise InvalidPageReadError(
+            f"page {page_number} read on channel {channel_id!r} claims READ but "
+            f"carries no tokens -- READ means usable content was obtained")
     return PageRead(
         channel_id=channel_id, page_number=page_number, status=status, text=body,
         text_sha256="sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest(),

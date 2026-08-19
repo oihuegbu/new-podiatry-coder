@@ -1112,6 +1112,60 @@ class IndependentReaderBlankInferenceTest(unittest.TestCase):
         self.assertEqual(reads[1].text, "some real transcribed text")
 
 
+class BuildPageReadValidationTest(unittest.TestCase):
+    """Codex F7-R3-A, exact-SHA re-review, fourth pass: the shared `build_page_read`
+    builder -- not just this project's own production reader -- is the ONE place a
+    claim-affecting BLANK finding can be minted, so it validates rather than merely
+    records. Any caller (including a third-party `source_reader`) is bound by these
+    invariants, not only `IndependentVisionReader`."""
+
+    def test_empty_text_with_no_explicit_status_is_unreadable_not_blank(self):
+        from app.contracts.source_evidence import PageStatus, build_page_read
+        read = build_page_read("chan", 1, "")
+        self.assertEqual(read.status, PageStatus.UNREADABLE)
+
+    def test_an_explicit_blank_claim_requires_provenance(self):
+        from app.contracts.source_evidence import (InvalidPageReadError, PageStatus,
+                                                    build_page_read)
+        with self.assertRaises(InvalidPageReadError):
+            build_page_read("chan", 1, "", status=PageStatus.BLANK)   # no detail
+        # With provenance, the same claim is accepted.
+        read = build_page_read("chan", 1, "", status=PageStatus.BLANK,
+                               detail="a deterministic detector confirmed no marks")
+        self.assertEqual(read.status, PageStatus.BLANK)
+
+    def test_a_blank_claim_with_text_is_self_contradicting(self):
+        from app.contracts.source_evidence import (InvalidPageReadError, PageStatus,
+                                                    build_page_read)
+        with self.assertRaises(InvalidPageReadError):
+            build_page_read("chan", 1, "some text", status=PageStatus.BLANK,
+                            detail="claims blank but carries text")
+
+    def test_a_read_claim_with_no_tokens_is_self_contradicting(self):
+        from app.contracts.source_evidence import (InvalidPageReadError, PageStatus,
+                                                    build_page_read)
+        with self.assertRaises(InvalidPageReadError):
+            build_page_read("chan", 1, "", status=PageStatus.READ)
+
+    def test_blank_missing_unreadable_and_read_remain_distinguishable(self):
+        """Codex's exact durable-record complaint: BLANK, MISSING, and UNREADABLE
+        must never look byte-equivalent in the record. Status AND detail differ for
+        each, and a genuine blank finding always carries its own provenance."""
+        from app.contracts.source_evidence import PageRead, PageStatus, build_page_read
+        blank = build_page_read("chan", 1, "", status=PageStatus.BLANK,
+                                detail="detector confirmed no marks on the page")
+        unreadable = build_page_read("chan", 1, "", status=PageStatus.UNREADABLE,
+                                     detail="empty model response, no assertion")
+        missing = PageRead(channel_id="chan", page_number=1,
+                           status=PageStatus.MISSING, detail="reader returned no page")
+        read = build_page_read("chan", 1, "real content here")
+        records = [blank, unreadable, missing, read]
+        statuses = {r.status for r in records}
+        details = {r.detail for r in records}
+        self.assertEqual(len(statuses), 4, "all four statuses must be distinct")
+        self.assertEqual(len(details), 4, "all four detail strings must be distinct")
+
+
 class SourceDigestVerificationTest(unittest.TestCase):
     """Source identity is a fact the compiler establishes, not an upstream assertion."""
 
