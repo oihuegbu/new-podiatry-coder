@@ -454,17 +454,40 @@ def code_encounter(
     # cover used to be RECORDED (`recall_uncovered_pages`) but never BLOCKED anything --
     # a failed proactive read, or a reader that covered no page, still let the encounter
     # proceed to a fully resolved, presentable claim. A service documented only on that
-    # page is then silently absent, with every control reporting clean. Every NONBLANK
-    # page must be covered by an independent usable reading before retrieval; a page an
-    # independent channel has POSITIVELY VERIFIED as empty (`PageStatus.BLANK`, not
-    # merely unread) holds nothing, or every short note with a trailing blank page would
-    # hold forever waiting for a reading that could never find anything.
+    # page is then silently absent, with every control reporting clean.
+    #
+    # The first version of this gate exempted a page whose AGGREGATE `PageStatus` is
+    # BLANK -- but the compiler assigns that status whenever the PRIMARY transcription
+    # and the embedded-text layer both found zero tokens (round-2 re-review). Neither
+    # of those is a read of the rendered PAGE IMAGE: a blank vision transcription may
+    # mean the model omitted the page's visible content, and an empty text layer says
+    # nothing about text drawn as an image. "Two channels found nothing" is not proof a
+    # human looking at the page would find nothing too. A page is exempt only when an
+    # INDEPENDENT, IMAGE-CAPABLE channel (vision or OCR -- never the embedded-text layer,
+    # and never the primary transcription itself) actually attempted a read of it, empty
+    # result or not: that read is a genuine inspection of the page image, so a truly
+    # blank page is exempt once one exists, and an unread one still holds.
     if consensus is not None and source_evidence is not None:
-        from app.contracts.source_evidence import PageStatus as _PageStatus
-        _blocking_pages = [
-            p for p in consensus.recall_uncovered_pages
-            if source_evidence.page(p) is not None
-            and source_evidence.page(p).status is not _PageStatus.BLANK]
+        from app.contracts.source_evidence import ChannelKind as _ChannelKind
+        from app.contracts.source_evidence import independent_of as _independent_of
+        primary_channel = source_evidence.primary_channel
+
+        def _image_inspected(page_number: int) -> bool:
+            page = source_evidence.page(page_number)
+            if page is None or primary_channel is None:
+                return False
+            for read in page.reads:
+                if read.channel_id == source_evidence.primary_channel_id:
+                    continue
+                channel = source_evidence.channel(read.channel_id)
+                if (channel is not None
+                        and channel.kind in (_ChannelKind.VISION, _ChannelKind.OCR)
+                        and _independent_of(channel, primary_channel)):
+                    return True
+            return False
+
+        _blocking_pages = [p for p in consensus.recall_uncovered_pages
+                           if not _image_inspected(p)]
         if _blocking_pages:
             pre_retrieval_gates.append(GateResult(
                 "recall_page_coverage", Outcome.UNKNOWN,
