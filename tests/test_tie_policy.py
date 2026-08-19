@@ -563,12 +563,14 @@ class SelectionUniquenessTest(unittest.TestCase):
 
     # ---- what "eliminated" has to mean ----------------------------------------------
     def test_a_bare_pick_cannot_establish_uniqueness_but_a_named_elimination_can(self):
-        """The same shortlist and the same document, judged two ways. When both models
-        NAME why the alternative is out, the line releases. When they answer with a bare
-        pick and say nothing about the alternative, silence is not an elimination and the
-        line holds — the fail-closed default, with no separate code path."""
+        """The same shortlist, judged two ways. When both models NAME why the
+        alternative is out AND the original document itself documents only the winner's
+        distinguishing term (so the elimination is independently GROUNDED, not merely
+        asserted), the line releases. When they answer with a bare pick and say nothing
+        about the alternative, silence is not an elimination and the line holds — the
+        fail-closed default, with no separate code path."""
         named = _judge(lambda d: _ONE in d)
-        released = self._resolve(self.BOTH_DOCUMENTED, named, _judge(lambda d: _ONE in d))
+        released = self._resolve(self.ONE_DOCUMENTED, named, _judge(lambda d: _ONE in d))
         self.assertTrue(released.resolved, released.rationale)
         self.assertEqual(released.chosen.code, "SYN_A")
 
@@ -580,6 +582,24 @@ class SelectionUniquenessTest(unittest.TestCase):
         self.assertEqual(held.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
         self.assertFalse(
             held.tie_record["judgements"][0]["declared_shortlist_verdict"])
+
+    # ---- Codex F8-R1, round-9 re-review: a NAMED reason is not itself grounds ---------
+    def test_a_false_named_elimination_the_document_contradicts_does_not_release(self):
+        """The reviewer's exact round-9 counterexample: the documentation states BOTH
+        components (so SYN_B is genuinely, independently entailed), but two SEPARATE
+        judging models both falsely name SYN_B as eliminated. Before this fix, any
+        non-empty reason string from every model was enough to drop a candidate from the
+        standing set — 'model agreement as proof, only in a richer JSON shape.' The
+        elimination must now be independently confirmed against the original document
+        (the same `tiebreak.narrow` proof the tie policy already uses) before it can
+        remove a candidate, and the document here confirms the OPPOSITE of what both
+        models claimed, so SYN_B must stay standing."""
+        only_one = lambda d: _ONE in d                          # noqa: E731
+        line = self._resolve(self.BOTH_DOCUMENTED, _judge(only_one), _judge(only_one))
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
+        self.assertTrue(line.documentation_gap, line.rationale)
+        self.assertNotIn("SYN_B", line.tie_record["eliminated"])
 
     def test_the_corroborator_evaluates_the_shortlist_not_only_the_pick(self):
         """The corroborator's own view of the OTHER candidates has to count. Here it

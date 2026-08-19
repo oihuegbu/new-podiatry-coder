@@ -593,7 +593,7 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
     # nothing about SEVERAL more-specific relatives being equally documented -- and picking
     # between those is exactly the choice a model may not make alone.
     offered = [c for c in shortlist if c.code != line.chosen.code]
-    still_entailed, _elim = _uniqueness_view(offered, picked, judgements, {})
+    still_entailed, _elim = _uniqueness_view(fact, offered, picked, judgements, {})
     if len(still_entailed) > 1:
         prior = line.chosen
         line.chosen = None
@@ -722,18 +722,67 @@ def _tie_escalation(fact: ClinicalFact, candidates: list[CandidateCode],
         rationale=f"{reason} -- {tie.detail}")
 
 
-def _uniqueness_view(shortlist: list[CandidateCode], chosen: CandidateCode,
-                     judgements: list, eliminated_earlier: dict[str, str],
+def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: CandidateCode,
+                          reconciliation) -> tuple[bool, str]:
+    """Codex F8-R1 (round-9 re-review): a model's NAMED reason for ruling out `loser` is
+    not, by itself, grounds to remove it from the standing set -- both judging models
+    returning SOME non-empty reason string is exactly the "richer JSON shape" of model
+    agreement Codex's reproduction showed converting a false elimination into a release.
+
+    Preferentially grounded against the SAME document-proof the tie policy already uses to
+    settle a genuine tie (`tiebreak.narrow`, built on `graph_consensus.source_support`) --
+    never the model's own prose, and never a second, parallel definition of proof. When
+    that proof settles the two candidates' discriminating axis (in either direction), its
+    answer is final: a document that confirms the winner's term grounds the elimination; a
+    document that is checked and states the LOSER's term too, or settles nothing, refuses
+    it.
+
+    `narrow` gives up for a THIRD reason that is not a checked-and-inconclusive document: no
+    reconciled page reading could be checked at all (unanchored evidence spans, or no
+    reconciliation was supplied for this call). That is not every fact this resolver ever
+    sees -- most of `resolve`'s callers judge from evidence text with no page-anchoring
+    infrastructure behind it at all -- so treating it as "unverifiable, therefore never
+    grounded" would block the ordinary near-synonym rejection this module has always done.
+    Falling back to the RAW evidence text the judging models themselves were shown is never
+    WEAKER proof than what already grounded their verdict, and it is still real document
+    text, not a model's own prose.
+    """
+    tie = _tiebreak.narrow(fact, [winner, loser], reconciliation)
+    if tie.winner is not None and tie.winner.code == winner.code:
+        return True, tie.detail
+    if not tie.source_integrity:
+        return False, tie.detail
+    text = " ".join(str(getattr(s, "text", "") or "")
+                    for s in (getattr(fact, "evidence", None) or []))
+    words = _tiebreak._text_tokens(text)          # SAME tokenizer `narrow` proves axes with
+    loser_terms = {t for probe in tie.axes for t in probe.terms_by_code.get(loser.code, ())}
+    winner_terms = {t for probe in tie.axes
+                    for t in probe.terms_by_code.get(winner.code, ())}
+    if loser_terms & words:
+        return False, (f"the documentation states {sorted(loser_terms & words)}, "
+                       f"{loser.code}'s own distinguishing term")
+    if winner_terms & words:
+        return True, (f"the documentation states {sorted(winner_terms & words)}, "
+                      f"{winner.code}'s own distinguishing term, and not {loser.code}'s")
+    return False, "neither candidate's distinguishing term is stated in the documentation"
+
+
+def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
+                     chosen: CandidateCode, judgements: list,
+                     eliminated_earlier: dict[str, str], reconciliation=None,
                      ) -> tuple[list[CandidateCode], dict[str, str]]:
     """Which shortlisted candidates are STILL ENTAILED once every judging model has
     answered about every one of them, and the NAMED reason each of the others is out.
 
     Codex F8-R1: two models agreeing about ONE candidate eliminates nothing else. A
-    candidate is out only when EVERY judging model NAMED a reason for ruling it out (or an
-    earlier re-selection round already had it rejected outright). Silence about a
-    candidate, an undeclared verdict, and the two models disagreeing about it all leave it
-    STANDING -- the fail-closed direction, because a standing alternative BLOCKS the
-    release rather than permitting one.
+    candidate is out only when EVERY judging model NAMED a reason for ruling it out AND
+    that reason is independently confirmed against the original document (or an earlier
+    re-selection round already had it rejected outright by deterministic constraints, which
+    needs no further grounding -- it was never a model's prose to begin with). Silence about
+    a candidate, an undeclared verdict, the two models disagreeing about it, and a NAMED
+    elimination the document does not independently confirm all leave it STANDING -- the
+    fail-closed direction, because a standing alternative BLOCKS the release rather than
+    permitting one.
     """
     remaining: list[CandidateCode] = []
     eliminated: dict[str, str] = {}
@@ -747,9 +796,13 @@ def _uniqueness_view(shortlist: list[CandidateCode], chosen: CandidateCode,
             continue
         named = [j.elimination_of(cand.code) for j in judgements]
         if named and all(named):
-            eliminated[cand.code] = "; ".join(dict.fromkeys(named))
-        else:
-            remaining.append(cand)
+            grounded, ground_detail = _grounded_elimination(fact, cand, chosen,
+                                                            reconciliation)
+            if grounded:
+                eliminated[cand.code] = (f"{'; '.join(dict.fromkeys(named))} "
+                                         f"(document-confirmed: {ground_detail})")
+                continue
+        remaining.append(cand)
     return remaining, eliminated
 
 
@@ -766,8 +819,8 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
     features, here it is two models' named eliminations. Nothing about "the first model
     picked this one" is allowed to stand in for uniqueness.
     """
-    remaining, eliminated = _uniqueness_view(shortlist, chosen, judgements,
-                                             eliminated_earlier)
+    remaining, eliminated = _uniqueness_view(fact, shortlist, chosen, judgements,
+                                             eliminated_earlier, reconciliation)
     # Candidates eliminated BEFORE the shortlist existed (a failed deterministic
     # constraint) belong in the same accounting: the record has to show the whole
     # retrieved pool being disposed of, not only the part the models were shown.
