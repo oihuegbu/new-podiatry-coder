@@ -302,7 +302,13 @@ def drug_units_gate(result: CodingResult, source: CodeSource) -> GateResult:
 # file the manifest content-addresses must be the same object by construction, and an
 # undeclared control raises here instead of releasing claims unattested. (Codex F6-R5.)
 _NECESSITY_CONTROL_ID = "necessity_relation_control"
-_NECESSITY_CONTROL_CACHE: dict | None = None
+#: `(validated config, content identity of the exact bytes it was parsed from)`, cached for
+#: the life of the process.  The identity lives IN the cache rather than beside it so the two
+#: can never be restored, cleared or reloaded independently -- a config answering from memory
+#: while a stale identity is propagated to the certificate would be a worse bug than the one
+#: this closes.  A control replaced after it was parsed is reported as certificate drift, the
+#: same way the compiled database and the code tables are. (Codex F6-R5-B.)
+_NECESSITY_CONTROL_CACHE: tuple | None = None
 
 _REQUIRED_CONTROL_KEYS = ("version", "control_mode", "authority", "min_relation_confidence",
                           "require_anchored_relation_evidence", "require_asserted_state",
@@ -319,11 +325,11 @@ def load_necessity_control() -> dict:
     """The reviewed necessity relation control, fully validated. Cached per process."""
     global _NECESSITY_CONTROL_CACHE
     if _NECESSITY_CONTROL_CACHE is not None:
-        return _NECESSITY_CONTROL_CACHE
+        return _NECESSITY_CONTROL_CACHE[0]
     try:
-        from app.release.source_manifest import declared_source_path
-        path = declared_source_path(_NECESSITY_CONTROL_ID)
-        cfg = json.loads(path.read_text())
+        from app.release.source_manifest import declared_json_snapshot
+        cfg, identity = declared_json_snapshot(_NECESSITY_CONTROL_ID,
+                                               NecessityControlError)
     except Exception as exc:
         raise NecessityControlError(
             f"necessity relation control unreadable ({_NECESSITY_CONTROL_ID}): {exc}") from exc
@@ -372,8 +378,16 @@ def load_necessity_control() -> dict:
             f"only: {sorted(_prov.GROUNDED_RECONCILIATION_STATUSES)}")
     if not cfg.get("authority"):
         raise NecessityControlError("a control must cite its authority")
-    _NECESSITY_CONTROL_CACHE = cfg
+    _NECESSITY_CONTROL_CACHE = (cfg, identity)
     return cfg
+
+
+def necessity_control_snapshot() -> dict | None:
+    """The content identity of the control bytes THIS process parsed, or None when the
+    control was never consulted.  Bound into the release fingerprint, which the certificate
+    must match -- a control re-hashed from its path at certification time is a different
+    fact about a different moment. (Codex F6-R5-B.)"""
+    return dict(_NECESSITY_CONTROL_CACHE[1]) if _NECESSITY_CONTROL_CACHE else None
 
 
 def _necessity_support_relations(result: CodingResult, control: dict) -> tuple[list, set]:

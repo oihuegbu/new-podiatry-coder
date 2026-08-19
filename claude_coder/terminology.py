@@ -78,9 +78,19 @@ class TerminologyIndex:
         return set(self._byset.get(toks, set())) if toks else set()
 
     @classmethod
+    def load_snapshot(cls) -> tuple["TerminologyIndex", dict]:
+        """(index, content identity of the exact bytes parsed).
+
+        The identity is captured AT THE PARSE because the index is then answered from
+        memory: a file replaced afterwards would otherwise be re-hashed at certification
+        time and attested to for retrievals it never served. (Codex F6-R5-B.)
+        """
+        from app.release.source_manifest import (DeclaredSourceUnavailable,
+                                                 declared_document_snapshot)
+        document, identity = declared_document_snapshot("index_terms",
+                                                        DeclaredSourceUnavailable)
+        return cls(document.get("terms", {})), identity
+
+    @classmethod
     def load(cls) -> "TerminologyIndex":
-        import json
-        from app.release.source_manifest import declared_source_path
-        with open(declared_source_path("index_terms")) as fh:
-            terms = json.load(fh).get("terms", {})
-        return cls(terms)
+        return cls.load_snapshot()[0]

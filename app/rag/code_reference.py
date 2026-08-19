@@ -1,16 +1,13 @@
-import json
 import os
 import sqlite3
 import calendar
 from datetime import date
-from app.core.config import (
-    ICD10_FILE, CPT_FILE, HCPCS_FILE, MUE_FILE,
-    SNOMED_ROOTS_FILE,
-)
 from app.core.logger import get_logger
 from app.compliance.datastore.store import cpt_edition_window
 from app.release.source_manifest import (
-    CompiledDatabaseUnavailable, compliance_database_path, open_database_snapshot)
+    CompiledDatabaseUnavailable, DeclaredSourceUnavailable, SourceSnapshotSet,
+    compliance_database_path, declared_json_snapshot, declared_source_path,
+    open_database_snapshot)
 
 logger = get_logger(__name__)
 
@@ -38,6 +35,17 @@ def _snapshot_identity(path) -> tuple:
     return _stat_identity(path.stat())
 
 
+class CodeTableUnavailable(DeclaredSourceUnavailable):
+    """An authoritative code/limit table could not be parsed into memory.
+
+    Typed rather than left as a bare `OSError`/`JSONDecodeError` because these tables are
+    read through the release declaration now (`declared_json_snapshot`), which is also what
+    captures the CONTENT IDENTITY of the exact bytes parsed.  A caller that cannot obtain
+    the authority must hold, and every "the authority is unavailable" failure in the
+    repository already travels the `DeclaredSourceUnavailable` family.  (Codex F6-R5-B.)
+    """
+
+
 class SnomedRootsUnavailable(RuntimeError):
     """The SNOMED root-concept control table could not be read.
 
@@ -49,6 +57,18 @@ class SnomedRootsUnavailable(RuntimeError):
     unreadable bytes has to fail the same way instead of quietly loading nothing.
     (Round 5, phase 4.)
     """
+
+
+def _declared_path_for_message(source_id: str) -> str:
+    """The declared path of a source, for an error message only -- never for reading.
+
+    An unresolvable declaration is itself one of the failures being reported, so this can
+    never be allowed to raise out of the handler that is already reporting one.
+    """
+    try:
+        return str(declared_source_path(source_id))
+    except Exception:
+        return f"<{source_id}: unresolvable declaration>"
 
 
 def _norm(code: str) -> str:
@@ -112,6 +132,13 @@ class CodeReferenceDB:
         self._db_snapshot: tuple | None = None
         self._db_identity: dict | None = None
         self._db_handle = None
+        # The CONTENT identities of the JSON sources this instance parsed INTO MEMORY.
+        # Same defect, same technique, different sources: `load_all` reads each table once
+        # and every later answer comes from the parsed copy, so a file replaced afterwards
+        # leaves the certificate attesting to bytes no lookup ever saw.  Each loader binds
+        # the identity captured at its own read, and `data_fingerprint` carries the set
+        # forward into the certificate, which must match it.  (Codex F6-R5-B.)
+        self._source_snapshots = SourceSnapshotSet()
 
     def load_all(self) -> None:
         # Treat one load as one authoritative data snapshot. A subsequent
@@ -119,6 +146,11 @@ class CodeReferenceDB:
         # NCCI release window.
         self._ncci_release_window_loaded = False
         self._ncci_release_window = None
+        # A load is the ONE place a new authoritative snapshot legitimately begins, for the
+        # in-memory tables exactly as for the compiled database: the identities bound below
+        # describe the bytes this load parsed, and the previous load's are gone with the
+        # data they described.
+        self._source_snapshots = SourceSnapshotSet()
         self._release_database_snapshot()
         self._load_icd10()
         self._load_cpt()
@@ -128,8 +160,8 @@ class CodeReferenceDB:
         self._load_snomed_roots()
 
     def _load_icd10(self) -> None:
-        with open(ICD10_FILE) as f:
-            data = json.load(f)
+        data, identity = declared_json_snapshot("icd10_codes", CodeTableUnavailable)
+        self._source_snapshots.bind(identity)
         for entry in data:
             code = entry.get("code", "").strip()
             if code:
@@ -144,8 +176,8 @@ class CodeReferenceDB:
         logger.info(f"Loaded {len(self.icd10)} ICD-10-CM codes")
 
     def _load_cpt(self) -> None:
-        with open(CPT_FILE) as f:
-            data = json.load(f)
+        data, identity = declared_json_snapshot("cpt_codes", CodeTableUnavailable)
+        self._source_snapshots.bind(identity)
         codes_list = data.get("codes", data) if isinstance(data, dict) else data
         for entry in codes_list:
             code = entry.get("code", "").strip()
@@ -163,8 +195,8 @@ class CodeReferenceDB:
         logger.info(f"Loaded {len(self.cpt)} CPT codes")
 
     def _load_hcpcs(self) -> None:
-        with open(HCPCS_FILE) as f:
-            data = json.load(f)
+        data, identity = declared_json_snapshot("hcpcs_codes", CodeTableUnavailable)
+        self._source_snapshots.bind(identity)
         for entry in data:
             raw_code = entry.get("code", "").strip()
             if len(raw_code) >= 5:
@@ -200,8 +232,8 @@ class CodeReferenceDB:
         logger.info("NCCI edit pairs: served from compliance.db (no in-memory duplicate)")
 
     def _load_mue(self) -> None:
-        with open(MUE_FILE) as f:
-            data = json.load(f)
+        data, identity = declared_json_snapshot("mue_limits", CodeTableUnavailable)
+        self._source_snapshots.bind(identity)
         for entry in data:
             code = entry.get("code", "").strip()
             if code:
@@ -213,8 +245,8 @@ class CodeReferenceDB:
         by the table rather than defaulted in code, so a truncated file cannot leave the
         restriction in place while silently substituting a threshold nobody reviewed."""
         try:
-            with open(SNOMED_ROOTS_FILE) as f:
-                data = json.load(f)
+            data, identity = declared_json_snapshot("snomed_root_concepts",
+                                                    SnomedRootsUnavailable)
             if not isinstance(data, dict):
                 raise TypeError(f"expected a JSON object, got {type(data).__name__}")
             roots = data.get("root_concepts")
@@ -225,8 +257,9 @@ class CodeReferenceDB:
                 raise ValueError(f"confidence_cap {cap} is outside (0, 1]")
         except Exception as exc:
             raise SnomedRootsUnavailable(
-                f"SNOMED root-concept control table unreadable at {SNOMED_ROOTS_FILE}: "
-                f"{exc}") from exc
+                f"SNOMED root-concept control table unreadable at "
+                f"{_declared_path_for_message('snomed_root_concepts')}: {exc}") from exc
+        self._source_snapshots.bind(identity)
         self.snomed_roots = roots
         self.snomed_root_confidence_cap = cap
         logger.info(f"Loaded {len(self.snomed_roots)} SNOMED root concept IDs")
@@ -335,6 +368,17 @@ class CodeReferenceDB:
                 handle.close()
             except OSError:
                 pass
+
+    def source_snapshots(self) -> SourceSnapshotSet:
+        """The content identities of the authoritative JSON sources THIS instance parsed
+        into memory, for the certificate to be required to match.
+
+        Not recomputed from the paths: that is a different fact about a different moment,
+        and a source replaced after `load_all` (a legitimate concurrent refresh promoting a
+        new generation with `os.replace`) would otherwise be hashed at certification time
+        and attested to by a certificate for lookups it never answered.  (Codex F6-R5-B.)
+        """
+        return self._source_snapshots
 
     def database_snapshot(self) -> dict:
         """The CONTENT identity of the compiled-database snapshot this instance's queries

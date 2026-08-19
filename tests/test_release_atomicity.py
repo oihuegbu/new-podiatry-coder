@@ -150,7 +150,20 @@ def _reseal(fp):
     not that the required-source-set / role / release-metadata checks did. The reviewed
     counterexamples were all self-consistent objects. (Codex F6-R5.)"""
     import claude_coder.capability as cap
+    from app.release.source_manifest import SNAPSHOT_BOUND_SOURCES
     man = fp["source_manifest"]
+    # The load-time bindings are part of "self-consistent" now: production propagates the
+    # identity each source was PARSED from and the validator requires the manifest record to
+    # equal it, so a counterexample that edits a record without re-deriving its binding
+    # would be rejected for the binding rather than for the property under test.
+    # (Codex F6-R5-B.)
+    records = {s["source_id"]: s for s in man["sources"]}
+    for source_id in SNAPSHOT_BOUND_SOURCES:
+        record = records.get(source_id)
+        if record is not None and source_id in (fp.get("source_snapshots") or {}):
+            fp["source_snapshots"][source_id] = {
+                "source_id": source_id, "path": record["path"],
+                "sha256": record["sha256"], "size": record["bytes"]}
     man["manifest_sha256"] = cap.manifest_digest(man["sources"])
     fp["fingerprint_sha256"] = cap.fingerprint_digest(fp["counts"], man)
     return fp
@@ -1319,7 +1332,10 @@ def test_corrupt_snomed_root_concepts_raise_instead_of_disabling_the_confidence_
                     '{"root_concepts": {"1": "x"}}',            # no published cap
                     '{"root_concepts": {"1": "x"}, "confidence_cap": 0}'):
         corrupt.write_text(content)
-        monkeypatch.setattr(cr, "SNOMED_ROOTS_FILE", corrupt)
+        # Repointed through the DECLARATION, not a module-level filename constant: the
+        # loader resolves (and content-addresses) every table through `declared_source_path`
+        # now, which is what captures the identity the certificate must match.
+        _repoint(monkeypatch, "snomed_root_concepts", corrupt)
         with pytest.raises(cr.SnomedRootsUnavailable):
             cr.CodeReferenceDB()._load_snomed_roots()
         monkeypatch.undo()
@@ -2210,3 +2226,434 @@ def test_the_readiness_gate_binds_exactly_the_declared_required_set(monkeypatch)
         assert control.outcome is ControlOutcome.NOT_CHECKED, (source_id, control)
         assert source_id in control.reason, (source_id, control.reason)
         monkeypatch.undo()
+
+
+# ---- Codex F6-R5-B (round 10): the SAME binding for EVERY other claim-affecting source --
+# The compiled database was the first instance of the defect, not the only one.
+# `CodeReferenceDB.load_all()` parses the ICD/CPT/HCPCS/MUE and SNOMED control tables into
+# memory ONCE and answers every later lookup from that parsed copy, and the lazily-read
+# policy/rule documents are cached the same way.  A file replaced after it was loaded (a
+# legitimate concurrent refresh promoting a new generation with `os.replace`) leaves the
+# in-memory data speaking for the OLD bytes while the manifest hashes the NEW ones -- and
+# nothing obliges a second read to happen and notice.
+def _editions(suffix: str = "") -> dict:
+    """Minimal, structurally real editions of every EAGERLY-loaded declared source.
+
+    SYNTHETIC identifiers only -- no medical code, code family or descriptor appears here,
+    so the fixture cannot silently go stale against the real code sets.  `suffix` varies the
+    BYTES while every table keeps answering exactly the same thing, which is what makes a
+    replacement a genuine new edition rather than a differently-shaped file (and what proves
+    the binding is a CONTENT identity rather than a row count).
+    """
+    return {
+        "icd10_codes": [{"code": "SYNDX", "description": "synthetic diagnosis" + suffix,
+                         "status": "active", "effective_from": "2025-01-01"}],
+        "cpt_codes": [{"code": "SYNPROC", "short_description": "synthetic" + suffix,
+                       "long_description": "synthetic procedure" + suffix}],
+        "hcpcs_codes": [{"code": "X1234synthetic supply", "add_date": "2025-01-01",
+                         "long_description": "synthetic supply" + suffix}],
+        "mue_limits": [{"code": "SYNPROC", "mue_value": 1,
+                        "note": "synthetic" + suffix}],
+        "snomed_root_concepts": {"root_concepts": {"1": "synthetic root" + suffix},
+                                 "confidence_cap": 0.4},
+    }
+
+
+def _synthetic_sources(tmp_path, monkeypatch) -> dict:
+    """Write every eagerly-loaded source and point its DECLARED IDENTITY at it, exactly as
+    the release manifest and the loaders both resolve it."""
+    paths = {}
+    for source_id, document in _editions().items():
+        path = tmp_path / f"{source_id}.json"
+        path.write_text(json.dumps(document))
+        _repoint(monkeypatch, source_id, path)
+        paths[source_id] = path
+    return paths
+
+
+def _promote(tmp_path, source_id: str, path, suffix: str = "-v2"):
+    """A legitimate concurrent refresh: a new generation written beside the old one and
+    promoted with an ATOMIC `os.replace` -- what every builder under `tools/` already does,
+    and the only refresh a live batch may see."""
+    replacement = tmp_path / f"{source_id}{suffix}.json"
+    replacement.write_text(json.dumps(_editions(suffix)[source_id]))
+    os.replace(replacement, path)
+
+
+def _loaded_reference(tmp_path, monkeypatch):
+    """A `CodeReferenceDB` whose tables have all been PARSED INTO MEMORY."""
+    from app.rag.code_reference import CodeReferenceDB
+    paths = _synthetic_sources(tmp_path, monkeypatch)
+    ref = CodeReferenceDB()
+    ref.load_all()
+    assert ref.icd10 and ref.cpt and ref.hcpcs and ref.mue and ref.snomed_roots, (
+        "the fixture must actually populate every table, or there is no parse to bind")
+    return ref, paths
+
+
+def _errors_for(manifest, source_id: str) -> list:
+    return [e for e in manifest["integrity_errors"] if str(e).startswith(source_id + ":")]
+
+
+def _source_drift(manifest, source_id: str) -> list:
+    """Only the "these bytes are not the ones that were parsed" errors for `source_id` --
+    never the other integrity errors a repointed fixture legitimately raises."""
+    return [e for e in _errors_for(manifest, source_id) if "parsed into memory" in e]
+
+
+def _db_drift(manifest) -> list:
+    """Only round 9's compiled-database DRIFT errors, for the same reason."""
+    return [e for e in manifest["integrity_errors"] if "answered this encounter" in str(e)]
+
+
+@pytest.mark.parametrize("source_id", ["icd10_codes", "cpt_codes", "hcpcs_codes",
+                                       "mue_limits", "snomed_root_concepts"])
+def test_a_source_replaced_after_it_was_loaded_cannot_be_certified(source_id, monkeypatch,
+                                                                   tmp_path):
+    """THE FINDING (F6-R5-B), once per claim-affecting source.  Load it, atomically replace
+    it as a legitimate concurrent refresh would, then certify -- with NO second load and no
+    lookup obliged to notice.
+
+    Before the fix, `build_manifest` hashed the REPLACEMENT and the certificate attested to
+    bytes that produced none of the in-memory codes, descriptors or unit limits the claim
+    was actually built from.
+    """
+    from claude_coder.capability import build_manifest
+    ref, paths = _loaded_reference(tmp_path, monkeypatch)
+    bound = ref.source_snapshots().identities
+    assert source_id in bound, bound
+
+    _promote(tmp_path, source_id, paths[source_id])
+    # NO further load or lookup happens from here on -- that is the point of the finding.
+
+    manifest = build_manifest(bound_sources=ref.source_snapshots())
+    record = next(s for s in manifest["sources"] if s["source_id"] == source_id)
+    assert record["sha256"] != bound[source_id]["sha256"], (
+        "this record is the REPLACEMENT, independently re-hashed from the path at "
+        "certification time -- which is exactly what the certificate used to attest to")
+    assert manifest["status"] == "BLOCKED"
+    errors = _errors_for(manifest, source_id)
+    assert errors, f"{source_id} was replaced after it was loaded and certified silently"
+    assert any("parsed into memory" in e for e in errors), errors
+    # ... and the in-memory table really is still the superseded edition, which is WHY it
+    # has to hold rather than quietly re-binding to the new file.
+    assert ref.source_snapshots().identities == bound
+
+
+def test_unchanged_sources_certify_and_report_no_drift(monkeypatch, tmp_path):
+    """The failure path of the fix itself: a control that fires on a clean run would hold
+    every encounter, which is the same outage as no control at all."""
+    from claude_coder.capability import build_manifest
+    ref, _paths = _loaded_reference(tmp_path, monkeypatch)
+    bound = ref.source_snapshots().identities
+    manifest = build_manifest(bound_sources=ref.source_snapshots())
+    records = {s["source_id"]: s for s in manifest["sources"]}
+    for source_id, identity in bound.items():
+        assert _errors_for(manifest, source_id) == [], (source_id, manifest)
+        assert records[source_id]["sha256"] == identity["sha256"]
+        assert records[source_id]["bytes"] == identity["size"]
+    assert ref.source_snapshots().conflicts == []
+
+
+def test_an_in_place_rewrite_of_a_loaded_source_cannot_be_certified(monkeypatch, tmp_path):
+    """The same hole reached by MUTATION rather than replacement, and the reason the binding
+    cannot be a stat tuple: this rewrite changes a claim-changing DESCRIPTOR while leaving
+    (device, inode, size, mtime) byte-identical."""
+    from claude_coder.capability import build_manifest
+    ref, paths = _loaded_reference(tmp_path, monkeypatch)
+    path = paths["cpt_codes"]
+    before = path.stat()
+    original = path.read_bytes()
+    # Same LENGTH, different answer: the descriptor a coder reads changes, nothing else.
+    rewritten = original.replace(b"synthetic procedure", b"SYNTHETIC procedure")
+    assert len(rewritten) == len(original) and rewritten != original
+    with open(path, "r+b") as handle:
+        handle.write(rewritten)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    assert (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) == (
+        before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns), (
+        "the fixture must be INVISIBLE to a stat comparison, or it proves nothing")
+
+    assert _errors_for(build_manifest(bound_sources=ref.source_snapshots()), "cpt_codes"), (
+        "an in-place claim-changing rewrite of a loaded source certified silently")
+
+
+def test_the_bound_identity_is_the_bytes_that_were_actually_parsed(monkeypatch, tmp_path):
+    """The identity has to describe the buffer the in-memory table was built from -- not a
+    reopen, restat or re-hash of the path, each of which is a different moment."""
+    from app.release.source_manifest import is_content_digest
+    ref, paths = _loaded_reference(tmp_path, monkeypatch)
+    parsed_bytes = paths["icd10_codes"].read_bytes()
+    identity = ref.source_snapshots().identities["icd10_codes"]
+    assert is_content_digest(identity["sha256"])
+    assert identity["sha256"] == "sha256:" + hashlib.sha256(parsed_bytes).hexdigest()
+    assert identity["size"] == len(parsed_bytes)
+    assert identity["path"] == str(paths["icd10_codes"])
+
+    _promote(tmp_path, "icd10_codes", paths["icd10_codes"])
+    assert paths["icd10_codes"].read_bytes() != parsed_bytes
+    # The in-memory descriptor is still the superseded edition ...
+    assert ref.icd10["SYNDX"]["description"] == "synthetic diagnosis"
+    # ... and so is the identity the certificate is required to match.
+    assert ref.source_snapshots().identities["icd10_codes"] == identity
+
+
+def test_a_release_with_no_source_bindings_at_all_cannot_be_certified(monkeypatch,
+                                                                     tmp_path):
+    """"Nobody identified the bytes that became the in-memory tables" is not a clean result.
+    Without this, a loader that silently stopped binding would make the whole check vacuous
+    and certify exactly as it did before the fix."""
+    from app.release.source_manifest import SNAPSHOT_BOUND_SOURCES, SourceSnapshotSet
+    from claude_coder.capability import build_manifest
+    from claude_coder.data_access import MockSource
+    from claude_coder.pipeline import _fingerprint_certifiable
+    _synthetic_sources(tmp_path, monkeypatch)
+    errors = build_manifest(bound_sources=SourceSnapshotSet())["integrity_errors"]
+    unbound = [e for e in errors if "no content identity was captured" in e]
+    assert unbound, errors
+    for source_id in SNAPSHOT_BOUND_SOURCES:
+        assert source_id in unbound[0], (source_id, unbound)
+
+    fingerprint = MockSource().data_fingerprint()
+    assert _fingerprint_certifiable(fingerprint) is True
+    fingerprint.pop("source_snapshots")
+    assert _fingerprint_certifiable(fingerprint) is False
+
+
+def test_a_certificate_whose_record_disagrees_with_a_source_binding_is_not_certifiable():
+    """Belt and braces at the certification boundary: even a fully self-consistent manifest
+    (digests resealed) may not certify when its record for a source is not the snapshot that
+    was parsed into memory."""
+    import claude_coder.capability as cap
+    from app.release.source_manifest import SNAPSHOT_BOUND_SOURCES
+    from claude_coder.data_access import MockSource
+    from claude_coder.pipeline import _fingerprint_certifiable
+    for source_id in SNAPSHOT_BOUND_SOURCES:
+        fingerprint = MockSource().data_fingerprint()
+        record = next(s for s in fingerprint["source_manifest"]["sources"]
+                      if s["source_id"] == source_id)
+        record["sha256"] = "sha256:" + "b" * 64
+        manifest = fingerprint["source_manifest"]
+        manifest["manifest_sha256"] = cap.manifest_digest(manifest["sources"])
+        fingerprint["fingerprint_sha256"] = cap.fingerprint_digest(fingerprint["counts"],
+                                                                   manifest)
+        assert _fingerprint_certifiable(fingerprint) is False, source_id
+
+
+def test_two_editions_parsed_for_one_source_hold_the_claim(monkeypatch, tmp_path):
+    """A refresh that lands BETWEEN two loads means the decisions may have come from either
+    edition, so the claim is bound to no single snapshot.  Recorded as a conflict rather
+    than silently last-one-wins."""
+    from app.rag.code_reference import CodeReferenceDB
+    from app.release.source_manifest import SourceSnapshotSet
+    from claude_coder.capability import build_manifest
+    ref, paths = _loaded_reference(tmp_path, monkeypatch)
+    _promote(tmp_path, "icd10_codes", paths["icd10_codes"])
+    later = CodeReferenceDB()
+    later.load_all()
+
+    merged = SourceSnapshotSet()
+    merged.merge(ref.source_snapshots())
+    merged.merge(later.source_snapshots())
+    assert any("two different sets of bytes" in c and c.startswith("icd10_codes:")
+               for c in merged.conflicts), merged.conflicts
+    assert [e for e in build_manifest(bound_sources=merged)["integrity_errors"]
+            if "two different sets of bytes" in e]
+
+
+def test_a_cached_policy_source_replaced_after_it_was_read_cannot_be_certified(monkeypatch,
+                                                                              tmp_path):
+    """The LAZILY-read half: coverage policy is parsed on first use and every later
+    necessity answer comes from that cached map, so it carries exactly the same defect --
+    and, being lazy, it cannot be a mandatory binding, only a checked one when present."""
+    from claude_coder.capability import build_manifest
+    from claude_coder.data_access import AuthoritativeSource
+    path = tmp_path / "coverage_policy.json"
+    policy = {"lcd": [{"policy_id": "SYNTHETIC-1", "governed_cpts": ["SYNPROC"],
+                       "qualifying_dx": ["SYNDX"]}]}
+    path.write_text(json.dumps(policy))
+    _repoint(monkeypatch, "coverage_policy", path)
+
+    source = AuthoritativeSource()
+    assert source.qualifying_dx_for("SYNPROC") == {"SYNDX"}
+    bound = source._bound_sources.identities
+    assert "coverage_policy" in bound, bound
+    assert _errors_for(build_manifest(bound_sources=source._bound_sources),
+                       "coverage_policy") == []
+
+    policy["lcd"][0]["qualifying_dx"] = ["SYNDX", "SYNDX2"]
+    replacement = tmp_path / "coverage_policy-v2.json"
+    replacement.write_text(json.dumps(policy))
+    os.replace(replacement, path)
+
+    errors = _errors_for(build_manifest(bound_sources=source._bound_sources),
+                         "coverage_policy")
+    assert errors, "a coverage policy replaced after it was cached certified silently"
+    assert any("parsed into memory" in e for e in errors), errors
+    # The cached map really is still the superseded edition -- which is why it must hold.
+    assert source.qualifying_dx_for("SYNPROC") == {"SYNDX"}
+
+
+def test_the_producer_propagates_the_source_bindings_into_the_release_fingerprint(
+        monkeypatch, tmp_path):
+    """END TO END through the REAL producer.  `code_encounter` certifies from
+    `source.data_fingerprint()`; this drives that method itself, so the bindings are proven
+    to travel from the objects that PARSED the data into the fingerprint the certificate is
+    built over -- not merely to exist on `CodeReferenceDB`."""
+    from app.release.source_manifest import SNAPSHOT_BOUND_SOURCES
+    from claude_coder.data_access import AuthoritativeSource
+    from claude_coder.pipeline import _fingerprint_certifiable
+    db = _synthetic_database(tmp_path / "compliance.db")
+    _repoint_runtime(monkeypatch, "compliance_database", db)
+    ref, paths = _loaded_reference(tmp_path, monkeypatch)
+    source = AuthoritativeSource()
+    source._db = ref                    # the instance that parsed the authoritative tables
+
+    clean = source.data_fingerprint()
+    assert set(SNAPSHOT_BOUND_SOURCES) <= set(clean["source_snapshots"]), clean[
+        "source_snapshots"]
+    # A SUPERSET: the module-level reviewed CONTROL configuration (necessity relation
+    # control / relation-evidence grammar) is bound too whenever this process has consulted
+    # it, which is a real part of the propagation rather than noise.
+    assert all(clean["source_snapshots"].get(source_id) == identity
+               for source_id, identity in ref.source_snapshots().identities.items())
+    for source_id in SNAPSHOT_BOUND_SOURCES:
+        assert _errors_for(clean["source_manifest"], source_id) == []
+
+    _promote(tmp_path, "mue_limits", paths["mue_limits"])      # no further load or lookup
+    held = source.data_fingerprint()
+    assert held["source_snapshots"] == clean["source_snapshots"], (
+        "the fingerprint must keep naming the bytes that were parsed, not re-read the path")
+    assert any("parsed into memory" in e
+               for e in _errors_for(held["source_manifest"], "mue_limits"))
+    assert _fingerprint_certifiable(held) is False
+
+
+def test_the_compiled_database_binding_and_the_source_bindings_compose(monkeypatch,
+                                                                      tmp_path):
+    """COMPOSITION with round 9's compliance.db binding: two independent bindings over ONE
+    manifest.  Each must report its own source and only its own, so neither can mask the
+    other and a claim held for one reason is not silently cleared by the other."""
+    from app.release.source_manifest import COMPLIANCE_DATABASE_SOURCE_ID
+    from claude_coder.capability import build_manifest
+    # The declared sources are repointed FIRST: `_synthetic_database` records the source
+    # fingerprints the staleness check compares, so a database compiled before the repoint
+    # would report an (irrelevant, and correct) "compiled from other bytes" error that has
+    # nothing to do with either binding under test.
+    ref, paths = _loaded_reference(tmp_path, monkeypatch)
+    db = _synthetic_database(tmp_path / "compliance.db")
+    _repoint_runtime(monkeypatch, "compliance_database", db)
+    assert ref.check_ncci("SYNTHETIC_ONE", "SYNTHETIC_TWO", "2025-06-01")
+    bound_db = ref.database_snapshot()
+
+    clean = build_manifest(bound_database=bound_db, bound_sources=ref.source_snapshots())
+    assert _db_drift(clean) == [] and _source_drift(clean, "icd10_codes") == []
+
+    _promote(tmp_path, "icd10_codes", paths["icd10_codes"])
+    only_source = build_manifest(bound_database=ref.database_snapshot(),
+                                 bound_sources=ref.source_snapshots())
+    assert _db_drift(only_source) == [], (
+        "a replaced JSON source must not be reported as compiled-database DRIFT; the "
+        "database still is the snapshot that answered the edit queries")
+    assert _source_drift(only_source, "icd10_codes")
+
+    os.replace(_mutated_database(tmp_path / "replacement.db"), db)
+    both = build_manifest(bound_database=ref.database_snapshot(),
+                          bound_sources=ref.source_snapshots())
+    assert _db_drift(both), "the database drift stopped being reported"
+    assert _source_drift(both, "icd10_codes"), "the source drift stopped being reported"
+
+
+def test_a_control_configuration_replaced_after_it_was_loaded_cannot_be_certified(
+        monkeypatch, tmp_path):
+    """The reviewed CONTROL CONFIGURATION half of F6-R5-B.
+
+    The necessity relation control and the directional relation-evidence grammar decide
+    which diagnosis->service relations may release a claim, and both are parsed ONCE and
+    cached for the life of the process -- so a file replaced afterwards leaves the gates
+    enforcing the old edition while the certificate names the new bytes.  Their cache is
+    module-level rather than per-object, so the binding is read from the module; the
+    identity is stored INSIDE that cache so the two can never be cleared or restored apart.
+    """
+    import claude_coder.gates as gates
+    import claude_coder.provenance as provenance
+    from app.release import source_manifest as sm
+    from app.release.source_manifest import SourceSnapshotSet
+    from claude_coder.capability import build_manifest
+
+    controls = (
+        (gates, "_NECESSITY_CONTROL_CACHE", gates._NECESSITY_CONTROL_ID,
+         gates.load_necessity_control, gates.necessity_control_snapshot),
+        (provenance, "_RELATION_GRAMMAR_CACHE", provenance._RELATION_GRAMMAR_ID,
+         provenance.load_relation_grammar, provenance.relation_grammar_snapshot),
+    )
+    for module, attribute, source_id, load, snapshot in controls:
+        saved = getattr(module, attribute)
+        staged = tmp_path / f"{source_id}.json"
+        staged.write_bytes(sm.declared_source_path(source_id).read_bytes())
+        try:
+            _repoint(monkeypatch, source_id, staged)
+            setattr(module, attribute, None)
+            config = load()
+            bound = snapshot()
+            assert bound and bound["path"] == str(staged), (source_id, bound)
+
+            document = json.loads(staged.read_text())
+            document["refreshed_generation"] = "synthetic"
+            replacement = tmp_path / f"{source_id}-v2.json"
+            replacement.write_text(json.dumps(document))
+            os.replace(replacement, staged)          # atomic generation promotion
+
+            # The gate is still enforcing the edition it PARSED ...
+            assert load() is config, source_id
+            assert snapshot() == bound, source_id
+            # ... so the certificate may not attest to the replacement.
+            bindings = SourceSnapshotSet()
+            bindings.bind(bound)
+            errors = _source_drift(build_manifest(bound_sources=bindings), source_id)
+            assert errors, f"{source_id} was replaced after it was loaded and certified"
+        finally:
+            setattr(module, attribute, saved)
+            monkeypatch.undo()
+
+
+def test_a_second_in_memory_copy_of_a_code_table_is_bound_too(monkeypatch, tmp_path):
+    """POST-FIX REVIEW, adjacent instance: `AuthoritativeSource._rich_records` keeps a
+    SECOND in-memory copy of the same declared code tables (the full descriptor tiers), read
+    at a different moment from the one `CodeReferenceDB.load_all()` parses.
+
+    Two parses of one source at two moments is exactly the case a single binding cannot
+    describe, so a refresh landing BETWEEN them must be a reported CONFLICT rather than two
+    editions silently answering one claim -- and the second reader has to resolve through
+    the declaration, not a config filename literal, or the manifest never sees it at all.
+    """
+    from claude_coder.data_access import AuthoritativeSource
+    from claude_coder.pipeline import _fingerprint_certifiable
+    ref, paths = _loaded_reference(tmp_path, monkeypatch)
+    _repoint_runtime(monkeypatch, "compliance_database",
+                     _synthetic_database(tmp_path / "compliance.db"))
+    source = AuthoritativeSource()
+    source._db = ref
+
+    # Same edition, read twice: ONE snapshot, and the second reader agrees with the first.
+    assert source._rich_records("cpt")
+    assert (source._bound_sources.identities["cpt_codes"]
+            == ref.source_snapshots().identities["cpt_codes"])
+    clean = source.data_fingerprint()
+    assert [e for e in clean["source_manifest"]["integrity_errors"]
+            if "two different sets of bytes" in e] == []
+
+    # A refresh landing BETWEEN the two parses of the SAME source is a conflict: the two
+    # copies answering this claim are different editions.
+    _promote(tmp_path, "icd10_codes", paths["icd10_codes"])
+    assert source._rich_records("icd10")
+    assert (source._bound_sources.identities["icd10_codes"]["sha256"]
+            != ref.source_snapshots().identities["icd10_codes"]["sha256"]), (
+        "the second parse must have read the NEW generation, or there is nothing to detect")
+
+    fingerprint = source.data_fingerprint()
+    conflicts = [e for e in fingerprint["source_manifest"]["integrity_errors"]
+                 if "two different sets of bytes" in e]
+    assert conflicts, fingerprint["source_manifest"]["integrity_errors"]
+    assert _fingerprint_certifiable(fingerprint) is False

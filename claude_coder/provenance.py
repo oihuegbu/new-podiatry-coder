@@ -292,7 +292,9 @@ def merge_relations(relations: list[RelationAssertion]) -> list[RelationAssertio
 # bytes decide which relations release a claim, so they are content-addressed by the same
 # manifest that identifies the authoritative data. (Codex F6-R5.)
 _RELATION_GRAMMAR_ID = "relation_evidence_grammar"
-_RELATION_GRAMMAR_CACHE: dict | None = None
+#: `(validated grammar, content identity of the exact bytes it was parsed from)` -- see
+#: `gates._NECESSITY_CONTROL_CACHE` for why the identity lives inside the cache.
+_RELATION_GRAMMAR_CACHE: tuple | None = None
 # Compiled matchers, keyed by grammar version. Deliberately NOT stored inside the config
 # object: a config dict must stay JSON-serialisable, or any audit record that records it
 # would raise and turn a healthy encounter into a SYSTEM_HOLD.
@@ -313,10 +315,10 @@ def load_relation_grammar() -> dict:
     'both facts appeared nearby', which is exactly the defect this control exists to fix."""
     global _RELATION_GRAMMAR_CACHE
     if _RELATION_GRAMMAR_CACHE is not None:
-        return _RELATION_GRAMMAR_CACHE
+        return _RELATION_GRAMMAR_CACHE[0]
     try:
-        from app.release.source_manifest import declared_source_path
-        cfg = json.loads(declared_source_path(_RELATION_GRAMMAR_ID).read_text())
+        from app.release.source_manifest import declared_json_snapshot
+        cfg, identity = declared_json_snapshot(_RELATION_GRAMMAR_ID, RelationGrammarError)
     except Exception as exc:
         raise RelationGrammarError(
             f"relation evidence grammar unreadable ({_RELATION_GRAMMAR_ID}): {exc}") from exc
@@ -355,8 +357,14 @@ def load_relation_grammar() -> dict:
                     f"predicate {name!r} {key} must be an array of non-empty strings")
         if not cues:
             raise RelationGrammarError(f"predicate {name!r} declares no directional cue")
-    _RELATION_GRAMMAR_CACHE = cfg
+    _RELATION_GRAMMAR_CACHE = (cfg, identity)
     return cfg
+
+
+def relation_grammar_snapshot() -> dict | None:
+    """The content identity of the grammar bytes THIS process parsed, or None when the
+    grammar was never consulted. (Codex F6-R5-B.)"""
+    return dict(_RELATION_GRAMMAR_CACHE[1]) if _RELATION_GRAMMAR_CACHE else None
 
 
 def _cue_pattern(cues: list) -> "re.Pattern | None":

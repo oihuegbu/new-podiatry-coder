@@ -133,6 +133,53 @@ def _probe(path: Any, required: bool, role: str, registry: dict[str, str],
     return record, errors
 
 
+def _bound_source_errors(bound_sources: Any,
+                         sources: list[dict[str, Any]]) -> list[str]:
+    """Every disagreement between the snapshots the decisions were made from and the
+    records this manifest is about to publish.
+
+    Three deliberately separate questions, the same three the compiled database is asked:
+    (1) was more than one edition of a source parsed while this claim was being coded --
+    `SourceSnapshotSet` records that as a conflict rather than last-one-wins; (2) is each
+    bound source still the bytes it was when it was parsed (`source_snapshot_drift`
+    re-derives the identity from the path); and (3) does the RECORD this manifest carries --
+    the one the certificate is built over -- name those same bytes. A manifest that simply
+    had no record for a source would otherwise satisfy (1) and (2) and attest to nothing.
+
+    A required source whose in-memory parse must be bound but is not is an error in itself:
+    a loader that silently stops binding would otherwise make this whole check vacuous.
+    (Codex F6-R5-B.)
+    """
+    from app.release.source_manifest import (SNAPSHOT_BOUND_SOURCES,
+                                             source_snapshot_drift)
+    identities = getattr(bound_sources, "identities", bound_sources)
+    if not isinstance(identities, dict):
+        identities = {}
+    errors: list[str] = list(getattr(bound_sources, "conflicts", None) or [])
+    errors.extend(source_snapshot_drift(identities))
+    records = {str(s.get("source_id") or ""): s for s in sources}
+    for source_id in sorted(identities):
+        identity = identities[source_id] if isinstance(identities[source_id], dict) else {}
+        record = records.get(str(source_id))
+        if record is None:
+            errors.append(
+                f"{source_id}: the manifest carries no record for the source this "
+                f"encounter's decisions were read from")
+        elif (str(record.get("sha256") or "") != str(identity.get("sha256") or "")
+                or record.get("bytes") != identity.get("size")):
+            errors.append(
+                f"{source_id}: the manifest record identifies bytes other than the "
+                f"snapshot that was parsed into memory for this encounter")
+    unbound = [source_id for source_id in SNAPSHOT_BOUND_SOURCES
+               if source_id not in identities]
+    if unbound:
+        errors.append(
+            "no content identity was captured when these sources were parsed into memory, "
+            "so the certificate cannot be shown to describe the data the decisions were "
+            f"made against: {', '.join(unbound)}")
+    return errors
+
+
 def manifest_digest(sources: list[dict[str, Any]]) -> str:
     """Content-addressed identity of the whole manifest — a single value that changes
     whenever ANY source's bytes, size, presence or release window changes."""
@@ -153,7 +200,8 @@ def fingerprint_digest(counts: dict[str, Any], manifest: dict[str, Any]) -> str:
         + list(manifest.get("sources") or []))
 
 
-def build_manifest(bound_database: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_manifest(bound_database: dict[str, Any] | None = None,
+                   bound_sources: Any = None) -> dict[str, Any]:
     """Probe every authoritative source the coder depends on. Required sources gate
     release (fail closed); optional sources are recorded so their absence is visible
     rather than silently degrading retrieval. Every present source is content-addressed
@@ -168,7 +216,16 @@ def build_manifest(bound_database: dict[str, Any] | None = None) -> dict[str, An
     that disagreement an integrity error -- i.e. a hold -- instead of a silent pass.
     Omitted only by callers that are not certifying an encounter (the standalone capability
     probe), which is why its absence is not itself an error here; the certificate validator
-    is what refuses a fingerprint that carries no binding. (Codex F6-R5-A.)"""
+    is what refuses a fingerprint that carries no binding. (Codex F6-R5-A.)
+
+    `bound_sources` is the same fact for every OTHER claim-affecting source: a
+    `SourceSnapshotSet` of the identities captured when each declared JSON source was PARSED
+    INTO MEMORY, by the objects that hold the parsed data. The compiled database was only
+    the first instance of the defect -- `CodeReferenceDB.load_all()` reads the ICD/CPT/HCPCS
+    and MUE tables once and answers from memory for the rest of the batch, so a file
+    replaced afterwards is hashed here and attested to for lookups it never served.
+    Requiring each captured identity to equal this manifest's own record for that source is
+    what makes that a hold. (Codex F6-R5-B.)"""
     from app.release.source_manifest import (
         REQUIRED_SOURCE_SCHEMA_VERSION, optional_release_sources,
         required_release_sources)
@@ -240,6 +297,8 @@ def build_manifest(bound_database: dict[str, Any] | None = None) -> dict[str, An
             integrity_errors.append(
                 f"{COMPLIANCE_DATABASE_SOURCE_ID}: the manifest record identifies bytes "
                 f"other than the snapshot that answered this encounter's queries")
+    if bound_sources is not None:
+        integrity_errors.extend(_bound_source_errors(bound_sources, sources))
     # Reported by DECLARED IDENTITY, not by filename stem: the hold message names the same
     # identity the declaration, the fingerprint validator and the audit trail use, so
     # "required source(s) missing: coverage_policy" is actionable where "podiatry_lcd" was

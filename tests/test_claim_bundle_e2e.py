@@ -1512,6 +1512,78 @@ def test_the_artifact_binds_the_compiled_database_the_run_actually_queried(deplo
     assert load_bundle(payload).release_blockers() == ()
 
 
+def test_a_source_replaced_after_it_was_loaded_stops_the_deployed_entrypoint(deployment,
+                                                                            monkeypatch,
+                                                                            tmp_path):
+    """THE BOUNDARY CHECK for F6-R5-B, the same one round 9 applied to the compiled
+    database. A unit test on the loader proves nothing about the deployment if the binding
+    is dropped on the way to the certificate.
+
+    This runs `run.main` -- the real entrypoint, the real coding path, the real release
+    contract -- and promotes a NEW GENERATION of a declared, eagerly-loaded authoritative
+    source (atomically, with `os.replace`, exactly as every builder under `tools/` refreshes
+    one) AFTER the run parsed it into memory and BEFORE the certificate is built. No second
+    load and no lookup is obliged to notice: only an identity captured at the parse and
+    carried forward can catch it.
+
+    `snomed_root_concepts` specifically: it is required, eagerly loaded, and deliberately
+    NOT one of the sources the compiled database records a fingerprint for
+    (`_DATABASE_SOURCE_ROWS`), so what holds the encounter here can only be this binding
+    rather than round 9's compiled-database staleness check.
+    """
+    import json
+    import os
+    from app.release import source_manifest as sm
+    from claude_coder.data_access import AuthoritativeSource
+
+    declared = sm.declared_source_path("snomed_root_concepts")
+    staged = tmp_path / "snomed_root_concepts.json"
+    staged.write_bytes(declared.read_bytes())
+    registry = dict(sm._AUTHORITATIVE)
+    registry["snomed_root_concepts"] = staged
+    monkeypatch.setattr(sm, "_AUTHORITATIVE", registry)
+
+    real_fingerprint = AuthoritativeSource.data_fingerprint
+    parsed_digest, observed = [], []
+
+    def _promote_then_fingerprint(self):
+        if not parsed_digest:
+            assert self._db is not None, (
+                "the refresh must land AFTER the tables were parsed into memory, or the "
+                "scenario under test was never reproduced")
+            parsed_digest.append(
+                self._db.source_snapshots().identities["snomed_root_concepts"]["sha256"])
+            document = json.loads(staged.read_text())
+            document["refreshed_generation"] = "synthetic"
+            replacement = tmp_path / "snomed_root_concepts.next.json"
+            replacement.write_text(json.dumps(document))
+            os.replace(replacement, staged)          # atomic generation promotion
+        fingerprint = real_fingerprint(self)
+        observed.append(fingerprint)
+        return fingerprint
+
+    monkeypatch.setattr(AuthoritativeSource, "data_fingerprint", _promote_then_fingerprint)
+
+    payload = deployment.run()
+    assert parsed_digest, "the run never certified, so the scenario was not reproduced"
+    # The fingerprint the certificate is built over still names the bytes that were PARSED,
+    # never a re-read of the path ...
+    assert all(fp["source_snapshots"]["snomed_root_concepts"]["sha256"] == parsed_digest[0]
+               for fp in observed)
+    # ... and the disagreement with the manifest record is reported as an integrity error,
+    # which is what makes it a hold.
+    assert any(e for fp in observed
+               for e in fp["source_manifest"]["integrity_errors"]
+               if str(e).startswith("snomed_root_concepts:") and "parsed into memory" in e)
+
+    if payload.get("processing_error"):
+        return          # failed loudly before a claim existed; nothing was released
+    release = payload["release"]
+    assert release["holds"], payload["release"]
+    assert release["destination"] != "AUTO_READY"
+    assert load_bundle(payload).release_blockers()
+
+
 def test_an_uncertifiable_compiled_database_stops_the_deployed_entrypoint(deployment,
                                                                          monkeypatch,
                                                                          tmp_path):

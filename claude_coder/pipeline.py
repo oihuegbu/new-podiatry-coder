@@ -58,6 +58,11 @@ def _fingerprint_certifiable(fp) -> bool:
         database must equal. A digest re-read from the path at certification time is a
         different fact about a different moment, and on its own would certify whatever
         file happens to be there rather than the one the decisions came from;
+      - `source_snapshots`: the same binding for every OTHER claim-affecting source that is
+        PARSED INTO MEMORY and answered from that copy afterwards -- the ICD/CPT/HCPCS and
+        MUE tables and the SNOMED control table always, plus whichever policy/rule documents
+        this encounter had to read. Each must be present for the sources the declaration
+        says are eagerly loaded, and each must equal the manifest's own record for it;
       - a `manifest_sha256` that still matches the recorded sources, and a top-level
         `fingerprint_sha256` RECOMPUTED from the canonical counts + manifest and compared —
         pattern-matching its shape accepted an arbitrary all-zero / all-`f` / plausible-but-
@@ -79,7 +84,8 @@ def _fingerprint_certifiable(fp) -> bool:
 def _fingerprint_schema_ok(fp) -> bool:
     from app.release.source_manifest import (
         COMPLIANCE_DATABASE_SOURCE_ID, REQUIRED_SOURCE_SCHEMA_VERSION,
-        is_content_digest, release_window_populated, required_release_sources)
+        SNAPSHOT_BOUND_SOURCES, is_content_digest, release_window_populated,
+        required_release_sources)
 
     if not isinstance(fp, dict) or not fp:
         return False
@@ -148,6 +154,27 @@ def _fingerprint_schema_ok(fp) -> bool:
         return False
     if bound_record.get("bytes") != snapshot.get("size"):
         return False
+
+    # The same requirement for every source held IN MEMORY: the certificate must name the
+    # bytes each table was parsed from, not whatever is at its path now. Absence of a
+    # binding for an eagerly-loaded source is itself disqualifying -- "nobody identified the
+    # bytes that became the in-memory table" is not a clean result, and accepting it would
+    # let a loader that stops binding certify exactly as before. (Codex F6-R5-B.)
+    snapshots = fp.get("source_snapshots")
+    if not isinstance(snapshots, dict) or not snapshots:
+        return False
+    if any(source_id not in snapshots for source_id in SNAPSHOT_BOUND_SOURCES):
+        return False
+    for source_id, identity in snapshots.items():
+        if not isinstance(identity, dict) or not is_content_digest(identity.get("sha256")):
+            return False
+        record = declared.get(str(source_id))
+        if not isinstance(record, dict):
+            return False
+        if str(record.get("sha256") or "") != str(identity.get("sha256") or ""):
+            return False
+        if record.get("bytes") != identity.get("size"):
+            return False
 
     from .capability import fingerprint_digest, manifest_digest
     if manifest.get("manifest_sha256") != manifest_digest(sources):

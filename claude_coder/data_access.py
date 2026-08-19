@@ -27,9 +27,13 @@ from typing import Any, Protocol, runtime_checkable
 # the base error and the fail-closed readers from it (rather than defining a second set
 # here) is what makes "declared source" mean the same thing in `app/**` and in
 # `claude_coder/**`. (Codex F6-R5-A, round 6.)
-from app.release.source_manifest import (DeclaredSourceUnavailable,
-                                         declared_document as _declared_document,
-                                         declared_table as _declared_table)
+from app.release.source_manifest import (
+    DeclaredSourceUnavailable, SourceSnapshotSet,
+    declared_document as _declared_document,
+    declared_document_snapshot as _declared_document_snapshot,
+    declared_json_snapshot as _declared_json_snapshot,
+    declared_table as _declared_table,
+    declared_table_snapshot as _declared_table_snapshot)
 
 from .models import CandidateCode, Outcome
 
@@ -126,6 +130,34 @@ def declared_table(source_id: str, key: str,
     return _declared_table(source_id, key, error)
 
 
+def declared_document_snapshot(source_id: str,
+                               error: type[AuthoritativeDataUnavailable]) -> tuple:
+    """(document, identity of the exact bytes parsed) -- for a read whose result is CACHED.
+
+    A cached read answers every later decision from memory, so the file at the path when
+    the certificate is built is not what answered anything.  The identity captured at the
+    parse is bound into the release fingerprint and the certificate must match it.
+    (Codex F6-R5-B.)
+    """
+    return _declared_document_snapshot(source_id, error)
+
+
+def declared_table_snapshot(source_id: str, key: str,
+                            error: type[AuthoritativeDataUnavailable]) -> tuple:
+    """(non-empty table, identity of the exact bytes parsed) -- see
+    `declared_document_snapshot`."""
+    return _declared_table_snapshot(source_id, key, error)
+
+
+def declared_json_snapshot(source_id: str,
+                           error: type[AuthoritativeDataUnavailable]) -> tuple:
+    """(parsed JSON of ANY shape, identity of the exact bytes parsed).
+
+    Any shape because the authoritative code tables are JSON ARRAYS, not objects.
+    """
+    return _declared_json_snapshot(source_id, error)
+
+
 @runtime_checkable
 class CodeSource(Protocol):
     def retrieve(self, description: str, system: str,
@@ -211,6 +243,13 @@ class AuthoritativeSource:
         self._drug = None
         self._drug_units: dict | None = None
         self._rich: dict | None = None
+        # The content identities of the declared sources THIS adapter parsed and cached.
+        # The code/edit tables are bound by `CodeReferenceDB` (which parses them); the
+        # lazily-read policy and rule documents below are parsed here, so their identities
+        # are captured here and merged into one set at `data_fingerprint`. Same defect and
+        # same technique as the compiled database: the bytes that produced the cached copy,
+        # not a re-hash of the path at certification time. (Codex F6-R5-B.)
+        self._bound_sources = SourceSnapshotSet()
 
     def prepare(self, force_rebuild_index: bool = False) -> None:
         """Build/load every heavy dependency ONCE, up front, and fail loudly if it
@@ -241,33 +280,51 @@ class AuthoritativeSource:
         self._reference()
         self.assert_claim_assembly_data_readable()
 
+    #: {code system -> the DECLARED release-source identity publishing its code table}.
+    #: Identities, not paths and not medical codes: the reader resolves (and
+    #: content-addresses) the file through the declaration, so the bytes that become the
+    #: rich-descriptor table are the bytes the certificate names.  Resolving from CENTRAL
+    #: CONFIG rather than an f-string was the earlier fix here (the ICD file is
+    #: 'icd10cm_codes.json', so f"{system}_codes.json" built a non-existent path and
+    #: silently lost every ICD descriptor tier); resolving from the DECLARATION is the same
+    #: fix carried one step further, to the one registry the manifest is built from.
+    _RICH_RECORD_SOURCES = {"icd10": "icd10_codes", "cpt": "cpt_codes",
+                            "hcpcs": "hcpcs_codes"}
+
     def _rich_records(self, system: str) -> dict:
-        """Raw {code: record} straight from data/codes/<system>_codes.json, which
-        carries the FULL set of authoritative description tiers (the in-memory
-        CodeReferenceDB keeps only long+short). Cached per system; {} if absent."""
+        """Raw {code: record} straight from the declared code table, which carries the FULL
+        set of authoritative description tiers (the in-memory CodeReferenceDB keeps only
+        long+short). Cached per system; {} if absent.
+
+        This is a SECOND in-memory copy of the same three declared tables, parsed at a
+        different moment from `CodeReferenceDB.load_all()`'s, so it is bound like every
+        other parse -- and binding it is what makes a refresh landing BETWEEN the two loads
+        a reported conflict instead of two editions silently answering one claim.
+        (Codex F6-R5-B, post-fix review.)
+        """
         if self._rich is None:
             self._rich = {}
         if system not in self._rich:
             table: dict[str, dict] = {}
             try:
-                import json
-                from app.core.config import ICD10_FILE, CPT_FILE, HCPCS_FILE
-                # Resolve the rich-descriptor file from CENTRAL CONFIG, not an f-string:
-                # the ICD file is 'icd10cm_codes.json', so f"{system}_codes.json" built a
-                # non-existent 'icd10_codes.json' and silently fell back (descriptor tiers
-                # lost for ICD). Config is the single source of truth for these paths.
-                _path = {"icd10": ICD10_FILE, "cpt": CPT_FILE, "hcpcs": HCPCS_FILE}.get(system)
-                if _path is None:
-                    raise FileNotFoundError(f"no configured rich-record file for {system}")
-                with open(_path) as fh:
-                    data = json.load(fh)
+                source_id = self._RICH_RECORD_SOURCES.get(system)
+                if source_id is None:
+                    raise AuthoritativeDataUnavailable(
+                        f"no declared rich-record source for code system {system!r}")
+                data, identity = declared_json_snapshot(source_id,
+                                                        AuthoritativeDataUnavailable)
                 rows = (data if isinstance(data, list)
                         else data.get("codes") or data.get(system)
                         or next((v for v in data.values() if isinstance(v, list)), []))
                 for r in rows:
                     if isinstance(r, dict) and r.get("code"):
                         table[str(r["code"])] = r
+                self._bound_sources.bind(identity)
             except Exception:
+                # Descriptor TIERS only: without them `descriptions()` falls back to the
+                # in-memory registry's long+short, which removes matching surface rather
+                # than admitting anything, so this degrades instead of holding -- and binds
+                # nothing, because no bytes were parsed to attest to.
                 table = {}
             self._rich[system] = table
         return self._rich[system]
@@ -296,12 +353,11 @@ class AuthoritativeSource:
         if system != "icd10":
             return set()
         if self._snomed is None:
-            path = _source_path("snomed_crosswalk")
             try:
-                import json
                 from .terminology import TerminologyIndex
-                with open(path) as fh:
-                    term_to_codes = json.load(fh).get("terms", {})
+                document, identity = declared_document_snapshot(
+                    "snomed_crosswalk", AuthoritativeDataUnavailable)
+                term_to_codes = document.get("terms", {})
                 # Invert term->codes into code->terms and reuse the SAME robust
                 # matcher as the ICD Index (exact / compound / token-set + plural)
                 # so variant phrasings (possessive / plural / word order) hit.
@@ -310,7 +366,11 @@ class AuthoritativeSource:
                     for c in codes:
                         inv.setdefault(c, []).append(term)
                 self._snomed = TerminologyIndex(inv)
+                self._bound_sources.bind(identity)
             except Exception:
+                # A reviewed-OPTIONAL recall aid: absence removes candidates and can never
+                # admit one, so it degrades rather than holding. Nothing is bound in that
+                # case, which is correct -- no bytes were parsed to attest to.
                 self._snomed = False
         if not self._snomed:
             return set()
@@ -332,13 +392,13 @@ class AuthoritativeSource:
         if system != "cpt":
             return set()
         if getattr(self, "_cptidx", None) is None:
-            path = _source_path("cpt_index_terms")
             try:
-                import json
                 from .terminology import TerminologyIndex
-                with open(path) as fh:
-                    terms = json.load(fh).get("terms", {})   # {code: [index phrases]}
+                document, identity = declared_document_snapshot(
+                    "cpt_index_terms", AuthoritativeDataUnavailable)
+                terms = document.get("terms", {})            # {code: [index phrases]}
                 self._cptidx = TerminologyIndex(terms) if terms else False
+                self._bound_sources.bind(identity)
             except Exception:
                 self._cptidx = False
         if not self._cptidx:
@@ -353,14 +413,14 @@ class AuthoritativeSource:
     def _load_drug_table(self) -> None:
         if self._drug is not None:
             return
-        path = _source_path("hcpcs_drug_table")
         try:
-            import json
             from .terminology import TerminologyIndex
-            data = json.loads(path.read_text())
+            data, identity = declared_document_snapshot("hcpcs_drug_table",
+                                                        AuthoritativeDataUnavailable)
             terms = data.get("terms", {})       # {code: [drug names]}
             self._drug = TerminologyIndex(terms) if terms else False
             self._drug_units = data.get("units", {}) or {}
+            self._bound_sources.bind(identity)
         except Exception:
             self._drug = False
             self._drug_units = {}
@@ -491,7 +551,8 @@ class AuthoritativeSource:
         if self._idx is None:
             try:
                 from .terminology import TerminologyIndex
-                self._idx = TerminologyIndex.load()
+                self._idx, identity = TerminologyIndex.load_snapshot()
+                self._bound_sources.bind(identity)
             except Exception:
                 self._idx = False
         if not self._idx:
@@ -528,7 +589,9 @@ class AuthoritativeSource:
         corruption RELAXING the claim, so it raises. (Round 5, phase 4.)
         """
         if self._gp is None:
-            self._gp = declared_table("pfs_indicators", "codes", PfsIndicatorsUnavailable)
+            self._gp, identity = declared_table_snapshot(
+                "pfs_indicators", "codes", PfsIndicatorsUnavailable)
+            self._bound_sources.bind(identity)
         return self._gp
 
     def _pfs(self, code: str) -> dict:
@@ -760,7 +823,7 @@ class AuthoritativeSource:
         authoritative data. A swallowed failure that returned {} or partial counts is a
         silent-fallback certification hole.
         """
-        fp: dict[str, Any] = {"fingerprint_version": "release-data-fingerprint-v2"}
+        fp: dict[str, Any] = {"fingerprint_version": "release-data-fingerprint-v3"}
         db = self._reference()                       # load failure raises -> pipeline holds
         # The identity of the database snapshot that ANSWERED this encounter, taken from
         # the querying object itself and carried forward into the certificate.  The
@@ -770,6 +833,27 @@ class AuthoritativeSource:
         # Raises if the database cannot be identified at all -- a release must never be
         # certified against data nobody can name. (Codex F6-R5-A.)
         fp["database_snapshot"] = snapshot = db.database_snapshot()
+        # ... and the identities of every JSON source that was PARSED INTO MEMORY and has
+        # answered from that parsed copy ever since: the code/limit tables (bound by the
+        # object that loaded them) and whichever policy/rule documents this encounter had to
+        # read (bound here). Exactly the same defect as the compiled database's, for every
+        # other claim-affecting source: a file replaced after it was loaded leaves the
+        # in-memory data speaking for the OLD bytes while the manifest below hashes the NEW
+        # ones. Requiring the two to agree makes that a hold. (Codex F6-R5-B.)
+        bound_sources = SourceSnapshotSet()
+        bound_sources.merge(db.source_snapshots())
+        bound_sources.merge(self._bound_sources)
+        # The reviewed CONTROL CONFIGURATION is cached at MODULE level (one edition per
+        # process, by construction), so its binding is read from the modules that hold it
+        # rather than from an object. Bound only WHEN it was consulted: an encounter that
+        # never reached the necessity gate legitimately has no control binding, and
+        # inventing one would attest to bytes that decided nothing.
+        from .gates import necessity_control_snapshot
+        from .provenance import relation_grammar_snapshot
+        for control in (necessity_control_snapshot(), relation_grammar_snapshot()):
+            if control:
+                bound_sources.bind(control)
+        fp["source_snapshots"] = bound_sources.identities
         fp["counts"] = {s: len(getattr(db, s, {}) or {})
                         for s in ("icd10", "cpt", "hcpcs")}
         if not all(fp["counts"].get(s) for s in ("icd10", "cpt", "hcpcs")):
@@ -783,7 +867,7 @@ class AuthoritativeSource:
         except Exception:
             pass                                     # codes_checksum is corroborating only
         from .capability import build_manifest, fingerprint_digest  # raises if unavailable
-        manifest = build_manifest(bound_database=snapshot)
+        manifest = build_manifest(bound_database=snapshot, bound_sources=bound_sources)
         fp["source_manifest"] = manifest
         fp["fingerprint_sha256"] = fingerprint_digest(fp["counts"], manifest)
         return fp
@@ -803,8 +887,8 @@ class AuthoritativeSource:
         cache = getattr(self, "_excl1", None)
         if cache is not None:
             return cache
-        entries = declared_table("instructional_notes", "codes",
-                                 InstructionalNotesUnavailable)
+        entries, identity = declared_table_snapshot("instructional_notes", "codes",
+                                                    InstructionalNotesUnavailable)
         cache = {}
         for key, rec in entries.items():
             if not isinstance(rec, dict):
@@ -820,6 +904,7 @@ class AuthoritativeSource:
             raise InstructionalNotesUnavailable(
                 f"authoritative instructional_notes at {_source_path('instructional_notes')} "
                 f"declares no Excludes1 reference for any code")
+        self._bound_sources.bind(identity)
         self._excl1 = cache
         return cache
 
@@ -837,8 +922,9 @@ class AuthoritativeSource:
         cache = getattr(self, "_cov", None)
         if cache is not None:
             return cache
-        d = declared_document("coverage_policy", CoverageDataUnavailable)
-        path = _source_path("coverage_policy")   # resolved above, so this cannot raise
+        d, identity = declared_document_snapshot("coverage_policy",
+                                                 CoverageDataUnavailable)
+        path = identity["path"]                  # the bytes actually parsed, not a re-read
         cache = {}
         try:
             for row in (d.get("lcd") or []) + (d.get("article") or []):
@@ -855,6 +941,7 @@ class AuthoritativeSource:
             raise CoverageDataUnavailable(
                 f"authoritative coverage policy at {path} declares no governed "
                 f"procedure/qualifying-diagnosis linkage")
+        self._bound_sources.bind(identity)
         self._cov = cache
         return cache
 
@@ -1031,7 +1118,7 @@ class MockSource:
         set that no longer exists."""
         from app.release.source_manifest import (
             COMPLIANCE_DATABASE_SOURCE_ID, REQUIRED_SOURCE_SCHEMA_VERSION,
-            required_release_sources)
+            SNAPSHOT_BOUND_SOURCES, required_release_sources)
         from .capability import MANIFEST_VERSION, fingerprint_digest, manifest_digest
         sources = []
         for source_id, spec in required_release_sources().items():
@@ -1057,12 +1144,24 @@ class MockSource:
         # without one would pass a shape production rejects. (Codex F6-R5-A.)
         database = next(s for s in sources
                         if s["source_id"] == COMPLIANCE_DATABASE_SOURCE_ID)
-        return {"source": "mock", "fingerprint_version": "release-data-fingerprint-v2",
+        # The in-memory sources' load-time bindings, mirrored from the mock's own records
+        # for them, for the same reason as the database's: the real producer propagates the
+        # identity captured when each source was PARSED and the validator requires the
+        # manifest to agree with it, so a mock without them would pass a shape production
+        # rejects. Read from the same declaration, so a change to the bound set fails the
+        # mock too. (Codex F6-R5-B.)
+        by_id = {s["source_id"]: s for s in sources}
+        snapshots = {source_id: {"source_id": source_id, "path": by_id[source_id]["path"],
+                                 "sha256": by_id[source_id]["sha256"],
+                                 "size": by_id[source_id]["bytes"]}
+                     for source_id in SNAPSHOT_BOUND_SOURCES}
+        return {"source": "mock", "fingerprint_version": "release-data-fingerprint-v3",
                 "counts": counts, "source_manifest": manifest,
                 "database_snapshot": {"source_id": COMPLIANCE_DATABASE_SOURCE_ID,
                                       "path": database["path"],
                                       "sha256": database["sha256"],
                                       "size": database["bytes"]},
+                "source_snapshots": snapshots,
                 "fingerprint_sha256": fingerprint_digest(counts, manifest)}
 
     def qualifying_dx_for(self, code, system="cpt"):

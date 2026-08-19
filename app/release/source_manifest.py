@@ -556,6 +556,23 @@ _REQUIRED_RELEASE_SOURCES: dict[str, dict[str, str]] = {
 }
 
 
+#: Declared sources whose bytes are PARSED INTO MEMORY once, eagerly, and then answered
+#: from memory for the rest of the batch (`CodeReferenceDB.load_all`).  For these the file
+#: on disk at certification time is NOT what answered anything -- the parsed copy is -- so a
+#: certifiable release must carry the identity captured AT THAT PARSE.  Absence of a binding
+#: is itself an integrity error: "nobody identified the bytes that became the in-memory
+#: table" is not a clean result.  (Codex F6-R5-B.)
+#:
+#: Lazily-read sources (coverage policy, tabular notes, PFS indicators, ...) are bound the
+#: same way WHEN they are read, but cannot be required here: an encounter that never had to
+#: consult one legitimately has no binding for it.
+#:
+#: These are DECLARED SOURCE IDENTITIES, not medical codes: no code, code family, prefix
+#: range or descriptor appears here.
+SNAPSHOT_BOUND_SOURCES = (
+    "icd10_codes", "cpt_codes", "hcpcs_codes", "mue_limits", "snomed_root_concepts")
+
+
 def _assert_registry_dispositioned() -> None:
     """Every EXPLICITLY registered source must be dispositioned: required, or optional
     with a written justification for why its absence cannot change a released claim.
@@ -578,6 +595,14 @@ def _assert_registry_dispositioned() -> None:
     if both:
         raise RuntimeError(
             f"source(s) declared both required and optional: {both}")
+    # A source whose in-memory parse must be BOUND has to be a required release source:
+    # the certificate compares the captured identity against the manifest RECORD for that
+    # source, and only a required source is guaranteed to have one. (Codex F6-R5-B.)
+    unbindable = sorted(set(SNAPSHOT_BOUND_SOURCES) - set(_REQUIRED_RELEASE_SOURCES))
+    if unbindable:
+        raise RuntimeError(
+            "source(s) whose in-memory snapshot must be bound are not declared required "
+            f"release sources, so no manifest record can be compared to them: {unbindable}")
     for source_id, entry in _OPTIONAL_SOURCES.items():
         if not str(entry.get("role") or "").strip():
             raise RuntimeError(f"optional source {source_id!r} declares no role")
@@ -621,6 +646,82 @@ def declared_source_path(source_id: str) -> Path:
     return Path(path)
 
 
+def read_declared_snapshot(source_id: str,
+                           error: type[DeclaredSourceUnavailable]) -> tuple[bytes, dict]:
+    """(exact bytes, content identity) of a DECLARED source, read through ONE open handle.
+
+    The generalisation of `open_database_snapshot` to every source whose content is parsed
+    into memory (Codex F6-R5-B).  The compiled database is queried through a descriptor the
+    caller keeps open, so pinning the inode is what makes its identity durable.  A JSON
+    source is different in a way that makes the binding STRONGER: it is read exactly once,
+    in full, and every later answer comes from the parsed copy -- so the identity is taken
+    from the very buffer that is about to be parsed.  The bytes that produced the in-memory
+    table and the bytes the identity describes are then not merely "the same file", they are
+    the same object; no reopen, restat or re-hash sits between them for a replacement to
+    slip through.
+
+    A file rewritten WHILE it is being read raises rather than returning a digest that
+    describes no single state of it: `read()` can straddle a non-atomic writer, and half of
+    one edition plus half of another is not a snapshot anything may be certified against.
+    (An atomic `os.replace` refresh -- what every builder under `tools/` already does -- can
+    never produce that: the reader keeps the unlinked inode it opened.)
+
+    Raises the caller's typed error for an unresolvable declaration, unreadable bytes, or a
+    concurrent rewrite -- never a partial identity, and never an empty table, which is the
+    permissive answer for every one of these sources.
+    """
+    try:
+        path = declared_source_path(source_id)
+    except Exception as exc:
+        raise error(f"authoritative {source_id} is not resolvable from the release-source "
+                    f"declaration: {exc}") from exc
+    started = time.time_ns()
+    try:
+        with open(path, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            payload = handle.read()
+            settled = os.fstat(handle.fileno())
+    except OSError as exc:
+        raise error(f"authoritative {source_id} unreadable at {path}: {exc}") from exc
+    if _file_key(settled) != _file_key(opened):
+        raise error(
+            f"authoritative {source_id} at {path} was being rewritten while it was read; "
+            f"no single set of bytes can be bound to this encounter")
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    if settled.st_mtime_ns + _RACY_MTIME_WINDOW_NS < started:
+        # The same cache, and the same racily-clean rule, `sha256_file` uses -- so the
+        # manifest's own re-hash of this path is served from the digest of the bytes that
+        # were actually parsed instead of costing a second full read per source per process.
+        _DIGEST_CACHE[str(path)] = (_file_key(settled), digest)
+    return payload, {"source_id": source_id, "path": str(path),
+                     "sha256": digest, "size": int(settled.st_size)}
+
+
+def declared_json_snapshot(source_id: str,
+                           error: type[DeclaredSourceUnavailable]) -> tuple[Any, dict]:
+    """(parsed JSON of ANY shape, identity of the exact bytes parsed).
+
+    Any shape because the authoritative code tables are JSON ARRAYS, not objects, and they
+    need the identical binding the object-shaped sources get.
+    """
+    payload, identity = read_declared_snapshot(source_id, error)
+    try:
+        return json.loads(payload), identity
+    except Exception as exc:
+        raise error(f"authoritative {source_id} unreadable at {identity['path']}: "
+                    f"{exc}") from exc
+
+
+def declared_document_snapshot(source_id: str,
+                               error: type[DeclaredSourceUnavailable]) -> tuple[dict, dict]:
+    """(parsed JSON object, identity of the exact bytes parsed) — see `declared_document`."""
+    document, identity = declared_json_snapshot(source_id, error)
+    if not isinstance(document, dict):
+        raise error(f"authoritative {source_id} at {identity['path']} is not a JSON object "
+                    f"(got {type(document).__name__})")
+    return document, identity
+
+
 def declared_document(source_id: str,
                       error: type[DeclaredSourceUnavailable]) -> dict:
     """The parsed JSON document a DECLARED source publishes, read FAIL-CLOSED.
@@ -636,25 +737,24 @@ def declared_document(source_id: str,
     re-deriving (and re-losing) fail-closed behavior in their own `try: ... except:
     return {}`.  `claude_coder.data_access.declared_document` now delegates here, so both
     trees share one implementation.  (Codex F6-R5-A, round 6.)
+
+    Callers whose result is CACHED and answers later decisions from memory must use
+    `declared_document_snapshot` instead and bind the identity it returns: the certificate
+    otherwise attests to whatever is at the path when it is built, which is a different
+    fact about a different moment. (Codex F6-R5-B.)
     """
-    try:
-        path = declared_source_path(source_id)
-    except Exception as exc:
-        # The DECLARATION itself is unresolvable -- an unregistered identity, or a
-        # registry that is not fully dispositioned.  The reader cannot obtain the
-        # authority, which is the same conclusion as unreadable bytes, so it travels the
-        # same typed path and holds.
-        raise error(f"authoritative {source_id} is not resolvable from the release-source "
-                    f"declaration: {exc}") from exc
-    try:
-        with open(path) as handle:
-            payload = json.load(handle)
-    except Exception as exc:
-        raise error(f"authoritative {source_id} unreadable at {path}: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise error(f"authoritative {source_id} at {path} is not a JSON object "
-                    f"(got {type(payload).__name__})")
-    return payload
+    return declared_document_snapshot(source_id, error)[0]
+
+
+def declared_table_snapshot(source_id: str, key: str,
+                            error: type[DeclaredSourceUnavailable]) -> tuple[dict, dict]:
+    """(the non-empty mapping under `key`, identity of the exact bytes parsed)."""
+    payload, identity = declared_document_snapshot(source_id, error)
+    table = payload.get(key)
+    if not isinstance(table, dict) or not table:
+        raise error(f"authoritative {source_id} at {identity['path']} "
+                    f"publishes no non-empty {key!r} table")
+    return table, identity
 
 
 def declared_table(source_id: str, key: str,
@@ -666,12 +766,114 @@ def declared_table(source_id: str, key: str,
     the same `{}` the swallowed-exception path used to yield, and `{}` is the permissive
     answer for every one of these sources.
     """
-    payload = declared_document(source_id, error)
-    table = payload.get(key)
-    if not isinstance(table, dict) or not table:
-        raise error(f"authoritative {source_id} at {declared_source_path(source_id)} "
-                    f"publishes no non-empty {key!r} table")
-    return table
+    return declared_table_snapshot(source_id, key, error)[0]
+
+
+class SourceSnapshotSet:
+    """The content identities the in-memory authoritative data was actually parsed from.
+
+    One of these travels with each object that PARSES a declared source and then answers
+    decisions from the parsed copy (`CodeReferenceDB` for the code/edit tables,
+    `AuthoritativeSource` for the lazily-read policy and rule documents).  They are merged
+    at certification time and every one of them must equal the manifest's own record, which
+    is what turns "a source was replaced after it was loaded" from a silent pass into a
+    hold. (Codex F6-R5-B.)
+
+    Deliberately NOT a process-global registry: the binding must belong to the objects that
+    hold the parsed data, so its lifetime is exactly the data's lifetime -- a new load
+    legitimately begins a new snapshot, and nothing outside those objects can accumulate
+    stale identities that later encounters would then have to explain.
+
+    Two different sets of bytes bound for the SAME source is recorded as a conflict rather
+    than silently last-one-wins: the decisions may have come from either, so the claim is
+    bound to no single snapshot and must hold.
+    """
+
+    def __init__(self) -> None:
+        self._bound: dict[str, dict] = {}
+        self._conflicts: list[str] = []
+
+    def bind(self, identity: dict) -> dict:
+        """Record the identity captured at a parse; returns it unchanged for chaining."""
+        record = identity if isinstance(identity, dict) else {}
+        source_id = str(record.get("source_id") or "").strip()
+        if not source_id or not is_content_digest(record.get("sha256")):
+            self._conflicts.append(
+                "a declared source was parsed into memory without a usable content "
+                f"identity ({record!r}); the certificate cannot name the bytes it used")
+            return identity
+        prior = self._bound.get(source_id)
+        if prior is None:
+            self._bound[source_id] = dict(record)
+        elif prior.get("sha256") != record.get("sha256"):
+            self._conflicts.append(
+                f"{source_id}: two different sets of bytes were parsed into memory while "
+                f"this claim was being coded ({prior.get('sha256')} then "
+                f"{record.get('sha256')}); no single snapshot can be certified for it")
+        return identity
+
+    def merge(self, other: "SourceSnapshotSet | None") -> "SourceSnapshotSet":
+        if other is None:
+            return self
+        for identity in other.identities.values():
+            self.bind(identity)
+        self._conflicts.extend(other.conflicts)
+        return self
+
+    @property
+    def identities(self) -> dict[str, dict]:
+        return {source_id: dict(identity)
+                for source_id, identity in self._bound.items()}
+
+    @property
+    def conflicts(self) -> list[str]:
+        return list(self._conflicts)
+
+
+def source_snapshot_drift(bound: dict) -> list[str]:
+    """Every reason a declared source on disk is no longer the snapshot `bound` names.
+
+    The certify-time half of `read_declared_snapshot`, and the exact analogue of
+    `database_snapshot_drift` for the sources that are held in memory instead of queried.
+    `bound` is `{source_id -> identity captured when the bytes were parsed}`; this
+    re-derives each identity from the file the certificate is about to attest to.  Any
+    difference means the decisions and the attestation describe two different editions,
+    which is a HOLD -- and it must be detectable HERE, because nothing obliges a second
+    read to happen and notice.  (Codex F6-R5-B.)
+
+    Returns a list rather than raising: its caller composes a manifest's `integrity_errors`
+    and must report every problem at once.
+    """
+    if not isinstance(bound, dict):
+        return ["source snapshots: no content identities were bound when the authoritative "
+                "data was parsed, so the certificate cannot be shown to describe the data "
+                "the decisions were made against"]
+    errors: list[str] = []
+    for source_id in sorted(bound):
+        identity = bound[source_id]
+        if not isinstance(identity, dict) or not is_content_digest(identity.get("sha256")):
+            errors.append(
+                f"{source_id}: no content identity was bound when it was parsed into "
+                f"memory, so the certificate cannot be shown to describe the data the "
+                f"decisions were made against")
+            continue
+        try:
+            path = declared_source_path(str(source_id))
+            current = sha256_file(path)
+            size = int(path.stat().st_size)
+        except Exception as exc:
+            errors.append(f"{source_id}: the bound snapshot can no longer be "
+                          f"re-identified ({exc})")
+            continue
+        changed = [label for field, label, value in
+                   (("sha256", "content digest", current), ("size", "size in bytes", size))
+                   if identity.get(field) != value]
+        if changed:
+            errors.append(
+                f"{source_id}: replaced or rewritten after it was parsed into memory for "
+                f"this encounter ({', '.join(changed)} differ from the bound snapshot); the "
+                f"certificate would attest to bytes no decision was made from")
+    return errors
 
 
 class CompiledDatabaseUnavailable(DeclaredSourceUnavailable):
