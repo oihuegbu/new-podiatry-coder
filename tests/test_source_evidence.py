@@ -1049,6 +1049,69 @@ class SameProviderIndependentReaderTest(unittest.TestCase):
         self.assertEqual(channel.channel_id, SECONDARY_VISION_CHANNEL_ID)
 
 
+class _ChatCompletionsClient:
+    """A minimal OpenAI-chat-shaped client stub: answers
+    `chat.completions.create(...)` with a fixed response TEXT, so the reader's own
+    blank-inference logic can be exercised with a controlled model response."""
+    __module__ = "openai._client"
+
+    def __init__(self, content: str):
+        from types import SimpleNamespace
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=lambda **kwargs: response))
+
+
+class IndependentReaderBlankInferenceTest(unittest.TestCase):
+    """Codex F7-R3-A, exact-SHA re-review, third pass: an EMPTY vision-model response
+    must never be silently promoted to a positive BLANK finding -- an API error, a
+    refusal, or a truncated response all look identical to silence, and only the
+    model's own explicit assertion may certify the page as genuinely blank."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.path = self.root / "note.pdf"
+        self.path.write_bytes(build_pdf([[]]))          # an image-only page
+        self.document = compile_source_evidence(
+            self.path, _extraction(["alpha beta gamma delta"], self.path))
+
+    def _reader(self, content: str):
+        from unittest import mock
+        from app.ingestion.source_evidence import IndependentVisionReader
+        reader = IndependentVisionReader(
+            self.path, primary_channel=self.document.primary_channel)
+        return reader, mock.patch("app.core.llm_client.get_openai_client",
+                                  return_value=_ChatCompletionsClient(content))
+
+    def test_an_empty_response_is_unreadable_never_inferred_blank(self):
+        from app.contracts.source_evidence import PageStatus
+        reader, patched = self._reader("")
+        with patched:
+            reads = reader.read_pages((1,))
+        self.assertEqual(reads[1].status, PageStatus.UNREADABLE)
+
+    def test_an_explicit_blank_marker_is_certified_blank(self):
+        from app.contracts.source_evidence import PageStatus
+        from app.ingestion.source_evidence import BLANK_PAGE_MARKER
+        reader, patched = self._reader(BLANK_PAGE_MARKER)
+        with patched:
+            reads = reader.read_pages((1,))
+        self.assertEqual(reads[1].status, PageStatus.BLANK)
+
+    def test_real_transcribed_text_still_reads_normally(self):
+        from app.contracts.source_evidence import PageStatus
+        reader, patched = self._reader("some real transcribed text")
+        with patched:
+            reads = reader.read_pages((1,))
+        self.assertEqual(reads[1].status, PageStatus.READ)
+        self.assertEqual(reads[1].text, "some real transcribed text")
+
+
 class SourceDigestVerificationTest(unittest.TestCase):
     """Source identity is a fact the compiler establishes, not an upstream assertion."""
 

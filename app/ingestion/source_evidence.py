@@ -82,11 +82,22 @@ SECONDARY_VISION_CHANNEL_ID = "independent_vision"
 #: the independent vision channel cover the page.
 MINIMUM_TEXT_LAYER_YIELD = 0.6
 
+#: A distinguishable, positive assertion the model must emit for a genuinely blank
+#: page -- never inferred from an empty or missing response (Codex F7-R3-A, exact-SHA
+#: re-review, third pass). Silence is not the same claim as "I looked and there is
+#: nothing here": an API error, a refusal, a truncated response, or any other failure
+#: mode this reader cannot distinguish from a real blank page all produce empty text
+#: too, and promoting that ambiguity to a positive BLANK finding is exactly the
+#: omission-versus-blank confusion this marker exists to remove.
+BLANK_PAGE_MARKER = "[BLANK_PAGE]"
+
 _VISION_PROMPT = (
     "Transcribe this page image VERBATIM. Copy every word exactly as printed, in "
     "reading order, preserving line breaks. Do not summarise, correct, reorder, "
     "expand abbreviations or add anything that is not printed on the page. If a word "
-    "is unreadable, write [UNCLEAR] in its place. Output the transcription only."
+    f"is unreadable, write [UNCLEAR] in its place. If the page is genuinely BLANK -- "
+    f"no printed text anywhere on it -- output exactly the single token "
+    f"{BLANK_PAGE_MARKER} and nothing else. Output the transcription only."
 )
 
 
@@ -578,7 +589,25 @@ class IndependentVisionReader:
                                f"({type(exc).__name__}: {exc}); the quotations on that "
                                f"page stay unverified and hold")
                 continue
-            out[number] = build_page_read(SECONDARY_VISION_CHANNEL_ID, number, text)
+            # Codex F7-R3-A, exact-SHA re-review, third pass: `build_page_read`'s
+            # default status inference (READ if tokens else BLANK) treats an EMPTY
+            # response as a positive blank finding -- but this reader's empty text can
+            # equally mean the model refused, truncated, or otherwise returned nothing
+            # for a page that is NOT blank. Only the model's explicit
+            # `BLANK_PAGE_MARKER` assertion may certify BLANK; silence never does.
+            stripped = text.strip()
+            if stripped == BLANK_PAGE_MARKER:
+                out[number] = build_page_read(
+                    SECONDARY_VISION_CHANNEL_ID, number, "",
+                    status=PageStatus.BLANK,
+                    detail=f"model explicitly asserted {BLANK_PAGE_MARKER}")
+            elif stripped:
+                out[number] = build_page_read(SECONDARY_VISION_CHANNEL_ID, number, text)
+            else:
+                out[number] = build_page_read(
+                    SECONDARY_VISION_CHANNEL_ID, number, "",
+                    status=PageStatus.UNREADABLE,
+                    detail="empty model response with no explicit blank assertion")
         return out
 
     def _page_image(self, number: int) -> bytes:

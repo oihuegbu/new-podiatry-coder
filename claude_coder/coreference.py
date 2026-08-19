@@ -176,23 +176,50 @@ _ENUMERATED_AXES = frozenset({"laterality"})
 #: face value.
 _CANONICAL_LATERALITY = frozenset({"left", "right", "bilateral", "unspecified"})
 
+#: The only CANONICAL laterality pair that is genuinely, unambiguously OPPOSED.
+#: Codex F7-R3-C1, exact-SHA re-review, third pass: a flat "unequal canonical values
+#: are different" rule is wrong occurrence logic for this specific enum, because its
+#: own values overlap in meaning rather than partitioning cleanly. 'unspecified'
+#: asserts nothing (unknown, not a third side); 'bilateral' covers BOTH sides, so it
+#: does not contradict either 'left' or 'right' alone -- it is compatible evidence
+#: for a bilateral procedure being (correctly or incompletely) described as
+#: unilateral in one mention, not proof of two distinct sides. Only 'left' and
+#: 'right' actually exclude each other.
+_LATERALITY_DISJOINT_PAIR = frozenset({"left", "right"})
 
-def _reliably_literal(axis: str, va: str, vb: str) -> bool:
-    """May `axis` be compared as a literal enum/identifier for THESE two values?
 
-    True for an identifier axis always; true for an enumerated axis only when BOTH
-    values are already members of its canonical set. A non-canonical enumerated value
-    is not distinguishable, by this function alone, from open free text that merely
-    resembles the enum's vocabulary -- so it gets exactly the same conservative
-    treatment as open vocabulary (identity or ambiguous, never a bare-inequality
-    difference).
+def _axis_relation(axis: str, va: str, vb: str) -> str:
+    """SAME_EVENT, DISTINCT_EVENT, or UNDETERMINED for one axis's two stated values.
+
+    Identifier axes (performer_id): an id is either the same id or a different one --
+    no overlap semantics, so any inequality is a confirmed difference.
+
+    Enumerated axes (laterality) where BOTH values are already canonical members of
+    the enum: real RELATION semantics, not flat inequality (`_LATERALITY_DISJOINT_PAIR`)
+    -- equal values are the same; 'left' vs 'right' is the one genuinely disjoint pair;
+    everything else ('unspecified' paired with anything, 'bilateral' paired with a
+    single side) is UNDETERMINED, because the record does not actually state two
+    excluding facts.
+
+    Everything else -- OPEN vocabulary, or an enumerated axis where either value is
+    NOT canonical (the extraction boundary does not enforce the enumeration, so a
+    stored value may be an arbitrary string) -- gets the conservative open-vocabulary
+    treatment: an exact match (case/whitespace folded) is the same value; anything
+    else is UNDETERMINED. Lexical shape alone never establishes a confirmed
+    DISTINCT_EVENT for open text (Codex F7-R3-C, exact-SHA re-review, third pass) or
+    for a non-canonical enumerated value it cannot be told apart from.
     """
     if axis in _IDENTIFIER_AXES:
-        return True
-    if axis in _ENUMERATED_AXES:
-        return (va.lower() in _CANONICAL_LATERALITY
-                and vb.lower() in _CANONICAL_LATERALITY)
-    return False
+        return SAME_EVENT if va.lower() == vb.lower() else DISTINCT_EVENT
+    if (axis in _ENUMERATED_AXES and va.lower() in _CANONICAL_LATERALITY
+            and vb.lower() in _CANONICAL_LATERALITY):
+        a, b = va.lower(), vb.lower()
+        if a == b:
+            return SAME_EVENT
+        if {a, b} == _LATERALITY_DISJOINT_PAIR:
+            return DISTINCT_EVENT
+        return UNDETERMINED
+    return SAME_EVENT if va.lower() == vb.lower() else UNDETERMINED
 
 
 def known_known_differences(left: dict | None, right: dict | None,
@@ -218,16 +245,16 @@ def known_known_differences(left: dict | None, right: dict | None,
     value; anything else is `known_known_ambiguous`, never promoted to a confirmed
     difference by disjointness, containment, or any other lexical heuristic.
 
-    A CLOSED, small clinical enumeration the record states directly (laterality) carries
-    none of that synonym risk PROVIDED the value is actually one of its canonical
-    members -- 'left', 'right', 'bilateral', 'unspecified' -- so a literal inequality
-    between two CANONICAL values remains a confirmed difference, exactly like an
-    identifier axis (performer_id). The extraction boundary does not itself enforce
-    that enumeration (Codex F7-R3-C1, exact-SHA re-review): a fact's stored value is
-    whatever string the model wrote, verbatim, so a NON-CANONICAL value (a full phrase
-    like 'left side' rather than the bare enum value) is not something this function
-    may trust at face value either -- it degrades to the same identity-or-ambiguous
-    treatment open vocabulary gets (`_reliably_literal`).
+    A CLOSED, small clinical enumeration the record states directly (laterality) has
+    an explicit RELATION (`_axis_relation`), not a flat equality test: 'left' vs
+    'right' is the one genuinely disjoint canonical pair, but 'unspecified' or
+    'bilateral' paired with a single side is deliberately NOT a confirmed difference
+    either (Codex F7-R3-C1, exact-SHA re-review, third pass -- a flat inequality rule
+    made 'unspecified' vs 'left' and 'bilateral' vs 'left' both overbill). The
+    extraction boundary does not itself enforce the enumeration, so a NON-CANONICAL
+    value (a full phrase like 'left side' rather than the bare enum value) is not
+    something this function may trust at face value either -- it degrades to the same
+    identity-or-ambiguous treatment open vocabulary gets.
 
     Genuine distinctness from OPEN vocabulary (and from a non-canonical enumerated
     value) is established elsewhere in this system -- an explicit SEPARATE_FROM
@@ -239,41 +266,33 @@ def known_known_differences(left: dict | None, right: dict | None,
     for axis in axes:
         va = str(a.get(axis, "") or "").strip()
         vb = str(b.get(axis, "") or "").strip()
-        if not (va and vb):
-            continue
-        if _reliably_literal(axis, va, vb) and va.lower() != vb.lower():
+        if va and vb and _axis_relation(axis, va, vb) == DISTINCT_EVENT:
             out.append(axis)
-        # OPEN vocabulary, or a non-canonical enumerated value: an exact match is not a
-        # difference; an inexact one is ambiguous (`known_known_ambiguous`), never a
-        # confirmed difference here.
     return tuple(out)
 
 
 def known_known_ambiguous(left: dict | None, right: dict | None,
                           axes: tuple[str, ...] = DISTINGUISHING_AXES) -> tuple[str, ...]:
-    """The OPEN-vocabulary axes on which both mentions state a value that is not an
-    exact match (even after case/whitespace folding).
+    """The axes on which both mentions state a value whose RELATION
+    (`_axis_relation`) is UNDETERMINED -- neither confirmed same nor confirmed
+    different.
 
-    Raw lexical shape cannot establish, in either direction, whether an inexact match on
-    open clinical vocabulary is a synonym/abbreviation/eponym for the SAME concept or a
-    genuinely different one (Codex F7-R3, exact-SHA re-review, third pass) -- so a
-    caller deciding whether two mentions are the SAME event must treat any ambiguous
-    axis as blocking that verdict, never as a match. An identifier axis, or an
-    enumerated axis where BOTH values are already canonical, is never ambiguous:
-    `known_known_differences` compares those literally. A NON-CANONICAL enumerated
-    value (Codex F7-R3-C1) gets the SAME ambiguous treatment as open vocabulary --
-    it is not distinguishable from free text that merely resembles the enum.
+    For open vocabulary that is an inexact lexical match, this covers the same ground
+    it always has (Codex F7-R3, exact-SHA re-review, third pass): raw shape cannot
+    tell a synonym/abbreviation/eponym apart from a real distinction. For the
+    laterality enumeration, it now ALSO covers 'unspecified' or 'bilateral' paired
+    with a single side (Codex F7-R3-C1) -- the record states something, but not
+    something that excludes the other value. A caller deciding whether two mentions
+    are the SAME event must treat any ambiguous axis as blocking that verdict, never
+    as a match.
     """
     a, b = dict(left or {}), dict(right or {})
     out: list[str] = []
     for axis in axes:
         va = str(a.get(axis, "") or "").strip()
         vb = str(b.get(axis, "") or "").strip()
-        if not (va and vb) or va.lower() == vb.lower():
-            continue
-        if _reliably_literal(axis, va, vb):
-            continue
-        out.append(axis)
+        if va and vb and _axis_relation(axis, va, vb) == UNDETERMINED:
+            out.append(axis)
     return tuple(out)
 
 

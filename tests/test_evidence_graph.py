@@ -1872,17 +1872,73 @@ class AxisComparisonIsNormalized(unittest.TestCase):
                     cr.known_known_ambiguous({"anatomy": a},
                                              {"anatomy": b}), ("anatomy",))
 
-    def test_a_closed_enumeration_still_confirms_a_genuine_difference(self):
-        """Laterality has no synonym-collision risk the way open anatomy text does, so
-        it is compared literally: a genuine inequality remains a confirmed difference,
-        and it is never ambiguous."""
+    def test_the_laterality_relation_matrix(self):
+        """Codex F7-R3-C1, exact-SHA re-review, third pass: laterality's own
+        canonical values overlap in meaning rather than partitioning cleanly, so a
+        flat "unequal canonical values differ" rule was wrong occurrence logic --
+        'unspecified' asserts nothing (unknown, not a third side) and 'bilateral'
+        covers both sides (so it does not contradict either alone). Only 'left' and
+        'right' actually exclude each other. Covers every pair plus order symmetry."""
         from claude_coder import coreference as cr
-        self.assertEqual(
-            cr.known_known_differences({"laterality": "left"},
-                                       {"laterality": "right"}), ("laterality",))
-        self.assertEqual(
-            cr.known_known_ambiguous({"laterality": "left"},
-                                     {"laterality": "right"}), ())
+
+        def _check(a, b, expect):
+            differences = cr.known_known_differences({"laterality": a},
+                                                      {"laterality": b})
+            ambiguous = cr.known_known_ambiguous({"laterality": a},
+                                                 {"laterality": b})
+            if expect == "same":
+                self.assertEqual(differences, ())
+                self.assertEqual(ambiguous, ())
+            elif expect == "distinct":
+                self.assertEqual(differences, ("laterality",))
+                self.assertEqual(ambiguous, ())
+            else:
+                self.assertEqual(differences, ())
+                self.assertEqual(ambiguous, ("laterality",))
+
+        cases = (
+            [(v, v, "same") for v in
+             ("left", "right", "bilateral", "unspecified")]
+            + [("left", "right", "distinct")]
+            + [("unspecified", "left", "undetermined"),
+               ("unspecified", "right", "undetermined"),
+               ("unspecified", "bilateral", "undetermined"),
+               ("bilateral", "left", "undetermined"),
+               ("bilateral", "right", "undetermined")])
+        for a, b, expect in cases:
+            for x, y in ((a, b), (b, a)):        # order symmetry
+                with self.subTest(pair=(x, y), expect=expect):
+                    _check(x, y, expect)
+
+    def test_unspecified_laterality_does_not_overbill_against_a_stated_side(self):
+        """Codex's exact reproduction: 'unspecified' vs 'left' is unknown versus
+        known, not two documented sides -- must hold, not silently produce two
+        billable units for one resolved service."""
+        import json
+
+        note = ("Procedure alpha performed today. "
+                "Alpha procedure completed on the left.")
+        primary = json.dumps({"facts": [
+            {"fact_id": "F1", "kind": "procedure",
+             "description": "excision procedure alpha performed",
+             "attributes": {"laterality": "unspecified", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Procedure alpha performed today"],
+             "confidence": 0.99},
+            {"fact_id": "F2", "kind": "procedure",
+             "description": "procedure alpha removal completed",
+             "attributes": {"laterality": "left", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Alpha procedure completed on the left"],
+             "confidence": 0.99}]})
+
+        result = _run_union(primary, primary, note_text=note)
+
+        self.assertEqual(result.billable_lines, [],
+                         "unspecified vs a stated side must not silently reconcile "
+                         "in either direction")
 
     def test_an_ambiguous_axis_never_lets_two_mentions_read_as_the_same_event(self):
         """Codex's exact scenario: the same documented action, but ANATOMY worded as
