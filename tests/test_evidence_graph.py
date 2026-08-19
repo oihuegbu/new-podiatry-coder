@@ -1619,6 +1619,75 @@ class IndependentDocumentRecall(unittest.TestCase):
         self.assertIs(gate.outcome, Outcome.UNKNOWN, gate.detail)
         self.assertTrue(gate.retryable)
 
+    def test_an_unreadable_independent_read_still_holds_the_claim(self):
+        """Codex F7-R3-A, exact-SHA re-review, second pass: a `PageRead` record
+        existing was being treated as proof of inspection, but the record's OWN
+        `status` can be UNREADABLE -- the channel tried and could not obtain text.
+        That is not BLANK, and a page that could not be read may still carry a
+        documented service; the gate must not be satisfied by a failed attempt."""
+        from app.contracts.source_evidence import (ChannelKind, PageStatus,
+                                                    ReadChannel, build_page_read)
+        from app.ingestion.source_evidence import SECONDARY_VISION_CHANNEL_ID
+        from claude_coder.models import Destination, Outcome
+
+        class _UnreadableReader:
+            def channel(self):
+                return ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                                   kind=ChannelKind.VISION, provider="openai")
+
+            def read_pages(self, page_numbers):
+                return {n: build_page_read(SECONDARY_VISION_CHANNEL_ID, n, "",
+                                           status=PageStatus.UNREADABLE,
+                                           detail="image too degraded to read")
+                       for n in page_numbers}
+
+        document, tmp = _document(_RECALL_TRANSCRIPT, [])   # image-only page
+        self.addCleanup(tmp.cleanup)
+
+        result = _run_recall(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            lambda s, u: _multi_reading(_SECOND_SAME_SERVICE),
+            note_text=document.primary_text(), source_evidence=document,
+            source_reader=_UnreadableReader())
+
+        self.assertEqual(result.consensus["recall_uncovered_pages"], [1])
+        self.assertNotEqual(result.destination, Destination.AUTO_READY)
+        gate = next(g for g in result.gates if g.name == "recall_page_coverage")
+        self.assertIs(gate.outcome, Outcome.UNKNOWN, gate.detail)
+
+    def test_a_missing_independent_read_still_holds_the_claim(self):
+        """The same requirement for `PageStatus.MISSING` -- the channel simply did
+        not return the page at all, which is likewise not proof of blankness."""
+        from app.contracts.source_evidence import (ChannelKind, PageStatus,
+                                                    ReadChannel, build_page_read)
+        from app.ingestion.source_evidence import SECONDARY_VISION_CHANNEL_ID
+        from claude_coder.models import Destination, Outcome
+
+        class _MissingReader:
+            def channel(self):
+                return ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                                   kind=ChannelKind.VISION, provider="openai")
+
+            def read_pages(self, page_numbers):
+                return {n: build_page_read(SECONDARY_VISION_CHANNEL_ID, n, "",
+                                           status=PageStatus.MISSING,
+                                           detail="page not returned by the reader")
+                       for n in page_numbers}
+
+        document, tmp = _document(_RECALL_TRANSCRIPT, [])
+        self.addCleanup(tmp.cleanup)
+
+        result = _run_recall(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            lambda s, u: _multi_reading(_SECOND_SAME_SERVICE),
+            note_text=document.primary_text(), source_evidence=document,
+            source_reader=_MissingReader())
+
+        self.assertEqual(result.consensus["recall_uncovered_pages"], [1])
+        self.assertNotEqual(result.destination, Destination.AUTO_READY)
+        gate = next(g for g in result.gates if g.name == "recall_page_coverage")
+        self.assertIs(gate.outcome, Outcome.UNKNOWN, gate.detail)
+
     def test_an_unconfirmed_transcription_omission_holds_and_is_never_dropped(self):
         """The failure path of the recovery: no third reading of the page exists.
 
@@ -1835,7 +1904,13 @@ class AxisComparisonIsNormalized(unittest.TestCase):
         """The claim-level reproduction: one performed service, mentioned twice with
         SYNONYMOUS anatomy wording ('great toe' / 'hallux'). Before this fix, disjoint
         normalized tokens were read as a confirmed axis difference and this billed two
-        units for one documented service."""
+        units for one documented service.
+
+        It also must not silently merge to one unit (Codex F7-R3-C2, exact-SHA
+        re-review): without a genuine terminology-normalization service, this system
+        cannot actually tell a synonym pair from a real second, distinct site -- so the
+        correct, honest outcome for a genuinely ambiguous anatomy axis is neither
+        guess, but a hold."""
         import json
 
         note = ("Procedure alpha performed on the great toe today. "
@@ -1858,11 +1933,11 @@ class AxisComparisonIsNormalized(unittest.TestCase):
 
         result = _run_union(primary, primary, note_text=note)
 
-        billable = result.billable_lines
-        self.assertEqual([ln.chosen.code for ln in billable], ["PROC_X"], billable)
-        self.assertEqual(billable[0].units, 1,
-                         f"a synonym pair for the same anatomy is one service, not "
-                         f"two: {billable[0].rationale}")
+        self.assertEqual(result.billable_lines, [],
+                         "an unresolved synonym pair must not silently merge to one "
+                         "unit or add a second -- hold rather than guess")
+        held = next(ln for ln in result.lines if ln.documentation_gap)
+        self.assertIn("PROC_X", held.documentation_gap)
 
     def test_identifier_axes_are_never_normalized(self):
         """An identifier is either the same identifier or it is not -- stemming it
@@ -2207,6 +2282,77 @@ class OccurrenceCardinality(unittest.TestCase):
                            ln.documentation_gap)
                 self.assertIn("2", held.documentation_gap)
                 self.assertIn("3", held.documentation_gap)
+
+    def test_a_noncanonical_laterality_value_holds_instead_of_reconciling_either_way(
+            self):
+        """Codex F7-R3-C1, exact-SHA re-review: laterality is a closed enumeration,
+        but the extraction boundary does not enforce it -- a fact's stored value is
+        whatever string the model wrote, verbatim. Two mentions of the same resolved
+        service with 'left side' and 'left' (a non-canonical value alongside a
+        canonical one) must not be trusted as a literal match OR a literal
+        difference; the line holds instead of silently reconciling either way."""
+        import json
+
+        note = ("Procedure alpha performed today on the left side. "
+                "Alpha procedure completed on the left.")
+        primary = json.dumps({"facts": [
+            {"fact_id": "F1", "kind": "procedure",
+             "description": "excision procedure alpha performed",
+             "attributes": {"laterality": "left side", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Procedure alpha performed today on the left side"],
+             "confidence": 0.99},
+            {"fact_id": "F2", "kind": "procedure",
+             "description": "procedure alpha removal completed",
+             "attributes": {"laterality": "left", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Alpha procedure completed on the left"],
+             "confidence": 0.99}]})
+
+        result = _run_union(primary, primary, note_text=note)
+
+        self.assertEqual(result.billable_lines, [],
+                         "a non-canonical laterality value must not silently "
+                         "reconcile in either direction")
+        held = next(ln for ln in result.lines if ln.documentation_gap)
+        self.assertIn("PROC_X", held.documentation_gap)
+
+    def test_an_axis_ambiguous_pair_holds_instead_of_silently_merging(self):
+        """Codex F7-R3-C2, exact-SHA re-review: `event_verdict` correctly returns
+        UNDETERMINED for two mentions whose open ANATOMY value is inexact (not an
+        exact match, not disjoint either), but claim assembly used to silently MERGE
+        any non-DISTINCT verdict -- accepting a possible underbill in a genuinely
+        distinct-site case to avoid the overbill in a synonym case. Both must now be
+        refused: the line holds instead of guessing in either direction."""
+        import json
+
+        note = ("Procedure alpha performed on the structure today. "
+                "Alpha procedure completed on the structure again.")
+        primary = json.dumps({"facts": [
+            {"fact_id": "F1", "kind": "procedure",
+             "description": "excision procedure alpha performed",
+             "attributes": {"anatomy": "structure", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Procedure alpha performed on the structure today"],
+             "confidence": 0.99},
+            {"fact_id": "F2", "kind": "procedure",
+             "description": "procedure alpha removal completed",
+             "attributes": {"anatomy": "the structure", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Alpha procedure completed on the structure again"],
+             "confidence": 0.99}]})
+
+        result = _run_union(primary, primary, note_text=note)
+
+        self.assertEqual(result.billable_lines, [],
+                         "an axis-ambiguous pair must not silently merge or add a "
+                         "unit")
+        held = next(ln for ln in result.lines if ln.documentation_gap)
+        self.assertIn("PROC_X", held.documentation_gap)
 
 
 if __name__ == "__main__":

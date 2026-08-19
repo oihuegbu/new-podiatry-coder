@@ -164,8 +164,35 @@ _IDENTIFIER_AXES = frozenset({"performer_id"})
 #: re-review, third pass.)
 _ENUMERATED_AXES = frozenset({"laterality"})
 
-#: Axes exempt from lexical-shape comparison entirely -- see `known_known_differences`.
-_LITERAL_AXES = _IDENTIFIER_AXES | _ENUMERATED_AXES
+#: The CLOSED value set `laterality` actually takes, in canonical form. The extraction
+#: boundary does not enforce this enumeration -- a fact's `attributes["laterality"]` is
+#: whatever string the model wrote, verbatim -- so a value OUTSIDE this set (e.g. a full
+#: phrase like 'left side' rather than the bare enum value) is not a value the literal-
+#: comparison guarantee covers. Codex F7-R3-C1, exact-SHA re-review: trusting an
+#: arbitrary, non-canonical string as if it were already the closed enum is exactly how
+#: a noncanonical value slipped a confirmed difference (and a false extra unit) past the
+#: enumerated-axis literal compare. A non-canonical value degrades to the SAME
+#: exact-match-or-ambiguous treatment open vocabulary gets, rather than being trusted at
+#: face value.
+_CANONICAL_LATERALITY = frozenset({"left", "right", "bilateral", "unspecified"})
+
+
+def _reliably_literal(axis: str, va: str, vb: str) -> bool:
+    """May `axis` be compared as a literal enum/identifier for THESE two values?
+
+    True for an identifier axis always; true for an enumerated axis only when BOTH
+    values are already members of its canonical set. A non-canonical enumerated value
+    is not distinguishable, by this function alone, from open free text that merely
+    resembles the enum's vocabulary -- so it gets exactly the same conservative
+    treatment as open vocabulary (identity or ambiguous, never a bare-inequality
+    difference).
+    """
+    if axis in _IDENTIFIER_AXES:
+        return True
+    if axis in _ENUMERATED_AXES:
+        return (va.lower() in _CANONICAL_LATERALITY
+                and vb.lower() in _CANONICAL_LATERALITY)
+    return False
 
 
 def known_known_differences(left: dict | None, right: dict | None,
@@ -192,11 +219,20 @@ def known_known_differences(left: dict | None, right: dict | None,
     difference by disjointness, containment, or any other lexical heuristic.
 
     A CLOSED, small clinical enumeration the record states directly (laterality) carries
-    none of that synonym risk, so a literal inequality there remains a confirmed
-    difference, exactly like an identifier axis (performer_id). Genuine distinctness
-    from OPEN vocabulary is established elsewhere in this system -- an explicit
-    SEPARATE_FROM relation (`explicitly_separated`, checked before this function even
-    runs) or a different service episode -- never by comparing two anatomy strings.
+    none of that synonym risk PROVIDED the value is actually one of its canonical
+    members -- 'left', 'right', 'bilateral', 'unspecified' -- so a literal inequality
+    between two CANONICAL values remains a confirmed difference, exactly like an
+    identifier axis (performer_id). The extraction boundary does not itself enforce
+    that enumeration (Codex F7-R3-C1, exact-SHA re-review): a fact's stored value is
+    whatever string the model wrote, verbatim, so a NON-CANONICAL value (a full phrase
+    like 'left side' rather than the bare enum value) is not something this function
+    may trust at face value either -- it degrades to the same identity-or-ambiguous
+    treatment open vocabulary gets (`_reliably_literal`).
+
+    Genuine distinctness from OPEN vocabulary (and from a non-canonical enumerated
+    value) is established elsewhere in this system -- an explicit SEPARATE_FROM
+    relation (`explicitly_separated`, checked before this function even runs) or a
+    different service episode -- never by comparing two raw strings.
     """
     a, b = dict(left or {}), dict(right or {})
     out: list[str] = []
@@ -205,10 +241,11 @@ def known_known_differences(left: dict | None, right: dict | None,
         vb = str(b.get(axis, "") or "").strip()
         if not (va and vb):
             continue
-        if axis in _LITERAL_AXES and va.lower() != vb.lower():
+        if _reliably_literal(axis, va, vb) and va.lower() != vb.lower():
             out.append(axis)
-        # OPEN vocabulary: an exact match is not a difference; an inexact one is
-        # ambiguous (`known_known_ambiguous`), never a confirmed difference here.
+        # OPEN vocabulary, or a non-canonical enumerated value: an exact match is not a
+        # difference; an inexact one is ambiguous (`known_known_ambiguous`), never a
+        # confirmed difference here.
     return tuple(out)
 
 
@@ -221,18 +258,22 @@ def known_known_ambiguous(left: dict | None, right: dict | None,
     open clinical vocabulary is a synonym/abbreviation/eponym for the SAME concept or a
     genuinely different one (Codex F7-R3, exact-SHA re-review, third pass) -- so a
     caller deciding whether two mentions are the SAME event must treat any ambiguous
-    axis as blocking that verdict, never as a match. Identifier and enumerated axes are
-    never ambiguous: `known_known_differences` already compares them literally.
+    axis as blocking that verdict, never as a match. An identifier axis, or an
+    enumerated axis where BOTH values are already canonical, is never ambiguous:
+    `known_known_differences` compares those literally. A NON-CANONICAL enumerated
+    value (Codex F7-R3-C1) gets the SAME ambiguous treatment as open vocabulary --
+    it is not distinguishable from free text that merely resembles the enum.
     """
     a, b = dict(left or {}), dict(right or {})
     out: list[str] = []
     for axis in axes:
-        if axis in _LITERAL_AXES:
-            continue
         va = str(a.get(axis, "") or "").strip()
         vb = str(b.get(axis, "") or "").strip()
-        if va and vb and va.lower() != vb.lower():
-            out.append(axis)
+        if not (va and vb) or va.lower() == vb.lower():
+            continue
+        if _reliably_literal(axis, va, vb):
+            continue
+        out.append(axis)
     return tuple(out)
 
 

@@ -462,22 +462,30 @@ def code_encounter(
     # of those is a read of the rendered PAGE IMAGE: a blank vision transcription may
     # mean the model omitted the page's visible content, and an empty text layer says
     # nothing about text drawn as an image. "Two channels found nothing" is not proof a
-    # human looking at the page would find nothing too. A page is exempt only when an
-    # INDEPENDENT, IMAGE-CAPABLE channel (vision or OCR -- never the embedded-text layer,
-    # and never the primary transcription itself) actually attempted a read of it, empty
-    # result or not: that read is a genuine inspection of the page image, so a truly
-    # blank page is exempt once one exists, and an unread one still holds.
+    # human looking at the page would find nothing too.
+    #
+    # The second version exempted a page once ANY independent image-capable channel had
+    # a `PageRead` record for it at all -- but a record existing is not the same as that
+    # record reporting BLANK (exact-SHA re-review, second pass): an independent reader
+    # can return a read whose OWN `PageRead.status` is `UNREADABLE` (it tried and could
+    # not get text) or `MISSING` (it did not return the page at all), and both used to
+    # count as "inspected" purely because a record was present. A page is exempt only
+    # when an independent, image-capable channel's read of it POSITIVELY reports
+    # `PageStatus.BLANK` -- a genuine inspection that found nothing, not merely an
+    # attempt that failed or never happened.
     if consensus is not None and source_evidence is not None:
         from app.contracts.source_evidence import ChannelKind as _ChannelKind
+        from app.contracts.source_evidence import PageStatus as _PageStatus
         from app.contracts.source_evidence import independent_of as _independent_of
         primary_channel = source_evidence.primary_channel
 
-        def _image_inspected(page_number: int) -> bool:
+        def _image_verified_blank(page_number: int) -> bool:
             page = source_evidence.page(page_number)
             if page is None or primary_channel is None:
                 return False
             for read in page.reads:
-                if read.channel_id == source_evidence.primary_channel_id:
+                if (read.channel_id == source_evidence.primary_channel_id
+                        or read.status is not _PageStatus.BLANK):
                     continue
                 channel = source_evidence.channel(read.channel_id)
                 if (channel is not None
@@ -487,7 +495,7 @@ def code_encounter(
             return False
 
         _blocking_pages = [p for p in consensus.recall_uncovered_pages
-                           if not _image_inspected(p)]
+                           if not _image_verified_blank(p)]
         if _blocking_pages:
             pre_retrieval_gates.append(GateResult(
                 "recall_page_coverage", Outcome.UNKNOWN,
@@ -1350,8 +1358,9 @@ def dedup_lines(result: CodingResult) -> None:
             reps_by_key[key] = [ln]
             cluster_state[key] = [_seed(ln)]
             continue
-        verdicts = [
-            (i,) + _coref.event_verdict(
+        verdicts = []
+        for i, rep in enumerate(reps_by_key[key]):
+            verdict, reason = _coref.event_verdict(
                 left_kind=rep.fact.kind, right_kind=ln.fact.kind,
                 left_action=rep.fact.description, right_action=ln.fact.description,
                 left_attributes=rep.fact.attributes, right_attributes=ln.fact.attributes,
@@ -1359,18 +1368,37 @@ def dedup_lines(result: CodingResult) -> None:
                 right_episode=episodes.get(str(ln.fact.fact_id)),
                 explicitly_separated=frozenset(
                     (str(rep.fact.fact_id), str(ln.fact.fact_id))) in separated)
-            for i, rep in enumerate(reps_by_key[key])]
-        repeats = [v for v in verdicts if not _coref.is_additional_occurrence(v[1])]
-        if repeats:
-            # A repeat of an occurrence already recognized -- any match settles it; the
-            # record states nothing further once one already-counted occurrence agrees.
-            idx, verdict, reason = repeats[0]
+            # WHY this pair is undetermined matters (Codex F7-R3-C2, exact-SHA
+            # re-review): an AMBIGUOUS AXIS (open vocabulary that is not an exact
+            # match and not disjoint either -- a possible synonym OR a possible real
+            # distinction) is a genuine, claim-changing uncertainty this resolver may
+            # not silently guess through in either direction. Wording alone failing to
+            # match with NO axis in question is a different, already-intentional case
+            # this module exists to merge (see its own module docstring): two mentions
+            # with compatible axes and unrelated action PHRASING are undetermined by
+            # `action_identity` alone, and once both have independently resolved to the
+            # SAME authoritative code with no documented distinctness, the descriptor
+            # set -- not anyone's prose -- has already settled procedure identity.
+            axis_ambiguous = bool(_coref.known_known_ambiguous(
+                rep.fact.attributes, ln.fact.attributes))
+            verdicts.append((i, verdict, reason, axis_ambiguous))
+        same = [v for v in verdicts if v[1] == _coref.SAME_EVENT]
+        axis_undetermined = [v for v in verdicts
+                             if v[1] == _coref.UNDETERMINED and v[3]]
+        wording_undetermined = [v for v in verdicts
+                                if v[1] == _coref.UNDETERMINED and not v[3]]
+        if same:
+            idx, verdict, reason, axis_ambiguous = same[0]
+        elif axis_undetermined:
+            idx, verdict, reason, axis_ambiguous = axis_undetermined[0]
+        elif wording_undetermined:
+            idx, verdict, reason, axis_ambiguous = wording_undetermined[0]
         else:
             # DISTINCT from every occurrence recognized so far -- a new occurrence, and
             # this mention becomes ITS OWN representative for any later mention.
             reps_by_key[key].append(ln)
             cluster_state[key].append(_seed(ln))
-            idx, verdict, reason = verdicts[-1]
+            idx, verdict, reason, axis_ambiguous = verdicts[-1]
         # The merged mention's evidence is kept either way: it is what the record says
         # about this service, and losing it would make the surviving line rest on less
         # documentation than the encounter actually has.
@@ -1381,6 +1409,20 @@ def dedup_lines(result: CodingResult) -> None:
             ln.excluded_reason = (f"second documented occurrence of {ln.chosen.code} — "
                                   f"units folded into the primary line ({reason})")
             _resync(key)
+            continue
+        if verdict == _coref.UNDETERMINED and axis_ambiguous:
+            ln.excluded_reason = (
+                f"{ln.chosen.code} is already on the claim, and whether this mention "
+                f"is the same documented occurrence or a distinct one is not "
+                f"established by the record ({reason}) — held rather than guessed")
+            keep.chosen = None
+            keep.method = ResolutionMethod.ABSTAINED
+            keep.documentation_gap = (
+                f"the record does not establish whether this mention of "
+                f"{ln.chosen.code} is the same documented occurrence already on the "
+                f"claim or a distinct one — please clarify ({reason})")
+            keep.rationale = (f"{keep.rationale}; occurrence identity ambiguous — "
+                              f"escalate rather than guess ({reason})")
             continue
         # A repeated mention of an occurrence already recognized. Codex F7-R3: a count
         # stated on a LATER mention used to be discarded outright, because only the
