@@ -280,13 +280,16 @@ class CannotLinkConstraints(unittest.TestCase):
         self.assertTrue(any("cannot-link" in p for p in problems), problems)
 
     def test_known_known_attribute_conflict_is_recorded_as_a_constraint(self):
+        # Fully DISJOINT normalized tokens -- nothing shared at all -- so this is an
+        # unambiguous documented difference, not the merely-related-but-inexact
+        # wording `known_known_ambiguous` exists to NOT treat as a confirmed one.
         a = _fact("F1", FactKind.PROCEDURE, "documented procedure action",
                   spans=[_span("Procedure performed today", span_id="p1")],
-                  attributes={"approach": "first approach"})
+                  attributes={"approach": "anterior"})
         b = _fact("F2", FactKind.PROCEDURE, "documented procedure action",
                   spans=[_span("A second, separately documented procedure",
                                span_id="p2")],
-                  attributes={"approach": "other approach"})
+                  attributes={"approach": "posterior"})
         compiled = _graph([a, b], [])
         bases = [c.basis for c in compiled.cannot_links]
         self.assertTrue(any("approach" in basis for basis in bases), bases)
@@ -1580,6 +1583,41 @@ class IndependentDocumentRecall(unittest.TestCase):
                          "the service the TRANSCRIPTION omitted must reach the claim")
         self.assertEqual(result.graph.integrity_problems(), ())
 
+    def test_a_failed_page_read_holds_the_claim_instead_of_omitting_silently(self):
+        """Codex F7-R3, exact-SHA re-review, defect A: recording an unread page
+        (`recall_page_read_detail`/`recall_uncovered_pages`) used to be purely
+        informational -- a proactive read that failed still let the encounter resolve
+        and release whatever the primary transcription alone supported, so a service
+        documented only on that page was silently omitted with every other control
+        reporting clean. A NONBLANK page no independent reading could cover must now
+        hold the encounter as retryable system work, never present as a clean claim."""
+        from app.contracts.source_evidence import ChannelKind, ReadChannel
+        from app.ingestion.source_evidence import SECONDARY_VISION_CHANNEL_ID
+        from claude_coder.models import Destination, Outcome
+
+        class _FailingReader:
+            def channel(self):
+                return ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                                   kind=ChannelKind.VISION, provider="openai")
+
+            def read_pages(self, page_numbers):
+                raise RuntimeError("provider unavailable")
+
+        document, tmp = _document(_RECALL_TRANSCRIPT, [])   # image-only page
+        self.addCleanup(tmp.cleanup)
+
+        result = _run_recall(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            lambda s, u: _multi_reading(_SECOND_SAME_SERVICE),
+            note_text=document.primary_text(), source_evidence=document,
+            source_reader=_FailingReader())
+
+        self.assertEqual(result.consensus["recall_uncovered_pages"], [1])
+        self.assertNotEqual(result.destination, Destination.AUTO_READY)
+        gate = next(g for g in result.gates if g.name == "recall_page_coverage")
+        self.assertIs(gate.outcome, Outcome.UNKNOWN, gate.detail)
+        self.assertTrue(gate.retryable)
+
     def test_an_unconfirmed_transcription_omission_holds_and_is_never_dropped(self):
         """The failure path of the recovery: no third reading of the page exists.
 
@@ -1713,31 +1751,68 @@ class IndependentDocumentRecall(unittest.TestCase):
 
 
 class AxisComparisonIsNormalized(unittest.TestCase):
-    """Codex F7-R3, round-9 re-review, defect D: `known_known_differences` used to
-    compare axis values as raw, lowercased strings, so two spellings of the SAME
-    documented value manufactured a distinguishing axis -- and therefore a false
-    DISTINCT_EVENT verdict, and an extra billed occurrence -- purely from wording."""
+    """Codex F7-R3: `known_known_differences` used to compare axis values as raw,
+    lowercased strings, so two spellings of the SAME documented value manufactured a
+    distinguishing axis -- and therefore a false DISTINCT_EVENT verdict and an extra
+    billed occurrence -- purely from wording (round-9 re-review, defect D). The first
+    fix treated any lexical SUBSET relationship as equality, which the exact-SHA
+    re-review then showed unsafe in the other direction: 'structure' is a subset of
+    'fifth structure', but the extra word may be exactly what distinguishes two real
+    events. The current version commits to a difference only on a fully DISJOINT
+    normalized token set, and treats anything else inexact as AMBIGUOUS -- which must
+    block a SAME_EVENT verdict without being promoted to a confirmed difference."""
 
-    def test_equivalent_free_text_wording_is_not_a_documented_difference(self):
+    def test_an_exact_match_after_case_folding_is_not_a_documented_difference(self):
         from claude_coder import coreference as cr
         self.assertEqual(
-            cr.known_known_differences({"laterality": "left side"},
-                                       {"laterality": "Left"}), ())
+            cr.known_known_differences({"laterality": "Left"},
+                                       {"laterality": "left"}), ())
         self.assertEqual(
-            cr.known_known_differences({"approach": "open approach"},
-                                       {"approach": "Open"}), ())
+            cr.known_known_ambiguous({"laterality": "Left"},
+                                     {"laterality": "left"}), ())
+
+    def test_related_but_inexact_wording_is_ambiguous_not_a_difference(self):
+        """'left side' vs 'Left' -- and Codex's exact counterexample, 'structure' vs
+        'fifth structure' -- share a root but are not identical. Neither may be
+        established as the same value, and neither may be promoted to a confirmed
+        difference from wording alone."""
+        from claude_coder import coreference as cr
+        for a, b in (("left side", "Left"), ("structure", "fifth structure"),
+                    ("first approach", "other approach")):
+            with self.subTest(a=a, b=b):
+                self.assertEqual(
+                    cr.known_known_differences({"laterality": a},
+                                               {"laterality": b}), ())
+                self.assertEqual(
+                    cr.known_known_ambiguous({"laterality": a},
+                                             {"laterality": b}), ("laterality",))
 
     def test_genuinely_different_free_text_values_still_differ(self):
+        """Fully DISJOINT normalized tokens -- nothing shared at all -- remain a
+        confirmed, unambiguous difference."""
         from claude_coder import coreference as cr
         self.assertEqual(
             cr.known_known_differences({"laterality": "left"},
                                        {"laterality": "right"}), ("laterality",))
-        # A shared, non-distinguishing word ('approach') must not paper over two
-        # genuinely different values -- plain token OVERLAP is not enough; one value's
-        # tokens must be a subset of the other's, or the difference stands.
         self.assertEqual(
-            cr.known_known_differences({"approach": "first approach"},
-                                       {"approach": "other approach"}), ("approach",))
+            cr.known_known_ambiguous({"laterality": "left"},
+                                     {"laterality": "right"}), ())
+
+    def test_an_ambiguous_axis_never_lets_two_mentions_read_as_the_same_event(self):
+        """Codex's exact scenario: the same documented action, but ANATOMY worded as
+        'structure' in one mention and 'fifth structure' in the other. This must
+        return UNDETERMINED, never SAME_EVENT -- the extra word may be a real
+        distinguishing qualifier the coreference test cannot rule out from wording
+        alone."""
+        from claude_coder import coreference as cr
+        verdict, reason = cr.event_verdict(
+            left_kind="procedure", right_kind="procedure",
+            left_action="excision procedure alpha performed",
+            right_action="excision procedure alpha performed",
+            left_attributes={"anatomy": "structure"},
+            right_attributes={"anatomy": "fifth structure"})
+        self.assertEqual(verdict, cr.UNDETERMINED, reason)
+        self.assertFalse(cr.is_additional_occurrence(verdict))
 
     def test_identifier_axes_are_never_normalized(self):
         """An identifier is either the same identifier or it is not -- stemming it
@@ -2034,6 +2109,52 @@ class OccurrenceCardinality(unittest.TestCase):
                     ln.documentation_gap)
         self.assertIn("2", held.documentation_gap)
         self.assertIn("3", held.documentation_gap)
+
+    def test_conflicting_counts_hold_regardless_of_arrival_order(self):
+        """Codex F7-R3, exact-SHA re-review, defect B: reconciling only against the
+        CURRENT representative fact's attributes made the result depend on which
+        mention arrived first. missing->2->3 let 3 silently overwrite 2 (compared
+        against a representative that was still "missing"); this must now hold for
+        every ordering of the same three mentions -- missing/2/3, 2/missing/3, and
+        2/3/missing alike."""
+        import itertools
+        import json
+
+        base = {"laterality": "left", "performer_id": "actor-1",
+                "billing_entity_id": "actor-1"}
+        # Three DIFFERENT phrasings, cycled by position -- identical wording would let
+        # `eligibility.merge_duplicate_intents` merge all three mentions into one
+        # intent BEFORE retrieval (same _service_key), so this reproduction would never
+        # reach dedup_lines's cluster reconciliation as three separate lines at all.
+        _descriptions = ("excision procedure alpha performed",
+                         "procedure alpha removal completed", "alpha procedure redone")
+
+        def _fact(pos, fact_id, count):
+            attrs = dict(base)
+            if count is not None:
+                attrs["count"] = count
+            return {"fact_id": fact_id, "kind": "procedure",
+                   "description": _descriptions[pos],
+                   "attributes": attrs, "disposition": "performed_today",
+                   "negated": False,
+                   "evidence": [f"Alpha procedure completed {fact_id}"],
+                   "confidence": 0.99}
+
+        for order in itertools.permutations([None, 2, 3]):
+            with self.subTest(order=order):
+                facts = [_fact(i, f"F{i}", count) for i, count in enumerate(order)]
+                primary = json.dumps({"facts": facts})
+                note = " ".join(f["evidence"][0] + "." for f in facts)
+                result = _run_union(primary, primary, note_text=note)
+                billable = result.billable_lines
+                self.assertEqual(billable, [], (order, [
+                    (ln.chosen.code if ln.chosen else None, ln.units)
+                    for ln in result.lines]))
+                held = next(ln for ln in result.lines
+                           if ln.documentation_gap and "different counts" in
+                           ln.documentation_gap)
+                self.assertIn("2", held.documentation_gap)
+                self.assertIn("3", held.documentation_gap)
 
 
 if __name__ == "__main__":

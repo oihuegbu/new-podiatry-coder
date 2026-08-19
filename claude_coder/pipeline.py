@@ -450,6 +450,28 @@ def code_encounter(
             f"second_reading_event_unverified:{_held.second_event_id}",
             Outcome.UNKNOWN, _held.reason,
             "event-candidate union (product directive section 3)", retryable=True))
+    # Codex F7-R3, exact-SHA re-review, defect A: a page no independent reading could
+    # cover used to be RECORDED (`recall_uncovered_pages`) but never BLOCKED anything --
+    # a failed proactive read, or a reader that covered no page, still let the encounter
+    # proceed to a fully resolved, presentable claim. A service documented only on that
+    # page is then silently absent, with every control reporting clean. Every NONBLANK
+    # page must be covered by an independent usable reading before retrieval; a page an
+    # independent channel has POSITIVELY VERIFIED as empty (`PageStatus.BLANK`, not
+    # merely unread) holds nothing, or every short note with a trailing blank page would
+    # hold forever waiting for a reading that could never find anything.
+    if consensus is not None and source_evidence is not None:
+        from app.contracts.source_evidence import PageStatus as _PageStatus
+        _blocking_pages = [
+            p for p in consensus.recall_uncovered_pages
+            if source_evidence.page(p) is not None
+            and source_evidence.page(p).status is not _PageStatus.BLANK]
+        if _blocking_pages:
+            pre_retrieval_gates.append(GateResult(
+                "recall_page_coverage", Outcome.UNKNOWN,
+                f"page(s) {_blocking_pages} of the original document have no "
+                f"independent reading; a service documented only there would be "
+                f"silently omitted from the claim",
+                "independent document recall (issue #6 F7-R3)", retryable=True))
     lines = []
     for fact in facts:
         _it = _elig_state.get(fact.fact_id)
@@ -582,7 +604,8 @@ def code_encounter(
         # the record supports a specific one but verification is split.
         if line.resolved and fact.kind is FactKind.DIAGNOSIS:
             line = resolution.refine_diagnosis_specificity(
-                line, source, verify_llm, corroborate_llm)
+                line, source, verify_llm, corroborate_llm,
+                reconciliation=source_reconciliation)
         if line.resolved and line.fact.billable:
             # Data-driven bundling filter: a resolved code the source declares
             # NOT separately reportable (bundled / non-covered / MUE 0) is kept
@@ -1276,6 +1299,24 @@ def dedup_lines(result: CodingResult) -> None:
     # to 3 instead of the documented 2. Testing against every occurrence already
     # recognized, not only the first, is what a genuine multi-occurrence cluster needs.
     reps_by_key: dict[tuple[str, str], list[ResolvedLine]] = {}
+    # Cluster-level cardinality, PARALLEL to reps_by_key -- one {"count": int|None,
+    # "units": int} per recognized occurrence, independent of which specific mention is
+    # "keep" (Codex F7-R3, exact-SHA re-review, defect B). Comparing every new mention
+    # only against the representative fact's CURRENT attributes made reconciliation
+    # depend on ARRIVAL ORDER: missing-then-2-then-3 compared 3 against a representative
+    # that was still "missing" (None), so 3 silently overwrote 2 instead of conflicting
+    # with it. Tracking the cluster's own running cardinality -- update on EVERY repeat,
+    # not just against whichever fact happens to be `keep` -- makes the result the same
+    # for missing->2->3, 2->missing->3, and 2->3->missing alike.
+    cluster_state: dict[tuple[str, str], list[dict]] = {}
+
+    def _seed(ln: ResolvedLine) -> dict:
+        return {"count": _coref.documented_cardinality(ln.fact.attributes),
+               "units": ln.units}
+
+    def _resync(key) -> None:
+        keep_by_key[key].units = sum(s["units"] for s in cluster_state[key])
+
     for ln in result.lines:
         if not (ln.resolved and ln.fact.billable and not ln.excluded_reason):
             continue
@@ -1284,9 +1325,10 @@ def dedup_lines(result: CodingResult) -> None:
         if keep is None:
             keep_by_key[key] = ln
             reps_by_key[key] = [ln]
+            cluster_state[key] = [_seed(ln)]
             continue
         verdicts = [
-            (rep,) + _coref.event_verdict(
+            (i,) + _coref.event_verdict(
                 left_kind=rep.fact.kind, right_kind=ln.fact.kind,
                 left_action=rep.fact.description, right_action=ln.fact.description,
                 left_attributes=rep.fact.attributes, right_attributes=ln.fact.attributes,
@@ -1294,54 +1336,58 @@ def dedup_lines(result: CodingResult) -> None:
                 right_episode=episodes.get(str(ln.fact.fact_id)),
                 explicitly_separated=frozenset(
                     (str(rep.fact.fact_id), str(ln.fact.fact_id))) in separated)
-            for rep in reps_by_key[key]]
+            for i, rep in enumerate(reps_by_key[key])]
         repeats = [v for v in verdicts if not _coref.is_additional_occurrence(v[1])]
         if repeats:
             # A repeat of an occurrence already recognized -- any match settles it; the
             # record states nothing further once one already-counted occurrence agrees.
-            _, verdict, reason = repeats[0]
+            idx, verdict, reason = repeats[0]
         else:
             # DISTINCT from every occurrence recognized so far -- a new occurrence, and
             # this mention becomes ITS OWN representative for any later mention.
             reps_by_key[key].append(ln)
-            _, verdict, reason = verdicts[-1]
+            cluster_state[key].append(_seed(ln))
+            idx, verdict, reason = verdicts[-1]
         # The merged mention's evidence is kept either way: it is what the record says
         # about this service, and losing it would make the surviving line rest on less
         # documentation than the encounter actually has.
         keep.fact.evidence = list(keep.fact.evidence) + list(ln.fact.evidence)
         if _coref.is_additional_occurrence(verdict):
-            keep.units += ln.units
             keep.rationale = (f"{keep.rationale}; a SECOND DOCUMENTED OCCURRENCE was "
                               f"folded in — {reason}")
             ln.excluded_reason = (f"second documented occurrence of {ln.chosen.code} — "
                                   f"units folded into the primary line ({reason})")
+            _resync(key)
             continue
-        # A repeated mention of the SAME occurrence. Codex F7-R3, round-9 re-review,
-        # defect C: a count stated on a LATER mention used to be discarded outright,
-        # because only the first-seen line's units ever survived -- so "documented
-        # once, then again as twice" silently billed one. Any mention's stated count is
-        # honored regardless of arrival order; two mentions that each state a
-        # DIFFERENT explicit count is the record disagreeing with itself, which no
-        # guess may resolve, so the line holds instead of picking either one.
-        keep_count = _coref.documented_cardinality(keep.fact.attributes)
+        # A repeated mention of an occurrence already recognized. Codex F7-R3: a count
+        # stated on a LATER mention used to be discarded outright, because only the
+        # arrival-order-dependent representative's units ever survived; and comparing
+        # against the representative's CURRENT attributes let a third mention silently
+        # overwrite an already-established count instead of conflicting with it. Any
+        # mention's stated count is honored into ITS CLUSTER regardless of arrival
+        # order; two mentions of the SAME occurrence that each state a DIFFERENT
+        # explicit count is the record disagreeing with itself, which no guess may
+        # resolve, so the line holds instead of picking either one.
+        state = cluster_state[key][idx]
         ln_count = _coref.documented_cardinality(ln.fact.attributes)
-        if keep_count is not None and ln_count is not None and keep_count != ln_count:
+        if state["count"] is not None and ln_count is not None and state["count"] != ln_count:
             ln.excluded_reason = (
                 f"{ln.chosen.code} is already on the claim, and the record states "
                 f"conflicting explicit counts for this occurrence "
-                f"({keep_count} vs {ln_count}) — held rather than guessed")
+                f"({state['count']} vs {ln_count}) — held rather than guessed")
             keep.chosen = None
             keep.method = ResolutionMethod.ABSTAINED
             keep.documentation_gap = (
                 f"the record states two different counts for this documented "
-                f"occurrence ({keep_count} and {ln_count}) — please confirm how many "
-                f"times it was performed")
+                f"occurrence ({state['count']} and {ln_count}) — please confirm how "
+                f"many times it was performed")
             keep.rationale = (f"{keep.rationale}; conflicting documented counts "
-                              f"({keep_count} vs {ln_count}) for one occurrence — "
+                              f"({state['count']} vs {ln_count}) for one occurrence — "
                               f"escalate rather than guess")
             continue
-        if ln.units > keep.units:
-            keep.units = ln.units
+        if ln_count is not None and state["count"] is None:
+            state["count"], state["units"] = ln_count, ln.units
+        _resync(key)
         keep.rationale = (f"{keep.rationale}; a second mention of this service was "
                           f"merged without adding units — {reason}")
         ln.excluded_reason = (f"{ln.chosen.code} is already on the claim and the "

@@ -160,25 +160,28 @@ _IDENTIFIER_AXES = frozenset({"performer_id"})
 def known_known_differences(left: dict | None, right: dict | None,
                             axes: tuple[str, ...] = DISTINGUISHING_AXES
                             ) -> tuple[str, ...]:
-    """The axes on which BOTH mentions state a value and the values GENUINELY differ.
+    """The axes on which BOTH mentions state a value and the values are GENUINELY,
+    UNAMBIGUOUSLY opposed.
 
     Known-plus-missing is NOT a difference: one reading recording an axis the other left
-    blank is an incomplete reading, not a second event.
+    blank is an incomplete reading, not a second event. Nor is a lexical restatement of
+    the SAME value: an identifier axis is compared literally (normalizing an id is never
+    correct); a free-text axis is compared on its normalized root tokens
+    (`action_form`), and an EXACT match there (or after simple case/whitespace folding)
+    is the same documented value, not a difference.
 
-    Nor is a lexical restatement of the SAME value (Codex F7-R3, round-9 re-review,
-    defect D): raw string inequality treated 'left side' as different from 'Left',
-    manufacturing a documented difference -- and therefore a billable second occurrence
-    -- out of two writers' wording rather than out of anything the record actually
-    distinguishes. An identifier axis is still compared literally (normalizing an id is
-    never correct). A free-text axis is compared on the SAME normalized root tokens
-    `action_form` reduces the clinical action to, and two values are the SAME documented
-    value when one's tokens are a SUBSET of the other's -- one writer simply adding a
-    qualifier word ('side', 'approach') the other omitted is not a second, contradicting
-    value. Two values that each carry a token the OTHER does not (neither is a subset of
-    the other) are a genuine documented difference: plain overlap is not enough, or
-    'first approach' and 'other approach' would compare equal on the shared word
-    'approach' alone. The authoritative descriptor set, never this axis check, is what
-    ultimately settles whether restated wording means one service or two.
+    A free-text axis whose values are RELATED but not identical -- sharing some root
+    but not all of it -- is deliberately NEITHER a difference here NOR treated as the
+    same value. Codex F7-R3, exact-SHA re-review: the earlier fix treated any SUBSET
+    relationship as equality ('left side' vs 'Left'), and the reviewer's counterexample
+    showed that is unsafe in the other direction too -- 'structure' is a lexical subset
+    of 'fifth structure', but the extra word may be exactly the qualifier that
+    distinguishes two different anatomical sites, approaches, or occurrences. Lexical
+    containment is not a stable terminology identity in either direction, so this
+    function commits to a difference only when the normalized tokens share NOTHING at
+    all -- a real, structural opposition wording alone can safely assert. Every other
+    inexact match is `known_known_ambiguous`, and `event_verdict` must never read
+    ambiguity as SAME_EVENT.
     """
     a, b = dict(left or {}), dict(right or {})
     out: list[str] = []
@@ -191,15 +194,41 @@ def known_known_differences(left: dict | None, right: dict | None,
             if va.lower() != vb.lower():
                 out.append(axis)
             continue
+        if va.lower() == vb.lower():
+            continue                                    # exact match -> not a difference
         fa, fb = action_form(va), action_form(vb)
-        if fa and fb:
-            if not (fa <= fb or fb <= fa):
-                out.append(axis)
-        elif va.lower() != vb.lower():
-            # Either value normalized away to nothing (e.g. below the stem floor) --
-            # fall back to a literal compare rather than reading "no signal either way"
-            # as agreement, and rather than letting an empty set's vacuous subset
-            # relationship manufacture an agreement neither value actually states.
+        if not (fa and fb):
+            out.append(axis)                             # nothing to compare but to differ
+        elif not (fa & fb):
+            out.append(axis)                             # disjoint roots -> genuinely opposed
+        # else: related but not identical -- ambiguous, not a confirmed difference here.
+    return tuple(out)
+
+
+def known_known_ambiguous(left: dict | None, right: dict | None,
+                          axes: tuple[str, ...] = DISTINGUISHING_AXES) -> tuple[str, ...]:
+    """The axes on which both mentions state a free-text value that is NEITHER an exact
+    match NOR genuinely opposed (`known_known_differences`) -- values that share some
+    normalized root but not all of it.
+
+    Wording alone cannot establish, in either direction, whether an ambiguous axis is
+    one documented value restated or a real distinguishing qualifier (Codex F7-R3,
+    exact-SHA re-review). A caller deciding whether two mentions are the SAME event must
+    treat any ambiguous axis as blocking that verdict -- never as a match, and never
+    promoted to a confirmed difference either. Identifier axes are never ambiguous: an
+    id is always compared literally.
+    """
+    a, b = dict(left or {}), dict(right or {})
+    out: list[str] = []
+    for axis in axes:
+        if axis in _IDENTIFIER_AXES:
+            continue
+        va = str(a.get(axis, "") or "").strip()
+        vb = str(b.get(axis, "") or "").strip()
+        if not (va and vb) or va.lower() == vb.lower():
+            continue
+        fa, fb = action_form(va), action_form(vb)
+        if fa and fb and (fa & fb):
             out.append(axis)
     return tuple(out)
 
@@ -245,6 +274,17 @@ def event_verdict(*, left_kind: Any, right_kind: Any,
     if axes:
         return DISTINCT_EVENT, ("the record states different values for "
                                 + ", ".join(axes))
+    # Codex F7-R3, exact-SHA re-review: a RELATED-but-not-identical free-text value
+    # ('structure' vs 'fifth structure') must never let this reach SAME_EVENT below --
+    # the extra wording may be exactly the qualifier that distinguishes two real
+    # events, and wording alone cannot settle which. Checked BEFORE the action/episode
+    # tests below, because neither of those may override an axis this ambiguous.
+    ambiguous = known_known_ambiguous(left_attributes, right_attributes)
+    if ambiguous:
+        return UNDETERMINED, (
+            "the record states related but not identical values for "
+            + ", ".join(ambiguous) + " -- wording alone does not establish whether "
+            "this is the same documented value or a distinguishing qualifier")
     le, re_ = str(left_episode or ""), str(right_episode or "")
     if le and re_ and le != re_:
         return DISTINCT_EVENT, "documented in different service episodes"
