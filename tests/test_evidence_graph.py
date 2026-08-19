@@ -280,19 +280,20 @@ class CannotLinkConstraints(unittest.TestCase):
         self.assertTrue(any("cannot-link" in p for p in problems), problems)
 
     def test_known_known_attribute_conflict_is_recorded_as_a_constraint(self):
-        # Fully DISJOINT normalized tokens -- nothing shared at all -- so this is an
-        # unambiguous documented difference, not the merely-related-but-inexact
-        # wording `known_known_ambiguous` exists to NOT treat as a confirmed one.
+        # LATERALITY is a closed clinical enumeration (compared literally, no synonym
+        # risk the way open vocabulary like "approach" has -- Codex F7-R3, exact-SHA
+        # re-review, third pass), so a genuine inequality here is an unambiguous,
+        # confirmed documented difference.
         a = _fact("F1", FactKind.PROCEDURE, "documented procedure action",
                   spans=[_span("Procedure performed today", span_id="p1")],
-                  attributes={"approach": "anterior"})
+                  attributes={"laterality": "left"})
         b = _fact("F2", FactKind.PROCEDURE, "documented procedure action",
                   spans=[_span("A second, separately documented procedure",
                                span_id="p2")],
-                  attributes={"approach": "posterior"})
+                  attributes={"laterality": "right"})
         compiled = _graph([a, b], [])
         bases = [c.basis for c in compiled.cannot_links]
-        self.assertTrue(any("approach" in basis for basis in bases), bases)
+        self.assertTrue(any("laterality" in basis for basis in bases), bases)
 
 
 # ---------------------------------------------------------------------------
@@ -1751,16 +1752,27 @@ class IndependentDocumentRecall(unittest.TestCase):
 
 
 class AxisComparisonIsNormalized(unittest.TestCase):
-    """Codex F7-R3: `known_known_differences` used to compare axis values as raw,
-    lowercased strings, so two spellings of the SAME documented value manufactured a
-    distinguishing axis -- and therefore a false DISTINCT_EVENT verdict and an extra
-    billed occurrence -- purely from wording (round-9 re-review, defect D). The first
-    fix treated any lexical SUBSET relationship as equality, which the exact-SHA
-    re-review then showed unsafe in the other direction: 'structure' is a subset of
-    'fifth structure', but the extra word may be exactly what distinguishes two real
-    events. The current version commits to a difference only on a fully DISJOINT
-    normalized token set, and treats anything else inexact as AMBIGUOUS -- which must
-    block a SAME_EVENT verdict without being promoted to a confirmed difference."""
+    """Codex F7-R3 (round-9 re-review defect D; exact-SHA re-review, second and third
+    passes). Three rounds of the same underlying lesson:
+
+      1. `known_known_differences` compared axis values as raw, lowercased strings, so
+         two spellings of the SAME documented value manufactured a distinguishing axis
+         and a false extra billed occurrence purely from wording.
+      2. Treating a lexical SUBSET relationship as equality ('structure' vs 'fifth
+         structure') was unsafe: the extra word can be exactly the qualifier that
+         distinguishes two real events.
+      3. Treating a fully DISJOINT normalized token set as a confirmed difference is
+         ALSO unsafe: 'great toe' and 'hallux' share no root at all and denote the
+         identical anatomy -- a synonym pair no stemmer can be expected to unify.
+
+    The current version is TYPE-AWARE: a CLOSED, small clinical enumeration the record
+    states directly (laterality) has no synonym risk and is compared literally, so a
+    genuine inequality there is a confirmed difference. OPEN clinical vocabulary
+    (anatomy, approach, site, session, objective, encounter) has no versioned
+    terminology-normalization service backing it in this codebase, so lexical shape may
+    establish IDENTITY (an exact match) but never DIFFERENCE -- an inexact match is
+    always ambiguous, which must block a SAME_EVENT verdict without being promoted to a
+    confirmed difference either."""
 
     def test_an_exact_match_after_case_folding_is_not_a_documented_difference(self):
         from claude_coder import coreference as cr
@@ -1768,28 +1780,33 @@ class AxisComparisonIsNormalized(unittest.TestCase):
             cr.known_known_differences({"laterality": "Left"},
                                        {"laterality": "left"}), ())
         self.assertEqual(
-            cr.known_known_ambiguous({"laterality": "Left"},
-                                     {"laterality": "left"}), ())
+            cr.known_known_differences({"anatomy": "Great Toe"},
+                                       {"anatomy": "great toe"}), ())
+        self.assertEqual(
+            cr.known_known_ambiguous({"anatomy": "Great Toe"},
+                                     {"anatomy": "great toe"}), ())
 
-    def test_related_but_inexact_wording_is_ambiguous_not_a_difference(self):
-        """'left side' vs 'Left' -- and Codex's exact counterexample, 'structure' vs
-        'fifth structure' -- share a root but are not identical. Neither may be
-        established as the same value, and neither may be promoted to a confirmed
-        difference from wording alone."""
+    def test_open_vocabulary_synonyms_are_ambiguous_never_a_confirmed_difference(self):
+        """Codex's exact exact-SHA counterexample: 'great toe' and 'hallux' are
+        synonyms for the identical anatomy, but share NO normalized root at all -- the
+        prior (disjoint-means-different) fix called this a confirmed difference.
+        Neither disjoint tokens nor lexical containment may establish a difference on
+        OPEN vocabulary; both are merely ambiguous."""
         from claude_coder import coreference as cr
-        for a, b in (("left side", "Left"), ("structure", "fifth structure"),
+        for a, b in (("great toe", "hallux"), ("structure", "fifth structure"),
                     ("first approach", "other approach")):
             with self.subTest(a=a, b=b):
                 self.assertEqual(
-                    cr.known_known_differences({"laterality": a},
-                                               {"laterality": b}), ())
+                    cr.known_known_differences({"anatomy": a},
+                                               {"anatomy": b}), ())
                 self.assertEqual(
-                    cr.known_known_ambiguous({"laterality": a},
-                                             {"laterality": b}), ("laterality",))
+                    cr.known_known_ambiguous({"anatomy": a},
+                                             {"anatomy": b}), ("anatomy",))
 
-    def test_genuinely_different_free_text_values_still_differ(self):
-        """Fully DISJOINT normalized tokens -- nothing shared at all -- remain a
-        confirmed, unambiguous difference."""
+    def test_a_closed_enumeration_still_confirms_a_genuine_difference(self):
+        """Laterality has no synonym-collision risk the way open anatomy text does, so
+        it is compared literally: a genuine inequality remains a confirmed difference,
+        and it is never ambiguous."""
         from claude_coder import coreference as cr
         self.assertEqual(
             cr.known_known_differences({"laterality": "left"},
@@ -1800,19 +1817,52 @@ class AxisComparisonIsNormalized(unittest.TestCase):
 
     def test_an_ambiguous_axis_never_lets_two_mentions_read_as_the_same_event(self):
         """Codex's exact scenario: the same documented action, but ANATOMY worded as
-        'structure' in one mention and 'fifth structure' in the other. This must
-        return UNDETERMINED, never SAME_EVENT -- the extra word may be a real
-        distinguishing qualifier the coreference test cannot rule out from wording
-        alone."""
+        'great toe' in one mention and 'hallux' in the other -- a real synonym pair.
+        This must return UNDETERMINED, never SAME_EVENT (a wrongly merged line could
+        under-report a real second service) and never DISTINCT_EVENT (which is exactly
+        the overbilling defect this fix closes)."""
         from claude_coder import coreference as cr
         verdict, reason = cr.event_verdict(
             left_kind="procedure", right_kind="procedure",
             left_action="excision procedure alpha performed",
             right_action="excision procedure alpha performed",
-            left_attributes={"anatomy": "structure"},
-            right_attributes={"anatomy": "fifth structure"})
+            left_attributes={"anatomy": "great toe"},
+            right_attributes={"anatomy": "hallux"})
         self.assertEqual(verdict, cr.UNDETERMINED, reason)
         self.assertFalse(cr.is_additional_occurrence(verdict))
+
+    def test_the_synonym_pair_does_not_overbill_end_to_end(self):
+        """The claim-level reproduction: one performed service, mentioned twice with
+        SYNONYMOUS anatomy wording ('great toe' / 'hallux'). Before this fix, disjoint
+        normalized tokens were read as a confirmed axis difference and this billed two
+        units for one documented service."""
+        import json
+
+        note = ("Procedure alpha performed on the great toe today. "
+                "Alpha procedure completed on the hallux.")
+        primary = json.dumps({"facts": [
+            {"fact_id": "F1", "kind": "procedure",
+             "description": "excision procedure alpha performed",
+             "attributes": {"anatomy": "great toe", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Procedure alpha performed on the great toe today"],
+             "confidence": 0.99},
+            {"fact_id": "F2", "kind": "procedure",
+             "description": "procedure alpha removal completed",
+             "attributes": {"anatomy": "hallux", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Alpha procedure completed on the hallux"],
+             "confidence": 0.99}]})
+
+        result = _run_union(primary, primary, note_text=note)
+
+        billable = result.billable_lines
+        self.assertEqual([ln.chosen.code for ln in billable], ["PROC_X"], billable)
+        self.assertEqual(billable[0].units, 1,
+                         f"a synonym pair for the same anatomy is one service, not "
+                         f"two: {billable[0].rationale}")
 
     def test_identifier_axes_are_never_normalized(self):
         """An identifier is either the same identifier or it is not -- stemming it
@@ -1826,11 +1876,13 @@ class AxisComparisonIsNormalized(unittest.TestCase):
             cr.known_known_differences({"performer_id": "Actor-1"},
                                        {"performer_id": "actor-1"}), ())
 
-    def test_the_wording_variant_no_longer_overbills_end_to_end(self):
+    def test_a_laterality_case_variant_does_not_overbill_end_to_end(self):
         """The claim-level reproduction: one event, mentioned twice with LATERALITY
-        worded differently but meaning the same side. Before this fix the raw-string
-        axis compare would have called this a documented difference and billed two
-        units for one performed service."""
+        cased differently ('Left' vs 'left') but the identical closed-enumeration
+        value. Before the original fix, raw-string axis compare would have called this
+        a documented difference and billed two units for one performed service; a
+        closed enumeration is compared literally, so an exact match after case-folding
+        remains no difference."""
         import json
 
         note = ("Procedure alpha performed today on the left side. "
@@ -1839,7 +1891,7 @@ class AxisComparisonIsNormalized(unittest.TestCase):
         primary = json.dumps({"facts": [
             {"fact_id": "F1", "kind": "procedure",
              "description": "excision procedure alpha performed",
-             "attributes": {"laterality": "left side", "performer_id": "actor-1",
+             "attributes": {"laterality": "left", "performer_id": "actor-1",
                             "billing_entity_id": "actor-1"},
              "disposition": "performed_today", "negated": False,
              "evidence": ["Procedure alpha performed today on the left side"],
@@ -1847,14 +1899,14 @@ class AxisComparisonIsNormalized(unittest.TestCase):
         second = json.dumps({"facts": [
             {"fact_id": "F1", "kind": "procedure",
              "description": "excision procedure alpha performed",
-             "attributes": {"laterality": "left side", "performer_id": "actor-1",
+             "attributes": {"laterality": "left", "performer_id": "actor-1",
                             "billing_entity_id": "actor-1"},
              "disposition": "performed_today", "negated": False,
              "evidence": ["Procedure alpha performed today on the left side"],
              "confidence": 0.99},
             {"fact_id": "F2", "kind": "procedure",
              "description": "procedure alpha removal completed",
-             # SAME side, worded differently -- "Left" vs "left side".
+             # SAME closed-enumeration value, cased differently -- "Left" vs "left".
              "attributes": {"laterality": "Left", "performer_id": "actor-1",
                             "billing_entity_id": "actor-1"},
              "disposition": "performed_today", "negated": False,
@@ -1864,8 +1916,8 @@ class AxisComparisonIsNormalized(unittest.TestCase):
         billable = result.billable_lines
         self.assertEqual([ln.chosen.code for ln in billable], ["PROC_X"], billable)
         self.assertEqual(billable[0].units, 1,
-                         f"one service, restated with equivalent laterality wording, "
-                         f"is one unit: {billable[0].rationale}")
+                         f"one service, restated with the same laterality value in a "
+                         f"different case, is one unit: {billable[0].rationale}")
 
 
 class OccurrenceCardinality(unittest.TestCase):

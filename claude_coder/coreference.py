@@ -156,6 +156,17 @@ def action_identity(left: Any, right: Any) -> str:
 #: not; stemming one could accidentally equate two different ids or split one in half.
 _IDENTIFIER_AXES = frozenset({"performer_id"})
 
+#: Axes whose value space is a CLOSED, small clinical enumeration the record states
+#: directly -- not open vocabulary. Compared literally (case/whitespace folding only):
+#: there is no synonym/abbreviation/eponym risk in 'left' vs 'right' the way there is
+#: in open anatomy, approach, or site text (a lay term vs its clinical synonym), so a genuine
+#: inequality here IS a confirmed, unambiguous difference. (Codex F7-R3, exact-SHA
+#: re-review, third pass.)
+_ENUMERATED_AXES = frozenset({"laterality"})
+
+#: Axes exempt from lexical-shape comparison entirely -- see `known_known_differences`.
+_LITERAL_AXES = _IDENTIFIER_AXES | _ENUMERATED_AXES
+
 
 def known_known_differences(left: dict | None, right: dict | None,
                             axes: tuple[str, ...] = DISTINGUISHING_AXES
@@ -164,24 +175,28 @@ def known_known_differences(left: dict | None, right: dict | None,
     UNAMBIGUOUSLY opposed.
 
     Known-plus-missing is NOT a difference: one reading recording an axis the other left
-    blank is an incomplete reading, not a second event. Nor is a lexical restatement of
-    the SAME value: an identifier axis is compared literally (normalizing an id is never
-    correct); a free-text axis is compared on its normalized root tokens
-    (`action_form`), and an EXACT match there (or after simple case/whitespace folding)
-    is the same documented value, not a difference.
+    blank is an incomplete reading, not a second event.
 
-    A free-text axis whose values are RELATED but not identical -- sharing some root
-    but not all of it -- is deliberately NEITHER a difference here NOR treated as the
-    same value. Codex F7-R3, exact-SHA re-review: the earlier fix treated any SUBSET
-    relationship as equality ('left side' vs 'Left'), and the reviewer's counterexample
-    showed that is unsafe in the other direction too -- 'structure' is a lexical subset
-    of 'fifth structure', but the extra word may be exactly the qualifier that
-    distinguishes two different anatomical sites, approaches, or occurrences. Lexical
-    containment is not a stable terminology identity in either direction, so this
-    function commits to a difference only when the normalized tokens share NOTHING at
-    all -- a real, structural opposition wording alone can safely assert. Every other
-    inexact match is `known_known_ambiguous`, and `event_verdict` must never read
-    ambiguity as SAME_EVENT.
+    Codex F7-R3, exact-SHA re-review, third pass: raw lexical SHAPE -- token overlap,
+    subset containment, or disjointness -- is not a stable terminology identity in
+    EITHER direction for OPEN clinical vocabulary (anatomy, approach, site, session,
+    objective, encounter). The prior fix treated disjoint normalized tokens as a
+    confirmed difference; the reviewer's counterexample showed that is unsafe too --
+    a lay term and its clinical synonym for the same structure can share no root at
+    all, a pair no stemmer can be expected to unify. Without a versioned terminology-
+    normalization service (this codebase has none for free-text anatomy/approach/site,
+    only code-level synonym indexes keyed to whole clinical phrases, not isolated axis
+    values), the only claim wording alone can safely make about OPEN vocabulary is
+    IDENTITY: an exact match (after case/whitespace folding) is the same documented
+    value; anything else is `known_known_ambiguous`, never promoted to a confirmed
+    difference by disjointness, containment, or any other lexical heuristic.
+
+    A CLOSED, small clinical enumeration the record states directly (laterality) carries
+    none of that synonym risk, so a literal inequality there remains a confirmed
+    difference, exactly like an identifier axis (performer_id). Genuine distinctness
+    from OPEN vocabulary is established elsewhere in this system -- an explicit
+    SEPARATE_FROM relation (`explicitly_separated`, checked before this function even
+    runs) or a different service episode -- never by comparing two anatomy strings.
     """
     a, b = dict(left or {}), dict(right or {})
     out: list[str] = []
@@ -190,45 +205,33 @@ def known_known_differences(left: dict | None, right: dict | None,
         vb = str(b.get(axis, "") or "").strip()
         if not (va and vb):
             continue
-        if axis in _IDENTIFIER_AXES:
-            if va.lower() != vb.lower():
-                out.append(axis)
-            continue
-        if va.lower() == vb.lower():
-            continue                                    # exact match -> not a difference
-        fa, fb = action_form(va), action_form(vb)
-        if not (fa and fb):
-            out.append(axis)                             # nothing to compare but to differ
-        elif not (fa & fb):
-            out.append(axis)                             # disjoint roots -> genuinely opposed
-        # else: related but not identical -- ambiguous, not a confirmed difference here.
+        if axis in _LITERAL_AXES and va.lower() != vb.lower():
+            out.append(axis)
+        # OPEN vocabulary: an exact match is not a difference; an inexact one is
+        # ambiguous (`known_known_ambiguous`), never a confirmed difference here.
     return tuple(out)
 
 
 def known_known_ambiguous(left: dict | None, right: dict | None,
                           axes: tuple[str, ...] = DISTINGUISHING_AXES) -> tuple[str, ...]:
-    """The axes on which both mentions state a free-text value that is NEITHER an exact
-    match NOR genuinely opposed (`known_known_differences`) -- values that share some
-    normalized root but not all of it.
+    """The OPEN-vocabulary axes on which both mentions state a value that is not an
+    exact match (even after case/whitespace folding).
 
-    Wording alone cannot establish, in either direction, whether an ambiguous axis is
-    one documented value restated or a real distinguishing qualifier (Codex F7-R3,
-    exact-SHA re-review). A caller deciding whether two mentions are the SAME event must
-    treat any ambiguous axis as blocking that verdict -- never as a match, and never
-    promoted to a confirmed difference either. Identifier axes are never ambiguous: an
-    id is always compared literally.
+    Raw lexical shape cannot establish, in either direction, whether an inexact match on
+    open clinical vocabulary is a synonym/abbreviation/eponym for the SAME concept or a
+    genuinely different one (Codex F7-R3, exact-SHA re-review, third pass) -- so a
+    caller deciding whether two mentions are the SAME event must treat any ambiguous
+    axis as blocking that verdict, never as a match. Identifier and enumerated axes are
+    never ambiguous: `known_known_differences` already compares them literally.
     """
     a, b = dict(left or {}), dict(right or {})
     out: list[str] = []
     for axis in axes:
-        if axis in _IDENTIFIER_AXES:
+        if axis in _LITERAL_AXES:
             continue
         va = str(a.get(axis, "") or "").strip()
         vb = str(b.get(axis, "") or "").strip()
-        if not (va and vb) or va.lower() == vb.lower():
-            continue
-        fa, fb = action_form(va), action_form(vb)
-        if fa and fb and (fa & fb):
+        if va and vb and va.lower() != vb.lower():
             out.append(axis)
     return tuple(out)
 
