@@ -619,6 +619,32 @@ class SelectionUniquenessTest(unittest.TestCase):
         self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
         self.assertNotIn("SYN_B", line.tie_record["eliminated"])
 
+    def test_a_named_elimination_from_an_unlocatable_quotation_does_not_release(self):
+        """Codex F8-R1, exact-SHA re-review, second pass: the previous fix refused the
+        fallback only when this fact's evidence happened to be ANCHORED and a supplied
+        reconciliation rejected it. An UNANCHORED, un-locatable quotation -- one that
+        never even resolved to a span reconciliation could check -- fell through to
+        the same unsafe raw-text trust whenever a reconciliation object existed at all.
+        A quotation that cannot be located is not a weaker case than one that was
+        checked and disagreed with; both must refuse, and the refusal must depend only
+        on whether a reconciliation channel was supplied for this call -- never on
+        whether this particular fact's own evidence happened to anchor."""
+        only_one = lambda d: _ONE in d                          # noqa: E731
+        fact = ClinicalFact(
+            kind=FactKind.PROCEDURE, description="assembly service", attributes={},
+            disposition=Disposition.PERFORMED,
+            evidence=[EvidenceSpan(text=self.ONE_DOCUMENTED, start=0,
+                                   end=len(self.ONE_DOCUMENTED), anchored=False,
+                                   span_id="")],
+            confidence=0.99, fact_id="F1")
+        line = resolve(_request(fact), _source(SYN_A, SYN_B),
+                       llm=_pinned(_judge(only_one), "provider-a"),
+                       corroborate=_pinned(_judge(only_one), "provider-b"),
+                       reconciliation=_agreed("span-0"))
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
+        self.assertNotIn("SYN_B", line.tie_record["eliminated"])
+
     def test_the_corroborator_evaluates_the_shortlist_not_only_the_pick(self):
         """The corroborator's own view of the OTHER candidates has to count. Here it
         agrees with the pick — the only thing it used to be asked — while independently

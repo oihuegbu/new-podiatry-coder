@@ -747,38 +747,43 @@ def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: Cand
     it.
 
     `narrow` gives up for a THIRD reason that is not a checked-and-inconclusive document: no
-    reconciled page reading could be checked at all. That reason has TWO different causes,
-    and Codex's exact-SHA re-review found they were being treated alike:
+    reconciled page reading could be checked at all. That reason has TWO different causes:
 
-      * genuinely no anchored evidence exists for this fact at all -- unanchored spans, or no
-        reconciliation was ever supplied for this call. Most of `resolve`'s callers judge from
-        evidence text with no page-anchoring infrastructure behind it at all, so treating THIS
-        case as "unverifiable, therefore never grounded" would block the ordinary near-synonym
-        rejection this module has always done. Falling back to the RAW evidence text the
-        judging models themselves were shown is never WEAKER proof than what already grounded
-        their verdict here, because nothing stronger was ever obtainable for this fact.
-      * anchored evidence exists AND a reconciliation was supplied, but it did not confirm this
-        fact's quotations (disagreed, unverifiable, unlocated, or simply never reconciled). That
-        text is exactly what the STRONGER proof mechanism already checked and could not stand
-        behind -- falling back to it anyway launders rejected evidence into a confirmed
-        elimination, which is the same unsafe direction as the original defect, just one layer
-        deeper. This case must never fall back; it is refused exactly like a checked-and-
-        disagreeing document.
+      * genuinely no verification channel exists for this call -- `reconciliation is None`.
+        Most of `resolve`'s callers judge from evidence text with no page-anchoring
+        infrastructure behind them at all, so treating THIS case as "unverifiable, therefore
+        never grounded" would block the ordinary near-synonym rejection this module has
+        always done. Falling back to the RAW evidence text the judging models themselves were
+        shown is never WEAKER proof than what already grounded their verdict here, because
+        nothing stronger was ever obtainable for this fact.
+      * a reconciliation WAS supplied, but it did not confirm this fact's quotations --
+        disagreed, unverifiable, or (Codex's exact-SHA re-review, second pass) the quotation
+        could not even be LOCATED at all (unanchored, no span id, so it was never anchored
+        into a reading `reconciliation` could speak to in the first place). Both are the
+        reconciliation channel failing to stand behind the evidence -- an unlocatable
+        quotation is not a weaker case than a located-and-disagreed one, it is the SAME
+        failure with one less fact established. That text is exactly what the STRONGER proof
+        mechanism was supplied to check and could not stand behind -- falling back to it
+        anyway launders rejected (or unverifiable) evidence into a confirmed elimination,
+        the same unsafe direction as the original defect, one layer deeper each time. Neither
+        sub-case may fall back.
 
-    The two are told apart by whether this fact carries any ANCHORED evidence at all: only the
-    first case is a genuine absence of a channel to check against.
+    The two are told apart ONLY by whether a reconciliation object exists for this call at
+    all -- never by whether this particular fact's evidence happened to anchor successfully,
+    which is exactly the distinction the first fix drew and Codex's re-review found unsafe:
+    an anchored-but-disagreed span and an unanchored, un-locatable span are both "the
+    reconciliation channel that was supplied could not confirm this," and must both refuse.
     """
     tie = _tiebreak.narrow(fact, [winner, loser], reconciliation)
     if tie.winner is not None and tie.winner.code == winner.code:
         return True, tie.detail
     if not tie.source_integrity:
         return False, tie.detail
-    anchored = [s for s in (getattr(fact, "evidence", None) or [])
-               if getattr(s, "anchored", False) and str(getattr(s, "span_id", "") or "")]
-    if reconciliation is not None and anchored:
-        # A reconciliation channel exists and was consulted for this fact's own anchored
-        # spans, but did not confirm them -- refuse rather than fall back to the same
-        # unverified text reconciliation already declined to stand behind.
+    if reconciliation is not None:
+        # A reconciliation channel was supplied for this call but could not confirm this
+        # fact's quotations -- disagreed, unverifiable, or never locatable at all -- so
+        # refuse rather than fall back to the same evidence the channel declined to
+        # stand behind. Never conditioned on whether THIS fact happened to anchor.
         return False, tie.detail
     text = " ".join(str(getattr(s, "text", "") or "")
                     for s in (getattr(fact, "evidence", None) or []))
