@@ -351,14 +351,13 @@ def compare_axes(pairs: list[tuple[Any, Any]],
             compared += 1
             if a == b:
                 continue
-            if a and b and _coref.axis_relation(axis, a, b, source) == _coref.SAME_EVENT:
-                detail_fn = getattr(source, "concept_relation_detail", None)
-                detail = {}
-                if callable(detail_fn):
-                    try:
-                        detail = dict(detail_fn(a, b) or {})
-                    except Exception:
-                        detail = {}
+            # ONE atomic call for both the claim decision and the audit detail (Codex
+            # F7-R3-C4, exact-SHA re-review, eighth pass): the verdict this promotes on
+            # and the detail the consensus record names must come from the SAME source
+            # response, never two independent calls that could disagree.
+            verdict, detail = (_coref.axis_relation_detail(axis, a, b, source)
+                               if a and b else (_coref.UNDETERMINED, {}))
+            if verdict == _coref.SAME_EVENT:
                 span_ids = tuple(dict.fromkeys(
                     str(getattr(s, "span_id", "") or "")
                     for f in (left, right)

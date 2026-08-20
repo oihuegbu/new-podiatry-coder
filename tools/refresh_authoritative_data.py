@@ -89,6 +89,22 @@ def _run(cmd: list[str]) -> None:
     subprocess.run(cmd, cwd=str(ROOT), check=True)
 
 
+def _fsync_dir(path: Path) -> None:
+    """Best-effort: fsync a directory's own entry after a file is written or renamed
+    into it, so the change is durable across a crash immediately afterward (Codex
+    F7-R3-C5, exact-SHA re-review, eighth pass). Not every platform/filesystem
+    supports directory fsync; failing silently here is the correct degrade -- the
+    publish itself already succeeded, this only tightens the durability window."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
 # ── per-source FETCH steps (return a local file path for the prepare step) ──────
 def fetch_icd_index(tmp: Path, args) -> Path:
     url = args.icd_url or ICD_INDEX_URL_DEFAULT
@@ -191,8 +207,15 @@ SOURCES: dict[str, dict] = {
         "output": "icd10cm_index_terms.json",
         "cadence": "annual",     # NCHS ICD-10-CM: FY effective Oct 1
         "fetch": fetch_icd_index,
+        # Unlike every other builder, this one is TOLD its output path as a CLI arg
+        # rather than resolving it internally from `DATA_DIR` -- so it must read the
+        # SAME staging override `run_source` sets (issue #6 F7-R3-C5, exact-SHA
+        # re-review, eighth pass) or its write would bypass staging entirely and land
+        # directly on the published path regardless of what the subprocess env says.
         "prepare": lambda tmp, xml: [PY, "tools/parse_icd10cm_index.py", str(xml),
-                                     str(CODES / "icd10cm_index_terms.json")],
+                                     str(Path(os.environ.get("PODIATRY_DATA_DIR")
+                                              or str(DATA_DIR)) / "codes"
+                                        / "icd10cm_index_terms.json")],
     },
     "drug_table": {
         "output": "hcpcs_drug_table.json",
@@ -231,8 +254,8 @@ SOURCES: dict[str, dict] = {
 _KEYED_MAP_CONTAINERS = ("terms", "codes", "concepts")
 
 
-def _verify(output: str) -> dict:
-    path = CODES / output
+def _verify(output: str, base: Path | None = None) -> dict:
+    path = (base or CODES) / output
     if not path.exists():
         raise RuntimeError(f"expected output missing: {path}")
     data = json.loads(path.read_text())
@@ -315,31 +338,49 @@ def run_source(name: str, args) -> dict:
                                      "(set CPT_INDEX_FILE / CPT_INDEX_S3 / CPT_INDEX_URL)")
                     print("  " + rec["status"])
                     return rec
-            cmd = spec["prepare"](tmp, arg)
-            # Publication safety (Codex F7-R3-C5, exact-SHA re-review, sixth pass): every
-            # builder writes DIRECTLY to the published path (`CODES / spec["output"]`),
-            # so a run that fails partway or produces an invalid artifact overwrites the
-            # last known-good file before `_verify` below ever runs -- verification was
-            # catching damage that had already happened. Back the published file up here
-            # (inside this TemporaryDirectory, so the backup is cleaned up automatically)
-            # and restore it on ANY failure below, so a failed refresh can never leave the
-            # published path worse than it found it. This is the ONE place every source's
-            # publish step runs, so the fix covers all of them, not just this source.
-            published = CODES / spec["output"]
-            backup = tmp / f"{spec['output']}.backup"
-            had_prior = published.exists()
-            if had_prior:
-                shutil.copy2(published, backup)
-            try:
-                _run(cmd)
-                rec.update(_verify(spec["output"]))
-            except Exception:
-                if had_prior:
-                    shutil.copy2(backup, published)
-                elif published.exists():
-                    # the builder created a new, invalid file where none existed before
-                    published.unlink()
-                raise
+            # Publication safety (Codex F7-R3-C5, exact-SHA re-review, sixth/eighth
+            # passes): every builder resolves its output path from `app.core.config.
+            # DATA_DIR` (one, `icd10cm_index`, is instead TOLD its path as a CLI arg,
+            # which it also resolves through this SAME env var -- see its `prepare`
+            # lambda above). The build subprocess is run against a STAGING copy of
+            # DATA_DIR -- a same-filesystem sibling of the real data dir, so the final
+            # move is a true atomic rename, never a cross-device copy -- so the
+            # builder's own write NEVER touches the published path at all: the prior
+            # artifact stays visible to every concurrent reader for the ENTIRE build,
+            # not just until the next failure. `codes/` is mirrored into the staging
+            # copy first so a builder that cross-references an already-published table
+            # still finds it. Only after `_verify` accepts the STAGED bytes is the one
+            # output file moved into place with a single `os.replace` (atomic on a
+            # same-filesystem rename -- a reader can only ever see the complete old
+            # file or the complete new one, never a partial write).
+            #
+            # `PODIATRY_DATA_DIR` is set on THIS process's own environ, not only passed
+            # to the subprocess: `prepare(tmp, arg)` executes in THIS process and, for
+            # `icd10cm_index`, needs to see the SAME override while constructing its
+            # argv, before the subprocess it returns ever runs.
+            with tempfile.TemporaryDirectory(dir=str(DATA_DIR)) as staging_root:
+                staging_data = Path(staging_root)
+                staging_codes = staging_data / "codes"
+                if CODES.exists():
+                    shutil.copytree(CODES, staging_codes)
+                else:
+                    staging_codes.mkdir(parents=True)
+                previous_override = os.environ.get("PODIATRY_DATA_DIR")
+                os.environ["PODIATRY_DATA_DIR"] = str(staging_data)
+                try:
+                    cmd = spec["prepare"](tmp, arg)
+                    _run(cmd)
+                    verified = _verify(spec["output"], base=staging_codes)
+                finally:
+                    if previous_override is None:
+                        os.environ.pop("PODIATRY_DATA_DIR", None)
+                    else:
+                        os.environ["PODIATRY_DATA_DIR"] = previous_override
+                published = CODES / spec["output"]
+                CODES.mkdir(parents=True, exist_ok=True)
+                os.replace(staging_codes / spec["output"], published)
+                _fsync_dir(published.parent)
+                rec.update(verified)
         print(f"  OK: {rec['codes']} codes, {rec['bytes']} bytes")
     except Exception as exc:                          # a source failing never aborts the rest
         if spec.get("optional") and "empty" in str(exc).lower():

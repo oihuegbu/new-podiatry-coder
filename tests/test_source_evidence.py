@@ -1307,6 +1307,97 @@ class TrustBoundaryRevalidationTest(unittest.TestCase):
         covered = document.with_channel(channel, {1: genuine})
         self.assertTrue(covered.page(1).read_by(SECONDARY_VISION_CHANNEL_ID).usable)
 
+    def test_reordered_tokens_fabricating_a_contiguous_quote_are_refused(self):
+        """Codex F7-R3-A, exact-SHA re-review, seventh pass, exact reproduction: raw
+        text 'phrase documented' filed with the ORDERED token stream
+        ['documented', 'phrase'] -- both tokens genuinely occur in the text, so mere
+        membership accepted this, and reconciliation could then return AGREED for
+        the fabricated contiguous quote 'documented phrase', which the page never
+        actually says."""
+        import hashlib
+
+        from app.contracts.source_evidence import (ChannelKind, InvalidSourceEvidenceDocument,
+                                                    PageRead, PageStatus, ReadChannel,
+                                                    SourceToken)
+        document = _compile(self.root, [["alpha"]], ["alpha"])
+        channel = ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                              kind=ChannelKind.VISION, provider="openai")
+        raw = "phrase documented"
+        digest = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        reordered = PageRead(
+            channel_id=SECONDARY_VISION_CHANNEL_ID, page_number=1,
+            status=PageStatus.READ, text=raw, text_sha256=digest,
+            tokens=(SourceToken(text="documented", normalized="documented"),
+                   SourceToken(text="phrase", normalized="phrase")))
+        with self.assertRaises(InvalidSourceEvidenceDocument):
+            document.with_channel(channel, {1: reordered})
+
+    def test_a_token_claimed_more_times_than_it_actually_occurs_is_refused(self):
+        """Codex's exact multiplicity reproduction: raw text contains one occurrence
+        of a word, but the claimed token stream repeats it -- over-claiming
+        occurrence count is a fabrication just like reordering."""
+        import hashlib
+
+        from app.contracts.source_evidence import (ChannelKind, InvalidSourceEvidenceDocument,
+                                                    PageRead, PageStatus, ReadChannel,
+                                                    SourceToken)
+        document = _compile(self.root, [["alpha"]], ["alpha"])
+        channel = ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                              kind=ChannelKind.VISION, provider="openai")
+        raw = "alpha beta"
+        digest = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        over_claimed = PageRead(
+            channel_id=SECONDARY_VISION_CHANNEL_ID, page_number=1,
+            status=PageStatus.READ, text=raw, text_sha256=digest,
+            tokens=(SourceToken(text="alpha", normalized="alpha"),
+                   SourceToken(text="alpha", normalized="alpha"),
+                   SourceToken(text="beta", normalized="beta")))
+        with self.assertRaises(InvalidSourceEvidenceDocument):
+            document.with_channel(channel, {1: over_claimed})
+
+    def test_a_forged_read_baked_directly_into_an_incoming_document_is_refused(self):
+        """Codex's exact reproduction: `source_evidence` is itself a directly
+        caller-suppliable parameter to `code_encounter` -- a caller can hand in a
+        fully-formed `SourceEvidenceDocument` whose reads were never filed through
+        `with_channel` at all, bypassing that boundary entirely. `revalidated()`
+        must catch a forged read wherever it already sits on an incoming document,
+        not only ones added afterward."""
+        import hashlib
+
+        from app.contracts.source_evidence import (InvalidSourceEvidenceDocument, PageRead,
+                                                    PageStatus, SourceToken)
+        document = _compile(self.root, [["alpha"]], ["alpha"])
+        raw = "phrase documented"
+        digest = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        forged_read = PageRead(
+            channel_id=EMBEDDED_TEXT_CHANNEL_ID, page_number=1,
+            status=PageStatus.READ, text=raw, text_sha256=digest,
+            tokens=(SourceToken(text="documented", normalized="documented"),
+                   SourceToken(text="phrase", normalized="phrase")))
+        # Baked directly into the page's reads, bypassing `with_channel` entirely --
+        # replacing the genuine embedded-text-layer read with a forged one carrying
+        # the SAME channel id, exactly as a hand-built document could.
+        forged_pages = tuple(
+            page.model_copy(update={"reads": tuple(
+                forged_read if r.channel_id == EMBEDDED_TEXT_CHANNEL_ID else r
+                for r in page.reads)})
+            if page.page_number == 1 else page
+            for page in document.pages)
+        forged_document = document.model_copy(update={"pages": forged_pages})
+        with self.assertRaises(InvalidSourceEvidenceDocument):
+            forged_document.revalidated()
+
+    def test_a_genuine_document_revalidates_identically(self):
+        """The fix must not disturb an ordinary, already-valid compiled document --
+        `revalidated()` is safe to run unconditionally."""
+        document = _compile(self.root, [["alpha beta"], ["gamma delta"]],
+                            ["alpha beta", "gamma delta"])
+        revalidated = document.revalidated()
+        self.assertEqual(revalidated.document_sha256, document.document_sha256)
+        self.assertEqual(
+            [p.read_by(EMBEDDED_TEXT_CHANNEL_ID).text_sha256 for p in revalidated.pages],
+            [p.read_by(EMBEDDED_TEXT_CHANNEL_ID).text_sha256 for p in document.pages])
+
 
 class ChannelBindingTest(unittest.TestCase):
     """Codex F7-R3-A, exact-SHA re-review, fifth pass: `with_channel` attached

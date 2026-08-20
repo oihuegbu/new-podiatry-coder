@@ -2291,6 +2291,40 @@ class WholeEncounterGovernedTerminology(unittest.TestCase):
                          {"term alpha", "term beta"})
         self.assertEqual(matches[0].get("verdict"), CONCEPT_SAME)
 
+    def test_the_claim_decision_and_the_audit_record_cannot_split_brain(self):
+        """Codex F7-R3-C4, exact-SHA re-review, eighth pass, exact reproduction: the
+        prior version let the claim decision call `source.concept_relation` while the
+        audit detail came from a SEPARATE call to `source.concept_relation_detail` --
+        two independent calls to a best-effort source that could legitimately answer
+        differently. A source engineered to do exactly that (bare method says SAME,
+        detail method says unresolved) must not be able to produce a released claim
+        whose own certificate disagrees about what authorized it: since there is now
+        only ONE call, the claim and the audit are governed by whichever the detail
+        method says -- here, unresolved -- so the encounter must HOLD, never bill
+        while naming a different, more permissive relation in its own defense."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.terminology import CONCEPT_SAME, CONCEPT_UNRESOLVED
+
+        class _SplitBrainSource(MockSource):
+            def concept_relation(self, term_a, term_b):
+                return CONCEPT_SAME   # the bare method LIES
+
+            def concept_relation_detail(self, term_a, term_b):
+                return {"verdict": CONCEPT_UNRESOLVED}   # the detail method disagrees
+
+        primary, second = self._readings("term alpha", "term beta")
+        note = "Procedure alpha performed today, described both ways."
+        src = _SplitBrainSource(records={("PROC_X", "cpt"): {"active": True}})
+
+        result = _run_union(primary, second, note_text=note, source=src)
+
+        self.assertEqual(result.billable_lines, [], result.billable_lines)
+        matches = (result.consensus or {}).get("governed_matches") or []
+        self.assertEqual(matches, [],
+                         "no relation was CONFIRMED (the detail method -- the only "
+                         "one now consulted -- said unresolved), so nothing may be "
+                         "recorded as a governed match either")
+
 
 class OccurrenceCardinality(unittest.TestCase):
     """Defect B: a repeated MENTION is not a repeated SERVICE."""

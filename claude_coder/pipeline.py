@@ -217,6 +217,22 @@ def code_encounter(
     from .modifiers import ModifierEngine
     source = source or AuthoritativeSource()
 
+    # ---- Trust boundary for a CALLER-SUPPLIED source_evidence document ---------------
+    # `source_evidence` is directly caller-suppliable, so a caller can hand in a
+    # fully-formed `SourceEvidenceDocument` whose reads never passed through
+    # `with_channel`'s trust-boundary revalidation at all (issue #6 F7-R3-A, exact-SHA
+    # re-review, seventh pass). Revalidating unconditionally here -- not only for reads
+    # added later -- closes that gap: a genuinely valid document reconstructs
+    # identically, so this costs nothing for the ordinary case (a document from the
+    # trusted compiler) and refuses a forged one before a single quotation is
+    # reconciled against it.
+    if source_evidence is not None:
+        try:
+            source_evidence = source_evidence.revalidated()
+        except Exception as exc:
+            return _system_hold_result(encounter_id, date_of_service,
+                                       "source_evidence_integrity", exc, source)
+
     # ---- Fail-closed boundary for the data CLAIM ASSEMBLY reads ----------------------
     # `pfs_indicators` (global period + bilateral indicator) and `modifier_definitions` are
     # REQUIRED release sources consumed while the claim is being BUILT -- per-line

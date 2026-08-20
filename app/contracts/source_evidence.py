@@ -375,15 +375,44 @@ class SourcePage(_Strict):
         return None
 
 
+def _tokens_consistent_with_text(tokens: tuple, text: str) -> bool:
+    """Do these tokens, IN THE CLAIMED ORDER, form a genuine subsequence of the
+    read's own whitespace tokenization -- never reordered, never claimed more times
+    than they actually occur?
+
+    Codex F7-R3-A, exact-SHA re-review, seventh pass: mere membership ("this token's
+    text occurs SOMEWHERE in the text") does not rule out a caller REORDERING real
+    words into a fabricated contiguous phrase (raw text "phrase documented" filed as
+    the ordered stream ["documented", "phrase"] certifies the fabricated quote
+    "documented phrase"), or CLAIMING a token more times than the text actually
+    contains it. Walking `text.split()` forward once, consuming one word per claimed
+    token in order, catches both: a reordered token has no unconsumed match left
+    AHEAD of the current position, and an over-claimed token runs out of remaining
+    occurrences. This is exactly how `text` and its tokens are constructed together
+    everywhere in this codebase today (`build_page_read`'s own tokenizer, and the
+    embedded-text-layer's `text = " ".join(t.text for t in tokens)`), so a
+    genuinely-produced read always satisfies it.
+    """
+    words = text.split()
+    i = 0
+    for token in tokens:
+        while i < len(words) and words[i] != token.text:
+            i += 1
+        if i >= len(words):
+            return False
+        i += 1
+    return True
+
+
 def _revalidated_read(read: PageRead) -> PageRead:
     """Reconstruct one `PageRead`'s status/content invariants AND its digest/token
     provenance from its own raw fields, refusing anything that disagrees with what it
     claims. This is the ONE trust-boundary validator every filed read passes through
-    (Codex F7-R3-A, exact-SHA re-review, sixth pass) -- `with_channel` is where a
-    caller-supplied reader's output first enters a trusted document, so it is where
-    "trust nothing the object merely claims about itself" has to live.
+    (Codex F7-R3-A, exact-SHA re-review, sixth/seventh passes) -- `with_channel` is
+    where a caller-supplied reader's output first enters a trusted document, so it is
+    where "trust nothing the object merely claims about itself" has to live.
 
-    Two gaps closed together, because both let an object carry a claim its own raw
+    Gaps closed together, because each lets an object carry a claim its own raw
     fields do not support:
       * `model_copy(update=...)` never re-runs a pydantic validator -- a VALID `READ`
         object copied to `status=BLANK` with empty content bypassed `PageRead`'s own
@@ -395,8 +424,11 @@ def _revalidated_read(read: PageRead) -> PageRead:
         checked against the raw `text`/`SourceToken.text` they describe -- so an
         object could carry real-looking tokens and an empty digest describing content
         its own `text` field never contained. Both are recomputed here with the SAME
-        functions the shared builder uses, and any token whose raw text does not even
-        appear in this read's own `text` is refused outright.
+        functions the shared builder uses.
+      * A token whose text occurred SOMEWHERE in `text` was accepted even out of
+        order or over-claimed in count -- `_tokens_consistent_with_text` (above)
+        closes both: the full claimed token sequence must be a genuine, in-order,
+        multiplicity-respecting subsequence of the read's own tokenization.
     """
     try:
         read = PageRead(**read.model_dump())
@@ -415,10 +447,11 @@ def _revalidated_read(read: PageRead) -> PageRead:
                 f"page {read.page_number} read on channel {read.channel_id!r} carries "
                 f"a token {token.text!r} whose normalized form does not match its own "
                 f"text")
-        if token.text not in read.text:
-            raise InvalidSourceEvidenceDocument(
-                f"page {read.page_number} read on channel {read.channel_id!r} carries "
-                f"a token {token.text!r} that does not appear anywhere in its own text")
+    if not _tokens_consistent_with_text(read.tokens, read.text):
+        raise InvalidSourceEvidenceDocument(
+            f"page {read.page_number} read on channel {read.channel_id!r} carries a "
+            f"token sequence that is not a genuine in-order reading of its own text "
+            f"(reordered, over-claimed, or otherwise fabricated)")
     return read
 
 
@@ -595,6 +628,28 @@ class SourceEvidenceDocument(_Strict):
             page.model_copy(update={"reads": page.reads + (reads[page.page_number],)})
             if page.page_number in reads else page
             for page in self.pages)
+
+    def revalidated(self) -> "SourceEvidenceDocument":
+        """Every read ALREADY on this document, reconstructed and re-verified through
+        `_revalidated_read` -- not only reads added later through `with_channel`.
+
+        Codex F7-R3-A, exact-SHA re-review, seventh pass: `with_channel` closes the
+        boundary for reads a caller-supplied reader adds AFTER a document exists, but
+        `source_evidence` is itself a directly caller-suppliable parameter
+        (`pipeline.code_encounter(..., source_evidence=...)`) -- a caller can hand in
+        a fully-formed `SourceEvidenceDocument` whose reads were never filed through
+        `with_channel` at all, bypassing that boundary entirely. This is the SAME
+        check applied once, up front, to a whole document, regardless of whether it
+        came from the trusted compiler or was constructed directly: a genuinely valid
+        document reconstructs identically, so this is safe to run unconditionally
+        rather than trying to distinguish "trusted" from "untrusted" documents -- the
+        distinction that let this gap exist in the first place.
+        """
+        pages = tuple(
+            page.model_copy(update={
+                "reads": tuple(_revalidated_read(r) for r in page.reads)})
+            for page in self.pages)
+        return self.model_copy(update={"pages": pages})
 
     # ----------------------------------------------------------- serialization
 

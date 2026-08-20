@@ -197,17 +197,29 @@ _LATERALITY_DISJOINT_PAIR = frozenset({"left", "right"})
 _CONCEPT_GOVERNED_AXES = frozenset({"anatomy"})
 
 
-def axis_relation(axis: str, va: str, vb: str, source: Any = None) -> str:
-    """SAME_EVENT, DISTINCT_EVENT, or UNDETERMINED for one axis's two stated values.
+def axis_relation_detail(axis: str, va: str, vb: str,
+                         source: Any = None) -> tuple[str, dict]:
+    """(SAME_EVENT/DISTINCT_EVENT/UNDETERMINED, auditable detail dict) for one axis's
+    two stated values -- the ONE atomic call every stage makes to the governed source,
+    so the verdict a claim decision ACTS ON and the detail an audit record NAMES can
+    never disagree (Codex F7-R3-C4, exact-SHA re-review, eighth pass: the prior
+    version let claim assembly call `source.concept_relation` while the consensus
+    record separately called `source.concept_relation_detail` -- two independent
+    calls to a REVIEWED-OPTIONAL, best-effort source that could legitimately answer
+    differently or one could raise while the other didn't, so a released claim and
+    its own certificate could name a different relation for the same pair). `detail`
+    is `{}` for every axis/value pair that never reaches the governed source (an
+    identifier axis, a canonical-enumeration axis, or an exact lexical match) -- there
+    is nothing beyond the verdict itself to audit for those.
 
-    PUBLIC (issue #6 F7-R3-C4): this is the ONE axis-relation mechanic every stage of
-    the pipeline that compares two documented values must consult -- claim assembly
+    `axis_relation` (below) is a thin wrapper returning just the verdict, for the
+    (more common) callers that do not need the detail.
+
+    PUBLIC: this is the ONE axis-relation mechanic every stage of the pipeline that
+    compares two documented values must consult -- claim assembly
     (`pipeline.dedup_lines`), event coreference (`event_union._corefers_with_primary`),
     cross-reading axis consensus (`graph_consensus.compare_axes`), and eligibility's
-    known-known conflict check. Two competing implementations of "is this the same
-    value" is exactly how a governed concept match could settle claim assembly while
-    an earlier stage, still comparing raw strings, held or diverged the same pair
-    first -- so there is now only one.
+    known-known conflict check.
 
     Identifier axes (performer_id): an id is either the same id or a different one --
     no overlap semantics, so any inequality is a confirmed difference.
@@ -224,12 +236,13 @@ def axis_relation(axis: str, va: str, vb: str, source: Any = None) -> str:
     stored value may be an arbitrary string) -- gets the conservative open-vocabulary
     treatment: an exact match (case/whitespace folded) is the same value. For an axis
     in `_CONCEPT_GOVERNED_AXES`, an inexact match is then put to the governed concept
-    graph (`source.concept_relation`) when a `source` was supplied: only a confirmed
-    SAME concept promotes to SAME_EVENT. DISTINCT_EVENT is never reachable from the
-    concept graph (issue #6 F7-R3-C3): an IS_A subsumption hierarchy has no basis to
-    assert two concepts are opposed, so `ConceptRelationIndex` never returns DISJOINT,
-    and this function does not invent a promotion path for one. An
-    ancestor/descendant relation, an ambiguous overlap, or an unresolved term -- like
+    graph (`source.concept_relation_detail`) when a `source` was supplied: only a
+    confirmed, internally-consistent SAME concept promotes to SAME_EVENT.
+    DISTINCT_EVENT is never reachable from the concept graph (issue #6 F7-R3-C3): an
+    IS_A subsumption hierarchy has no basis to assert two concepts are opposed, so
+    `ConceptRelationIndex` never returns DISJOINT, and this function does not invent a
+    promotion path for one. An ancestor/descendant relation, an ambiguous overlap, a
+    missing/exceptional/internally-mismatched detail, or an unresolved term -- like
     every other open axis, and like this axis when no `source` is available at all --
     stays UNDETERMINED. Lexical shape alone never establishes a confirmed
     DISTINCT_EVENT for open text (Codex F7-R3-C, exact-SHA re-review, third pass) or
@@ -237,28 +250,35 @@ def axis_relation(axis: str, va: str, vb: str, source: Any = None) -> str:
     graph is consulted precisely because it is authoritative data, not lexical shape.
     """
     if axis in _IDENTIFIER_AXES:
-        return SAME_EVENT if va.lower() == vb.lower() else DISTINCT_EVENT
+        return (SAME_EVENT if va.lower() == vb.lower() else DISTINCT_EVENT), {}
     if (axis in _ENUMERATED_AXES and va.lower() in _CANONICAL_LATERALITY
             and vb.lower() in _CANONICAL_LATERALITY):
         a, b = va.lower(), vb.lower()
         if a == b:
-            return SAME_EVENT
+            return SAME_EVENT, {}
         if {a, b} == _LATERALITY_DISJOINT_PAIR:
-            return DISTINCT_EVENT
-        return UNDETERMINED
+            return DISTINCT_EVENT, {}
+        return UNDETERMINED, {}
     if va.lower() == vb.lower():
-        return SAME_EVENT
+        return SAME_EVENT, {}
     if axis in _CONCEPT_GOVERNED_AXES and source is not None:
-        concept_relation = getattr(source, "concept_relation", None)
-        if callable(concept_relation):
+        detail_fn = getattr(source, "concept_relation_detail", None)
+        if callable(detail_fn):
             from .terminology import CONCEPT_SAME
             try:
-                verdict = concept_relation(va, vb)
+                detail = dict(detail_fn(va, vb) or {})
             except Exception:
-                verdict = None
-            if verdict == CONCEPT_SAME:
-                return SAME_EVENT
-    return UNDETERMINED
+                detail = {}
+            if detail.get("verdict") == CONCEPT_SAME:
+                return SAME_EVENT, detail
+            return UNDETERMINED, detail
+    return UNDETERMINED, {}
+
+
+def axis_relation(axis: str, va: str, vb: str, source: Any = None) -> str:
+    """SAME_EVENT, DISTINCT_EVENT, or UNDETERMINED for one axis's two stated values --
+    see `axis_relation_detail` for the full mechanic and its auditable basis."""
+    return axis_relation_detail(axis, va, vb, source)[0]
 
 
 def known_known_differences(left: dict | None, right: dict | None,

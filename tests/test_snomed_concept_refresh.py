@@ -126,22 +126,71 @@ class SnomedConceptTermsRefreshRegression(unittest.TestCase):
                 refresh.CODES = old_codes
 
 
+def _staged_builder_script(payload_json: str, *, echo_published: Path | None = None) -> list[str]:
+    """A fake builder command matching the REAL contract every builder follows
+    (issue #6 F7-R3-C5, exact-SHA re-review, eighth pass): it resolves its OWN output
+    path from `PODIATRY_DATA_DIR` (falling back to the real data dir), exactly like
+    `app.core.config.DATA_DIR` does -- never a path baked in by the test itself, which
+    would silently skip staging and prove nothing.
+
+    `echo_published`, when given, makes the fake builder READ BACK the REAL published
+    path WHILE it runs (before it writes anything) and records what it saw to a
+    marker file next to it -- the concurrent-reader proof: a reader consulting the
+    published path DURING the build must see the untouched prior bytes, never the
+    in-progress staged write.
+    """
+    echo = ""
+    if echo_published is not None:
+        marker = echo_published.with_suffix(".seen_during_build")
+        echo = (f"import shutil\n"
+               f"src = {str(echo_published)!r}\n"
+               f"try:\n"
+               f"    shutil.copy2(src, {str(marker)!r})\n"
+               f"except FileNotFoundError:\n"
+               f"    open({str(marker)!r}, 'w').write('<absent>')\n")
+    script = (
+        "import json, os, pathlib\n"
+        f"{echo}"
+        "base = pathlib.Path(os.environ.get('PODIATRY_DATA_DIR') or '.') / 'codes'\n"
+        "base.mkdir(parents=True, exist_ok=True)\n"
+        f"(base / 'fake_source.json').write_text({payload_json!r})\n"
+    )
+    return [sys.executable, "-c", script]
+
+
 class RunSourcePublicationSafetyTest(unittest.TestCase):
-    """Codex F7-R3-C5, exact-SHA re-review, sixth pass, exact reproduction: start with
-    a valid prior artifact, make `prepare` write an empty/invalid one, run
-    `run_source`. Before this fix it reported `ERROR: ... prepared but empty` but LEFT
-    THE INVALID FILE IN PLACE, destroying the prior valid artifact -- every builder
-    writes directly to the published path, so a failed run overwrites the last
-    known-good file before verification ever runs."""
+    """Codex F7-R3-C5, exact-SHA re-review, sixth/eighth passes: publication is now
+    fully staged -- every builder subprocess runs against a staging copy of the data
+    directory (`PODIATRY_DATA_DIR`), so its own write NEVER touches the published path
+    at all; only a validated staged artifact is moved into place with one atomic
+    `os.replace`. This is a materially stronger guarantee than backup-and-restore (the
+    prior artifact is never overwritten in the first place, not overwritten-then-
+    restored), and these tests prove it directly: a concurrent reader sees the
+    untouched prior bytes for the FULL duration of the build, not just after a
+    failure is caught."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.codes_dir = Path(self.tmp.name) / "codes"
-        self.codes_dir.mkdir()
+        self.data_dir = Path(self.tmp.name) / "data"
+        self.codes_dir = self.data_dir / "codes"
+        self.codes_dir.mkdir(parents=True)
 
     class _Args:
         dry_run = False
+
+    def _patched(self, refresh, prepare):
+        old_codes, old_data_dir, old_sources = (
+            refresh.CODES, refresh.DATA_DIR, refresh.SOURCES)
+        refresh.CODES = self.codes_dir
+        refresh.DATA_DIR = self.data_dir
+        refresh.SOURCES = dict(refresh.SOURCES)
+        refresh.SOURCES["fake_source"] = {"output": "fake_source.json",
+                                          "prepare": prepare}
+        return old_codes, old_data_dir, old_sources
+
+    def _restore(self, refresh, saved):
+        refresh.CODES, refresh.DATA_DIR, refresh.SOURCES = saved
 
     def test_a_failed_refresh_preserves_the_prior_valid_artifact(self):
         import json
@@ -154,28 +203,16 @@ class RunSourcePublicationSafetyTest(unittest.TestCase):
         prior_bytes = output_path.read_bytes()
 
         def _broken_prepare(tmp, args):
-            # `prepare` returns a COMMAND; the write happens when that command is RUN
-            # (mirroring every real builder, which writes to the published path as a
-            # subprocess, not as a side effect of `prepare` being called) -- the exact
-            # failure mode is the builder overwriting the PUBLISHED path with an empty
-            # (but validly-shaped) artifact, then exiting 0; `_verify` is what catches
-            # the emptiness, not the build command itself.
-            script = (f"import json; open({str(output_path)!r}, 'w')"
-                     f".write(json.dumps({{'concepts': {{}}}}))")
-            return [sys.executable, "-c", script]
+            return _staged_builder_script(json.dumps({"concepts": {}}))
 
-        old_codes, old_sources = refresh.CODES, refresh.SOURCES
-        refresh.CODES = self.codes_dir
-        refresh.SOURCES = dict(refresh.SOURCES)
-        refresh.SOURCES["fake_source"] = {"output": "fake_source.json",
-                                          "prepare": _broken_prepare}
+        saved = self._patched(refresh, _broken_prepare)
         try:
             rec = refresh.run_source("fake_source", self._Args())
             self.assertTrue(str(rec["status"]).startswith("ERROR"), rec)
             self.assertEqual(output_path.read_bytes(), prior_bytes,
                              "a failed refresh must not destroy the prior valid artifact")
         finally:
-            refresh.CODES, refresh.SOURCES = old_codes, old_sources
+            self._restore(refresh, saved)
 
     def test_a_failed_first_run_leaves_no_artifact_behind(self):
         """The symmetric case: no prior artifact existed at all. A failed run must not
@@ -188,15 +225,9 @@ class RunSourcePublicationSafetyTest(unittest.TestCase):
         self.assertFalse(output_path.exists())
 
         def _broken_prepare(tmp, args):
-            script = (f"import json; open({str(output_path)!r}, 'w')"
-                     f".write(json.dumps({{'concepts': {{}}}}))")
-            return [sys.executable, "-c", script]
+            return _staged_builder_script(json.dumps({"concepts": {}}))
 
-        old_codes, old_sources = refresh.CODES, refresh.SOURCES
-        refresh.CODES = self.codes_dir
-        refresh.SOURCES = dict(refresh.SOURCES)
-        refresh.SOURCES["fake_source"] = {"output": "fake_source.json",
-                                          "prepare": _broken_prepare}
+        saved = self._patched(refresh, _broken_prepare)
         try:
             rec = refresh.run_source("fake_source", self._Args())
             self.assertTrue(str(rec["status"]).startswith("ERROR"), rec)
@@ -204,7 +235,7 @@ class RunSourcePublicationSafetyTest(unittest.TestCase):
                              "a failed first-ever run must not leave an invalid "
                              "artifact where none existed before")
         finally:
-            refresh.CODES, refresh.SOURCES = old_codes, old_sources
+            self._restore(refresh, saved)
 
     def test_a_successful_refresh_still_publishes_normally(self):
         """The fix must not block a genuinely successful refresh from publishing."""
@@ -212,24 +243,84 @@ class RunSourcePublicationSafetyTest(unittest.TestCase):
 
         import tools.refresh_authoritative_data as refresh
 
-        output_path = self.codes_dir / "fake_source.json"
-
         def _good_prepare(tmp, args):
-            script = (f"import json; open({str(output_path)!r}, 'w').write(json.dumps("
-                     f"{{'concepts': {{'C1': {{'terms': ['x'], 'parents': []}}}}}}))")
-            return [sys.executable, "-c", script]
+            return _staged_builder_script(
+                json.dumps({"concepts": {"C1": {"terms": ["x"], "parents": []}}}))
 
-        old_codes, old_sources = refresh.CODES, refresh.SOURCES
-        refresh.CODES = self.codes_dir
-        refresh.SOURCES = dict(refresh.SOURCES)
-        refresh.SOURCES["fake_source"] = {"output": "fake_source.json",
-                                          "prepare": _good_prepare}
+        saved = self._patched(refresh, _good_prepare)
         try:
             rec = refresh.run_source("fake_source", self._Args())
             self.assertEqual(rec["status"], "ok", rec)
             self.assertEqual(rec["codes"], 1)
         finally:
-            refresh.CODES, refresh.SOURCES = old_codes, old_sources
+            self._restore(refresh, saved)
+
+    def test_a_concurrent_reader_sees_the_untouched_prior_artifact_during_the_build(self):
+        """Codex's exact concurrency reproduction: a reader consulting the PUBLISHED
+        path WHILE the builder is still running (before verification/replace) must
+        see the complete, untouched prior artifact -- never unverified in-progress
+        bytes, and never absence. Proven by having the fake builder itself read the
+        published path before writing anything."""
+        import json
+
+        import tools.refresh_authoritative_data as refresh
+
+        output_path = self.codes_dir / "fake_source.json"
+        prior_payload = {"concepts": {"C1": {"terms": ["x"], "parents": []}}}
+        output_path.write_text(json.dumps(prior_payload))
+        prior_bytes = output_path.read_bytes()
+
+        def _good_prepare(tmp, args):
+            return _staged_builder_script(
+                json.dumps({"concepts": {"C2": {"terms": ["y"], "parents": []}}}),
+                echo_published=output_path)
+
+        saved = self._patched(refresh, _good_prepare)
+        try:
+            rec = refresh.run_source("fake_source", self._Args())
+            self.assertEqual(rec["status"], "ok", rec)
+            marker = output_path.with_suffix(".seen_during_build")
+            self.assertEqual(marker.read_bytes(), prior_bytes,
+                             "the published path must show the untouched prior "
+                             "artifact to a reader while the build is in progress")
+            # And publication still completed correctly afterward.
+            self.assertEqual(json.loads(output_path.read_text())["concepts"],
+                             {"C2": {"terms": ["y"], "parents": []}})
+        finally:
+            self._restore(refresh, saved)
+
+    def test_a_build_that_never_completes_leaves_the_published_path_untouched(self):
+        """Codex's exact hard-termination reproduction, exercised at the process
+        boundary rather than by actually sending SIGKILL (not reliably reproducible
+        in a unit test): a builder subprocess that dies before writing ANYTHING
+        (simulating a crash/kill at the earliest possible point) must never have
+        touched the published path -- true by construction once the write goes to a
+        staging copy first, but proven here rather than merely asserted."""
+        import json
+
+        import tools.refresh_authoritative_data as refresh
+
+        output_path = self.codes_dir / "fake_source.json"
+        output_path.write_text(json.dumps(
+            {"concepts": {"C1": {"terms": ["x"], "parents": []}}}))
+        prior_bytes = output_path.read_bytes()
+        prior_mtime = output_path.stat().st_mtime_ns
+
+        def _killed_prepare(tmp, args):
+            # Exits nonzero before writing anything -- the closest a portable unit
+            # test can get to "the process died mid-build".
+            return [sys.executable, "-c", "import sys; sys.exit(137)"]
+
+        saved = self._patched(refresh, _killed_prepare)
+        try:
+            rec = refresh.run_source("fake_source", self._Args())
+            self.assertTrue(str(rec["status"]).startswith("ERROR"), rec)
+            self.assertEqual(output_path.read_bytes(), prior_bytes)
+            self.assertEqual(output_path.stat().st_mtime_ns, prior_mtime,
+                             "the published file must not even be TOUCHED (no write,"
+                             " no rename) when the build never reaches completion")
+        finally:
+            self._restore(refresh, saved)
 
 
 if __name__ == "__main__":

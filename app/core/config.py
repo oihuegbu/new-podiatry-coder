@@ -62,7 +62,11 @@ STRUCTURED_OUTPUTS: bool = os.getenv("STRUCTURED_OUTPUTS", "1") != "0"
 GRAPH_CONSENSUS: bool = os.getenv("GRAPH_CONSENSUS", "1") != "0"
 
 # --- Paths ---
-DATA_DIR = BASE_DIR / "data"
+# Overridable so `tools/refresh_authoritative_data.py` can point a builder subprocess
+# at a STAGING copy of data/ for the duration of one build, never letting the builder's
+# own write touch the published path at all (issue #6 F7-R3-C5, exact-SHA re-review,
+# eighth pass -- atomic publish). Unset in every other context; defaults unchanged.
+DATA_DIR = Path(os.getenv("PODIATRY_DATA_DIR") or str(BASE_DIR / "data"))
 QDRANT_DIR = BASE_DIR / Path(os.getenv("QDRANT_PATH", "data/qdrant_store"))
 QDRANT_URL: str = os.getenv("QDRANT_URL", "")  # if set, connect to Qdrant server; else use local path
 OUTPUT_DIR = BASE_DIR / "output" / "results"
