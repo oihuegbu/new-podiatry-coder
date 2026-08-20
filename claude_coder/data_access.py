@@ -213,6 +213,8 @@ class CodeSource(Protocol):
 
     def concept_relation_detail(self, term_a: str, term_b: str) -> dict: ...
 
+    def concept_lookup(self, term: str) -> dict: ...
+
 
 # Data-driven signals that a code is NOT a separately reportable line. These are
 # generic terms found in coverage/status fields or the descriptor itself (e.g.
@@ -439,6 +441,30 @@ class AuthoritativeSource:
                       "candidates": list(detail.match_b.candidates),
                       "method": detail.match_b.method,
                       "unique": detail.match_b.unique},
+            "source_identity": dict(self._concept_relation_identity or {}),
+        }
+
+    def concept_lookup(self, term: str) -> dict:
+        """This ONE term's governed identity, independent of any comparison (issue #6
+        F7-R3-C4): a single-entity normalization, so a documented value is resolved
+        against the concept graph even when no second reading worded it differently
+        to compare against. `expansions` is every OTHER term the SAME concept is known
+        by (empty unless the match is unique) -- the canonical alternate phrasings
+        retrieval may additionally query under. A JSON-safe record, same discipline as
+        `concept_relation_detail`.
+        """
+        from . import terminology as _term
+        index = self._ensure_concept_relation_index()
+        if not index:
+            return {"candidates": [], "method": "none", "unique": False,
+                   "expansions": [], "source_identity": None}
+        match, expansions = index.normalize(term)
+        return {
+            "term": match.term,
+            "candidates": list(match.candidates),
+            "method": match.method,
+            "unique": match.unique,
+            "expansions": list(expansions),
             "source_identity": dict(self._concept_relation_identity or {}),
         }
 
@@ -1073,7 +1099,8 @@ class MockSource:
                  learned_index: dict[str, set] | None = None,
                  excludes1: dict[str, set] | None = None,
                  coverage: dict[str, set] | None = None,
-                 concept_relation: dict[tuple[str, str], str] | None = None) -> None:
+                 concept_relation: dict[tuple[str, str], str] | None = None,
+                 concept_lookup: dict[str, dict] | None = None) -> None:
         self._records = records or {}
         self._retrieval = retrieval or {}
         self._ncci = ncci or {}
@@ -1095,6 +1122,7 @@ class MockSource:
                           {str(x).replace(".", "").upper() for x in v}
                           for k, v in (coverage or {}).items()}
         self._concept_relation_map = concept_relation or {}
+        self._concept_lookup_map = concept_lookup or {}
 
     def global_period(self, code):
         return self._gp.get(code)
@@ -1260,6 +1288,12 @@ class MockSource:
         return {"verdict": self.concept_relation(term_a, term_b),
                "confidence": 1.0, "term_a": {"term": term_a}, "term_b": {"term": term_b},
                "source_identity": {"source_id": "mock_concept_relation"}}
+
+    def concept_lookup(self, term):
+        if term in self._concept_lookup_map:
+            return dict(self._concept_lookup_map[term])
+        return {"term": term, "candidates": [], "method": "none", "unique": False,
+               "expansions": [], "source_identity": None}
 
     def excludes1_refs(self, code, system):
         if system != "icd10" or not self._excl1_data:

@@ -43,6 +43,8 @@ Usage
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import io
 import json
@@ -404,6 +406,39 @@ def run_source(name: str, args) -> dict:
     return rec
 
 
+class RefreshAlreadyRunning(RuntimeError):
+    """Another refresh holds the single-writer lock (issue #6 F7-R3-C5)."""
+
+
+@contextlib.contextmanager
+def _refresh_lock():
+    """A simple single-writer lock around the actual refresh/integration work
+    (issue #6 F7-R3-C5, product-owner-narrowed scope): scheduled and manual runs
+    must not overlap and race the shared `PODIATRY_DATA_DIR` staging override or
+    interleave writes to the same published path. A local, non-blocking OS file
+    lock is sufficient for this single-host deployment -- a second overlapping run
+    is refused LOUDLY and immediately rather than queuing or racing. Distributed
+    locking, a generalized release manager, and a versioned generation-pointer
+    platform are explicitly out of scope for this remediation.
+    """
+    lock_path = DATA_DIR / ".refresh.lock"
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise RefreshAlreadyRunning(
+            f"another refresh is already running (lock held on {lock_path}) -- "
+            f"scheduled and manual runs must not overlap; refusing rather than "
+            f"racing the shared staging directory")
+    try:
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -425,25 +460,31 @@ def main() -> int:
         month = time.gmtime().tm_mon
         names = [n for n in names if _due(n, month)]
         print(f"--due: month {month} -> {names or '(nothing due this month)'}")
-    manifest = {}
-    for name in names:
-        manifest[name] = run_source(name, args)
+    try:
+        with _refresh_lock():
+            manifest = {}
+            for name in names:
+                manifest[name] = run_source(name, args)
 
-    # INTEGRATE: fold the refreshed snapshots into compliance.db in one deliberate step,
-    # but only if at least one source actually produced output (never rebuild off a
-    # run where everything failed/skipped).
-    packaged = any(r.get("codes") for r in manifest.values())
-    if not args.dry_run and not args.no_integrate and packaged:
-        try:
-            integrate()
-        except Exception as exc:                      # integration failure must be loud
-            manifest["_integrate"] = {"status": f"ERROR: {exc}"}
-            print(f"  integrate ERROR: {exc}")
+            # INTEGRATE: fold the refreshed snapshots into compliance.db in one
+            # deliberate step, ordered AFTER every source's own verified publication
+            # above, and only if at least one source actually produced output (never
+            # rebuild off a run where everything failed/skipped).
+            packaged = any(r.get("codes") for r in manifest.values())
+            if not args.dry_run and not args.no_integrate and packaged:
+                try:
+                    integrate()
+                except Exception as exc:                  # integration failure must be loud
+                    manifest["_integrate"] = {"status": f"ERROR: {exc}"}
+                    print(f"  integrate ERROR: {exc}")
 
-    if not args.dry_run:
-        (CODES / "_manifest.json").write_text(json.dumps(
-            {"refreshed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-             "sources": manifest}, indent=1))
+            if not args.dry_run:
+                (CODES / "_manifest.json").write_text(json.dumps(
+                    {"refreshed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                     "sources": manifest}, indent=1))
+    except RefreshAlreadyRunning as exc:
+        print(f"ERROR: {exc}")
+        return 1
     print("\nmanifest:")
     for n, r in manifest.items():
         print(f"  {n:16} {r['status']}"

@@ -190,6 +190,13 @@ class ConceptRelationIndex:
     def __init__(self, concepts: dict):
         self._parents: dict[str, tuple[str, ...]] = {
             cid: tuple(rec.get("parents") or []) for cid, rec in (concepts or {}).items()}
+        #: concept id -> every governed term that names it (issue #6 F7-R3-C4): the
+        #: REVERSE of the term->concept indexes below, so a UNIQUELY resolved term can
+        #: be expanded to its concept's other known names for retrieval, independent of
+        #: any comparison against a second value.
+        self._terms_by_concept: dict[str, tuple[str, ...]] = {
+            cid: tuple(sorted({_norm(t) for t in (rec.get("terms") or []) if _norm(t)}))
+            for cid, rec in (concepts or {}).items()}
         self._exact: dict[str, set[str]] = {}
         self._despaced: dict[str, set[str]] = {}
         self._byset: dict[frozenset[str], set[str]] = {}
@@ -204,7 +211,12 @@ class ConceptRelationIndex:
                 if toks:
                     self._byset.setdefault(toks, set()).add(cid)
 
-    def _match(self, term: str) -> ConceptMatch:
+    def terms_for_concept(self, concept_id: str) -> tuple[str, ...]:
+        """Every governed term that names `concept_id` -- the reverse lookup a
+        single-entity normalization expands through (issue #6 F7-R3-C4)."""
+        return self._terms_by_concept.get(concept_id, ())
+
+    def match(self, term: str) -> ConceptMatch:
         """One term's full match record: candidates plus WHICH strategy found them
         (exact, compound-word, or order/plural-independent token set -- the same
         strategy order as `TerminologyIndex`), so a caller can audit not just what
@@ -227,7 +239,7 @@ class ConceptRelationIndex:
         strategy as `TerminologyIndex.candidates` (exact, compound-word, then
         order/plural-independent token set), just against concept ids instead of
         authoritative codes."""
-        return set(self._match(term).candidates)
+        return set(self.match(term).candidates)
 
     def _ancestors(self, concept_id: str) -> set[str]:
         seen: set[str] = set()
@@ -255,7 +267,7 @@ class ConceptRelationIndex:
         overlap, not a confirmed identity. Absence of any of the above is UNRESOLVED,
         never DISJOINT -- an IS_A hierarchy has no basis to assert opposition.
         """
-        ma, mb = self._match(term_a), self._match(term_b)
+        ma, mb = self.match(term_a), self.match(term_b)
         a, b = set(ma.candidates), set(mb.candidates)
         if not a or not b:
             return ConceptRelationDetail(CONCEPT_UNRESOLVED, ma, mb, 0.0)
@@ -274,6 +286,18 @@ class ConceptRelationIndex:
         """One of the CONCEPT_* verdicts above for two clinical terms -- see
         `relation_detail` for the full auditable basis behind it."""
         return self.relation_detail(term_a, term_b).verdict
+
+    def normalize(self, term: str) -> tuple[ConceptMatch, tuple[str, ...]]:
+        """This ONE term's match, plus every OTHER term the SAME concept is known by
+        (issue #6 F7-R3-C4) -- independent of any comparison against a second value,
+        so a single mention (or an abbreviation both readings used identically) is
+        still normalized. `expansions` is empty unless the match is UNIQUE: an
+        ambiguous term's "other names" would be a guess at which of several real
+        concepts it actually meant.
+        """
+        m = self.match(term)
+        expansions = self.terms_for_concept(m.candidates[0]) if m.unique else ()
+        return m, tuple(t for t in expansions if t != _norm(term))
 
     @classmethod
     def load_snapshot(cls) -> tuple["ConceptRelationIndex", dict]:

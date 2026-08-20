@@ -321,6 +321,14 @@ class CodingResult:
     # The two-reading axis comparison record (`graph_consensus.ConsensusReport`
     # serialized), or None when only one reading was taken.
     consensus: dict | None = None
+    # Single-entity terminology normalization (issue #6 F7-R3-C4, product-owner-
+    # narrowed scope): one typed record per governed axis per fact, independent of
+    # any cross-reading comparison -- populated whether or not a second reading ran,
+    # and whether or not the two readings agreed on the wording. The ONE canonical
+    # store of these records (`claude_coder.coreference.normalize_fact_terminology`);
+    # bound into the certificate directly rather than duplicated onto graph nodes or
+    # claim-line intents.
+    terminology_normalizations: tuple[dict[str, Any], ...] = ()
 
     @property
     def billable_lines(self) -> list[ResolvedLine]:

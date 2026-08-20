@@ -2356,6 +2356,110 @@ class WholeEncounterGovernedTerminology(unittest.TestCase):
                          "a SAME verdict with no versioned source identity behind it "
                          "must never be recorded as a confirmed governed match")
 
+    def test_equal_wording_still_normalizes_and_its_expansion_reaches_retrieval(self):
+        """Implementer directive (narrowed F7-R3-C4), required regression #1: when
+        both independent readings contain the SAME abbreviation, the pairwise
+        cross-reading match (`graph_consensus.compare_axes`) never fires -- equal
+        values are never a disagreement, so it was never even a candidate for
+        concept lookup. `coreference.normalize_fact_terminology` runs on every fact
+        regardless of pairing, so the documented abbreviation is expanded to its
+        concept's canonical term and retrieval finds a candidate indexed only under
+        that expansion, never the abbreviation itself."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CandidateCode
+
+        class _ExpansionOnlySource(MockSource):
+            def retrieve(self, description, system, top_k=20):
+                if system == "cpt" and "canonical term" in (description or "").lower():
+                    return [CandidateCode("PROC_CANON", "cpt", "Procedure alpha, each",
+                                          0.9)]
+                return []
+
+        primary, second = self._readings("abbrev term", "abbrev term")   # IDENTICAL
+        note = "Procedure alpha performed today, using the abbreviation both times."
+        src = _ExpansionOnlySource(
+            records={("PROC_CANON", "cpt"): {"active": True}},
+            concept_lookup={"abbrev term": {
+                "term": "abbrev term", "candidates": ["C1"], "method": "exact",
+                "unique": True, "expansions": ["canonical term"],
+                "source_identity": {"source_id": "mock_concept_lookup"}}})
+
+        result = _run_union(primary, second, note_text=note, source=src)
+
+        billable = result.billable_lines
+        self.assertEqual([ln.chosen.code for ln in billable], ["PROC_CANON"],
+                         [ln.rationale for ln in result.lines])
+        # Required regression #5: raw phrase and exact span remain visible in the
+        # audit trail, joinable back to the fact this normalization applied to.
+        normalizations = result.terminology_normalizations
+        self.assertTrue(normalizations, normalizations)
+        record = normalizations[0]
+        self.assertEqual(record["status"], "expanded")
+        self.assertEqual(record["axis"], "anatomy")
+        self.assertEqual(record["raw_phrase"], "abbrev term")
+        self.assertIn("canonical term", record["expansion"])
+        self.assertTrue(record["evidence_span_ids"], record)
+        self.assertTrue(record["normalization_id"])
+        self.assertTrue(record["source_identity"])
+        self.assertEqual(record["fact_id"], billable[0].fact.fact_id)
+
+        # Required regression #2: the expansion-only candidate can be retrieved AND
+        # DEFENDED -- the certificate itself, not just the in-process result, must
+        # be able to reproduce why this line was found.
+        from claude_coder.certificate import build_certificate
+        cert = build_certificate(result, note)
+        self.assertEqual([ln["code"] for ln in cert["lines"]], ["PROC_CANON"])
+        self.assertTrue(cert["terminology_normalizations"])
+        cert_record = next(n for n in cert["terminology_normalizations"]
+                           if n["fact_id"] == billable[0].fact.fact_id)
+        self.assertEqual(cert_record["status"], "expanded")
+        self.assertIn("canonical term", cert_record["expansion"])
+
+    def test_an_ambiguous_single_entity_match_never_silently_chooses_one(self):
+        """Required regression #4: a term that resolves ambiguously (more than one
+        candidate concept) must not expand -- there is nothing here to disambiguate
+        against, so guessing which candidate it meant is exactly the silent choice
+        this must never make."""
+        from claude_coder.data_access import MockSource
+
+        primary, second = self._readings("ambiguous term", "ambiguous term")
+        note = "Procedure alpha performed today."
+        src = MockSource(
+            records={("PROC_X", "cpt"): {"active": True}},
+            concept_lookup={"ambiguous term": {
+                "term": "ambiguous term", "candidates": ["C1", "C2"], "method": "exact",
+                "unique": False, "expansions": [],
+                "source_identity": {"source_id": "mock_concept_lookup"}}})
+
+        result = _run_union(primary, second, note_text=note, source=src)
+
+        record = result.terminology_normalizations[0]
+        self.assertEqual(record["status"], "ambiguous")
+        self.assertEqual(record["expansion"], [])
+        self.assertEqual(sorted(record["alternatives"]), ["C1", "C2"])
+        self.assertEqual(result.billable_lines, [])
+
+    def test_a_unique_match_with_no_source_identity_never_expands_either(self):
+        """Required regression #3, single-entity form: missing source identity must
+        not enable a billable line -- a unique match with real expansions but no
+        versioned authority behind it must still contribute nothing to retrieval."""
+        from claude_coder.data_access import MockSource
+
+        primary, second = self._readings("abbrev term", "abbrev term")
+        note = "Procedure alpha performed today."
+        src = MockSource(
+            records={("PROC_X", "cpt"): {"active": True}},
+            concept_lookup={"abbrev term": {
+                "term": "abbrev term", "candidates": ["C1"], "method": "exact",
+                "unique": True, "expansions": ["canonical term"],
+                "source_identity": None}})
+
+        result = _run_union(primary, second, note_text=note, source=src)
+
+        record = result.terminology_normalizations[0]
+        self.assertEqual(record["status"], "unbound")
+        self.assertEqual(result.billable_lines, [])
+
 
 class OccurrenceCardinality(unittest.TestCase):
     """Defect B: a repeated MENTION is not a repeated SERVICE."""

@@ -407,6 +407,25 @@ def code_encounter(
                            "independent_support": r.independent_support,
                            "support": r.support} for r in relations],
         }))
+        # ---- Single-entity terminology normalization (issue #6 F7-R3-C4) -----------
+        # Runs over EVERY fact -- including any the second-reading union recovered
+        # above -- regardless of whether a second reading exists at all, and
+        # regardless of whether two readings agreed on the wording: the cross-reading
+        # pairwise match in `graph_consensus.compare_axes` only ever fires on a
+        # MISMATCH, so an abbreviation both readings wrote identically (or a note
+        # extracted from only one reading) never reached a concept lookup before.
+        # Placed BEFORE eligibility so `fact_snapshot_digest` captures the
+        # normalized `governed_terms` it already covers, not a pre-normalization
+        # snapshot a later mutation could diverge from.
+        from . import coreference as _coref
+        terminology_normalizations: list[dict] = []
+        for _fact in facts:
+            terminology_normalizations.extend(
+                _coref.normalize_fact_terminology(_fact, source, encounter_id))
+        if terminology_normalizations:
+            audit_hashes.append(audit_repository.append(
+                encounter_id, "terminology_normalization",
+                {"normalizations": terminology_normalizations}))
         intents = _elig.evaluate(facts, relations, encounter_id, date_of_service,
                                  source=source)
         audit_hashes.append(audit_repository.append(encounter_id, "eligibility_enforced", {
@@ -715,6 +734,7 @@ def code_encounter(
         audit_record_hashes=audit_hashes,
         graph=clinical_graph,
         consensus=(consensus.as_record() if consensus is not None else None),
+        terminology_normalizations=tuple(terminology_normalizations),
     )
     # Mechanic 4 — collapse duplicate resolved codes into one line before anything
     # downstream reasons about the claim as a set.

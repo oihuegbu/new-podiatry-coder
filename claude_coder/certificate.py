@@ -148,6 +148,14 @@ def build_certificate(result: CodingResult, note_text: str,
                            if getattr(result, "graph", None) is not None else None),
         "graph_consensus": (dict(result.consensus)
                             if getattr(result, "consensus", None) else None),
+        # Single-entity terminology normalization (issue #6 F7-R3-C4): one record per
+        # governed axis per fact -- raw phrase, evidence span ids, candidates, method,
+        # status, and source identity -- joinable back to `claim_line_intents`/`lines`
+        # by `fact_id`, so the decisive terminology action behind any expansion-driven
+        # retrieval is reproducible from the certificate without a second full copy
+        # bound onto every intent or graph node.
+        "terminology_normalizations": [dict(n) for n in
+                                       (result.terminology_normalizations or ())],
     }
     payload["certificate_sha256"] = content_digest(payload)
     return payload

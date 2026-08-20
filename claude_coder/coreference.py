@@ -56,6 +56,7 @@ authoritative data.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -287,6 +288,90 @@ def axis_relation(axis: str, va: str, vb: str, source: Any = None) -> str:
     """SAME_EVENT, DISTINCT_EVENT, or UNDETERMINED for one axis's two stated values --
     see `axis_relation_detail` for the full mechanic and its auditable basis."""
     return axis_relation_detail(axis, va, vb, source)[0]
+
+
+def normalize_fact_terminology(fact: Any, source: Any = None,
+                               encounter_id: str = "") -> tuple[dict, ...]:
+    """One typed, auditable normalization record per governed axis this fact carries
+    (issue #6 F7-R3-C4, product-owner-narrowed scope) -- INDEPENDENT of any
+    comparison against a second reading, so a single mention (or an abbreviation
+    both readings wrote identically) is normalized exactly like a mismatched pair
+    already is by `axis_relation_detail`. The cross-reading pairwise match only ever
+    fires on a raw-string MISMATCH; two readings that agree, or a fact with no
+    second reading at all, never reached a concept lookup before this.
+
+    Each record carries: a stable id, the fact id and axis, the raw phrase and its
+    evidence span ids, the candidate concept ids, the matching method, the resolved
+    STATUS ("expanded" | "ambiguous" | "unresolved" | "unbound"), confidence, the
+    alternatives an ambiguous match could not choose between, and the governed
+    source's own versioned identity -- the minimum record the acceptance criteria
+    ask for, emitted once per axis, never duplicated as a second full copy anywhere
+    else. `fact.governed_terms` (already what `resolution.resolve` queries under) is
+    the ONLY other place this writes, and only for a record whose status is
+    "expanded" -- a unique, confidently resolved match backed by a real source
+    identity. Ambiguous, unresolved, or unbound (no source_identity) results
+    contribute NOTHING to retrieval, exactly like this axis already degrades with no
+    concept source at all: never a guess, never enabling billable output from an
+    unproven relation.
+    """
+    if source is None:
+        return ()
+    lookup_fn = getattr(source, "concept_lookup", None)
+    if not callable(lookup_fn):
+        return ()
+    attrs = dict(getattr(fact, "attributes", None) or {})
+    fact_id = str(getattr(fact, "fact_id", "") or "")
+    span_ids = tuple(dict.fromkeys(
+        str(getattr(s, "span_id", "") or "")
+        for s in (getattr(fact, "evidence", None) or [])
+        if getattr(s, "span_id", None)))
+    current = dict(getattr(fact, "governed_terms", None) or {})
+    records: list[dict] = []
+    expanded = False
+    for axis in _CONCEPT_GOVERNED_AXES:
+        value = str(attrs.get(axis, "") or "").strip()
+        if not value:
+            continue
+        try:
+            result = lookup_fn(value) or {}
+        except Exception:
+            continue
+        candidates = tuple(c for c in (result.get("candidates") or ()) if c)
+        unique = bool(result.get("unique"))
+        source_identity = result.get("source_identity") or None
+        expansions = tuple(e for e in (result.get("expansions") or []) if e)
+        if not candidates:
+            status = "unresolved"
+        elif not unique:
+            status = "ambiguous"
+        elif not source_identity or not expansions:
+            status = "unbound"
+        else:
+            status = "expanded"
+            existing = current.get(axis, ())
+            new_terms = tuple(e for e in expansions if e not in existing)
+            if new_terms:
+                current[axis] = existing + new_terms
+                expanded = True
+        norm_id = hashlib.sha256(
+            f"{encounter_id}|{fact_id}|{axis}|{value}".encode("utf-8")).hexdigest()[:16]
+        records.append({
+            "normalization_id": norm_id,
+            "fact_id": fact_id,
+            "axis": axis,
+            "raw_phrase": value,
+            "evidence_span_ids": list(span_ids),
+            "candidates": list(candidates),
+            "method": result.get("method") or "none",
+            "expansion": list(expansions) if status == "expanded" else [],
+            "alternatives": list(candidates) if status == "ambiguous" else [],
+            "confidence": 1.0 if status == "expanded" else 0.0,
+            "source_identity": source_identity,
+            "status": status,
+        })
+    if expanded:
+        fact.governed_terms = current
+    return tuple(records)
 
 
 def known_known_differences(left: dict | None, right: dict | None,

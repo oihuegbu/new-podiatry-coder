@@ -354,5 +354,60 @@ class RunSourcePublicationSafetyTest(unittest.TestCase):
             self._restore(refresh, saved)
 
 
+class RefreshLockTest(unittest.TestCase):
+    """Implementer directive (narrowed F7-R3-C5), required regression: a second
+    overlapping refresh is REFUSED rather than racing. A simple, local, non-blocking
+    OS file lock around the actual refresh/integration work (never distributed
+    locking, a release manager, or a versioned generation pointer -- explicitly out
+    of scope for this remediation)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name) / "data"
+        (self.data_dir / "codes").mkdir(parents=True)
+
+    def test_a_second_overlapping_refresh_is_refused_not_racing(self):
+        import fcntl
+        import os
+
+        import tools.refresh_authoritative_data as refresh
+
+        old_data_dir = refresh.DATA_DIR
+        refresh.DATA_DIR = self.data_dir
+        try:
+            # Simulate another refresh already holding the lock -- a SEPARATE open
+            # file description on the SAME lock path, exactly what two independent
+            # `refresh_authoritative_data.py` processes would each have.
+            lock_path = self.data_dir / ".refresh.lock"
+            held_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+            fcntl.flock(held_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                with self.assertRaises(refresh.RefreshAlreadyRunning):
+                    with refresh._refresh_lock():
+                        self.fail("must not enter the locked section at all")
+            finally:
+                fcntl.flock(held_fd, fcntl.LOCK_UN)
+                os.close(held_fd)
+        finally:
+            refresh.DATA_DIR = old_data_dir
+
+    def test_the_lock_is_released_for_the_next_run_once_a_refresh_completes(self):
+        """The lock must not be held forever -- a genuinely SEQUENTIAL second run
+        (the normal scheduled-then-manual case) must succeed once the first
+        finishes."""
+        import tools.refresh_authoritative_data as refresh
+
+        old_data_dir = refresh.DATA_DIR
+        refresh.DATA_DIR = self.data_dir
+        try:
+            with refresh._refresh_lock():
+                pass
+            with refresh._refresh_lock():
+                pass
+        finally:
+            refresh.DATA_DIR = old_data_dir
+
+
 if __name__ == "__main__":
     unittest.main()
