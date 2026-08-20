@@ -1213,6 +1213,101 @@ class BuildPageReadValidationTest(unittest.TestCase):
         self.assertEqual(len(partial.tokens), 2)
 
 
+class TrustBoundaryRevalidationTest(unittest.TestCase):
+    """Codex F7-R3-A, exact-SHA re-review, sixth pass, exact reproductions: the model
+    validator (fifth pass) is not the whole story. `model_copy(update=...)` never
+    re-runs it, and it never checked that `text_sha256`/`SourceToken.normalized`
+    actually describe the read's own `text`. `with_channel` -- the one trust boundary
+    a caller-supplied reader's output crosses -- now reconstructs and re-verifies
+    every filed read from its own raw fields before accepting it."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_a_model_copy_derived_blank_bypass_is_refused(self):
+        """Codex's exact reproduction: build a valid READ, `model_copy` it to
+        status=BLANK with empty text/tokens/detail (which never re-runs the model
+        validator), return it from a caller-supplied reader. Before this fix,
+        `with_channel` accepted it outright and the page was exempted as
+        independently verified blank with no `recall_page_coverage` gate."""
+        from app.contracts.source_evidence import (ChannelKind, InvalidSourceEvidenceDocument,
+                                                    PageStatus, ReadChannel, build_page_read)
+        document = _compile(self.root, [["alpha"]], ["alpha"])
+        channel = ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                              kind=ChannelKind.VISION, provider="openai")
+        valid_read = build_page_read(SECONDARY_VISION_CHANNEL_ID, 1, "alpha")
+        forged_blank = valid_read.model_copy(
+            update={"status": PageStatus.BLANK, "text": "", "text_sha256": "",
+                   "tokens": (), "detail": ""})
+        with self.assertRaises(InvalidSourceEvidenceDocument):
+            document.with_channel(channel, {1: forged_blank})
+
+    def test_forged_tokens_and_empty_digest_are_refused(self):
+        """Codex's exact reproduction: raw text 'different raw words', an empty
+        digest, and a token whose normalized field claims unrelated content. Before
+        this fix, nothing checked that `text_sha256`/`SourceToken.normalized`
+        actually described this read's own `text`, so `reconcile_spans()` could
+        return AGREED for a quotation this page never actually contained."""
+        from app.contracts.source_evidence import (ChannelKind, InvalidSourceEvidenceDocument,
+                                                    PageRead, PageStatus, ReadChannel,
+                                                    SourceToken)
+        document = _compile(self.root, [["alpha"]], ["alpha"])
+        channel = ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                              kind=ChannelKind.VISION, provider="openai")
+        forged = PageRead(
+            channel_id=SECONDARY_VISION_CHANNEL_ID, page_number=1,
+            status=PageStatus.READ, text="different raw words", text_sha256="",
+            tokens=(SourceToken(text="different", normalized="documented phrase"),),
+            detail="")
+        with self.assertRaises(InvalidSourceEvidenceDocument):
+            document.with_channel(channel, {1: forged})
+
+    def test_a_token_whose_text_does_not_appear_in_its_own_page_is_refused(self):
+        """A token may not name text absent from the read it is filed under, even
+        with a correctly-normalized form and a correct digest of a DIFFERENT text."""
+        import hashlib
+
+        from app.contracts.source_evidence import (ChannelKind, InvalidSourceEvidenceDocument,
+                                                    PageRead, PageStatus, ReadChannel,
+                                                    SourceToken)
+        document = _compile(self.root, [["alpha"]], ["alpha"])
+        channel = ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                              kind=ChannelKind.VISION, provider="openai")
+        raw = "alpha"
+        digest = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        forged = PageRead(
+            channel_id=SECONDARY_VISION_CHANNEL_ID, page_number=1,
+            status=PageStatus.READ, text=raw, text_sha256=digest,
+            tokens=(SourceToken(text="nowhere", normalized="nowhere"),))
+        with self.assertRaises(InvalidSourceEvidenceDocument):
+            document.with_channel(channel, {1: forged})
+
+    def test_a_genuinely_valid_read_still_passes_the_boundary(self):
+        """The fix rejects the invalid COMBINATIONS above, not every direct
+        construction -- a self-consistent read (real digest, real matching tokens)
+        still crosses the boundary normally."""
+        import hashlib
+
+        from app.contracts.source_evidence import (ChannelKind, PageRead, PageStatus,
+                                                    ReadChannel, SourceToken)
+        document = _compile(self.root, [["alpha"]], ["alpha"])
+        channel = ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                              kind=ChannelKind.VISION, provider="openai")
+        raw = "alpha beta"
+        digest = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        genuine = PageRead(
+            channel_id=SECONDARY_VISION_CHANNEL_ID, page_number=1,
+            status=PageStatus.READ, text=raw, text_sha256=digest,
+            tokens=(SourceToken(text="alpha", normalized="alpha"),
+                   SourceToken(text="beta", normalized="beta")))
+        covered = document.with_channel(channel, {1: genuine})
+        self.assertTrue(covered.page(1).read_by(SECONDARY_VISION_CHANNEL_ID).usable)
+
+
 class ChannelBindingTest(unittest.TestCase):
     """Codex F7-R3-A, exact-SHA re-review, fifth pass: `with_channel` attached
     whatever `PageRead` object a caller filed under a given page number, with no

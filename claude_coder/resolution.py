@@ -390,6 +390,22 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
     query = fact.description + " " + " ".join(
         str(v) for k, v in fact.attributes.items() if str(k).lower() != "count")
     queries = [query.strip()] + [s.text for s in fact.evidence[:1]]
+    # GOVERNED ALTERNATE WORDING (issue #6 F7-R3-C4): the two independent readings may
+    # have worded a code-changing axis differently (e.g. anatomy) and been recognized
+    # as the SAME concept rather than a disagreement -- `governed_terms` is that
+    # recognition's own record (`graph_consensus.compare`). This fact's own attribute
+    # keeps whichever wording the PRIMARY reading used, so a code indexed only under
+    # the SECOND reading's synonym would otherwise never be queried at all, even
+    # though the encounter no longer holds on the axis. One extra query per confirmed
+    # alternate, substituted for that one axis, gives it a real chance to be found --
+    # a verified expansion must IMPROVE recall, not merely remove a hold.
+    for axis, alternates in (fact.governed_terms or {}).items():
+        for alt in alternates:
+            attrs = dict(fact.attributes, **{axis: alt})
+            alt_query = fact.description + " " + " ".join(
+                str(v) for k, v in attrs.items() if str(k).lower() != "count")
+            if alt_query.strip():
+                queries.append(alt_query.strip())
     best: dict[str, CandidateCode] = {}
     for q in queries:
         if not q.strip():

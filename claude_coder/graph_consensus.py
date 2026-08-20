@@ -237,6 +237,15 @@ class ConsensusReport:
     recall_blank_pages: tuple[dict[str, Any], ...] = ()
     escalated_pages: tuple[int, ...] = ()
     escalation_detail: str = ""
+    #: Every axis pair a governed concept source (issue #6 F7-R3-C4) confirmed SAME
+    #: across the two readings -- the raw wording on each side, the axis, and (when the
+    #: source can supply it) the concept identity/method/confidence behind that
+    #: confirmation. Recorded even though no `AxisDisagreement` is raised for these
+    #: pairs: an autonomy outcome a governed match changed must be traceable from the
+    #: audit trail, not merely absent from the disagreement list (Codex F7-R3-C4,
+    #: exact-SHA re-review: "the decisive terminology action is not defensible from
+    #: the final audit").
+    governed_matches: tuple[dict[str, Any], ...] = ()
 
     @property
     def unresolved(self) -> tuple[AxisResolution, ...]:
@@ -263,6 +272,7 @@ class ConsensusReport:
             "recall_blank_pages": [dict(p) for p in self.recall_blank_pages],
             "escalated_pages": list(self.escalated_pages),
             "escalation_detail": self.escalation_detail,
+            "governed_matches": [dict(m) for m in self.governed_matches],
         }
 
 
@@ -301,8 +311,11 @@ def align(primary: list, second: list) -> tuple[list[tuple[Any, Any]], list, lis
 
 
 def compare_axes(pairs: list[tuple[Any, Any]],
-                 source: Any = None) -> tuple[list[AxisDisagreement], int]:
-    """Every code-changing axis the two readings did not read the same way.
+                 source: Any = None
+                 ) -> tuple[list[AxisDisagreement], int, list[dict[str, Any]]]:
+    """Every code-changing axis the two readings did not read the same way, plus
+    every axis a governed concept source POSITIVELY confirmed as the same value
+    despite differing wording.
 
     `source` (issue #6 F7-R3-C4) is put to the SAME governed axis-relation mechanic
     claim assembly uses (`coreference.axis_relation`) before a raw string mismatch is
@@ -316,9 +329,18 @@ def compare_axes(pairs: list[tuple[Any, Any]],
     descendant, ambiguous overlap, or unresolved) still raises a disagreement,
     exactly as before -- this only removes disagreements the graph POSITIVELY
     confirms are not real, never adds new tolerance beyond that.
+
+    Every axis suppressed this way is recorded in the third return value (issue #6
+    F7-R3-C4, exact-SHA re-review: a verified expansion must not "remove a hold
+    without improving candidate recall", and "the decisive terminology action" must
+    be "defensible from the final audit"). The caller applies these onto the
+    surviving fact (`ClinicalFact.governed_terms`) so retrieval can query under the
+    confirmed alternate wording too, and binds the raw record into the consensus
+    report for audit visibility.
     """
     from . import coreference as _coref
     out: list[AxisDisagreement] = []
+    governed: list[dict[str, Any]] = []
     compared = 0
     for left, right in pairs:
         left_axes = _axis_values(left)
@@ -330,6 +352,22 @@ def compare_axes(pairs: list[tuple[Any, Any]],
             if a == b:
                 continue
             if a and b and _coref.axis_relation(axis, a, b, source) == _coref.SAME_EVENT:
+                detail_fn = getattr(source, "concept_relation_detail", None)
+                detail = {}
+                if callable(detail_fn):
+                    try:
+                        detail = dict(detail_fn(a, b) or {})
+                    except Exception:
+                        detail = {}
+                span_ids = tuple(dict.fromkeys(
+                    str(getattr(s, "span_id", "") or "")
+                    for f in (left, right)
+                    for s in (getattr(f, "evidence", None) or [])
+                    if getattr(s, "span_id", None)))
+                governed.append({
+                    "node_id": str(getattr(left, "fact_id", "") or ""),
+                    "axis": axis, "value_primary": a, "value_second": b,
+                    "evidence_span_ids": list(span_ids), **detail})
                 continue
             if a and b:
                 basis = "the two readings recorded different values"
@@ -339,7 +377,7 @@ def compare_axes(pairs: list[tuple[Any, Any]],
                 node_id=str(getattr(left, "fact_id", "") or ""), axis=axis,
                 value_primary=a, value_second=b, basis=basis,
                 action=str(getattr(left, "description", "") or "")))
-    return out, compared
+    return out, compared, governed
 
 
 # ------------------------------------------------------------------ resolution
@@ -591,10 +629,25 @@ def compare(primary_facts: list, second_facts: list, *,
     """
     pairs, unmatched_primary, unmatched_second = (
         alignment if alignment is not None else align(primary_facts, second_facts))
-    disagreements, compared = compare_axes(pairs, source)
+    disagreements, compared, governed_matches = compare_axes(pairs, source)
     primary_by_id = {str(getattr(f, "fact_id", "") or ""): f for f in primary_facts}
     second_by_node = {str(getattr(left, "fact_id", "") or ""): right
                       for left, right in pairs}
+    # Apply every governed match onto the surviving PRIMARY fact (issue #6 F7-R3-C4):
+    # retrieval reads `ClinicalFact.governed_terms` to query under the confirmed
+    # alternate wording too, so a code indexed only under the SECOND reading's
+    # synonym is not silently unreachable once the two readings merge with no
+    # disagreement raised.
+    for match in governed_matches:
+        fact = primary_by_id.get(match["node_id"])
+        alt = str(match.get("value_second") or "").strip()
+        if fact is None or not alt:
+            continue
+        axis = match["axis"]
+        current = dict(getattr(fact, "governed_terms", None) or {})
+        if alt not in current.get(axis, ()):
+            current[axis] = current.get(axis, ()) + (alt,)
+        fact.governed_terms = current
     report = ConsensusReport(
         second_reading_origin=(second_origin.as_record()
                                if hasattr(second_origin, "as_record") else {}),
@@ -603,5 +656,6 @@ def compare(primary_facts: list, second_facts: list, *,
         disagreements=tuple(disagreements),
         unmatched_primary=tuple(_event_record(f) for f in unmatched_primary),
         unmatched_second=tuple(_event_record(f) for f in unmatched_second),
+        governed_matches=tuple(governed_matches),
     )
     return report, primary_by_id, second_by_node

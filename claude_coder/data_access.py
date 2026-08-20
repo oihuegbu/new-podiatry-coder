@@ -211,6 +211,8 @@ class CodeSource(Protocol):
 
     def concept_relation(self, term_a: str, term_b: str) -> str: ...
 
+    def concept_relation_detail(self, term_a: str, term_b: str) -> dict: ...
+
 
 # Data-driven signals that a code is NOT a separately reportable line. These are
 # generic terms found in coverage/status fields or the descriptor itself (e.g.
@@ -241,6 +243,7 @@ class AuthoritativeSource:
         self._idx = None
         self._snomed = None
         self._concept_relation_index = None
+        self._concept_relation_identity = None
         self._cptidx = None
         self._learned = None
         self._drug = None
@@ -380,6 +383,21 @@ class AuthoritativeSource:
         return {c for c in self._snomed.candidates(description)
                 if self.leaf_codes(c, "icd10")}
 
+    def _ensure_concept_relation_index(self):
+        from . import terminology as _term
+        if self._concept_relation_index is None:
+            try:
+                index, identity = _term.ConceptRelationIndex.load_snapshot()
+                self._concept_relation_index = index
+                self._concept_relation_identity = identity
+                self._bound_sources.bind(identity)
+            except Exception:
+                # A reviewed-OPTIONAL concept graph: absence can only leave a relation
+                # UNRESOLVED, never assert a wrong one, so it degrades rather than
+                # holding. Nothing is bound in that case -- no bytes were parsed.
+                self._concept_relation_index = False
+        return self._concept_relation_index
+
     def concept_relation(self, term_a: str, term_b: str) -> str:
         """SAME / ancestor-descendant / DISJOINT / unresolved for two clinical terms,
         from the authoritative SNOMED CT Body Structure concept graph (issue #6
@@ -391,19 +409,38 @@ class AuthoritativeSource:
         concept data; see tools/build_snomed_concept_terms.py.
         """
         from . import terminology as _term
-        if self._concept_relation_index is None:
-            try:
-                index, identity = _term.ConceptRelationIndex.load_snapshot()
-                self._concept_relation_index = index
-                self._bound_sources.bind(identity)
-            except Exception:
-                # A reviewed-OPTIONAL concept graph: absence can only leave a relation
-                # UNRESOLVED, never assert a wrong one, so it degrades rather than
-                # holding. Nothing is bound in that case -- no bytes were parsed.
-                self._concept_relation_index = False
-        if not self._concept_relation_index:
+        index = self._ensure_concept_relation_index()
+        if not index:
             return _term.CONCEPT_UNRESOLVED
-        return self._concept_relation_index.relation(term_a, term_b)
+        return index.relation(term_a, term_b)
+
+    def concept_relation_detail(self, term_a: str, term_b: str) -> dict:
+        """The full auditable basis (issue #6 F7-R3-C4) behind `concept_relation`'s
+        verdict: each side's matched concept candidates, matching method and
+        uniqueness, a confidence, and the exact concept-graph release identity the
+        verdict was read from -- a JSON-safe record for binding into the audit trail
+        and certificate, not just a bare string. `concept_relation`'s string verdict
+        alone cannot answer "which concept, from which release, decided this" --
+        this can.
+        """
+        from . import terminology as _term
+        index = self._ensure_concept_relation_index()
+        if not index:
+            return {"verdict": _term.CONCEPT_UNRESOLVED, "source_identity": None}
+        detail = index.relation_detail(term_a, term_b)
+        return {
+            "verdict": detail.verdict,
+            "confidence": detail.confidence,
+            "term_a": {"term": detail.match_a.term,
+                      "candidates": list(detail.match_a.candidates),
+                      "method": detail.match_a.method,
+                      "unique": detail.match_a.unique},
+            "term_b": {"term": detail.match_b.term,
+                      "candidates": list(detail.match_b.candidates),
+                      "method": detail.match_b.method,
+                      "unique": detail.match_b.unique},
+            "source_identity": dict(self._concept_relation_identity or {}),
+        }
 
     def cpt_index_codes(self, description: str, system: str) -> set[str]:
         """AUTHORITATIVE procedure term -> CPT code, via the AMA CPT Alphabetic
@@ -1218,6 +1255,11 @@ class MockSource:
         if (term_b, term_a) in self._concept_relation_map:
             return self._concept_relation_map[(term_b, term_a)]
         return CONCEPT_UNRESOLVED
+
+    def concept_relation_detail(self, term_a, term_b):
+        return {"verdict": self.concept_relation(term_a, term_b),
+               "confidence": 1.0, "term_a": {"term": term_a}, "term_b": {"term": term_b},
+               "source_identity": {"source_id": "mock_concept_relation"}}
 
     def excludes1_refs(self, code, system):
         if system != "icd10" or not self._excl1_data:

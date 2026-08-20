@@ -123,6 +123,13 @@ class ClinicalFact:
     # non-empty list holds the event before retrieval and routes it to PROVIDER_QUERY --
     # never to a coder queue, which the product directive forbids for model disagreement.
     axis_conflicts: list[str] = field(default_factory=list)
+    # Alternate wording a GOVERNED CONCEPT SOURCE confirmed names the SAME real-world
+    # value as this fact's own attribute (issue #6 F7-R3-C4) -- e.g. anatomy: the
+    # second reading's synonym for a value graph_consensus recognized as the same
+    # concept rather than a disagreement. Retrieval consults this to query under the
+    # confirmed alternate phrasing too, so a code indexed only under the OTHER
+    # reading's synonym is not silently unreachable once the two readings merge.
+    governed_terms: dict[str, tuple[str, ...]] = field(default_factory=dict)
     fact_id: str = ""
 
     @property

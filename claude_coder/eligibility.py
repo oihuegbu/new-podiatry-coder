@@ -74,7 +74,7 @@ class ClaimLineIntent:
     fact_digest: str = ""
 
 
-_SNAPSHOT_DIGEST_VERSION = "fsd-v2"
+_SNAPSHOT_DIGEST_VERSION = "fsd-v3"   # v3: added governed_terms (issue #6 F7-R3-C4)
 
 
 def fact_snapshot_digest(fact) -> str:
@@ -82,13 +82,17 @@ def fact_snapshot_digest(fact) -> str:
     captured at eligibility and re-verified before retrieval so nothing can change afterward:
     kind, clinical action, disposition, assertion certainty and experiencer, scalar and
     per-axis confidences (they set the post-retrieval autonomy floor), ALL attributes
-    (measurements + actor ids live here), and ORDERED anchored evidence-span identity
-    (order preserved so a reorder is detected). (Codex F6-R7.)"""
+    (measurements + actor ids live here), governed alternate wording (issue #6 F7-R3-C4:
+    it changes what retrieval actually queries for, exactly like an attribute would), and
+    ORDERED anchored evidence-span identity (order preserved so a reorder is detected).
+    (Codex F6-R7.)"""
     evidence = [
         (str(getattr(sp, "span_id", "") or ""),
          str(getattr(sp, "text_sha256", "") or
              hashlib.sha256(str(getattr(sp, "text", "")).encode()).hexdigest()))
         for sp in (getattr(fact, "evidence", None) or [])]     # ORDER preserved
+    governed_terms = {axis: sorted(alts) for axis, alts in
+                      (getattr(fact, "governed_terms", None) or {}).items()}
     payload = {
         "v": _SNAPSHOT_DIGEST_VERSION,
         "kind": fact.kind.value,
@@ -99,6 +103,7 @@ def fact_snapshot_digest(fact) -> str:
         "confidence": getattr(fact, "confidence", None),
         "axis_confidence": dict(getattr(fact, "axis_confidence", None) or {}),
         "attributes": fact.attributes or {},
+        "governed_terms": governed_terms,
         "evidence": evidence,
     }
     return hashlib.sha256(

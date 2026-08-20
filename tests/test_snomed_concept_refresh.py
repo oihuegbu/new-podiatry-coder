@@ -126,5 +126,111 @@ class SnomedConceptTermsRefreshRegression(unittest.TestCase):
                 refresh.CODES = old_codes
 
 
+class RunSourcePublicationSafetyTest(unittest.TestCase):
+    """Codex F7-R3-C5, exact-SHA re-review, sixth pass, exact reproduction: start with
+    a valid prior artifact, make `prepare` write an empty/invalid one, run
+    `run_source`. Before this fix it reported `ERROR: ... prepared but empty` but LEFT
+    THE INVALID FILE IN PLACE, destroying the prior valid artifact -- every builder
+    writes directly to the published path, so a failed run overwrites the last
+    known-good file before verification ever runs."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.codes_dir = Path(self.tmp.name) / "codes"
+        self.codes_dir.mkdir()
+
+    class _Args:
+        dry_run = False
+
+    def test_a_failed_refresh_preserves_the_prior_valid_artifact(self):
+        import json
+
+        import tools.refresh_authoritative_data as refresh
+
+        output_path = self.codes_dir / "fake_source.json"
+        output_path.write_text(json.dumps(
+            {"concepts": {"C1": {"terms": ["x"], "parents": []}}}))
+        prior_bytes = output_path.read_bytes()
+
+        def _broken_prepare(tmp, args):
+            # `prepare` returns a COMMAND; the write happens when that command is RUN
+            # (mirroring every real builder, which writes to the published path as a
+            # subprocess, not as a side effect of `prepare` being called) -- the exact
+            # failure mode is the builder overwriting the PUBLISHED path with an empty
+            # (but validly-shaped) artifact, then exiting 0; `_verify` is what catches
+            # the emptiness, not the build command itself.
+            script = (f"import json; open({str(output_path)!r}, 'w')"
+                     f".write(json.dumps({{'concepts': {{}}}}))")
+            return [sys.executable, "-c", script]
+
+        old_codes, old_sources = refresh.CODES, refresh.SOURCES
+        refresh.CODES = self.codes_dir
+        refresh.SOURCES = dict(refresh.SOURCES)
+        refresh.SOURCES["fake_source"] = {"output": "fake_source.json",
+                                          "prepare": _broken_prepare}
+        try:
+            rec = refresh.run_source("fake_source", self._Args())
+            self.assertTrue(str(rec["status"]).startswith("ERROR"), rec)
+            self.assertEqual(output_path.read_bytes(), prior_bytes,
+                             "a failed refresh must not destroy the prior valid artifact")
+        finally:
+            refresh.CODES, refresh.SOURCES = old_codes, old_sources
+
+    def test_a_failed_first_run_leaves_no_artifact_behind(self):
+        """The symmetric case: no prior artifact existed at all. A failed run must not
+        leave a broken one in its place either."""
+        import json
+
+        import tools.refresh_authoritative_data as refresh
+
+        output_path = self.codes_dir / "fake_source.json"
+        self.assertFalse(output_path.exists())
+
+        def _broken_prepare(tmp, args):
+            script = (f"import json; open({str(output_path)!r}, 'w')"
+                     f".write(json.dumps({{'concepts': {{}}}}))")
+            return [sys.executable, "-c", script]
+
+        old_codes, old_sources = refresh.CODES, refresh.SOURCES
+        refresh.CODES = self.codes_dir
+        refresh.SOURCES = dict(refresh.SOURCES)
+        refresh.SOURCES["fake_source"] = {"output": "fake_source.json",
+                                          "prepare": _broken_prepare}
+        try:
+            rec = refresh.run_source("fake_source", self._Args())
+            self.assertTrue(str(rec["status"]).startswith("ERROR"), rec)
+            self.assertFalse(output_path.exists(),
+                             "a failed first-ever run must not leave an invalid "
+                             "artifact where none existed before")
+        finally:
+            refresh.CODES, refresh.SOURCES = old_codes, old_sources
+
+    def test_a_successful_refresh_still_publishes_normally(self):
+        """The fix must not block a genuinely successful refresh from publishing."""
+        import json
+
+        import tools.refresh_authoritative_data as refresh
+
+        output_path = self.codes_dir / "fake_source.json"
+
+        def _good_prepare(tmp, args):
+            script = (f"import json; open({str(output_path)!r}, 'w').write(json.dumps("
+                     f"{{'concepts': {{'C1': {{'terms': ['x'], 'parents': []}}}}}}))")
+            return [sys.executable, "-c", script]
+
+        old_codes, old_sources = refresh.CODES, refresh.SOURCES
+        refresh.CODES = self.codes_dir
+        refresh.SOURCES = dict(refresh.SOURCES)
+        refresh.SOURCES["fake_source"] = {"output": "fake_source.json",
+                                          "prepare": _good_prepare}
+        try:
+            rec = refresh.run_source("fake_source", self._Args())
+            self.assertEqual(rec["status"], "ok", rec)
+            self.assertEqual(rec["codes"], 1)
+        finally:
+            refresh.CODES, refresh.SOURCES = old_codes, old_sources
+
+
 if __name__ == "__main__":
     unittest.main()

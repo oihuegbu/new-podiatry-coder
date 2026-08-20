@@ -375,6 +375,53 @@ class SourcePage(_Strict):
         return None
 
 
+def _revalidated_read(read: PageRead) -> PageRead:
+    """Reconstruct one `PageRead`'s status/content invariants AND its digest/token
+    provenance from its own raw fields, refusing anything that disagrees with what it
+    claims. This is the ONE trust-boundary validator every filed read passes through
+    (Codex F7-R3-A, exact-SHA re-review, sixth pass) -- `with_channel` is where a
+    caller-supplied reader's output first enters a trusted document, so it is where
+    "trust nothing the object merely claims about itself" has to live.
+
+    Two gaps closed together, because both let an object carry a claim its own raw
+    fields do not support:
+      * `model_copy(update=...)` never re-runs a pydantic validator -- a VALID `READ`
+        object copied to `status=BLANK` with empty content bypassed `PageRead`'s own
+        model validator entirely, and nothing downstream re-checked it. Reconstructing
+        through the ORDINARY constructor from the object's own dumped fields forces
+        full validation again: a `model_copy`-derived instance either re-validates
+        cleanly (it was already internally consistent) or raises here.
+      * `text_sha256` and each `SourceToken.normalized` were trusted as claimed, never
+        checked against the raw `text`/`SourceToken.text` they describe -- so an
+        object could carry real-looking tokens and an empty digest describing content
+        its own `text` field never contained. Both are recomputed here with the SAME
+        functions the shared builder uses, and any token whose raw text does not even
+        appear in this read's own `text` is refused outright.
+    """
+    try:
+        read = PageRead(**read.model_dump())
+    except ValidationError as exc:
+        raise InvalidSourceEvidenceDocument(
+            f"page {read.page_number} read on channel {read.channel_id!r} does not "
+            f"re-validate from its own fields: {exc}") from exc
+    expected_digest = "sha256:" + hashlib.sha256(read.text.encode("utf-8")).hexdigest()
+    if read.text_sha256 != expected_digest:
+        raise InvalidSourceEvidenceDocument(
+            f"page {read.page_number} read on channel {read.channel_id!r} claims a "
+            f"text digest that does not match its own text")
+    for token in read.tokens:
+        if normalize_token(token.text) != token.normalized:
+            raise InvalidSourceEvidenceDocument(
+                f"page {read.page_number} read on channel {read.channel_id!r} carries "
+                f"a token {token.text!r} whose normalized form does not match its own "
+                f"text")
+        if token.text not in read.text:
+            raise InvalidSourceEvidenceDocument(
+                f"page {read.page_number} read on channel {read.channel_id!r} carries "
+                f"a token {token.text!r} that does not appear anywhere in its own text")
+    return read
+
+
 class SourceEvidenceDocument(_Strict):
     """A versioned, multi-channel reading of one original document."""
 
@@ -508,6 +555,8 @@ class SourceEvidenceDocument(_Strict):
         attached without complaint, filing a page-99 read as evidence for page 2, or a
         read from an unrelated channel as if this channel had produced it.
         """
+        reads = {page_number: _revalidated_read(read)
+                for page_number, read in reads.items()}
         mismatched = [(page_number, read) for page_number, read in reads.items()
                      if read.page_number != page_number
                      or read.channel_id != channel.channel_id]

@@ -2253,6 +2253,44 @@ class WholeEncounterGovernedTerminology(unittest.TestCase):
 
         self.assertEqual(result.billable_lines, [], result.billable_lines)
 
+    def test_a_governed_expansion_reaches_retrieval_and_is_bound_in_consensus(self):
+        """Codex F7-R3-C4, exact-SHA re-review, exact counterexample: primary anatomy
+        'term alpha', second anatomy 'term beta', governed source confirms SAME, and
+        the only retrieval candidate is returned for a query containing 'term beta'.
+        Before this fix, consensus passed but no 'term beta' query was ever made and
+        no code was selected -- a verified expansion removed a hold without
+        improving candidate recall, and the terminology decision was not visible in
+        the audit trail at all."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CandidateCode
+        from claude_coder.terminology import CONCEPT_SAME
+
+        class _BetaOnlySource(MockSource):
+            def retrieve(self, description, system, top_k=20):
+                if system == "cpt" and "term beta" in (description or "").lower():
+                    return [CandidateCode("PROC_BETA", "cpt", "Procedure alpha, each",
+                                          0.9)]
+                return []
+
+        primary, second = self._readings("term alpha", "term beta")
+        note = "Procedure alpha performed today, described both ways."
+        src = _BetaOnlySource(records={("PROC_BETA", "cpt"): {"active": True}},
+                              concept_relation={("term alpha", "term beta"): CONCEPT_SAME})
+
+        result = _run_union(primary, second, note_text=note, source=src)
+
+        billable = result.billable_lines
+        self.assertEqual([ln.chosen.code for ln in billable], ["PROC_BETA"],
+                         [ln.rationale for ln in result.lines])
+        # The decisive terminology action is traceable from the audit trail, not just
+        # absent from the disagreement list.
+        matches = (result.consensus or {}).get("governed_matches") or []
+        self.assertTrue(matches, result.consensus)
+        self.assertEqual(matches[0]["axis"], "anatomy")
+        self.assertEqual({matches[0]["value_primary"], matches[0]["value_second"]},
+                         {"term alpha", "term beta"})
+        self.assertEqual(matches[0].get("verdict"), CONCEPT_SAME)
+
 
 class OccurrenceCardinality(unittest.TestCase):
     """Defect B: a repeated MENTION is not a repeated SERVICE."""

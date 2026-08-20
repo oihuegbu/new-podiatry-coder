@@ -48,6 +48,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -315,8 +316,30 @@ def run_source(name: str, args) -> dict:
                     print("  " + rec["status"])
                     return rec
             cmd = spec["prepare"](tmp, arg)
-            _run(cmd)
-        rec.update(_verify(spec["output"]))
+            # Publication safety (Codex F7-R3-C5, exact-SHA re-review, sixth pass): every
+            # builder writes DIRECTLY to the published path (`CODES / spec["output"]`),
+            # so a run that fails partway or produces an invalid artifact overwrites the
+            # last known-good file before `_verify` below ever runs -- verification was
+            # catching damage that had already happened. Back the published file up here
+            # (inside this TemporaryDirectory, so the backup is cleaned up automatically)
+            # and restore it on ANY failure below, so a failed refresh can never leave the
+            # published path worse than it found it. This is the ONE place every source's
+            # publish step runs, so the fix covers all of them, not just this source.
+            published = CODES / spec["output"]
+            backup = tmp / f"{spec['output']}.backup"
+            had_prior = published.exists()
+            if had_prior:
+                shutil.copy2(published, backup)
+            try:
+                _run(cmd)
+                rec.update(_verify(spec["output"]))
+            except Exception:
+                if had_prior:
+                    shutil.copy2(backup, published)
+                elif published.exists():
+                    # the builder created a new, invalid file where none existed before
+                    published.unlink()
+                raise
         print(f"  OK: {rec['codes']} codes, {rec['bytes']} bytes")
     except Exception as exc:                          # a source failing never aborts the rest
         if spec.get("optional") and "empty" in str(exc).lower():
