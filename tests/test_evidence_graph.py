@@ -2325,6 +2325,37 @@ class WholeEncounterGovernedTerminology(unittest.TestCase):
                          "one now consulted -- said unresolved), so nothing may be "
                          "recorded as a governed match either")
 
+    def test_a_same_verdict_with_no_source_identity_is_never_trusted(self):
+        """Codex F7-R3-C4, exact-SHA re-review, ninth pass, exact reproduction: a
+        source reports SAME, with unique equal candidates and confidence 1.0, but
+        `source_identity: None` -- no versioned authority behind the relation. This
+        must not release a billable line while its own certificate could name a
+        relation with nothing authoritative to audit it against."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.terminology import CONCEPT_SAME
+
+        class _UnboundSameSource(MockSource):
+            def concept_relation(self, term_a, term_b):
+                return CONCEPT_SAME
+
+            def concept_relation_detail(self, term_a, term_b):
+                return {"verdict": CONCEPT_SAME, "confidence": 1.0,
+                       "term_a": {"term": term_a, "candidates": ["C1"], "unique": True},
+                       "term_b": {"term": term_b, "candidates": ["C1"], "unique": True},
+                       "source_identity": None}
+
+        primary, second = self._readings("term alpha", "term beta")
+        note = "Procedure alpha performed today, described both ways."
+        src = _UnboundSameSource(records={("PROC_X", "cpt"): {"active": True}})
+
+        result = _run_union(primary, second, note_text=note, source=src)
+
+        self.assertEqual(result.billable_lines, [], result.billable_lines)
+        matches = (result.consensus or {}).get("governed_matches") or []
+        self.assertEqual(matches, [],
+                         "a SAME verdict with no versioned source identity behind it "
+                         "must never be recorded as a confirmed governed match")
+
 
 class OccurrenceCardinality(unittest.TestCase):
     """Defect B: a repeated MENTION is not a repeated SERVICE."""

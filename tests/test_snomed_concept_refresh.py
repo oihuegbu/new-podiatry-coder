@@ -322,6 +322,37 @@ class RunSourcePublicationSafetyTest(unittest.TestCase):
         finally:
             self._restore(refresh, saved)
 
+    def test_an_exit_zero_builder_that_writes_nothing_is_never_reported_as_refreshed(self):
+        """Codex F7-R3-C5, exact-SHA re-review, ninth pass, exact reproduction: a
+        builder that exits 0 without creating or updating its output (a silent
+        no-op, a path-redirection defect, or a swallowed producer failure) used to
+        inherit the OLD target from the staging mirror -- `_verify` accepted the
+        stale bytes as freshly built, and the refresh reported success while
+        actually refreshing nothing."""
+        import json
+
+        import tools.refresh_authoritative_data as refresh
+
+        output_path = self.codes_dir / "fake_source.json"
+        output_path.write_text(json.dumps(
+            {"concepts": {"C1": {"terms": ["x"], "parents": []}}}))
+        prior_bytes = output_path.read_bytes()
+
+        def _noop_prepare(tmp, args):
+            # Exits 0 -- a "successful" run -- but never writes fake_source.json at
+            # all, staged or otherwise.
+            return [sys.executable, "-c", "pass"]
+
+        saved = self._patched(refresh, _noop_prepare)
+        try:
+            rec = refresh.run_source("fake_source", self._Args())
+            self.assertTrue(str(rec["status"]).startswith("ERROR"), rec)
+            self.assertEqual(output_path.read_bytes(), prior_bytes,
+                             "a no-op builder must not be reported as a refresh, and "
+                             "must not disturb the prior artifact")
+        finally:
+            self._restore(refresh, saved)
+
 
 if __name__ == "__main__":
     unittest.main()

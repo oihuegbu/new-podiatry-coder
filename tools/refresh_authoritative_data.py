@@ -365,6 +365,18 @@ def run_source(name: str, args) -> dict:
                     shutil.copytree(CODES, staging_codes)
                 else:
                     staging_codes.mkdir(parents=True)
+                # The mirror above exists so a builder that CROSS-REFERENCES an
+                # already-published table still finds it -- it must NOT also hand the
+                # builder a pre-existing copy of its OWN target (Codex F7-R3-C5,
+                # exact-SHA re-review, ninth pass): a builder that exits 0 without
+                # writing anything -- a silent no-op, a path-redirection defect, or a
+                # swallowed producer failure -- would otherwise leave the INHERITED
+                # stale target sitting in staging, `_verify` would accept it as
+                # freshly built, and a refresh that produced nothing would publish as
+                # a success. Removing the mirrored copy of the target specifically
+                # means only a builder that ACTUALLY WRITES a fresh file (identical
+                # bytes are fine; inherited bytes are not) can ever pass `_verify`.
+                (staging_codes / spec["output"]).unlink(missing_ok=True)
                 previous_override = os.environ.get("PODIATRY_DATA_DIR")
                 os.environ["PODIATRY_DATA_DIR"] = str(staging_data)
                 try:

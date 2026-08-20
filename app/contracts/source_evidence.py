@@ -376,32 +376,36 @@ class SourcePage(_Strict):
 
 
 def _tokens_consistent_with_text(tokens: tuple, text: str) -> bool:
-    """Do these tokens, IN THE CLAIMED ORDER, form a genuine subsequence of the
-    read's own whitespace tokenization -- never reordered, never claimed more times
-    than they actually occur?
+    """Do these tokens account for EVERY material word of the read's own whitespace
+    tokenization, in order, with no material word silently omitted?
 
-    Codex F7-R3-A, exact-SHA re-review, seventh pass: mere membership ("this token's
-    text occurs SOMEWHERE in the text") does not rule out a caller REORDERING real
-    words into a fabricated contiguous phrase (raw text "phrase documented" filed as
-    the ordered stream ["documented", "phrase"] certifies the fabricated quote
-    "documented phrase"), or CLAIMING a token more times than the text actually
-    contains it. Walking `text.split()` forward once, consuming one word per claimed
-    token in order, catches both: a reordered token has no unconsumed match left
-    AHEAD of the current position, and an over-claimed token runs out of remaining
-    occurrences. This is exactly how `text` and its tokens are constructed together
-    everywhere in this codebase today (`build_page_read`'s own tokenizer, and the
-    embedded-text-layer's `text = " ".join(t.text for t in tokens)`), so a
-    genuinely-produced read always satisfies it.
+    Codex F7-R3-A, exact-SHA re-review, eighth pass: the prior (subsequence) version
+    proved order and upper-bounded multiplicity, but still let a caller OMIT an
+    intervening real word -- raw text "documented unrelated phrase" filed as the
+    token stream [documented, phrase] skips "unrelated" and turns two separated
+    words into an apparently CONTIGUOUS quotation the page never actually states.
+    Membership and order are not enough; COMPLETENESS is what closes it: walk the
+    read's own `text.split()` once, and every word must either be consumed by the
+    NEXT claimed token in sequence (an exact match) or be punctuation-only (the one
+    kind of omission `build_page_read`'s own default tokenizer already performs, via
+    its `if normalize_token(piece)` filter) -- a material word with no claimed token
+    to consume it fails the read outright, and any claimed token left over at the end
+    (more tokens than the text could ever supply) fails it too.
+
+    This is exactly how `text` and its tokens are constructed together everywhere in
+    this codebase today (`build_page_read`'s own tokenizer, and the embedded-text-
+    layer's `text = " ".join(t.text for t in tokens)`, which never omits anything),
+    so a genuinely-produced read always satisfies it.
     """
     words = text.split()
     i = 0
-    for token in tokens:
-        while i < len(words) and words[i] != token.text:
+    for word in words:
+        if i < len(tokens) and tokens[i].text == word:
             i += 1
-        if i >= len(words):
-            return False
-        i += 1
-    return True
+            continue
+        if normalize_token(word):
+            return False   # a material word with no token to account for it
+    return i == len(tokens)   # every claimed token was actually consumed
 
 
 def _revalidated_read(read: PageRead) -> PageRead:

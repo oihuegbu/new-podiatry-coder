@@ -1332,6 +1332,32 @@ class TrustBoundaryRevalidationTest(unittest.TestCase):
         with self.assertRaises(InvalidSourceEvidenceDocument):
             document.with_channel(channel, {1: reordered})
 
+    def test_an_omitted_intervening_word_fabricating_a_contiguous_quote_is_refused(self):
+        """Codex F7-R3-A, exact-SHA re-review, eighth pass, exact reproduction: raw
+        text 'documented unrelated phrase' filed with the token stream
+        ['documented', 'phrase'] -- SKIPPING the real intervening word 'unrelated'.
+        Order and multiplicity alone do not catch this: the claimed tokens are in
+        order and each occurs exactly once, but omitting a real word between them
+        turns two separated words into an apparently CONTIGUOUS fabricated quote
+        'documented phrase', which the page never actually states."""
+        import hashlib
+
+        from app.contracts.source_evidence import (ChannelKind, InvalidSourceEvidenceDocument,
+                                                    PageRead, PageStatus, ReadChannel,
+                                                    SourceToken)
+        document = _compile(self.root, [["alpha"]], ["alpha"])
+        channel = ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                              kind=ChannelKind.VISION, provider="openai")
+        raw = "documented unrelated phrase"
+        digest = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        omitted = PageRead(
+            channel_id=SECONDARY_VISION_CHANNEL_ID, page_number=1,
+            status=PageStatus.READ, text=raw, text_sha256=digest,
+            tokens=(SourceToken(text="documented", normalized="documented"),
+                   SourceToken(text="phrase", normalized="phrase")))
+        with self.assertRaises(InvalidSourceEvidenceDocument):
+            document.with_channel(channel, {1: omitted})
+
     def test_a_token_claimed_more_times_than_it_actually_occurs_is_refused(self):
         """Codex's exact multiplicity reproduction: raw text contains one occurrence
         of a word, but the claimed token stream repeats it -- over-claiming

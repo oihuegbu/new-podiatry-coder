@@ -269,7 +269,15 @@ def axis_relation_detail(axis: str, va: str, vb: str,
                 detail = dict(detail_fn(va, vb) or {})
             except Exception:
                 detail = {}
-            if detail.get("verdict") == CONCEPT_SAME:
+            # A SAME verdict promotes a claim-changing outcome, so it must be BOUND to
+            # a real, versioned authority before this trusts it (Codex F7-R3-C4,
+            # exact-SHA re-review, ninth pass, exact reproduction: SAME + unique
+            # candidates + confidence 1.0 + `source_identity: None` still released a
+            # billable line with no authoritative source behind the relation that
+            # authorized it). A source's OWN claim of SAME with nothing versioned to
+            # audit it against is exactly the unbound claim this axis exists to
+            # refuse -- degrades to UNDETERMINED, never trusted at face value.
+            if detail.get("verdict") == CONCEPT_SAME and detail.get("source_identity"):
                 return SAME_EVENT, detail
             return UNDETERMINED, detail
     return UNDETERMINED, {}
