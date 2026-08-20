@@ -465,6 +465,13 @@ class AuthoritativeSource:
             "method": match.method,
             "unique": match.unique,
             "expansions": list(expansions),
+            # Every candidate's own known governed terms, ambiguous or not -- so a
+            # caller building a provider-facing message never has to show a bare
+            # concept id (issue #6 F7-R3-C4, exact-SHA re-review, tenth pass: an
+            # ambiguity hold routed to a human is only actionable if what it asks
+            # about is nameable).
+            "candidate_terms": {cid: list(index.terms_for_concept(cid))
+                               for cid in match.candidates},
             "source_identity": dict(self._concept_relation_identity or {}),
         }
 

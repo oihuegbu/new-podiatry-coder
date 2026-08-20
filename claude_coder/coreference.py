@@ -307,12 +307,24 @@ def normalize_fact_terminology(fact: Any, source: Any = None,
     source's own versioned identity -- the minimum record the acceptance criteria
     ask for, emitted once per axis, never duplicated as a second full copy anywhere
     else. `fact.governed_terms` (already what `resolution.resolve` queries under) is
-    the ONLY other place this writes, and only for a record whose status is
-    "expanded" -- a unique, confidently resolved match backed by a real source
-    identity. Ambiguous, unresolved, or unbound (no source_identity) results
-    contribute NOTHING to retrieval, exactly like this axis already degrades with no
-    concept source at all: never a guess, never enabling billable output from an
-    unproven relation.
+    the only place an "expanded" record additionally writes -- a unique, confidently
+    resolved match backed by a real source identity, contributing an extra retrieval
+    query. "unresolved" and "unbound" contribute nothing further: exactly how this
+    axis already degrades with no concept source at all, since neither one is
+    evidence the record actually means something UNCERTAIN, only that the graph has
+    nothing (or nothing trustworthy) to say.
+
+    "ambiguous" is different (Codex F7-R3-C4, exact-SHA re-review, tenth pass): the
+    graph found MULTIPLE real candidate concepts for this EXACT term -- a positive
+    signal of genuine uncertainty, not mere absence. Left otherwise unacted on, the
+    RAW phrase still reaches the ordinary retrieval query untouched and could
+    resolve and bill a line with no acknowledgement that the documented value might
+    mean either of several different things. So an "ambiguous" record ALSO appends
+    to `fact.axis_conflicts` -- the SAME field a cross-reading axis disagreement
+    already uses to hold the fact at `eligibility._gate_axis_consensus` and route it
+    to a targeted provider query, never a coder queue, before retrieval ever runs.
+    No new gate: this reuses the one that already exists for exactly this kind of
+    unsettled code-changing fact.
     """
     if source is None:
         return ()
@@ -326,8 +338,10 @@ def normalize_fact_terminology(fact: Any, source: Any = None,
         for s in (getattr(fact, "evidence", None) or [])
         if getattr(s, "span_id", None)))
     current = dict(getattr(fact, "governed_terms", None) or {})
+    conflicts = list(getattr(fact, "axis_conflicts", None) or [])
     records: list[dict] = []
     expanded = False
+    conflicted = False
     for axis in _CONCEPT_GOVERNED_AXES:
         value = str(attrs.get(axis, "") or "").strip()
         if not value:
@@ -344,6 +358,18 @@ def normalize_fact_terminology(fact: Any, source: Any = None,
             status = "unresolved"
         elif not unique:
             status = "ambiguous"
+            candidate_terms = result.get("candidate_terms") or {}
+            named = tuple(dict.fromkeys(
+                t for c in candidates for t in (candidate_terms.get(c) or ())))
+            heard_as = " or ".join(repr(n) for n in named) if named else (
+                " or ".join(repr(c) for c in candidates))
+            question = (f"The record does not settle {axis!r}: the documented "
+                        f"phrase {value!r} matches more than one governed concept "
+                        f"({heard_as}), and nothing in the record picks between "
+                        f"them. Please document {axis!r} explicitly for this event.")
+            if question not in conflicts:
+                conflicts.append(question)
+                conflicted = True
         elif not source_identity or not expansions:
             status = "unbound"
         else:
@@ -371,6 +397,8 @@ def normalize_fact_terminology(fact: Any, source: Any = None,
         })
     if expanded:
         fact.governed_terms = current
+    if conflicted:
+        fact.axis_conflicts = conflicts
     return tuple(records)
 
 
