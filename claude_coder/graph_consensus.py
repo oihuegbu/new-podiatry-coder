@@ -300,8 +300,24 @@ def align(primary: list, second: list) -> tuple[list[tuple[Any, Any]], list, lis
     return pairs, unmatched_primary, unmatched_second
 
 
-def compare_axes(pairs: list[tuple[Any, Any]]) -> tuple[list[AxisDisagreement], int]:
-    """Every code-changing axis the two readings did not read the same way."""
+def compare_axes(pairs: list[tuple[Any, Any]],
+                 source: Any = None) -> tuple[list[AxisDisagreement], int]:
+    """Every code-changing axis the two readings did not read the same way.
+
+    `source` (issue #6 F7-R3-C4) is put to the SAME governed axis-relation mechanic
+    claim assembly uses (`coreference.axis_relation`) before a raw string mismatch is
+    recorded as a disagreement: two readings worded as a confirmed-SAME concept on a
+    governed axis (anatomy) are not a disagreement at all, exactly as two readings
+    worded identically never were. This is the choke point where a genuine synonym
+    pair used to become an unsettleable cross-reading conflict -- routed to
+    `eligibility._gate_axis_consensus` as AUTO_HOLD -- before claim assembly's own
+    concept-aware comparison ever ran, because this comparison is upstream of it and
+    used only raw string equality. A relation the graph cannot confirm (ancestor/
+    descendant, ambiguous overlap, or unresolved) still raises a disagreement,
+    exactly as before -- this only removes disagreements the graph POSITIVELY
+    confirms are not real, never adds new tolerance beyond that.
+    """
+    from . import coreference as _coref
     out: list[AxisDisagreement] = []
     compared = 0
     for left, right in pairs:
@@ -312,6 +328,8 @@ def compare_axes(pairs: list[tuple[Any, Any]]) -> tuple[list[AxisDisagreement], 
             b = right_axes.get(axis, "")
             compared += 1
             if a == b:
+                continue
+            if a and b and _coref.axis_relation(axis, a, b, source) == _coref.SAME_EVENT:
                 continue
             if a and b:
                 basis = "the two readings recorded different values"
@@ -557,7 +575,8 @@ def disagreement_span_ids(disagreements: list[AxisDisagreement], primary_by_id: 
 
 def compare(primary_facts: list, second_facts: list, *,
             second_origin: Any = None,
-            alignment: tuple | None = None) -> tuple[ConsensusReport, dict, dict]:
+            alignment: tuple | None = None,
+            source: Any = None) -> tuple[ConsensusReport, dict, dict]:
     """Align two readings and list every code-changing axis they disagree on.
 
     Returns the report plus the two id-keyed views the resolver needs, so the caller can
@@ -567,10 +586,12 @@ def compare(primary_facts: list, second_facts: list, *,
     union needs the SAME correspondence this comparison used -- an event counted as
     matched here must not be proposed as a new event there -- so the alignment is
     computed once and shared rather than recomputed and trusted to agree.
+
+    `source` (issue #6 F7-R3-C4) is passed straight through to `compare_axes`.
     """
     pairs, unmatched_primary, unmatched_second = (
         alignment if alignment is not None else align(primary_facts, second_facts))
-    disagreements, compared = compare_axes(pairs)
+    disagreements, compared = compare_axes(pairs, source)
     primary_by_id = {str(getattr(f, "fact_id", "") or ""): f for f in primary_facts}
     second_by_node = {str(getattr(left, "fact_id", "") or ""): right
                       for left, right in pairs}

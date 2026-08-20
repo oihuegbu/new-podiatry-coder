@@ -60,7 +60,7 @@ import unicodedata
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.core.dates import find_dates, parse_date
 
@@ -268,7 +268,19 @@ class SourceToken(_Strict):
 
 
 class PageRead(_Strict):
-    """What ONE channel obtained from ONE page."""
+    """What ONE channel obtained from ONE page.
+
+    The three invariants below are enforced ON THE MODEL, not only by the shared
+    `build_page_read` builder (Codex F7-R3-A, exact-SHA re-review, fifth pass): the
+    prior fix closed the empty-response silent-BLANK-inference path in that ONE
+    builder, but `PageRead` itself stayed directly constructible with any
+    status/content/detail combination, so a caller-supplied `source_reader` that
+    builds `PageRead(status=BLANK)` directly -- never going through the shared
+    builder at all -- could still manufacture an unattested blank finding. Enforcing
+    here means EVERY construction path, direct or through the builder, through
+    `with_channel`, or through a JSON round-trip, is held to the same standard; there
+    is no second entry point left that skips it.
+    """
 
     channel_id: str
     page_number: int = Field(ge=1)
@@ -278,6 +290,34 @@ class PageRead(_Strict):
     tokens: tuple[SourceToken, ...] = ()
     #: Why this read is not READ, when it is not.
     detail: str = ""
+
+    @model_validator(mode="after")
+    def _validate_status_content(self) -> "PageRead":
+        if self.status is PageStatus.BLANK and (self.tokens or self.text.strip()):
+            raise ValueError(
+                f"page {self.page_number} read on channel {self.channel_id!r} claims "
+                f"BLANK but carries text/tokens -- a blank page has no content to "
+                f"attest to")
+        if self.status is PageStatus.BLANK and not self.detail.strip():
+            raise ValueError(
+                f"page {self.page_number} read on channel {self.channel_id!r} claims "
+                f"BLANK with no assertion/detector provenance in `detail` -- a blank "
+                f"finding must say WHY it was certified blank, never just that it was")
+        if self.status is PageStatus.READ and not self.tokens:
+            raise ValueError(
+                f"page {self.page_number} read on channel {self.channel_id!r} claims "
+                f"READ but carries no tokens -- READ means usable content was obtained")
+        # MISSING means the channel did not return this page AT ALL (its own docstring:
+        # "did NOT return it at all") -- unlike UNREADABLE, which legitimately carries a
+        # PARTIAL, untrusted read (e.g. a text layer recovering too few tokens to trust
+        # -- see app/ingestion/source_evidence.py's low_text_yield case), MISSING has
+        # nothing to carry by definition, so any content contradicts the claim itself.
+        if self.status is PageStatus.MISSING and (self.tokens or self.text.strip()):
+            raise ValueError(
+                f"page {self.page_number} read on channel {self.channel_id!r} claims "
+                f"MISSING but carries text/tokens -- a channel that did not return "
+                f"this page has no content to carry")
+        return self
 
     @property
     def usable(self) -> bool:
@@ -459,7 +499,30 @@ class SourceEvidenceDocument(_Strict):
         is absent (issue #6 F7-R5): without it, a second read that shares the primary's
         provider is admitted, contributes nothing, and leaves an audit record naming a
         channel that proved nothing.
+
+        The dict key a `PageRead` is passed under is where this document files it --
+        `_pages_with_reads` trusts that key, not the object's own fields. So every
+        object's OWN `channel_id`/`page_number` must agree with where it is being
+        filed (Codex F7-R3-A, exact-SHA re-review, fifth pass): a caller passing a read
+        under one page/channel while the object itself names another used to be
+        attached without complaint, filing a page-99 read as evidence for page 2, or a
+        read from an unrelated channel as if this channel had produced it.
         """
+        mismatched = [(page_number, read) for page_number, read in reads.items()
+                     if read.page_number != page_number
+                     or read.channel_id != channel.channel_id]
+        if mismatched:
+            page_number, read = mismatched[0]
+            raise InvalidSourceEvidenceDocument(
+                f"read filed under page {page_number} for channel "
+                f"{channel.channel_id!r} does not match itself: it names page "
+                f"{read.page_number} on channel {read.channel_id!r} -- a read's own "
+                f"identity must agree with where it is being attached")
+        unknown_pages = sorted(set(reads) - {p.page_number for p in self.pages})
+        if unknown_pages:
+            raise InvalidSourceEvidenceDocument(
+                f"channel {channel.channel_id!r} read page(s) {unknown_pages} not "
+                f"present in this document")
         existing = self.channel(channel.channel_id)
         if existing is not None:
             already_read = {p.page_number for p in self.pages
@@ -670,6 +733,13 @@ class SourceReconciliation(_Strict):
     #: Per-page explicit outcomes, including pages nothing was quoted from.
     page_outcomes: tuple[dict[str, Any], ...] = ()
     document_anomalies: tuple[str, ...] = ()
+    #: The full declared identity (kind/provider/profile/prompt digest/schema version)
+    #: of every channel named above -- not just its bare id (Codex F7-R3-A, exact-SHA
+    #: re-review, fifth pass: "persist ... reader identity in the final certificate").
+    #: A page's exempting read is traceable to WHICH reader established it; without
+    #: this, the certificate names a channel_id string with no way to audit what read
+    #: it actually was.
+    channel_identities: tuple[dict[str, Any], ...] = ()
 
     def by_span_id(self) -> dict[str, SpanReconciliation]:
         return {s.span_id: s for s in self.spans}
@@ -692,6 +762,7 @@ class SourceReconciliation(_Strict):
             "summary": self.summary(),
             "document_anomalies": list(self.document_anomalies),
             "page_outcomes": [dict(p) for p in self.page_outcomes],
+            "channel_identities": [dict(c) for c in self.channel_identities],
             "spans": [s.model_dump(mode="json") for s in self.spans],
         }
 
@@ -917,6 +988,16 @@ def reconcile_spans(document: SourceEvidenceDocument,
         "independently_read_by": [c.channel_id for c in independents
                                   if (page.read_by(c.channel_id) or None)
                                   and page.read_by(c.channel_id).usable],
+        # Codex F7-R3-A, exact-SHA re-review, fifth pass: `independently_read_by`
+        # alone collapses BLANK, UNREADABLE and "this channel never covered this
+        # page at all" into the same absence -- a channel is left off the list for
+        # all three reasons identically. The DURABLE record needs the actual
+        # four-state distinction the compiled `PageRead` objects already carry, not
+        # only a usable/not-usable boolean.
+        "channel_statuses": {c.channel_id: (page.read_by(c.channel_id).status.value
+                                            if page.read_by(c.channel_id) is not None
+                                            else PageStatus.MISSING.value)
+                            for c in independents},
     } for page in document.pages)
 
     return SourceReconciliation(
@@ -927,7 +1008,8 @@ def reconcile_spans(document: SourceEvidenceDocument,
         independent_channel_ids=tuple(c.channel_id for c in independents),
         spans=tuple(results),
         page_outcomes=page_outcomes,
-        document_anomalies=document.anomalies)
+        document_anomalies=document.anomalies,
+        channel_identities=tuple(c.model_dump(mode="json") for c in document.channels))
 
 
 # --------------------------------------------------------------------------
@@ -1134,6 +1216,13 @@ def reconcile_reading(document: SourceEvidenceDocument,
         "independently_read_by": [c.channel_id for c in checking
                                   if (page.read_by(c.channel_id) or None)
                                   and page.read_by(c.channel_id).usable],
+        # Codex F7-R3-A, exact-SHA re-review, fifth pass: see the identical note in
+        # `reconcile_readings` -- the same four-state distinction belongs in this
+        # record too, not only a usable/not-usable boolean.
+        "channel_statuses": {c.channel_id: (page.read_by(c.channel_id).status.value
+                                            if page.read_by(c.channel_id) is not None
+                                            else PageStatus.MISSING.value)
+                            for c in checking},
     } for page in document.pages)
 
     return SourceReconciliation(
@@ -1149,7 +1238,8 @@ def reconcile_reading(document: SourceEvidenceDocument,
                                       if c.channel_id != primary_id),
         spans=tuple(results),
         page_outcomes=page_outcomes,
-        document_anomalies=document.anomalies)
+        document_anomalies=document.anomalies,
+        channel_identities=tuple(c.model_dump(mode="json") for c in document.channels))
 
 
 def merge_reconciliations(*parts: "SourceReconciliation | None") -> "SourceReconciliation | None":
@@ -1180,9 +1270,20 @@ def merge_reconciliations(*parts: "SourceReconciliation | None") -> "SourceRecon
             if channel_id and channel_id != head.primary_channel_id \
                     and channel_id not in channels:
                 channels.append(channel_id)
+    # Reader identity (Codex F7-R3-A, exact-SHA re-review, fifth pass) unions the same
+    # way `independent_channel_ids` does: a channel that only contributed through a
+    # LATER-merged record must not silently vanish from the merged record's own idea
+    # of who read this document.
+    identities: dict[str, dict] = {}
+    for record in present:
+        for identity in record.channel_identities:
+            cid = identity.get("channel_id")
+            if cid and cid not in identities:
+                identities[cid] = identity
     return head.model_copy(update={
         "spans": tuple(spans.values()),
-        "independent_channel_ids": tuple(channels)})
+        "independent_channel_ids": tuple(channels),
+        "channel_identities": tuple(identities.values())})
 
 
 def pages_needing_independent_read(
@@ -1222,25 +1323,17 @@ def build_page_read(channel_id: str, page_number: int, text: str,
     any second model read — hashes and tokenizes identically. Two producers computing
     "the same" digest differently is the drift class this codebase keeps finding.
 
-    This is also the ONE place a claim-affecting BLANK finding can be minted, which is
-    why it validates rather than merely records (Codex F7-R3-A, exact-SHA re-review,
-    fourth pass). The earlier bug was not confined to one reader: this shared builder
-    itself inferred BLANK from empty text whenever a caller omitted `status`, so ANY
-    caller — including a caller-supplied `source_reader`, which `claude_coder.pipeline`
-    explicitly allows as a boundary object it does not control the implementation of —
-    could manufacture a positive blank finding from silence without ever intending to.
-
-    Two invariants are now enforced at this ONE choke point, not left to callers to
-    remember:
-      * Empty text with NO explicit `status` is UNREADABLE, never inferred BLANK. A
-        producer that means to certify a page as genuinely blank must say so.
-      * A `status=BLANK` claim MUST carry non-empty `detail` naming the assertion or
-        detector that established it, and MUST carry no text/tokens (a blank page has
-        nothing to attest to). Either violation raises `InvalidPageReadError` rather
-        than silently accepting an unexplained or self-contradicting positive finding
-        — fail closed at the boundary, not downstream at the gate that trusts it.
-      * A `status=READ` claim must carry at least one token — READ means usable
-        content was actually obtained, not merely "no problem was noticed".
+    This is also the usual place a claim-affecting BLANK finding is minted, computing
+    the digest and default status a caller should not have to derive by hand. The
+    actual status/content invariants -- BLANK requires `detail` and carries no
+    text/tokens; READ requires at least one token -- are enforced ON THE MODEL itself
+    (`PageRead._validate_status_content`, Codex F7-R3-A, exact-SHA re-review, fifth
+    pass) so every construction path is held to them, not only this one. This
+    function only adds the ONE thing the model cannot infer on its own: empty text
+    with NO explicit `status` defaults to UNREADABLE, never inferred BLANK -- a
+    producer that means to certify a page as genuinely blank must say so explicitly.
+    A `pydantic.ValidationError` from the model is re-raised as `InvalidPageReadError`
+    so this function's existing callers keep the typed contract they already handle.
     """
     body = str(text or "")
     if tokens is None:
@@ -1248,23 +1341,14 @@ def build_page_read(channel_id: str, page_number: int, text: str,
                   for piece in body.split() if normalize_token(piece)]
     if status is None:
         status = PageStatus.UNREADABLE if not tokens else PageStatus.READ
-    if status is PageStatus.BLANK and (tokens or body.strip()):
+    try:
+        return PageRead(
+            channel_id=channel_id, page_number=page_number, status=status, text=body,
+            text_sha256="sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            tokens=tuple(tokens), detail=detail)
+    except ValidationError as exc:
         raise InvalidPageReadError(
-            f"page {page_number} read on channel {channel_id!r} claims BLANK but "
-            f"carries text/tokens -- a blank page has no content to attest to")
-    if status is PageStatus.BLANK and not detail.strip():
-        raise InvalidPageReadError(
-            f"page {page_number} read on channel {channel_id!r} claims BLANK with "
-            f"no assertion/detector provenance in `detail` -- a blank finding must "
-            f"say WHY it was certified blank, never just that it was")
-    if status is PageStatus.READ and not tokens:
-        raise InvalidPageReadError(
-            f"page {page_number} read on channel {channel_id!r} claims READ but "
-            f"carries no tokens -- READ means usable content was obtained")
-    return PageRead(
-        channel_id=channel_id, page_number=page_number, status=status, text=body,
-        text_sha256="sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest(),
-        tokens=tuple(tokens), detail=detail)
+            f"page {page_number} read on channel {channel_id!r}: {exc}") from exc
 
 
 # --------------------------------------------------------------------------

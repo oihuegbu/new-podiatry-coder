@@ -715,8 +715,8 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
 
         real_evaluate = elig_module.evaluate
 
-        def promoted(facts, relations, encounter_id, dos):
-            intents = real_evaluate(facts, relations, encounter_id, dos)
+        def promoted(facts, relations, encounter_id, dos, source=None):
+            intents = real_evaluate(facts, relations, encounter_id, dos, source)
             for intent in intents:
                 intent.component = elig_module.ClaimComponent.SERVICE
             return intents
@@ -2130,6 +2130,128 @@ class AxisComparisonIsNormalized(unittest.TestCase):
         self.assertEqual(billable[0].units, 1,
                          f"one service, restated with the same laterality value in a "
                          f"different case, is one unit: {billable[0].rationale}")
+
+
+def _union_source_with_concept_relation(mapping):
+    """`_union_source()`, plus a governed concept-relation map (issue #6 F7-R3-C4)."""
+    from claude_coder.data_access import MockSource
+    from claude_coder.models import CandidateCode
+
+    class _ByDescription(MockSource):
+        def retrieve(self, description, system, top_k=20):
+            if system != "cpt":
+                return []
+            if "beta" in (description or "").lower():
+                return [CandidateCode("PROC_Y", "cpt", "Procedure beta, each", 0.9)]
+            return [CandidateCode("PROC_X", "cpt", "Procedure alpha, each", 0.9)]
+
+    return _ByDescription(records={("PROC_X", "cpt"): {"active": True},
+                                   ("PROC_Y", "cpt"): {"active": True}},
+                          concept_relation=mapping)
+
+
+class WholeEncounterGovernedTerminology(unittest.TestCase):
+    """Issue #6 F7-R3-C4, reviewer's exact reproduction and acceptance criteria: the
+    document states two synonymous anatomy phrases and the two independent readings
+    each select one -- proven through the REAL entrypoint (`pipeline.code_encounter`),
+    not just `dedup_lines` in isolation. Before this fix, `graph_consensus.compare_axes`
+    compared the two readings' `anatomy` values as raw strings, so a genuine synonym
+    pair was recorded as an unsettleable cross-reading disagreement, held at
+    `eligibility._gate_axis_consensus` (AUTO_HOLD), and never reached retrieval --
+    regardless of what `dedup_lines` alone could already resolve downstream, because
+    the encounter never got that far."""
+
+    _ACTION = ("F1", "excision procedure alpha performed",
+              "Procedure alpha performed today")
+
+    def _readings(self, anatomy_primary: str, anatomy_second: str):
+        import json
+        fact_id, description, quote = self._ACTION
+
+        def _fact(anatomy):
+            return json.dumps({"facts": [{
+                "fact_id": fact_id, "kind": "procedure", "description": description,
+                "attributes": {"anatomy": anatomy, "performer_id": "actor-1",
+                               "billing_entity_id": "actor-1"},
+                "disposition": "performed_today", "negated": False,
+                "evidence": [quote], "confidence": 0.99}]})
+        return _fact(anatomy_primary), _fact(anatomy_second)
+
+    def test_a_governed_same_synonym_pair_progresses_autonomously(self):
+        """The acceptance criterion, positive case: a uniquely resolved synonym pair
+        must NOT hold -- it must reach retrieval and bill ONE line, exactly as if both
+        readings had used the identical word."""
+        from claude_coder.models import Outcome
+        from claude_coder.terminology import CONCEPT_SAME
+
+        primary, second = self._readings("great toe", "hallux")
+        note = "Procedure alpha performed today on the great toe/hallux."
+        src = _union_source_with_concept_relation(
+            {("great toe", "hallux"): CONCEPT_SAME})
+
+        result = _run_union(primary, second, note_text=note, source=src)
+
+        billable = result.billable_lines
+        self.assertEqual([ln.chosen.code for ln in billable], ["PROC_X"],
+                         [ln.rationale for ln in result.lines])
+        self.assertEqual(billable[0].units, 1)
+        axis_decisions = [d for intent in result.claim_line_intents
+                         for d in intent.decisions if d.gate == "axis_consensus"]
+        self.assertTrue(axis_decisions)
+        self.assertTrue(all(d.outcome is Outcome.PASS for d in axis_decisions),
+                        axis_decisions)
+        # The consensus report itself must show no disagreement -- not merely that one
+        # was raised and then separately excused.
+        self.assertEqual(result.consensus.get("disagreements"), [], result.consensus)
+
+    def test_the_same_pair_still_holds_without_a_governed_source(self):
+        """Regression: absence of a concept source (or an unresolved relation) must
+        still hold exactly as before this round -- the fix adds a confirmation path,
+        it does not loosen the default."""
+        primary, second = self._readings("great toe", "hallux")
+        note = "Procedure alpha performed today on the great toe/hallux."
+
+        from claude_coder.models import Outcome
+
+        result = _run_union(primary, second, note_text=note)   # default source, no map
+
+        self.assertEqual(result.billable_lines, [], result.billable_lines)
+        axis_decisions = [d for intent in result.claim_line_intents
+                         for d in intent.decisions if d.gate == "axis_consensus"]
+        self.assertTrue(any(d.outcome is Outcome.UNKNOWN for d in axis_decisions),
+                        axis_decisions)
+
+    def test_an_ancestor_descendant_relation_holds_not_progresses(self):
+        """The acceptance criterion's ambiguity/overlap case: a RELATED (not SAME)
+        concept relation is real evidence, but never a confirmed match -- it must hold,
+        exactly like an unresolved pair, never be promoted to autonomous progress."""
+        from claude_coder.terminology import CONCEPT_RELATED
+
+        primary, second = self._readings("great toe", "hallux")
+        note = "Procedure alpha performed today on the great toe/hallux."
+        src = _union_source_with_concept_relation(
+            {("great toe", "hallux"): CONCEPT_RELATED})
+
+        result = _run_union(primary, second, note_text=note, source=src)
+
+        self.assertEqual(result.billable_lines, [], result.billable_lines)
+
+    def test_a_reported_disjoint_relation_still_holds_not_splits(self):
+        """Defense in depth for the acceptance criterion's distinct-events case: even a
+        source that WRONGLY reports DISJOINT (this codebase's own `ConceptRelationIndex`
+        never does -- issue #6 F7-R3-C3) must not let that promote to a confirmed
+        cross-reading difference; the encounter still holds rather than fabricating a
+        second occurrence from a relation this system does not trust."""
+        from claude_coder.terminology import CONCEPT_DISJOINT
+
+        primary, second = self._readings("great toe", "hallux")
+        note = "Procedure alpha performed today on the great toe/hallux."
+        src = _union_source_with_concept_relation(
+            {("great toe", "hallux"): CONCEPT_DISJOINT})
+
+        result = _run_union(primary, second, note_text=note, source=src)
+
+        self.assertEqual(result.billable_lines, [], result.billable_lines)
 
 
 class OccurrenceCardinality(unittest.TestCase):

@@ -216,11 +216,16 @@ class Recovery:
 
 
 # ------------------------------------------------------------------- identity stage
-def propose(primary_facts, second_only_facts) -> list[EventCandidate]:
+def propose(primary_facts, second_only_facts, source=None) -> list[EventCandidate]:
     """Which second-reading-only events are NEW events, decided by document geometry.
 
     Runs before any page read, so the reconciliation that follows is aimed only at
     candidates that could actually change the claim.
+
+    `source` (issue #6 F7-R3-C4) is passed to the coreference test so a second-reading
+    event worded as a governed-SAME concept of a primary event (e.g. a synonym anatomy
+    phrase) is recognized as the SAME documented event rather than proposed as a new
+    one purely because the wording did not match.
     """
     owners: list[tuple[tuple[int, int], str]] = []
     for fact in (primary_facts or []):
@@ -261,7 +266,7 @@ def propose(primary_facts, second_only_facts) -> list[EventCandidate]:
         # the candidate the same coreference test everything else takes, never a bypass
         # of it: an event the record already carries, quoted somewhere else in the same
         # document, is still that one event.
-        corefers = _corefers_with_primary(fact, primary)
+        corefers = _corefers_with_primary(fact, primary, source)
         if corefers:
             candidate.verdict = DUPLICATE_OF_PRIMARY
             candidate.merged_into = corefers
@@ -275,7 +280,7 @@ def propose(primary_facts, second_only_facts) -> list[EventCandidate]:
     return out
 
 
-def _corefers_with_primary(fact, primary_facts) -> str:
+def _corefers_with_primary(fact, primary_facts, source=None) -> str:
     """The primary event this candidate IS, or "" when the record establishes none.
 
     Delegates the whole judgement to `claude_coder.coreference`, which is also what
@@ -284,6 +289,8 @@ def _corefers_with_primary(fact, primary_facts) -> str:
     encounter on ONE date, so every event here is in the same episode by construction --
     and passing an episode this module does not have would weaken the test, not
     strengthen it.
+
+    `source` (issue #6 F7-R3-C4) is passed straight through to `event_verdict`.
     """
     from . import coreference as _coref
 
@@ -294,7 +301,8 @@ def _corefers_with_primary(fact, primary_facts) -> str:
             left_action=getattr(fact, "description", ""),
             right_action=getattr(other, "description", ""),
             left_attributes=getattr(fact, "attributes", None),
-            right_attributes=getattr(other, "attributes", None))
+            right_attributes=getattr(other, "attributes", None),
+            source=source)
         if verdict == _coref.SAME_EVENT:
             return _clean(getattr(other, "fact_id", ""))
     return ""

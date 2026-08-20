@@ -220,18 +220,43 @@ SOURCES: dict[str, dict] = {
 }
 
 
+#: Keyed-map outputs, in priority order, and the field each schema uses to hold its
+#: records. Codex F7-R3-C5: this used to check ONLY "terms"/"codes", a hardcoded pair
+#: that matched every schema this tool wrote UNTIL `snomed_concept_terms.json`
+#: (concept id -> record) used a different, equally valid container field -- so a
+#: correctly-built 43,459-concept artifact counted as 0 and the refresh reported a
+#: truthful build as an empty-output failure. New keyed-map outputs must add their
+#: container field here, or `_verify` cannot count them.
+_KEYED_MAP_CONTAINERS = ("terms", "codes", "concepts")
+
+
 def _verify(output: str) -> dict:
     path = CODES / output
     if not path.exists():
         raise RuntimeError(f"expected output missing: {path}")
     data = json.loads(path.read_text())
-    # Outputs are either a keyed map ({"terms"/"codes": {...}, "provenance": ...}) or a
-    # bare list of records (e.g. ncci_data.json's PTP edit rows).
+    # Outputs are either a keyed map ({<container>: {...}, "provenance"/"release": ...})
+    # or a bare list of records (e.g. ncci_data.json's PTP edit rows).
     if isinstance(data, list):
         n, prov = len(data), ""
     else:
-        n = len(data.get("terms") or data.get("codes") or {})
+        container = next((k for k in _KEYED_MAP_CONTAINERS if k in data), None)
+        if container is None:
+            raise RuntimeError(
+                f"{output}: no recognized record container among "
+                f"{_KEYED_MAP_CONTAINERS} -- schema not registered in "
+                f"_KEYED_MAP_CONTAINERS, or the build product is malformed")
+        n = len(data.get(container) or {})
         prov = data.get("provenance") or data.get("source") or ""
+        # A licensed-release-sourced artifact (snomed_icd10, snomed_concept_terms)
+        # declares the exact bytes it was built from; a present-but-empty digest is a
+        # build defect in its own right even when the record container is non-empty --
+        # a partial or misconfigured run could still emit real-looking records against
+        # a digest it never actually validated.
+        for digest_field in ("relationship_sha256", "description_sha256"):
+            digest = data.get(digest_field)
+            if digest is not None and not str(digest).strip():
+                raise RuntimeError(f"{output}: {digest_field} present but empty")
     if n == 0:
         raise RuntimeError(f"{output} prepared but empty")
     return {"codes": n, "provenance": prov,

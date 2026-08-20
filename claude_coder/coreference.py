@@ -197,8 +197,17 @@ _LATERALITY_DISJOINT_PAIR = frozenset({"left", "right"})
 _CONCEPT_GOVERNED_AXES = frozenset({"anatomy"})
 
 
-def _axis_relation(axis: str, va: str, vb: str, source: Any = None) -> str:
+def axis_relation(axis: str, va: str, vb: str, source: Any = None) -> str:
     """SAME_EVENT, DISTINCT_EVENT, or UNDETERMINED for one axis's two stated values.
+
+    PUBLIC (issue #6 F7-R3-C4): this is the ONE axis-relation mechanic every stage of
+    the pipeline that compares two documented values must consult -- claim assembly
+    (`pipeline.dedup_lines`), event coreference (`event_union._corefers_with_primary`),
+    cross-reading axis consensus (`graph_consensus.compare_axes`), and eligibility's
+    known-known conflict check. Two competing implementations of "is this the same
+    value" is exactly how a governed concept match could settle claim assembly while
+    an earlier stage, still comparing raw strings, held or diverged the same pair
+    first -- so there is now only one.
 
     Identifier axes (performer_id): an id is either the same id or a different one --
     no overlap semantics, so any inequality is a confirmed difference.
@@ -215,14 +224,17 @@ def _axis_relation(axis: str, va: str, vb: str, source: Any = None) -> str:
     stored value may be an arbitrary string) -- gets the conservative open-vocabulary
     treatment: an exact match (case/whitespace folded) is the same value. For an axis
     in `_CONCEPT_GOVERNED_AXES`, an inexact match is then put to the governed concept
-    graph (`source.concept_relation`) when a `source` was supplied: a confirmed SAME
-    concept is SAME_EVENT, a confirmed DISJOINT concept is DISTINCT_EVENT, and an
-    ancestor/descendant or unresolved relation -- like every other open axis, and
-    like this axis when no `source` is available at all -- is UNDETERMINED. Lexical
-    shape alone never establishes a confirmed DISTINCT_EVENT for open text (Codex
-    F7-R3-C, exact-SHA re-review, third pass) or for a non-canonical enumerated value
-    it cannot be told apart from; the concept graph is consulted precisely because it
-    is authoritative data, not lexical shape.
+    graph (`source.concept_relation`) when a `source` was supplied: only a confirmed
+    SAME concept promotes to SAME_EVENT. DISTINCT_EVENT is never reachable from the
+    concept graph (issue #6 F7-R3-C3): an IS_A subsumption hierarchy has no basis to
+    assert two concepts are opposed, so `ConceptRelationIndex` never returns DISJOINT,
+    and this function does not invent a promotion path for one. An
+    ancestor/descendant relation, an ambiguous overlap, or an unresolved term -- like
+    every other open axis, and like this axis when no `source` is available at all --
+    stays UNDETERMINED. Lexical shape alone never establishes a confirmed
+    DISTINCT_EVENT for open text (Codex F7-R3-C, exact-SHA re-review, third pass) or
+    for a non-canonical enumerated value it cannot be told apart from; the concept
+    graph is consulted precisely because it is authoritative data, not lexical shape.
     """
     if axis in _IDENTIFIER_AXES:
         return SAME_EVENT if va.lower() == vb.lower() else DISTINCT_EVENT
@@ -239,15 +251,13 @@ def _axis_relation(axis: str, va: str, vb: str, source: Any = None) -> str:
     if axis in _CONCEPT_GOVERNED_AXES and source is not None:
         concept_relation = getattr(source, "concept_relation", None)
         if callable(concept_relation):
-            from .terminology import CONCEPT_DISJOINT, CONCEPT_SAME
+            from .terminology import CONCEPT_SAME
             try:
                 verdict = concept_relation(va, vb)
             except Exception:
                 verdict = None
             if verdict == CONCEPT_SAME:
                 return SAME_EVENT
-            if verdict == CONCEPT_DISJOINT:
-                return DISTINCT_EVENT
     return UNDETERMINED
 
 
@@ -272,12 +282,14 @@ def known_known_differences(left: dict | None, right: dict | None,
     same documented value. Where a governed concept source IS available (`source`,
     issue #6 F7-R3-C -- currently `anatomy` only, see `_CONCEPT_GOVERNED_AXES`), an
     inexact match is put to that authoritative graph rather than left an unresolved
-    guess; anything the graph does not confirm DISJOINT is `known_known_ambiguous`,
-    never promoted to a confirmed difference by disjointness, containment, or any
-    other lexical heuristic.
+    guess -- but the graph can only ever CONFIRM a match (issue #6 F7-R3-C3: an IS_A
+    subsumption hierarchy has no basis to assert two concepts are opposed, so this
+    axis can never land in `known_known_differences` from concept data, only ever in
+    `known_known_ambiguous` or nowhere at all); never promoted to a confirmed
+    difference by disjointness, containment, or any other lexical heuristic.
 
     A CLOSED, small clinical enumeration the record states directly (laterality) has
-    an explicit RELATION (`_axis_relation`), not a flat equality test: 'left' vs
+    an explicit RELATION (`axis_relation`), not a flat equality test: 'left' vs
     'right' is the one genuinely disjoint canonical pair, but 'unspecified' or
     'bilateral' paired with a single side is deliberately NOT a confirmed difference
     either (Codex F7-R3-C1, exact-SHA re-review, third pass -- a flat inequality rule
@@ -298,7 +310,7 @@ def known_known_differences(left: dict | None, right: dict | None,
     for axis in axes:
         va = str(a.get(axis, "") or "").strip()
         vb = str(b.get(axis, "") or "").strip()
-        if va and vb and _axis_relation(axis, va, vb, source) == DISTINCT_EVENT:
+        if va and vb and axis_relation(axis, va, vb, source) == DISTINCT_EVENT:
             out.append(axis)
     return tuple(out)
 
@@ -307,7 +319,7 @@ def known_known_ambiguous(left: dict | None, right: dict | None,
                           axes: tuple[str, ...] = DISTINGUISHING_AXES,
                           source: Any = None) -> tuple[str, ...]:
     """The axes on which both mentions state a value whose RELATION
-    (`_axis_relation`) is UNDETERMINED -- neither confirmed same nor confirmed
+    (`axis_relation`) is UNDETERMINED -- neither confirmed same nor confirmed
     different.
 
     For open vocabulary that is an inexact lexical match and has no governed concept
@@ -326,7 +338,7 @@ def known_known_ambiguous(left: dict | None, right: dict | None,
     for axis in axes:
         va = str(a.get(axis, "") or "").strip()
         vb = str(b.get(axis, "") or "").strip()
-        if va and vb and _axis_relation(axis, va, vb, source) == UNDETERMINED:
+        if va and vb and axis_relation(axis, va, vb, source) == UNDETERMINED:
             out.append(axis)
     return tuple(out)
 
@@ -364,9 +376,10 @@ def event_verdict(*, left_kind: Any, right_kind: Any,
     than to a heuristic.
 
     `source` is optional and, when supplied, is consulted for axes in
-    `_CONCEPT_GOVERNED_AXES` (issue #6 F7-R3-C) to tell an inexact lexical match on
-    those axes apart as a governed-SAME, governed-DISJOINT, or still-ambiguous
-    relation instead of defaulting every inexact match straight to `UNDETERMINED`.
+    `_CONCEPT_GOVERNED_AXES` (issue #6 F7-R3-C) to confirm an inexact lexical match on
+    those axes as a governed SAME relation instead of defaulting every inexact match
+    straight to `UNDETERMINED`. It can only ever confirm a match, never a difference
+    (issue #6 F7-R3-C3).
     """
     lk = str(getattr(left_kind, "value", left_kind) or "")
     rk = str(getattr(right_kind, "value", right_kind) or "")

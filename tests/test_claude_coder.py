@@ -573,36 +573,76 @@ class TerminologyIndexTest(unittest.TestCase):
 
 
 class ConceptRelationIndexTest(unittest.TestCase):
-    """SAME / ancestor-descendant / DISJOINT / unresolved for two clinical terms, from
-    a governed concept graph (issue #6 F7-R3-C) -- never from lexical shape. Synthetic
-    concept ids/terms — the mechanics under test are candidate matching (exact,
-    despaced, token-set), ancestor-closure BFS, and the four-way relation verdict, none
-    of which depend on any specific SNOMED concept."""
+    """SAME / ancestor-descendant-or-ambiguous-overlap / unresolved for two clinical
+    terms, from a governed concept graph (issue #6 F7-R3-C/C3) -- never from lexical
+    shape, and never a fabricated DISJOINT (an IS_A subsumption hierarchy has no basis
+    to assert two concepts are opposed). Synthetic concept ids/terms — the mechanics
+    under test are candidate matching (exact, despaced, token-set), ancestor-closure
+    BFS, unique-vs-ambiguous resolution, and the relation verdict, none of which depend
+    on any specific SNOMED concept."""
 
     def _index(self):
         from claude_coder.terminology import ConceptRelationIndex
-        # C1 (root) -> C2 -> C3, and an unrelated C9.
+        # C1 (root) -> C2 -> C3, an unrelated C9, and an AMBIGUOUS term ("shared name")
+        # naming both C2 and C9 -- two different real-world concepts with one shared
+        # lexical name, exactly the kind of term the licensed release audit found
+        # (65 exact terms, 543 token-set keys resolve to more than one concept).
         return ConceptRelationIndex({
             "C1": {"terms": ["root structure"], "parents": []},
-            "C2": {"terms": ["mid structure", "middle structure"], "parents": ["C1"]},
+            "C2": {"terms": ["mid structure", "middle structure", "shared name"],
+                  "parents": ["C1"]},
             "C3": {"terms": ["leaf structure", "the leaf"], "parents": ["C2"]},
-            "C9": {"terms": ["other structure"], "parents": []},
+            "C9": {"terms": ["other structure", "shared name"], "parents": []},
         })
 
     def test_two_synonyms_of_the_same_concept_are_same(self):
         idx = self._index()
         self.assertEqual(idx.relation("leaf structure", "the leaf"), "same")
 
-    def test_an_ancestor_and_descendant_are_related_not_same_or_disjoint(self):
+    def test_an_ancestor_and_descendant_are_related_not_same(self):
         idx = self._index()
         self.assertEqual(idx.relation("leaf structure", "mid structure"),
                          "ancestor_descendant")
         self.assertEqual(idx.relation("mid structure", "root structure"),
                          "ancestor_descendant")
 
-    def test_two_concepts_with_no_relation_are_disjoint(self):
+    def test_two_concepts_with_no_relation_are_unresolved_not_disjoint(self):
+        """Codex F7-R3-C3, exact-SHA re-review: SNOMED's IS_A hierarchy carries no
+        disjointness axiom (per its own OWL/NNF specification), and the licensed
+        release audit found tens of thousands of non-ancestor sibling pairs that still
+        share a descendant -- absent subsumption is not evidence of opposition. Two
+        structurally unrelated concepts must resolve UNRESOLVED, never a fabricated
+        DISJOINT that could wrongly add a billed occurrence."""
         idx = self._index()
-        self.assertEqual(idx.relation("leaf structure", "other structure"), "disjoint")
+        self.assertEqual(idx.relation("leaf structure", "other structure"),
+                         "unresolved")
+
+    def test_an_ambiguous_shared_candidate_is_related_not_a_confirmed_same(self):
+        """Codex F7-R3-C3: a term resolving to MORE THAN ONE concept is itself
+        ambiguous within the graph -- the candidate sets merely intersecting is not
+        proof the two terms name the same real-world structure, only that they MIGHT.
+        'shared name' names both C2 and C9; matched against a term unique to C2, the
+        verdict must be the weaker RELATED, never a confirmed SAME."""
+        idx = self._index()
+        self.assertEqual(idx.relation("shared name", "middle structure"),
+                         "ancestor_descendant")   # RELATED verdict string
+        self.assertNotEqual(idx.relation("shared name", "middle structure"), "same")
+
+    def test_relation_detail_carries_the_auditable_match_basis(self):
+        from claude_coder.terminology import CONCEPT_SAME
+        idx = self._index()
+        detail = idx.relation_detail("leaf structure", "the leaf")
+        self.assertEqual(detail.verdict, CONCEPT_SAME)
+        self.assertEqual(detail.match_a.candidates, ("C3",))
+        self.assertEqual(detail.match_a.method, "exact")
+        self.assertTrue(detail.match_a.unique)
+        self.assertEqual(detail.alternatives_a, ())
+        self.assertEqual(detail.confidence, 1.0)
+
+        ambiguous = idx.relation_detail("shared name", "no such term")
+        self.assertEqual(ambiguous.match_a.candidates, ("C2", "C9"))
+        self.assertFalse(ambiguous.match_a.unique)
+        self.assertEqual(ambiguous.alternatives_a, ("C2", "C9"))
 
     def test_an_unknown_term_is_unresolved_not_a_guessed_relation(self):
         idx = self._index()
@@ -782,10 +822,14 @@ class DedupTest(unittest.TestCase):
         self.assertEqual(len(billed), 1)
         self.assertEqual(billed[0].units, 1)
 
-    def test_a_governed_concept_source_still_confirms_a_genuinely_disjoint_pair(self):
-        """The same wiring must not turn every ambiguous pair into a merge: a concept
-        source that confirms DISJOINT concepts is a real, authoritative distinction --
-        a second billable occurrence, not a guess in either direction."""
+    def test_a_reported_disjoint_relation_never_confirms_a_distinct_occurrence(self):
+        """Codex F7-R3-C3, exact-SHA re-review: SNOMED's IS_A hierarchy has no basis to
+        assert two concepts are opposed, so `ConceptRelationIndex` never returns
+        CONCEPT_DISJOINT -- and `coreference.axis_relation` does not promote on it
+        even if a source reports it anyway (defense in depth against a
+        non-conforming or future `CodeSource` implementation). A pair a source claims
+        is DISJOINT must still HOLD, exactly like an unresolved pair -- never silently
+        confirmed as two occurrences from a relation this system does not trust."""
         from claude_coder.data_access import MockSource
         from claude_coder.models import CodingResult, FactKind
         from claude_coder.pipeline import dedup_lines
@@ -799,8 +843,9 @@ class DedupTest(unittest.TestCase):
             concept_relation={("second toe", "great toe"): CONCEPT_DISJOINT})
         dedup_lines(r, src)
         billed = [ln for ln in r.billable_lines if ln.chosen.code == "SAME"]
-        self.assertEqual(len(billed), 1)
-        self.assertEqual(billed[0].units, 2)
+        self.assertEqual(billed, [],
+                         "a claimed DISJOINT relation must hold, never confirm an "
+                         "occurrence -- this system has no authoritative basis for it")
 
     def test_an_unresolved_concept_source_falls_back_to_the_existing_hold(self):
         """A concept source that cannot resolve either term (issue #6 F7-R3-C) must

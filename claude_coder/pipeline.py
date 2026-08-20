@@ -304,7 +304,8 @@ def code_encounter(
             consensus, source_evidence, recovery, recall = _run_graph_consensus(
                 note_text, facts, billing_context, extract_llm_b, profiles,
                 document_version, source_evidence, source_reader,
-                enforce_independence=enforce_second_reading_independence)
+                enforce_independence=enforce_second_reading_independence,
+                source=source)
             # Every reading a fact may now be anchored in. The relation kernel re-reads
             # the document between two endpoint mentions to prove an edge's DIRECTION,
             # and it can only do that against the string those mentions were verified
@@ -390,7 +391,8 @@ def code_encounter(
                            "independent_support": r.independent_support,
                            "support": r.support} for r in relations],
         }))
-        intents = _elig.evaluate(facts, relations, encounter_id, date_of_service)
+        intents = _elig.evaluate(facts, relations, encounter_id, date_of_service,
+                                 source=source)
         audit_hashes.append(audit_repository.append(encounter_id, "eligibility_enforced", {
             "control_mode": "ENFORCED_FAIL_CLOSED",
             "model_profiles": profiles,
@@ -954,7 +956,8 @@ def _reconcile_readings(document, facts, recall, *, only=None):
 
 def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profiles,
                          document_version, source_evidence, source_reader, *,
-                         enforce_independence: bool = False):
+                         enforce_independence: bool = False,
+                         source: CodeSource | None = None):
     """Second reading -> EVENT-CANDIDATE UNION + axis comparison -> TARGETED
     original-page verification.
 
@@ -1102,13 +1105,14 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
     # for both to read the same correspondence rather than recompute it.
     alignment = _gc.align(facts, extracted_b.facts)
     report, primary_by_id, second_by_node = _gc.compare(
-        facts, extracted_b.facts, second_origin=extracted_b.origin, alignment=alignment)
+        facts, extracted_b.facts, second_origin=extracted_b.origin, alignment=alignment,
+        source=source)
     pairs, _unmatched_primary_facts, unmatched_second_facts = alignment
     # Identity first, page reads second. A candidate is only worth paying to prove when
     # it could actually change the claim: it must rest on document text no primary event
     # rests on AND fail to corefer with any primary event. A candidate the record already
     # carries is settled here, for free, before a page is read (issue #6 F7-R3).
-    candidates = _union.propose(facts, unmatched_second_facts)
+    candidates = _union.propose(facts, unmatched_second_facts, source=source)
     report.independent_providers = independent_providers
     report.independence_enforced = bool(enforce_independence)
     # The recall control's own reach, stated in the durable record: which reading it ran

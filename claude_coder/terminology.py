@@ -15,6 +15,7 @@ data at load time, and self-updates when the annual Index is re-ingested.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 
 def _norm(s: str) -> str:
@@ -105,24 +106,81 @@ class TerminologyIndex:
 # compiled by tools/build_snomed_concept_terms.py. REVIEWED-OPTIONAL, same disposition
 # as every other licensed recall aid on this adapter: absence degrades the axis
 # comparison to its existing conservative behavior, never to a wrong relation.
+#
+# RELATION SEMANTICS (Codex F7-R3-C3, exact-SHA re-review): SNOMED's IS_A hierarchy is
+# a subsumption graph, not a partition. Its own OWL/NNF specification does not encode
+# class disjointness, and this codebase's licensed release audits confirm why that
+# matters operationally: 19,547 Body Structure concepts have more than one parent, and
+# tens of thousands of sibling (non-ancestor) concept pairs still share a descendant --
+# "no subsumption edge between these two concepts" is NOT "these are opposed", it is
+# simply what an IS_A hierarchy alone cannot tell you. So this graph never asserts
+# CONCEPT_DISJOINT (removed as a reachable verdict below; the two open axes it could
+# have distinguished stay UNDETERMINED, exactly as they already do with no concept
+# source at all -- absence of proof is not proof of absence). Likewise, an exact term
+# is sometimes itself AMBIGUOUS in the graph (65 exact terms and 543 token-set keys in
+# the current release resolve to more than one concept): two ambiguous terms whose
+# candidate sets merely intersect are NOT a confirmed match either -- SAME requires
+# each term to resolve to exactly ONE concept, and for those concepts to be equal.
 
-#: The concept graph resolved BOTH terms to the SAME concept -- a confirmed match.
+#: The concept graph resolved BOTH terms to exactly ONE, EQUAL concept -- the only
+#: confirmed-identity verdict this graph may assert. Requires a UNIQUE match on both
+#: sides: an ambiguous term (more than one candidate concept) can share a candidate
+#: with the other side without actually naming the same real-world structure.
 CONCEPT_SAME = "same"
-#: One concept is an ancestor of the other -- related, but NOT proof of sameness (a
-#: descendant can be a real, more specific distinction) and NOT proof of a difference
-#: (an ancestor can be the same site described less specifically).
+#: Real evidence of a relation, but not a confirmed verdict either way: either an
+#: ancestor/descendant pair (a descendant can be a real, more specific distinction; an
+#: ancestor can be the same site described less specifically), or at least one side
+#: resolved ambiguously and the candidate sets merely overlap.
 CONCEPT_RELATED = "ancestor_descendant"
-#: Both terms resolved to concepts, and neither concept is an ancestor of the other --
-#: a genuine, structural opposition the authoritative graph itself asserts.
+#: RESERVED, never returned by `ConceptRelationIndex` (an IS_A hierarchy alone cannot
+#: establish disjointness -- see the module note above). Kept as a named verdict only
+#: for a future source built from an authoritative relation that actually asserts
+#: opposition (e.g. a modeled SEP triple or an explicit exclusion axiom), should one
+#: ever be added; no caller may treat its mere existence as a signal.
 CONCEPT_DISJOINT = "disjoint"
-#: Either term did not resolve to a known concept in this graph. Never a relation on
-#: its own -- the caller's existing lexical-identity fallback applies.
+#: Either term did not resolve to a known concept in this graph, or resolved with no
+#: relation this graph can state. Never a relation on its own -- the caller's existing
+#: lexical-identity fallback applies.
 CONCEPT_UNRESOLVED = "unresolved"
 
 
+@dataclass(frozen=True)
+class ConceptMatch:
+    """How ONE term resolved against the concept graph: which concept id(s) matched, by
+    which matching strategy, and (via `unique`) whether the match was unambiguous."""
+    term: str
+    candidates: tuple[str, ...]
+    method: str   # "exact" | "despaced" | "token_set" | "none"
+
+    @property
+    def unique(self) -> bool:
+        return len(self.candidates) == 1
+
+
+@dataclass(frozen=True)
+class ConceptRelationDetail:
+    """The full, auditable basis for one relation verdict: both sides' matches (concept
+    ids, matching strategy, ambiguity), the verdict itself, and a confidence a caller
+    can weigh rather than trust blindly. `alternatives_*` is empty exactly when that
+    side matched uniquely -- there was nothing else it could have meant."""
+    verdict: str
+    match_a: ConceptMatch
+    match_b: ConceptMatch
+    confidence: float
+
+    @property
+    def alternatives_a(self) -> tuple[str, ...]:
+        return self.match_a.candidates if not self.match_a.unique else ()
+
+    @property
+    def alternatives_b(self) -> tuple[str, ...]:
+        return self.match_b.candidates if not self.match_b.unique else ()
+
+
 class ConceptRelationIndex:
-    """SAME / ancestor-descendant / DISJOINT / unresolved for two clinical terms,
-    from an authoritative concept graph -- never from lexical shape.
+    """SAME / ancestor-descendant-or-ambiguous-overlap / unresolved for two clinical
+    terms, from an authoritative concept graph -- never from lexical shape, and never a
+    fabricated DISJOINT (see the module note above).
 
     No term or concept identity is named here: the graph itself (loaded from data) is
     the only place clinical vocabulary appears, matching every other terminology index
@@ -146,21 +204,30 @@ class ConceptRelationIndex:
                 if toks:
                     self._byset.setdefault(toks, set()).add(cid)
 
+    def _match(self, term: str) -> ConceptMatch:
+        """One term's full match record: candidates plus WHICH strategy found them
+        (exact, compound-word, or order/plural-independent token set -- the same
+        strategy order as `TerminologyIndex`), so a caller can audit not just what
+        matched but how confidently."""
+        n = _norm(term)
+        if not n:
+            return ConceptMatch(term, (), "none")
+        if n in self._exact:
+            return ConceptMatch(term, tuple(sorted(self._exact[n])), "exact")
+        despaced = n.replace(" ", "")
+        if despaced in self._despaced:
+            return ConceptMatch(term, tuple(sorted(self._despaced[despaced])), "despaced")
+        toks = frozenset(_sing(t) for t in n.split() if len(t) > 2)
+        if toks and toks in self._byset:
+            return ConceptMatch(term, tuple(sorted(self._byset[toks])), "token_set")
+        return ConceptMatch(term, (), "none")
+
     def candidates(self, term: str) -> set[str]:
         """Candidate concept ids a clinical term could name -- the SAME matching
         strategy as `TerminologyIndex.candidates` (exact, compound-word, then
         order/plural-independent token set), just against concept ids instead of
         authoritative codes."""
-        n = _norm(term)
-        if not n:
-            return set()
-        if n in self._exact:
-            return set(self._exact[n])
-        despaced = n.replace(" ", "")
-        if despaced in self._despaced:
-            return set(self._despaced[despaced])
-        toks = frozenset(_sing(t) for t in n.split() if len(t) > 2)
-        return set(self._byset.get(toks, set())) if toks else set()
+        return set(self._match(term).candidates)
 
     def _ancestors(self, concept_id: str) -> set[str]:
         seen: set[str] = set()
@@ -173,25 +240,40 @@ class ConceptRelationIndex:
                     stack.append(parent)
         return seen
 
-    def relation(self, term_a: str, term_b: str) -> str:
-        """One of the CONCEPT_* verdicts above for two clinical terms.
+    def relation_detail(self, term_a: str, term_b: str) -> ConceptRelationDetail:
+        """The full auditable basis (see `ConceptRelationDetail`) for one relation
+        verdict between two clinical terms.
 
-        UNRESOLVED whenever either term does not resolve to a known concept in this
-        graph -- including a term resolving to several concepts with no relation among
-        them, which is the term itself being ambiguous within the graph, not a
-        confirmed anything.
+        SAME only after a UNIQUE, EQUAL resolution on both sides (Codex F7-R3-C3):
+        an ambiguous term's candidate set merely intersecting the other side's is not
+        a confirmed match, because the ambiguous term itself might name a different
+        one of its own candidates. An ancestor/descendant relation between ANY
+        candidate pair is real hierarchy evidence, surfaced as RELATED -- never
+        promoted to SAME (a descendant can be a genuinely more specific, distinct
+        structure) and never to a difference. A shared candidate between two
+        otherwise-unrelated, ambiguous resolutions is likewise RELATED, not SAME: real
+        overlap, not a confirmed identity. Absence of any of the above is UNRESOLVED,
+        never DISJOINT -- an IS_A hierarchy has no basis to assert opposition.
         """
-        a, b = self.candidates(term_a), self.candidates(term_b)
+        ma, mb = self._match(term_a), self._match(term_b)
+        a, b = set(ma.candidates), set(mb.candidates)
         if not a or not b:
-            return CONCEPT_UNRESOLVED
-        if a & b:
-            return CONCEPT_SAME
+            return ConceptRelationDetail(CONCEPT_UNRESOLVED, ma, mb, 0.0)
+        if ma.unique and mb.unique and a == b:
+            return ConceptRelationDetail(CONCEPT_SAME, ma, mb, 1.0)
         for ca in a:
             ancestors_a = self._ancestors(ca)
             for cb in b:
                 if cb in ancestors_a or ca in self._ancestors(cb):
-                    return CONCEPT_RELATED
-        return CONCEPT_DISJOINT
+                    return ConceptRelationDetail(CONCEPT_RELATED, ma, mb, 0.0)
+        if a & b:
+            return ConceptRelationDetail(CONCEPT_RELATED, ma, mb, 0.0)
+        return ConceptRelationDetail(CONCEPT_UNRESOLVED, ma, mb, 0.0)
+
+    def relation(self, term_a: str, term_b: str) -> str:
+        """One of the CONCEPT_* verdicts above for two clinical terms -- see
+        `relation_detail` for the full auditable basis behind it."""
+        return self.relation_detail(term_a, term_b).verdict
 
     @classmethod
     def load_snapshot(cls) -> tuple["ConceptRelationIndex", dict]:

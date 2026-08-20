@@ -366,16 +366,20 @@ def _service_key(intent: "ClaimLineIntent"):
             str(a.get("laterality", "")).lower(), toks)
 
 
-def _known_known_conflict(a: "ClaimLineIntent", b: "ClaimLineIntent") -> bool:
+def _known_known_conflict(a: "ClaimLineIntent", b: "ClaimLineIntent", source=None) -> bool:
     """Two intents conflict on a distinguishing attribute ONLY when BOTH carry a KNOWN
     value and they differ. Known-plus-missing does NOT conflict (it reconciles). (F5-R1.)
 
     The axis set is `coreference.DISTINGUISHING_AXES` -- the SAME one claim assembly
     reads when it decides whether a repeated code is a second occurrence. Two spellings
     of "what makes these two events different" is exactly how an event could be separate
-    enough for two intents and identical enough to merge into extra units."""
+    enough for two intents and identical enough to merge into extra units.
+
+    `source` (issue #6 F7-R3-C4) is passed straight through, so this consults the same
+    governed concept graph claim assembly does rather than raw string comparison alone.
+    """
     from . import coreference as _coref
-    return bool(_coref.known_known_differences(a.attributes, b.attributes))
+    return bool(_coref.known_known_differences(a.attributes, b.attributes, source=source))
 
 
 def _reconcile_attrs(target: "ClaimLineIntent", src: "ClaimLineIntent") -> None:
@@ -387,14 +391,17 @@ def _reconcile_attrs(target: "ClaimLineIntent", src: "ClaimLineIntent") -> None:
 
 
 def merge_duplicate_intents(intents: list["ClaimLineIntent"],
-                            separate_pairs: set | None = None) -> list["ClaimLineIntent"]:
+                            separate_pairs: set | None = None,
+                            source=None) -> list["ClaimLineIntent"]:
     """same_episode_merge, PAIR-AWARE (Codex F5-R1): duplicate mentions (same key/episode/
     state) merge into ONE intent EXCEPT across a cannot-link -- an explicit SEPARATE_FROM
     (by event id) or a KNOWN-KNOWN attribute conflict. Cannot-links PROPAGATE one hop over
     coreference (a duplicate of an event inherits that event's separations), so an ambiguous
     duplicate adjacent to a SEPARATE_FROM is kept separate rather than merged into the wrong
     service. Known-plus-missing reconciles. No merged cluster contains both endpoints of a
-    SEPARATE_FROM."""
+    SEPARATE_FROM.
+
+    `source` (issue #6 F7-R3-C4) is passed to the known-known conflict check."""
     n = len(intents)
     pairs = set(separate_pairs or set())
 
@@ -414,7 +421,8 @@ def merge_duplicate_intents(intents: list["ClaimLineIntent"],
     cannot = [[False] * n for _ in range(n)]
     for i in range(n):
         for j in range(i + 1, n):
-            if _known_known_conflict(intents[i], intents[j]) or event_separated(i, j):
+            if (_known_known_conflict(intents[i], intents[j], source)
+                    or event_separated(i, j)):
                 cannot[i][j] = cannot[j][i] = True
 
     # one-hop propagation over INITIAL coreference (same key, not initially cannot-linked):
@@ -512,10 +520,13 @@ def _diagnosis_links(fact: ClinicalFact, relations: list) -> list[str]:
 
 
 def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: str,
-             date_of_service: str | None) -> list[ClaimLineIntent]:
+             date_of_service: str | None, source=None) -> list[ClaimLineIntent]:
     """Run the eligibility gates over every fact and produce a ClaimLineIntent for each.
     Service facts run the full service-line gate set; a diagnosis is a DIAGNOSIS_SUPPORT
-    intent (eligible when billable) -- never a service line, never demoted by PART_OF."""
+    intent (eligible when billable) -- never a service line, never demoted by PART_OF.
+
+    `source` (issue #6 F7-R3-C4) is passed to `merge_duplicate_intents`'s known-known
+    conflict check."""
     relations = relations or []
     _episodes, _ep_map = build_episodes(facts, relations, encounter_id, date_of_service)
     intents: list[ClaimLineIntent] = []
@@ -568,7 +579,7 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
                        for r in relations
                        if r.predicate is RelationPredicate.SEPARATE_FROM
                        and r.state is RelationState.ASSERTED}
-    return merge_duplicate_intents(intents, _separate_pairs)
+    return merge_duplicate_intents(intents, _separate_pairs, source)
 
 
 #: Decisions RECORDED for the audit trail that never determine the eligibility state.

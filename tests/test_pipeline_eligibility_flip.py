@@ -36,7 +36,7 @@ def test_eligible_service_reaches_retrieval_and_resolves():
 def test_integral_component_diverted_before_retrieval(monkeypatch):
     """Flip: when the engine marks a BILLABLE service NON_CLAIM (documented integral), the
     pipeline diverts it BEFORE retrieval -- it never resolves to a code."""
-    def fake_eval(fs, relations, enc, dos):
+    def fake_eval(fs, relations, enc, dos, source=None):
         from claude_coder.eligibility import (ClaimLineIntent, EligibilityState,
                                               ClaimComponent, EligibilityDecision)
         from claude_coder.models import Outcome

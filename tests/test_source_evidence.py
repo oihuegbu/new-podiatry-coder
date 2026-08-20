@@ -1165,6 +1165,152 @@ class BuildPageReadValidationTest(unittest.TestCase):
         self.assertEqual(len(statuses), 4, "all four statuses must be distinct")
         self.assertEqual(len(details), 4, "all four detail strings must be distinct")
 
+    def test_direct_construction_is_held_to_the_same_invariants(self):
+        """Codex F7-R3-A, exact-SHA re-review, fifth pass, exact reproduction: the
+        prior fix closed the empty-response inference path in `build_page_read`
+        alone, but `PageRead` itself stayed directly constructible with any
+        status/content/detail combination -- so a caller-supplied `source_reader`
+        that never goes through the shared builder at all could still manufacture
+        `PageRead(status=BLANK)` with no provenance. The invariant is now on the
+        MODEL, so direct construction is refused too, with no builder involved."""
+        from pydantic import ValidationError
+
+        from app.contracts.source_evidence import PageRead, PageStatus
+        with self.assertRaises(ValidationError):
+            PageRead(channel_id="chan", page_number=2, status=PageStatus.BLANK)
+        with self.assertRaises(ValidationError):
+            PageRead(channel_id="chan", page_number=2, status=PageStatus.BLANK,
+                     text="some text", detail="claims blank but carries text")
+        with self.assertRaises(ValidationError):
+            PageRead(channel_id="chan", page_number=2, status=PageStatus.READ,
+                     text="")
+        # A genuinely valid direct construction still succeeds -- the fix rejects
+        # the invalid COMBINATION, not the constructor itself.
+        read = PageRead(channel_id="chan", page_number=2, status=PageStatus.BLANK,
+                        detail="detector confirmed no marks on the page")
+        self.assertEqual(read.status, PageStatus.BLANK)
+
+    def test_missing_carries_no_content_but_unreadable_may_carry_a_partial_read(self):
+        """MISSING means the channel did not return the page AT ALL, so any content
+        contradicts the claim -- refused, just like BLANK. UNREADABLE is different: a
+        text layer that recovers too few tokens to trust is legitimately marked
+        UNREADABLE while still carrying those few real tokens (see
+        app/ingestion/source_evidence.py's low_text_yield case) -- that must keep
+        working, not be swept into the same constraint."""
+        from pydantic import ValidationError
+
+        from app.contracts.source_evidence import PageRead, PageStatus, SourceToken
+        with self.assertRaises(ValidationError):
+            PageRead(channel_id="chan", page_number=1, status=PageStatus.MISSING,
+                     text="unexpected content", detail="reader returned no page")
+        # UNREADABLE with a genuine partial read is still accepted.
+        partial = PageRead(
+            channel_id="chan", page_number=1, status=PageStatus.UNREADABLE,
+            text="a few", tokens=(SourceToken(text="a", normalized="a"),
+                                  SourceToken(text="few", normalized="few")),
+            detail="text layer recovers 2 of 30 tokens; too partial to trust")
+        self.assertEqual(partial.status, PageStatus.UNREADABLE)
+        self.assertEqual(len(partial.tokens), 2)
+
+
+class ChannelBindingTest(unittest.TestCase):
+    """Codex F7-R3-A, exact-SHA re-review, fifth pass: `with_channel` attached
+    whatever `PageRead` object a caller filed under a given page number, with no
+    check that the object's OWN `channel_id`/`page_number` agreed with where it was
+    being filed -- a read for one page or channel could be silently recorded as
+    evidence for a different one."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_a_read_naming_a_different_page_than_it_is_filed_under_is_refused(self):
+        from app.contracts.source_evidence import (ChannelKind, InvalidSourceEvidenceDocument,
+                                                    ReadChannel, build_page_read)
+        document = _compile(self.root, [["alpha"], ["beta"]], ["alpha", "beta"])
+        channel = ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                              kind=ChannelKind.VISION, provider="openai")
+        # Filed under page 1, but the read itself names page 2.
+        mismatched = build_page_read(SECONDARY_VISION_CHANNEL_ID, 2, "beta")
+        with self.assertRaises(InvalidSourceEvidenceDocument):
+            document.with_channel(channel, {1: mismatched})
+
+    def test_a_read_naming_a_different_channel_than_it_is_filed_under_is_refused(self):
+        from app.contracts.source_evidence import (ChannelKind, InvalidSourceEvidenceDocument,
+                                                    ReadChannel, build_page_read)
+        document = _compile(self.root, [["alpha"]], ["alpha"])
+        channel = ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                              kind=ChannelKind.VISION, provider="openai")
+        wrong_channel = build_page_read("some_other_channel", 1, "alpha")
+        with self.assertRaises(InvalidSourceEvidenceDocument):
+            document.with_channel(channel, {1: wrong_channel})
+
+    def test_a_read_for_a_page_this_document_does_not_have_is_refused(self):
+        from app.contracts.source_evidence import (ChannelKind, InvalidSourceEvidenceDocument,
+                                                    ReadChannel, build_page_read)
+        document = _compile(self.root, [["alpha"]], ["alpha"])   # ONE page only
+        channel = ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                              kind=ChannelKind.VISION, provider="openai")
+        out_of_range = build_page_read(SECONDARY_VISION_CHANNEL_ID, 99, "alpha")
+        with self.assertRaises(InvalidSourceEvidenceDocument):
+            document.with_channel(channel, {99: out_of_range})
+
+
+class CertificateChannelDistinguishabilityTest(unittest.TestCase):
+    """Codex F7-R3-A, exact-SHA re-review, fifth pass, exact complaint: 'explicit
+    MISSING and UNREADABLE runs produce identical consensus and identical
+    human-readable SourceReconciliation after removing only the opaque fingerprint.
+    The new test compares intermediate PageRead objects, not final certificate
+    records.' This proves it through `certificate_record()` -- the ACTUAL bytes bound
+    into the release certificate -- not through `PageRead` objects directly."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_missing_and_unreadable_are_distinct_in_the_final_certificate_record(self):
+        from app.contracts.source_evidence import (ChannelKind, PageStatus, ReadChannel,
+                                                    build_page_read, reconcile_spans)
+        document = _compile(self.root, [["alpha"], ["beta"]], ["alpha", "beta"])
+        channel = ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                              kind=ChannelKind.VISION, provider="openai")
+        # Page 1: the independent channel tried and got nothing back -- UNREADABLE.
+        # Page 2: the independent channel never covers it at all -- MISSING (no read
+        # object is filed for it; `with_channel` only accepts pages it HAS read).
+        covered = document.with_channel(
+            channel, {1: build_page_read(SECONDARY_VISION_CHANNEL_ID, 1, "",
+                                         status=PageStatus.UNREADABLE,
+                                         detail="empty model response")})
+
+        record = reconcile_spans(covered, [])
+        cert = record.certificate_record()
+        outcomes = {p["page_number"]: p for p in cert["page_outcomes"]}
+
+        self.assertEqual(
+            outcomes[1]["channel_statuses"][SECONDARY_VISION_CHANNEL_ID], "UNREADABLE")
+        self.assertEqual(
+            outcomes[2]["channel_statuses"][SECONDARY_VISION_CHANNEL_ID], "MISSING")
+        # For THIS channel specifically, both pages look identical under the old
+        # "not independently read" boolean (neither made the list) -- the PDF's own
+        # embedded-text channel is independent too and covers both, which is exactly
+        # why a coarser signal cannot be trusted to carry the distinction.
+        self.assertNotIn(SECONDARY_VISION_CHANNEL_ID, outcomes[1]["independently_read_by"])
+        self.assertNotIn(SECONDARY_VISION_CHANNEL_ID, outcomes[2]["independently_read_by"])
+        self.assertNotEqual(outcomes[1]["channel_statuses"],
+                            outcomes[2]["channel_statuses"])
+
+        # Reader identity (not just a bare channel_id string) is bound in too.
+        identities = {c["channel_id"]: c for c in cert["channel_identities"]}
+        self.assertIn(SECONDARY_VISION_CHANNEL_ID, identities)
+        self.assertEqual(identities[SECONDARY_VISION_CHANNEL_ID]["provider"], "openai")
+        self.assertEqual(identities[SECONDARY_VISION_CHANNEL_ID]["kind"], "vision")
+
 
 class SourceDigestVerificationTest(unittest.TestCase):
     """Source identity is a fact the compiler establishes, not an upstream assertion."""
