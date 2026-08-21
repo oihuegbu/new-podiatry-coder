@@ -356,6 +356,13 @@ class RelationPredicate(str, Enum):
     SEPARATE_FROM = "separate_from"
     PERFORMED_BY = "performed_by"
     ON_BEHALF_OF = "on_behalf_of"
+    #: issue #6, generic service-composition vocabulary: what a documented action did
+    #: to another event's anatomical target, or what it employed/was steered by --
+    #: still just relation NAMES, no procedure/code meaning lives here.
+    USES_DEVICE = "uses_device"
+    GUIDES = "guides"
+    REPAIRS = "repairs"
+    REMOVES = "removes"
 
 
 class RelationState(str, Enum):

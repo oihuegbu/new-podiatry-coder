@@ -136,6 +136,55 @@ class TwoReadingAxisConsensus(unittest.TestCase):
         self.assertIn("s1", [s.span_id for s in primary[0].evidence])
         self.assertEqual(primary[0].axis_conflicts, [])
 
+    def test_an_axis_only_one_reading_recorded_is_settled_not_a_disagreement(self):
+        """Real-run regression: one reading's own confirmed quotation supports an
+        axis value it recorded; the other reading simply never emitted that axis at
+        all (not an empty/contradicting value -- an absent key). This is not a
+        disagreement to arbitrate -- there is no competing claim -- so it must
+        settle from the recording reading, never reach a provider question, and the
+        question text (if it ever did) must never claim "two independent readings"
+        when only one recorded anything."""
+        primary = [_fact("F1", FactKind.PROCEDURE, "procedure performed",
+                         spans=[_span("A curved incision was made", span_id="p1")],
+                         attributes={"approach": "open"})]
+        second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
+                        spans=[_span("A curved incision was made", span_id="s1")],
+                        attributes={})]   # approach not recorded at all -- absent, not ""
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "approach")
+        self.assertEqual(disagreement.basis, "only one reading recorded a value")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None)
+        approach = next(r for r in resolutions if r.axis == "approach")
+        self.assertIs(approach.verdict, graph_consensus.AxisVerdict.RESOLVED_FROM_SOURCE,
+                      "an asymmetric axis with no competing value must settle, not hold")
+        self.assertEqual(approach.accepted_from, "primary")
+        self.assertEqual(approach.accepted_value, "open")
+        graph_consensus.apply_resolutions(primary_by_id, second_by_node, resolutions)
+        self.assertEqual(primary[0].axis_conflicts, [],
+                         "an explicit, uncontested fact must never generate a provider "
+                         "question")
+
+    def test_question_text_never_claims_two_readings_when_only_one_recorded(self):
+        """Direct unit coverage of the message-honesty fix, independent of whether
+        `resolve` manages to settle the case -- the wording itself must never lie
+        about how many readings actually recorded a value."""
+        one_sided = graph_consensus.AxisDisagreement(
+            node_id="F1", axis="approach", value_primary="open", value_second="",
+            basis="only one reading recorded a value", action="excision performed")
+        question = graph_consensus._question(one_sided)
+        self.assertNotIn("two independent readings", question)
+        self.assertIn("one reading", question)
+        self.assertIn("'open'", question)
+
+        two_sided = graph_consensus.AxisDisagreement(
+            node_id="F1", axis="approach", value_primary="open", value_second="closed",
+            basis="the two readings recorded different values", action="excision performed")
+        question = graph_consensus._question(two_sided)
+        self.assertIn("two independent readings", question)
+        self.assertIn("'open'", question)
+        self.assertIn("'closed'", question)
+
     def test_axis_the_source_cannot_settle_becomes_a_precise_provider_query(self):
         """Both readings rest on confirmed quotations, neither is uniquely stated."""
         primary, second = self._readings(

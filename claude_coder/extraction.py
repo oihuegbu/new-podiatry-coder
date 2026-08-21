@@ -78,11 +78,18 @@ For each fact return an object with:
 
 Also return "relations": documented edges between facts. Each has
 subject_event_id, predicate (part_of | used_in | reason_for | same_episode_as |
-separate_from), object_event_id, state (asserted | negated | uncertain),
-evidence_fact_ids (facts whose verbatim evidence supports the edge), and confidence.
+separate_from | uses_device | guides | repairs | removes), object_event_id,
+state (asserted | negated | uncertain), evidence_fact_ids (facts whose verbatim
+evidence supports the edge), and confidence.
 Do not infer integrality or distinctness from clinical convention; emit only what the
-note documents. PART_OF/USED_IN/REASON_FOR are directional; SEPARATE_FROM and
-SAME_EPISODE_AS are symmetric.
+note documents. PART_OF/USED_IN/REASON_FOR/USES_DEVICE/GUIDES/REPAIRS/REMOVES are
+directional; SEPARATE_FROM and SAME_EPISODE_AS are symmetric. USES_DEVICE names a
+device/material/instrument the subject event employed; GUIDES names imaging or another
+event that steered the subject event; REPAIRS/REMOVES name what the subject event did
+to the object event's anatomical target when the note states it as a distinct,
+nameable action (e.g. "the tendon was reattached" -> REPAIRS the tendon finding; "the
+bursa was excised" -> REMOVES the bursa finding) -- these narrow the SAME action-verb
+vocabulary already used in "description", not a new inference the note does not make.
 
 Whenever you emit a DIRECTIONAL relation, give each of its two endpoint facts an
 ADDITIONAL evidence quote: the shortest verbatim phrase inside the linking sentence

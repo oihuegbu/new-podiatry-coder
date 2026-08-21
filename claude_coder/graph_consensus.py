@@ -422,7 +422,18 @@ def source_support(fact, reconciliation) -> tuple[bool, str, str, tuple[str, ...
 
 def _question(disagreement: AxisDisagreement) -> str:
     values = [v for v in (disagreement.value_primary, disagreement.value_second) if v]
-    read_as = " and ".join(repr(v) for v in values) if values else "nothing"
+    # Honest about WHAT happened, not just what was said: a value present on only one
+    # side is not "two readings disagreed" -- that phrasing was confusing when this
+    # path was reachable for an asymmetric axis (`resolve` now settles most of those
+    # before ever reaching here; this remains correct for whatever residual case
+    # still arrives with a single recorded value and no source-confirmed win).
+    if len(values) <= 1:
+        read_as = repr(values[0]) if values else "nothing"
+        return (f"The record does not settle {disagreement.axis!r} for "
+                f"{disagreement.action!r}: one reading of the original document read "
+                f"it as {read_as}, and the page itself does not confirm it. Please "
+                f"document {disagreement.axis!r} explicitly for this event.")
+    read_as = " and ".join(repr(v) for v in values)
     return (f"The record does not settle {disagreement.axis!r} for "
             f"{disagreement.action!r}: two independent readings of the original "
             f"document read it as {read_as}, and the page itself does not confirm "
@@ -473,6 +484,21 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
             elif s_says and not p_says:
                 winner, proof, spans = "second", s_proof, s_spans
                 detail = "the confirmed quotation states this value verbatim"
+            elif bool(item.value_primary) != bool(item.value_second):
+                # ASYMMETRIC RECORDING, not a disagreement: one reading simply never
+                # emitted this axis at all -- there is no competing value to
+                # arbitrate between, so the literal-verbatim bar above (designed to
+                # pick a winner between two COMPETING assertions) does not apply
+                # here. The recording reading's own event-evidence is already
+                # source-confirmed (`p_ok and s_ok`, checked above); a normalized
+                # axis value can be supported by that confirmed span without the
+                # exact normalized word appearing in it verbatim.
+                if item.value_primary:
+                    winner, proof, spans = "primary", p_proof, p_spans
+                else:
+                    winner, proof, spans = "second", s_proof, s_spans
+                detail = ("only one reading recorded this axis at all, and its "
+                          "event-evidence is source-confirmed; nothing contradicts it")
             else:
                 detail = ("both readings rest on confirmed quotations and neither "
                           "value is uniquely stated by them")
