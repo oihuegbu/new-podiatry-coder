@@ -192,6 +192,17 @@ class ResolutionMethod(str, Enum):
     ABSTAINED = "abstained"           # genuine ambiguity / no candidate -> review
 
 
+class ClaimSubmissionStatus(str, Enum):
+    """Whether a resolved, coded line is ready to submit, or was coded while a
+    non-blocking hold remains open on the underlying event (issue #6 item 7: a
+    resolved CODE and a SUBMITTABLE claim are different questions -- an unresolved,
+    not-contradicted actor-ownership question should not, by itself, keep a
+    documented, clinically valid service out of the coded record entirely, but it
+    must not leave the claim looking clean either)."""
+    READY = "ready"
+    HELD = "held"
+
+
 @dataclass
 class ResolvedLine:
     fact: ClinicalFact
@@ -213,6 +224,11 @@ class ResolvedLine:
     # went to the provider. Present only when a tie was re-inspected, and carried into
     # the audit trail because "why the alternatives were rejected" is claim-affecting.
     tie_record: dict | None = None
+    # issue #6 item 7: stamped from the intent's own `claim_submission_status` by
+    # the caller AFTER resolution -- this module never decides it. READY unless the
+    # eligibility engine specifically held submission (see
+    # `eligibility.ClaimLineIntent.claim_submission_status`).
+    claim_submission_status: ClaimSubmissionStatus = ClaimSubmissionStatus.READY
 
     @property
     def resolved(self) -> bool:

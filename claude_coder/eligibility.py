@@ -20,7 +20,8 @@ from enum import Enum
 from typing import Any
 
 from .coreference import DISTINGUISHING_AXES as _DISTINCT_ATTR_AXES
-from .models import ClinicalFact, FactKind, Outcome, RelationPredicate, RelationState
+from .models import (ClaimSubmissionStatus, ClinicalFact, FactKind, Outcome,
+                     RelationPredicate, RelationState)
 from .ownership import classify_ownership, fact_ownership
 
 # `_DISTINCT_ATTR_AXES` keeps its historical name because the graph layer reads the
@@ -66,6 +67,13 @@ class ClaimLineIntent:
     source_span_ids: list[str]
     state: EligibilityState
     decisions: list[EligibilityDecision] = field(default_factory=list)
+    # issue #6 item 7: a CODED state (ELIGIBLE_FOR_RETRIEVAL) and a SUBMITTABLE
+    # claim are different questions. HELD only when `actor_ownership` was
+    # specifically UNKNOWN (unresolved, never an affirmative contradiction -- that
+    # still AUTO_HOLDs below exactly as before) and every other gate PASSED; see
+    # `_classify`'s own comment for why this one axis is carved out narrowly rather
+    # than repointing UNKNOWN generally.
+    claim_submission_status: ClaimSubmissionStatus = ClaimSubmissionStatus.READY
     service_episode_id: str | None = None
     mention_count: int = 1
     distinctness_facts: list[str] = field(default_factory=list)
@@ -280,7 +288,22 @@ def _gate_axis_consensus(fact: ClinicalFact) -> EligibilityDecision:
 def _classify(decisions: list[EligibilityDecision]) -> EligibilityState:
     """Precedence: NON_CLAIM (the event should never have been a line) before AUTO_HOLD
     (material ambiguity) before ELIGIBLE. A silent default-to-eligible is impossible —
-    every state is reached only by an explicit gate outcome."""
+    every state is reached only by an explicit gate outcome.
+
+    issue #6 item 7: `actor_ownership` UNKNOWN (unresolved -- e.g. an unstated
+    performer/organization id) is deliberately EXCLUDED from the UNKNOWN-triggers-
+    AUTO_HOLD set below, narrowly and only for this one gate. An affirmative
+    ownership CONTRADICTION (`actor_ownership` BLOCKED -- performed by a
+    documented, different actor than the billing entity) still AUTO_HOLDs exactly
+    as before via the BLOCKED check above; only the "simply not yet resolved" case
+    now reaches ELIGIBLE_FOR_RETRIEVAL. Every OTHER gate's UNKNOWN
+    (`conflict`/`documentation_minimum`/`axis_consensus`) is untouched, so this
+    cannot silently defeat a legitimate hold from any of them -- if actor_ownership
+    AND one of those is UNKNOWN on the same event, the event still AUTO_HOLDs on
+    the other gate's UNKNOWN. `evaluate()` separately stamps the resulting intent's
+    `claim_submission_status` HELD for exactly this one case, so a line that now
+    reaches retrieval on unresolved ownership is never indistinguishable from a
+    fully clean one."""
     by = {d.gate: d.outcome for d in decisions}
     # NON_CLAIM: the event is definitively not an independent service line
     if by.get("occurrence") is Outcome.BLOCKED:
@@ -292,8 +315,7 @@ def _classify(decisions: list[EligibilityDecision]) -> EligibilityState:
            if g in ("evidence_required", "actor_ownership")):
         return EligibilityState.AUTO_HOLD
     if any(o is Outcome.UNKNOWN for g, o in by.items()
-           if g in ("actor_ownership", "conflict", "documentation_minimum",
-                    "axis_consensus")):
+           if g in ("conflict", "documentation_minimum", "axis_consensus")):
         return EligibilityState.AUTO_HOLD
     return EligibilityState.ELIGIBLE_FOR_RETRIEVAL
 
@@ -538,6 +560,7 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
     for f in facts:
         span_ids = [s.span_id for s in (f.evidence or []) if getattr(s, "span_id", None)]
         billing_id = (f.attributes or {}).get("billing_entity_id")
+        submission_status = ClaimSubmissionStatus.READY
         if f.kind is FactKind.DIAGNOSIS:
             core = [_gate_evidence_required(f), _gate_occurrence(f),
                     _gate_axis_consensus(f)]
@@ -567,6 +590,14 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
                          _gate_axis_consensus(f)]
             state = _classify(decisions)
             component = ClaimComponent.SERVICE
+            # issue #6 item 7: only when actor_ownership's own UNKNOWN is why this
+            # event reached ELIGIBLE_FOR_RETRIEVAL at all (see `_classify`'s
+            # comment) -- a fact that is eligible with an unrelated PASS ownership
+            # decision stays READY.
+            if (state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL
+                    and any(d.gate == "actor_ownership" and d.outcome is Outcome.UNKNOWN
+                            for d in decisions)):
+                submission_status = ClaimSubmissionStatus.HELD
         else:
             continue
         intents.append(ClaimLineIntent(
@@ -574,6 +605,7 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
             encounter_id=encounter_id, component=component,
             clinical_event_ids=[f.fact_id] if f.fact_id else [],
             fact_kind=f.kind.value, clinical_action=f.description,
+            claim_submission_status=submission_status,
             attributes=dict(f.attributes or {}), date_of_service=date_of_service,
             billing_entity_id=billing_id, source_span_ids=span_ids,
             state=state, decisions=decisions,

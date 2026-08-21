@@ -733,6 +733,15 @@ def code_encounter(
                         source.drug_unit(line.chosen.code))
                     if du is not None:
                         line.units = du
+        # issue #6 item 7: stamped here, LAST, after every helper above that may
+        # reconstruct `line` (`arbitration.arbitrate`,
+        # `resolution.refine_diagnosis_specificity`) rather than mutate it in place
+        # -- either would otherwise silently drop the status back to the dataclass
+        # default (READY). None of `resolve`/`em.resolve_em`/arbitration/refinement
+        # decide a submission status; it always comes from the intent eligibility
+        # already computed in `eligibility.evaluate`.
+        if _it is not None:
+            line.claim_submission_status = _it.claim_submission_status
         lines.append(line)
 
     result = CodingResult(

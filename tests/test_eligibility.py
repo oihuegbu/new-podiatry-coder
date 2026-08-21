@@ -6,8 +6,9 @@ non-performed event never becomes a line, and material ambiguity holds. Agnostic
 synthetic facts/relations, no medical code."""
 from claude_coder import eligibility as el
 from claude_coder.eligibility import EligibilityState, ClaimComponent
-from claude_coder.models import (ClinicalFact, FactKind, Disposition, EvidenceSpan,
-                                 Outcome, RelationAssertion, RelationPredicate, RelationState)
+from claude_coder.models import (ClaimSubmissionStatus, ClinicalFact, FactKind,
+                                 Disposition, EvidenceSpan, Outcome, RelationAssertion,
+                                 RelationPredicate, RelationState)
 
 
 def _fact(kind=FactKind.PROCEDURE, desc="a performed service", anchored=True,
@@ -109,8 +110,15 @@ def test_contrary_ownership_holds():
     assert i.state is EligibilityState.AUTO_HOLD
 
 
-def test_unknown_ownership_holds():
-    assert _one([_fact(attrs={})]).state is EligibilityState.AUTO_HOLD
+def test_unknown_ownership_reaches_retrieval_but_submission_is_held():
+    """issue #6 item 7: unresolved (never a contradiction) ownership no longer holds
+    the event out of retrieval entirely -- it reaches retrieval, but the resulting
+    intent is marked HELD rather than READY, so it never looks indistinguishable
+    from a fully clean line. A genuine ownership CONTRADICTION still fully holds
+    (`test_contrary_ownership_holds`, unaffected by this change)."""
+    i = _one([_fact(attrs={})])
+    assert i.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL
+    assert i.claim_submission_status is ClaimSubmissionStatus.HELD
 
 
 def test_diagnosis_is_support_not_service_line():

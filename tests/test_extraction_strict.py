@@ -113,17 +113,20 @@ def test_missing_context_leaves_actor_unresolved():
     assert "performer_id" not in a
 
 
-def test_organization_as_performer_holds_through_eligibility():
-    # end-to-end through eligibility: an org-as-performer fact must NOT become eligible
+def test_organization_as_performer_reaches_retrieval_with_held_submission():
+    # end-to-end through eligibility: an org-as-performer fact strips to unresolved
+    # (never a contradiction -- nothing IS asserted once the invented id is discarded),
+    # so per issue #6 item 7 it now reaches retrieval, but the resulting line is held.
     from claude_coder.eligibility import evaluate, EligibilityState
-    from claude_coder.models import Disposition, EvidenceSpan, FactKind
+    from claude_coder.models import ClaimSubmissionStatus, Disposition, EvidenceSpan, FactKind
     res = extract_note("note", _stub({"facts": [_fact(
         attributes={"performer_id": "org-1"})]}), billing_context=_person_ctx())
     f = res.facts[0]
     f.disposition = Disposition.PERFORMED
     f.evidence = [EvidenceSpan("svc performed", anchored=True, text_sha256="h", span_id="s")]
     intents = evaluate([f], [], "enc", "2026-08-01")
-    assert all(i.state is not EligibilityState.ELIGIBLE_FOR_RETRIEVAL for i in intents)
+    assert all(i.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL for i in intents)
+    assert all(i.claim_submission_status is ClaimSubmissionStatus.HELD for i in intents)
 
 
 # ------------------------------------------------- F6-R1 round 3: confidence is never coerced
@@ -237,12 +240,13 @@ def test_non_performer_role_is_not_an_authorized_performer():
     assert "performer_id" not in _attrs({"performer_id": "actor-1"}, ctx)
 
 
-def test_roleless_self_billing_person_holds_through_eligibility_to_ownership():
+def test_roleless_self_billing_person_reaches_retrieval_with_held_submission():
     """extraction -> eligibility -> ownership: the roleless person self-bills, so performer ==
     billing entity would have PASSED ownership. With no performer resolved, ownership is
-    UNKNOWN and the line never becomes eligible for retrieval."""
+    UNKNOWN -- unresolved, never a contradiction -- so per issue #6 item 7 the line now
+    reaches eligibility for retrieval, but with submission held rather than ready."""
     from claude_coder.eligibility import evaluate, EligibilityState
-    from claude_coder.models import Disposition, EvidenceSpan, Outcome
+    from claude_coder.models import ClaimSubmissionStatus, Disposition, EvidenceSpan, Outcome
     from claude_coder.ownership import classify_ownership, fact_ownership
     ctx = {"billing_entity_id": "actor-1", "participants": [
         {"id": "actor-1", "type": "person"}]}
@@ -256,7 +260,8 @@ def test_roleless_self_billing_person_holds_through_eligibility_to_ownership():
     assert classify_ownership(own.performer_id, own.billing_entity_id,
                               own.organization_id, own.performer_function) is Outcome.UNKNOWN
     intents = evaluate([f], [], "enc", "2026-08-01")
-    assert all(i.state is not EligibilityState.ELIGIBLE_FOR_RETRIEVAL for i in intents)
+    assert all(i.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL for i in intents)
+    assert all(i.claim_submission_status is ClaimSubmissionStatus.HELD for i in intents)
 
 
 @pytest.mark.parametrize("roles", [
