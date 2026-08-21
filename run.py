@@ -346,6 +346,14 @@ def authority_binding(result, source) -> AuthorityBinding:
         code_counts={k: int(v) for k, v in
                      (fingerprint.get("counts") or {}).items()},
         model_profiles=identity.get("models") or {},
+        # issue #6 item 9: read from the environment, but NOT runtime introspection
+        # -- these values were fixed at `docker build` time by the Dockerfile's own
+        # ARGs (see `Dockerfile`), so reading the env var here reads a BAKED-IN
+        # build-time fact, never a live git/filesystem state a running, possibly
+        # hand-patched container could report differently from what was actually
+        # built and reviewed.
+        application_commit_sha=os.environ.get("APPLICATION_COMMIT_SHA", ""),
+        image_digest=os.environ.get("IMAGE_DIGEST", ""),
     )
 
 

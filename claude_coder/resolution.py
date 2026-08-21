@@ -422,6 +422,11 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
     # documents. Absence of a compiled signal on either side never excludes a
     # candidate; only an actual, documented conflict does.
     from . import semantic_eligibility as _semelig
+    # issue #6 item 8: recorded over the FULL retrieved pool, before filtering, so
+    # the audit trail shows every candidate's eligibility status -- kept or
+    # excluded -- never only the survivors, on a held/blocked line exactly as much
+    # as a released one.
+    _candidate_eligibility = _semelig.eligibility_report([fact], pool, source, dos)
     pool = _semelig.eligible_partition([fact], pool, source, dos)
 
     # The authoritative index hits (if any) LEAD the shortlist as high-confidence
@@ -448,7 +453,7 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
         # against a catch-all is near-tautological) -- escalate, never bill it verified.
         if (line.resolved and fact.kind is FactKind.DIAGNOSIS
                 and _residual_without_grounding(fact, line.chosen)):
-            return ResolvedLine(
+            line = ResolvedLine(
                 fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
                 alternatives=[line.chosen],
                 rationale=("the documented condition mapped only to a residual/catch-all "
@@ -456,14 +461,14 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                     "clinical term with the documentation -- a coder CLASSIFICATION/mapping "
                     "decision (identify the specific code, or confirm the residual bucket); "
                     "not a provider documentation gap, and not billed on a non-specific code"))
-        return line
-
-    if not pool:
-        return ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
+    elif not pool:
+        line = ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
                             rationale="no candidate retrieved for the concept")
-
-    return _decide(fact, pool, source=source, dos=dos,
-                   reconciliation=reconciliation)
+    else:
+        line = _decide(fact, pool, source=source, dos=dos,
+                       reconciliation=reconciliation)
+    line.candidate_eligibility = _candidate_eligibility
+    return line
 
 
 def _strip_laterality(text: str) -> str:

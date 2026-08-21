@@ -229,6 +229,13 @@ class ResolvedLine:
     # eligibility engine specifically held submission (see
     # `eligibility.ClaimLineIntent.claim_submission_status`).
     claim_submission_status: ClaimSubmissionStatus = ClaimSubmissionStatus.READY
+    # issue #6 item 8: which retrieved candidates `semantic_eligibility` kept or
+    # excluded for this fact, and why -- over the FULL pool, before filtering, so
+    # an excluded candidate is visible as a decision, never an absence. None means
+    # semantic eligibility never ran for this line (an authoritative deterministic
+    # index hit, or an E/M line resolved by `em.resolve_em`) -- a different, honest
+    # thing from "ran and excluded nothing."
+    candidate_eligibility: list[dict] | None = None
 
     @property
     def resolved(self) -> bool:
@@ -345,6 +352,11 @@ class CodingResult:
     # bound into the certificate directly rather than duplicated onto graph nodes or
     # claim-line intents.
     terminology_normalizations: tuple[dict[str, Any], ...] = ()
+    # issue #6 item 8: `claude_coder.composition.service_intents`'s read-time
+    # connected-component grouping over the FINAL facts/relations, serialized
+    # ({"intent_id", "component_event_ids"} per group) -- preserved for the audit
+    # trail regardless of whether any grouped event ended up billed.
+    service_intents: list[dict] = field(default_factory=list)
 
     @property
     def billable_lines(self) -> list[ResolvedLine]:

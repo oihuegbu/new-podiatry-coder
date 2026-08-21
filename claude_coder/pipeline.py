@@ -568,6 +568,10 @@ def code_encounter(
                 "independent document recall (issue #6 F7-R3)", retryable=True))
     lines = []
     for fact in facts:
+        # issue #6 item 8: reset every iteration -- a loop-local carried across facts
+        # would otherwise attach the PREVIOUS fact's candidate eligibility report to
+        # a line that never went through resolve() at all this iteration.
+        _candidate_eligibility = None
         _it = _elig_state.get(fact.fact_id)
         if _it is None:
             line = ResolvedLine(
@@ -643,6 +647,11 @@ def code_encounter(
             except Exception as exc:
                 return _system_hold_result(encounter_id, date_of_service,
                                            f"retrieval_execution:{fact.fact_id}", exc, source)
+            # issue #6 item 8: captured here, before arbitration/refinement below MAY
+            # reconstruct `line` (see the item 7 comment at the end of this loop for
+            # why that matters) -- `em.resolve_em` does not run semantic eligibility
+            # at all, so this is honestly None for an EM line, never guessed.
+            _candidate_eligibility = getattr(line, "candidate_eligibility", None)
         # A fact that went through propose-then-verify is already resolved-or-
         # escalated on authoritative entailment; don't second-guess it with the
         # weaker arbitration fallback. (Diagnoses verify too when they reach the
@@ -733,16 +742,28 @@ def code_encounter(
                         source.drug_unit(line.chosen.code))
                     if du is not None:
                         line.units = du
-        # issue #6 item 7: stamped here, LAST, after every helper above that may
+        # issue #6 items 7/8: stamped here, LAST, after every helper above that may
         # reconstruct `line` (`arbitration.arbitrate`,
         # `resolution.refine_diagnosis_specificity`) rather than mutate it in place
-        # -- either would otherwise silently drop the status back to the dataclass
-        # default (READY). None of `resolve`/`em.resolve_em`/arbitration/refinement
-        # decide a submission status; it always comes from the intent eligibility
-        # already computed in `eligibility.evaluate`.
+        # -- either would otherwise silently drop these fields back to their
+        # dataclass defaults. None of `resolve`/`em.resolve_em`/arbitration/
+        # refinement decide a submission status; it always comes from the intent
+        # eligibility already computed in `eligibility.evaluate`.
         if _it is not None:
             line.claim_submission_status = _it.claim_submission_status
+        # issue #6 item 8: restored here for the SAME reason -- captured right after
+        # resolve()/em.resolve_em() returned, before arbitration/refinement could
+        # reconstruct `line` and silently drop it back to the dataclass default.
+        if _candidate_eligibility is not None:
+            line.candidate_eligibility = _candidate_eligibility
         lines.append(line)
+
+    # issue #6 item 8: a read-time projection over the FINAL facts/relations (after
+    # structural composition above), preserved for the audit trail regardless of
+    # whether any of these events ended up billed -- the same "evidence survives a
+    # held outcome" principle `excluded_lines` already carries.
+    service_intents = [{"intent_id": si.intent_id, "component_event_ids": si.component_event_ids}
+                       for si in _compose.service_intents(facts, relations)]
 
     result = CodingResult(
         encounter_id=encounter_id,
@@ -756,6 +777,7 @@ def code_encounter(
         graph=clinical_graph,
         consensus=(consensus.as_record() if consensus is not None else None),
         terminology_normalizations=tuple(terminology_normalizations),
+        service_intents=service_intents,
     )
     # Mechanic 4 — collapse duplicate resolved codes into one line before anything
     # downstream reasons about the claim as a set.

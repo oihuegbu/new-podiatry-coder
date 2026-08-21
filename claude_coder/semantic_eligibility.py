@@ -57,26 +57,29 @@ def _documented_interval(facts: list[ClinicalFact]):
     return feats.interval if feats.interval and feats.interval.bounded() else None
 
 
-def eligible(candidate, facts: list[ClinicalFact], source,
-            date_of_service: str | None) -> bool:
-    """Whether ONE already-retrieved candidate is semantically eligible for what
-    `facts` document. Defaults to True (eligible) whenever there is nothing
-    compiled to check against, or nothing compiled conflicts -- never a reason to
-    exclude a candidate the vector search already found relevant."""
+def _ineligibility_reason(candidate, facts: list[ClinicalFact], source,
+                          date_of_service: str | None) -> str | None:
+    """None when eligible; otherwise the one compiled-record axis that positively
+    conflicted. The single place this module's actual decision logic lives --
+    `eligible()` and `eligibility_report()` both read it, so the audit trail's
+    stated reason can never drift from the reason a candidate was actually kept
+    or dropped."""
     record = _semantics.compiled_record(candidate.code, candidate.system, source)
     if record is None:
-        return True
+        return None
 
     if "measurement" in (record.get("required_attributes") or []) and \
             _documented_interval(facts) is None:
-        return False
+        return ("candidate's descriptor requires a documented measurement/interval "
+               "the fact's text does not state")
 
     fact_kinds = {f.kind for f in facts}
     expected_classes = {_FACT_KIND_SEMANTIC_CLASS[k] for k in fact_kinds
                         if k in _FACT_KIND_SEMANTIC_CLASS}
     candidate_class = record.get("semantic_class")
     if expected_classes and candidate_class and candidate_class not in expected_classes:
-        return False
+        return (f"candidate is classified {candidate_class!r}, incompatible with the "
+               f"documented fact kind's expected class {sorted(expected_classes)}")
 
     active = getattr(source, "active_on", None)
     if callable(active) and date_of_service:
@@ -85,9 +88,18 @@ def eligible(candidate, facts: list[ClinicalFact], source,
         except Exception:
             status = None
         if status is Outcome.BLOCKED:
-            return False
+            return "candidate is not active on the encounter's date of service"
 
-    return True
+    return None
+
+
+def eligible(candidate, facts: list[ClinicalFact], source,
+            date_of_service: str | None) -> bool:
+    """Whether ONE already-retrieved candidate is semantically eligible for what
+    `facts` document. Defaults to True (eligible) whenever there is nothing
+    compiled to check against, or nothing compiled conflicts -- never a reason to
+    exclude a candidate the vector search already found relevant."""
+    return _ineligibility_reason(candidate, facts, source, date_of_service) is None
 
 
 def eligible_partition(facts: list[ClinicalFact], candidates: list, source,
@@ -103,3 +115,18 @@ def eligible_partition(facts: list[ClinicalFact], candidates: list, source,
         return candidates
     kept = [c for c in candidates if eligible(c, facts, source, date_of_service)]
     return kept if kept else candidates
+
+
+def eligibility_report(facts: list[ClinicalFact], candidates: list, source,
+                       date_of_service: str | None) -> list[dict]:
+    """A full per-candidate audit record over `candidates` -- which `eligible_partition`
+    would keep or exclude, and why -- preserved for the audit trail EVEN on a
+    held/blocked outcome (issue #6 item 8), never only for a released line. Computed
+    over the SAME `_ineligibility_reason` `eligible_partition` itself reads, so this
+    record can never claim a different reason than the one that actually decided it."""
+    report = []
+    for c in candidates:
+        reason = _ineligibility_reason(c, facts, source, date_of_service)
+        report.append({"code": c.code, "system": c.system, "eligible": reason is None,
+                       "reason": reason})
+    return report

@@ -888,6 +888,16 @@ class AuthorityBinding(_Strict):
     index_checksum: str = ""
     code_counts: dict[str, int] = Field(default_factory=dict)
     model_profiles: dict[str, Any] = Field(default_factory=dict)
+    #: issue #6 item 9: which APPLICATION build produced this claim -- the exact
+    #: source commit and the built image's own digest, so a claim can be traced
+    #: back to reproducible application code, not only the authoritative DATA it
+    #: queried. Sourced from a build-time Dockerfile ARG (never computed here by
+    #: introspecting a running process, which could report a stale or hand-patched
+    #: checkout): a `docker build --build-arg` at build time, or absent when the
+    #: image was built without one. Absent never blocks a claim -- it only means
+    #: this one binding is missing, matching every other identity field here.
+    application_commit_sha: str = ""
+    image_digest: str = ""
 
     def problems(self) -> tuple[str, ...]:
         out: list[str] = []
@@ -1033,6 +1043,16 @@ class AuditSurface(_Strict):
     #: Resolved-but-not-billed lines (bundled, non-covered, excluded, held).
     #: Kept so a dropped line is visible as a decision, never as an absence.
     excluded_lines: tuple[dict[str, Any], ...] = ()
+    #: issue #6 item 8: `claude_coder.composition.service_intents`'s read-time
+    #: grouping over every fact this encounter documented -- present regardless of
+    #: whether any grouped event ended up billed, so a held/blocked encounter still
+    #: shows which events the record itself composed into one service.
+    service_intents: tuple[dict[str, Any], ...] = ()
+    #: issue #6 item 8: per fact, every candidate `semantic_eligibility` considered
+    #: and whether/why it was kept or excluded -- over the FULL retrieved pool, not
+    #: only the survivor, so an excluded candidate is visible as a decision even
+    #: when the line it belongs to never released.
+    candidate_eligibility: tuple[dict[str, Any], ...] = ()
 
 
 # --------------------------------------------------------------------------
@@ -1792,6 +1812,17 @@ def bundle_from_coding_result(
         _line_snapshot(line) for line in (getattr(result, "lines", None) or [])
         if id(line) not in {id(b) for b in billable}
     )
+    # issue #6 item 8: read off `result` duck-typed, exactly like every other audit
+    # field above -- this module still imports no pipeline implementation.
+    service_intents = tuple(
+        dict(si) for si in (getattr(result, "service_intents", None) or [])
+        if isinstance(si, dict))
+    candidate_eligibility = tuple(
+        {"fact_id": str(getattr(getattr(line, "fact", None), "fact_id", "") or ""),
+         "candidates": list(report)}
+        for line in (getattr(result, "lines", None) or [])
+        for report in [getattr(line, "candidate_eligibility", None)]
+        if report)
 
     encounter = EncounterIdentity(
         encounter_id=str(getattr(result, "encounter_id", "") or ""),
@@ -1853,6 +1884,8 @@ def bundle_from_coding_result(
                 dict(r) for r in (getattr(result, "necessity_support", None) or [])
                 if isinstance(r, dict)),
             excluded_lines=excluded,
+            service_intents=service_intents,
+            candidate_eligibility=candidate_eligibility,
         ),
     )
     # ---- Bind the certificate to THIS EXACT claim (issue #6 F7-R1) --------

@@ -49,6 +49,19 @@ RUN PYTHONPATH=/app python tools/prepare_ncci.py
 
 ENV PYTHONUNBUFFERED=1
 
+# issue #6 item 9 (reproducible run identity): baked in at BUILD time, never read
+# from a running process -- a build-time ARG is the one thing a hand-patched,
+# uncommitted running container cannot fake or omit silently. Declared this late
+# (after every expensive RUN layer above) so a value that changes on every commit
+# does not invalidate the pip-install/model-download/NCCI-prepare cache; only
+# metadata below this line depends on it. Absent (both default to "") when a
+# build supplies neither -- the claim still produces, just without this one
+# identity binding, matching every other optional AuthorityBinding field.
+ARG APPLICATION_COMMIT_SHA=""
+ARG IMAGE_DIGEST=""
+ENV APPLICATION_COMMIT_SHA=${APPLICATION_COMMIT_SHA}
+ENV IMAGE_DIGEST=${IMAGE_DIGEST}
+
 CMD ["python", "run.py"]
 
 

@@ -16,6 +16,17 @@ services:
       # `docker build --target test`; pinning target here keeps every
       # `docker compose build`/`up --build` path on the runtime stage.
       target: app
+      # issue #6 item 9 (reproducible run identity): passed through to the
+      # Dockerfile's own ARGs unchanged. Read from the SHELL environment this
+      # `docker compose build` runs in -- the deploying process is expected to
+      # export these (e.g. `export APPLICATION_COMMIT_SHA=$(git rev-parse HEAD)`)
+      # before building; compose cannot run a shell command itself to derive one.
+      # Absent (both default to empty) when nothing exports them -- the same
+      # "absent, the claim holds" pattern every other identity binding in
+      # `AuthorityBinding` already follows.
+      args:
+        APPLICATION_COMMIT_SHA: ${APPLICATION_COMMIT_SHA:-}
+        IMAGE_DIGEST: ${IMAGE_DIGEST:-}
     depends_on:
       - qdrant
     env_file: .env
