@@ -415,6 +415,15 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                 best[c.code] = c
     pool = sorted(best.values(), key=lambda c: c.score, reverse=True)
 
+    # ---- Semantic eligibility-before-retrieval (issue #6 items 4/5) --------------
+    # Narrows the broad RECALL pool -- never `seeds` below, which are already exact
+    # authoritative term->code hits, not a semantic guess -- to candidates whose
+    # compiled semantic record does not positively conflict with what THIS fact
+    # documents. Absence of a compiled signal on either side never excludes a
+    # candidate; only an actual, documented conflict does.
+    from . import semantic_eligibility as _semelig
+    pool = _semelig.eligible_partition([fact], pool, source, dos)
+
     # The authoritative index hits (if any) LEAD the shortlist as high-confidence
     # candidates — but they are billed only if propose-then-verify below confirms
     # entailment + corroboration, so a unique Index hit no longer auto-bills.
