@@ -297,7 +297,19 @@ def code_encounter(
                                             model_profile=profiles.get("extraction"))
         facts = extracted.facts
         _prov.anchor_facts(note_text, facts, document_version=document_version)
-        relations = _prov.bind_relation_evidence(extracted.relations, facts)
+        # ---- Structural composition (issue #6 items 2/3) -----------------------------
+        # A DIFFERENT signal from extraction's own relation calls: which events the note
+        # documents together, under the same heading, purely from the document's own
+        # structure -- never a judgement about which actions are usually integral to
+        # which (extraction.py reserves that judgement and never makes it either). Runs
+        # over the now-anchored primary facts so it can locate each one in `note_text`;
+        # its output joins extraction's own relations into the SAME grounding/validation
+        # pass below, so a structurally-derived edge is held to the identical standard
+        # as an extracted one -- never a parallel, less-verified path.
+        from . import composition as _compose
+        structural_relations = _compose.compose(facts, note_text)
+        relations = _prov.bind_relation_evidence(
+            list(extracted.relations) + structural_relations, facts)
         relations = _prov.validate_relations(relations, facts, note_text)
         if audit_repository is None:
             from app.core.config import PROVENANCE_DB
