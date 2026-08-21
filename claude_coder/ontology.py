@@ -59,6 +59,16 @@ class DescriptorFeatures:
     laterality: set[str] = field(default_factory=set)
     cardinality: str | None = None
     interval: Interval | None = None
+    #: issue #6, compiled-semantic-layer plan item 1. CPT/HCPCS descriptors follow a
+    #: real, observable grammar convention: the leading phrase up to the first comma
+    #: or semicolon names the ACTION (structurally: "Action, target" or
+    #: "Action, qualifier, target..." or "Action(s); target, qualifiers"), and what
+    #: follows names the target/anatomy and qualifiers. Split on that punctuation,
+    #: never on a lexicon of clinical verbs -- a descriptor with no such punctuation
+    #: cannot be honestly split, so `anatomy_tokens` stays empty rather than guessing
+    #: which of its tokens are the action.
+    action_tokens: set[str] = field(default_factory=set)
+    anatomy_tokens: set[str] = field(default_factory=set)
 
 
 _NUM = r"(\d+(?:\.\d+)?)"
@@ -111,17 +121,46 @@ def _tokens(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
 
 
+def _concept_tokens(text: str) -> set[str]:
+    return {t for t in _tokens(text)
+            if t not in _QUALIFIER and not t.isdigit() and len(t) > 2}
+
+
+#: issue #6 item 1. The "Action, Target[, qualifiers]" descriptor convention this
+#: split relies on holds for short, structural descriptors (measured against real
+#: authoritative CPT descriptors: a real 2-word action/target descriptor, an 8-word
+#: one) but NOT for long, paragraph-style ones like E/M codes' MDM-criteria text
+#: (measured: 49 words) --
+#: there the first comma falls mid-sentence, and everything after it is prose, not
+#: a target/anatomy phrase. Guarding on total word count (a structural property of
+#: the text, not a clinical judgement) keeps the split from manufacturing noise for
+#: descriptors it was never designed to parse.
+_SPLITTABLE_MAX_WORDS = 20
+
+
 def parse_descriptor(descriptor: str) -> DescriptorFeatures:
     laterality = {w for w in _LATERALITY
                   if re.search(rf"\b{w}\b", descriptor.lower())}
     cardinality = next((c for c in _CARDINALITY
                         if re.search(rf"\b{c}\b", descriptor.lower())), None)
     interval = _parse_interval(descriptor)
-    core = {t for t in _tokens(descriptor)
-            if t not in _QUALIFIER and not t.isdigit() and len(t) > 2}
+    core = _concept_tokens(descriptor)
+    positions = [i for i in (descriptor.find(","), descriptor.find(";")) if i >= 0]
+    split_at = min(positions) if positions else -1
+    if split_at >= 0 and len(descriptor.split()) <= _SPLITTABLE_MAX_WORDS:
+        action_tokens = _concept_tokens(descriptor[:split_at])
+        anatomy_tokens = _concept_tokens(descriptor[split_at + 1:])
+    else:
+        # No action/target punctuation to split on, or the descriptor is too long
+        # to trust the convention holds -- honestly unsplit rather than guessing
+        # which tokens are the action: everything stays in `core_tokens`, nothing
+        # is asserted as specifically an action or specifically a target.
+        action_tokens = set()
+        anatomy_tokens = set()
     return DescriptorFeatures(raw=descriptor, core_tokens=core,
                               laterality=laterality, cardinality=cardinality,
-                              interval=interval)
+                              interval=interval, action_tokens=action_tokens,
+                              anatomy_tokens=anatomy_tokens)
 
 
 _COUNT_RANGE = [

@@ -221,6 +221,20 @@ _OPTIONAL_SOURCES: dict[str, dict] = {
             "cache of previously VERIFIED resolutions; absence only forces the same "
             "resolution to be re-verified from authoritative data",
     },
+    "cpt_verified_synonyms": {
+        "path": config.CODES_DIR / "cpt_verified_synonyms.json",
+        "role": "round-trip-validated CPT procedure synonym terms (issue #6, "
+               "compiled-semantic-layer plan item 3)",
+        "absence_justification":
+            "each candidate term is llm-generated (cpt_synonyms.json's own "
+            "provenance: 'RETRIEVAL AID ONLY -- NOT an authoritative source'), then "
+            "VALIDATED by tools/verify_cpt_synonyms.py -- kept only when it "
+            "independently retrieves its own originating code through the same "
+            "authoritative retrieval index every other candidate lookup uses; "
+            "absence only means fewer verified alternate phrasings are offered for "
+            "the procedure governed-terminology axis, never a wrong or fabricated "
+            "match",
+    },
     "hcpcs_drug_table": {
         "path": config.CODES_DIR / "hcpcs_drug_table.json",
         "role": "drug dosing table",

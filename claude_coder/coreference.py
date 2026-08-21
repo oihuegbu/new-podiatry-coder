@@ -347,7 +347,7 @@ def normalize_fact_terminology(fact: Any, source: Any = None,
         if not value:
             continue
         try:
-            result = lookup_fn(value) or {}
+            result = lookup_fn(axis, value) or {}
         except Exception:
             continue
         candidates = tuple(c for c in (result.get("candidates") or ()) if c)

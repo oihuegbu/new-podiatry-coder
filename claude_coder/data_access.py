@@ -86,6 +86,17 @@ class InstructionalNotesUnavailable(AuthoritativeDataUnavailable):
     lookup: it RELAXES the Excludes1 compliance gate from a real check into a silent pass."""
 
 
+class SemanticClassUnavailable(AuthoritativeDataUnavailable):
+    """The authoritative code-classification config (`coding_semantics.json`) or one
+    of the reference tables its rules read (ICD-10-CM chapter boundaries, the
+    licensed CPT category membership) could not be read. Raised rather than
+    degraded to "no class": an unclassified code is never a proxy for "not a
+    surgical procedure" or "not evaluation and management" -- those are real,
+    consequential distinctions for family-eligibility narrowing (issue #6,
+    compiled-semantic-layer plan item 1), and losing the classifier must hold
+    that narrowing, never silently widen it back to the whole code space."""
+
+
 class ModifierDefinitionsUnavailable(AuthoritativeDataUnavailable):
     """The authoritative modifier definitions could not be read. Raised because the engine
     DISCOVERS every modifier it emits from these descriptions, so an empty table is
@@ -203,6 +214,10 @@ class CodeSource(Protocol):
 
     def excludes1_refs(self, code: str, system: str) -> set[str]: ...
 
+    def component_relationships(self, code: str, system: str) -> dict[str, set[str]]: ...
+
+    def semantic_class(self, code: str, system: str) -> str | None: ...
+
     def assert_claim_assembly_data_readable(self) -> None: ...
 
     def data_fingerprint(self) -> dict[str, Any]: ...
@@ -213,7 +228,7 @@ class CodeSource(Protocol):
 
     def concept_relation_detail(self, term_a: str, term_b: str) -> dict: ...
 
-    def concept_lookup(self, term: str) -> dict: ...
+    def concept_lookup(self, axis: str, term: str) -> dict: ...
 
 
 # Data-driven signals that a code is NOT a separately reportable line. These are
@@ -444,20 +459,64 @@ class AuthoritativeSource:
             "source_identity": dict(self._concept_relation_identity or {}),
         }
 
-    def concept_lookup(self, term: str) -> dict:
-        """This ONE term's governed identity, independent of any comparison (issue #6
-        F7-R3-C4): a single-entity normalization, so a documented value is resolved
-        against the concept graph even when no second reading worded it differently
-        to compare against. `expansions` is every OTHER term the SAME concept is known
-        by (empty unless the match is unique) -- the canonical alternate phrasings
-        retrieval may additionally query under. A JSON-safe record, same discipline as
-        `concept_relation_detail`.
+    #: Governed axes THIS source can route `concept_lookup` to a real concept graph
+    #: for. Only "anatomy" has one today (the SNOMED CT Body Structure hierarchy) --
+    #: adding a "procedure" axis needs a real licensed/verified procedure-terminology
+    #: source, which does not exist yet: `cpt_synonyms.json`'s own provenance field
+    #: says outright it is "llm-generated... RETRIEVAL AID ONLY -- NOT an authoritative
+    #: source and never a coding decision input", and CPT's `concept_id` field is 1:1
+    #: with each code (verified: 11,601 codes, 11,601 distinct concept_ids, zero
+    #: shared) -- it names the code itself, not a reverse term->concept grouping the
+    #: way SNOMED's does. "procedure" (below) is a genuinely weaker trust tier, not
+    #: a governed concept graph -- see `_ensure_procedure_synonym_index`. Any OTHER
+    #: axis honestly reports no governed source rather than being backed by data
+    #: explicitly disclaimed as non-authoritative.
+    _GOVERNED_LOOKUP_AXES = frozenset({"anatomy", "procedure"})
+
+    _EMPTY_CONCEPT_LOOKUP = {"candidates": [], "method": "none", "unique": False,
+                             "expansions": [], "source_identity": None}
+
+    def _ensure_procedure_synonym_index(self):
+        """Lazy-loaded, cached {normalized term -> set of CPT codes} /
+        {code -> its own verified terms} pair from `cpt_verified_synonyms.json`
+        (issue #6, compiled-semantic-layer plan item 3).
+
+        REVIEWED-OPTIONAL, same discipline as `_ensure_concept_relation_index`:
+        absence degrades this axis to "no expansion", never a held encounter --
+        this is a retrieval-recall aid, not a claim-changing relation the way a
+        governed anatomy SAME verdict is. Returns `False` (cached) when unavailable.
         """
+        if getattr(self, "_proc_syn_index", None) is not None:
+            return self._proc_syn_index
+        try:
+            doc, identity = declared_document_snapshot(
+                "cpt_verified_synonyms", AuthoritativeDataUnavailable)
+            terms_by_code = doc.get("terms") or {}
+            if not isinstance(terms_by_code, dict) or not terms_by_code:
+                raise AuthoritativeDataUnavailable("empty terms table")
+            by_term: dict[str, set[str]] = {}
+            code_terms: dict[str, tuple[str, ...]] = {}
+            for code, synonyms in terms_by_code.items():
+                norm_terms = tuple(sorted({str(t).strip().casefold()
+                                          for t in (synonyms or []) if str(t).strip()}))
+                if norm_terms:
+                    code_terms[code] = norm_terms
+                for t in norm_terms:
+                    by_term.setdefault(t, set()).add(code)
+            self._proc_syn_by_term = by_term
+            self._proc_syn_by_code = code_terms
+            self._proc_syn_identity = identity
+            self._bound_sources.bind(identity)
+            self._proc_syn_index = True
+        except Exception:
+            self._proc_syn_index = False
+        return self._proc_syn_index
+
+    def _concept_lookup_anatomy(self, term: str) -> dict:
         from . import terminology as _term
         index = self._ensure_concept_relation_index()
         if not index:
-            return {"candidates": [], "method": "none", "unique": False,
-                   "expansions": [], "source_identity": None}
+            return dict(self._EMPTY_CONCEPT_LOOKUP)
         match, expansions = index.normalize(term)
         return {
             "term": match.term,
@@ -474,6 +533,59 @@ class AuthoritativeSource:
                                for cid in match.candidates},
             "source_identity": dict(self._concept_relation_identity or {}),
         }
+
+    def _concept_lookup_procedure(self, term: str) -> dict:
+        """A DELIBERATELY WEAKER match tier than `_concept_lookup_anatomy`: this
+        does not read a governed concept graph, only a table of LLM-generated
+        candidate terms that were kept ONLY when they independently round-trip to
+        their own code through the authoritative retrieval index
+        (`tools/verify_cpt_synonyms.py`). That is corroboration BETWEEN two
+        machine-learned artifacts (the generating LLM and the retrieval embedding
+        model), not independent grounding in a licensed, human-curated standard
+        the way SNOMED CT backs the anatomy axis -- so `method` names this
+        explicitly (`"retrieval_consistency_validated"`, never a method string
+        that could be mistaken for a governed-concept match) and a caller must
+        never treat a "unique" match here with the same weight as a SAME verdict
+        from a real concept graph.
+        """
+        if not self._ensure_procedure_synonym_index():
+            return dict(self._EMPTY_CONCEPT_LOOKUP)
+        norm = str(term).strip().casefold()
+        candidates = tuple(sorted(self._proc_syn_by_term.get(norm, ())))
+        unique = len(candidates) == 1
+        expansions = (self._proc_syn_by_code.get(candidates[0], ())
+                     if unique else ())
+        expansions = tuple(e for e in expansions if e != norm)
+        return {
+            "term": term,
+            "candidates": list(candidates),
+            "method": "retrieval_consistency_validated" if candidates else "none",
+            "unique": unique,
+            "expansions": list(expansions),
+            "candidate_terms": {cid: list(self._proc_syn_by_code.get(cid, ()))
+                               for cid in candidates},
+            "source_identity": dict(self._proc_syn_identity or {}),
+        }
+
+    def concept_lookup(self, axis: str, term: str) -> dict:
+        """This ONE term's governed identity on `axis`, independent of any comparison
+        (issue #6 F7-R3-C4/plan item 3): a single-entity normalization, so a
+        documented value is resolved against the concept graph even when no second
+        reading worded it differently to compare against. `expansions` is every OTHER
+        term the SAME concept is known by (empty unless the match is unique) -- the
+        canonical alternate phrasings retrieval may additionally query under. A
+        JSON-safe record, same discipline as `concept_relation_detail`.
+
+        Each axis's `method` values are its own trust tier -- "anatomy" can return a
+        real governed-concept match; "procedure" can only ever return
+        `"retrieval_consistency_validated"` (see `_concept_lookup_procedure`), never
+        a method string that looks like the former. A caller must not conflate them.
+        """
+        if axis not in self._GOVERNED_LOOKUP_AXES:
+            return dict(self._EMPTY_CONCEPT_LOOKUP)
+        if axis == "anatomy":
+            return self._concept_lookup_anatomy(term)
+        return self._concept_lookup_procedure(term)
 
     def cpt_index_codes(self, description: str, system: str) -> set[str]:
         """AUTHORITATIVE procedure term -> CPT code, via the AMA CPT Alphabetic
@@ -1085,6 +1197,185 @@ class AuthoritativeSource:
             out |= table.get(undot[:length], set())
         return out
 
+    #: The ICD-10-CM Tabular relationship types this reads, alongside Excludes1
+    #: (already its own dedicated map/gate above -- unchanged). Same source file,
+    #: same `*_code_refs` shape (issue #6, compiled-semantic-layer plan item 1).
+    _RELATIONSHIP_FIELDS = ("excludes2", "codeFirst", "useAdditionalCode", "codeAlso")
+
+    def _relationship_map(self) -> dict[str, dict[str, set[str]]]:
+        """{undotted category key -> {relationship type -> target code-prefixes}} for
+        every Tabular relationship type OTHER than Excludes1 (which keeps its own
+        cache above; both read the same underlying table). Cached.
+
+        FAIL-CLOSED for the same reason `_excludes1_map` is: a table that parses but
+        declares no relationship at all is a schema/field drift, not a real Tabular
+        edition, and must not be read as "these codes carry no notes".
+        """
+        cache = getattr(self, "_relmap", None)
+        if cache is not None:
+            return cache
+        entries, identity = declared_table_snapshot("instructional_notes", "codes",
+                                                    InstructionalNotesUnavailable)
+        cache = {}
+        any_ref = False
+        for key, rec in entries.items():
+            if not isinstance(rec, dict):
+                continue
+            per_code: dict[str, set[str]] = {}
+            for field in self._RELATIONSHIP_FIELDS:
+                refs = rec.get(f"{field}_code_refs") or []
+                pref = {str(r).replace(".", "").upper() for r in refs if r}
+                if pref:
+                    per_code[field] = pref
+                    any_ref = True
+            if per_code:
+                cache[str(key).replace(".", "").upper()] = per_code
+        if not any_ref:
+            raise InstructionalNotesUnavailable(
+                f"authoritative instructional_notes at {_source_path('instructional_notes')} "
+                f"declares no Excludes2/codeFirst/useAdditionalCode/codeAlso reference "
+                f"for any code")
+        self._bound_sources.bind(identity)
+        self._relmap = cache
+        return cache
+
+    def component_relationships(self, code: str, system: str) -> dict[str, set[str]]:
+        """{relationship type -> target code-prefixes} for a diagnosis, gathered from
+        the code AND its ancestor categories exactly like `excludes1_refs` (a note at
+        a 3-character category governs every child code under it). Relationship types:
+        `excludes1` (mutually exclusive -- never code both), `excludes2` (not included
+        here, but may be coded together when the record supports both), `codeFirst`
+        (a sequencing requirement), `useAdditionalCode` (a required companion code
+        when the documentation supports it), `codeAlso` (a paired code, either order).
+        ICD-10-CM only; {} for any other system.
+
+        Raises `InstructionalNotesUnavailable` when the Tabular notes cannot be read,
+        matching `excludes1_refs` -- an empty result must mean "this diagnosis carries
+        no relationship note", never "nobody could tell us".
+        """
+        if system != "icd10":
+            return {}
+        undot = str(code).replace(".", "").upper()
+        excl1 = self.excludes1_refs(code, system)
+        out: dict[str, set[str]] = {"excludes1": excl1} if excl1 else {}
+        table = self._relationship_map()
+        for length in range(len(undot), 2, -1):
+            for field, refs in table.get(undot[:length], {}).items():
+                out.setdefault(field, set()).update(refs)
+        return out
+
+    # -- semantic classification (issue #6, compiled-semantic-layer plan item 1) --
+    def _coding_semantics(self) -> dict:
+        """The `code_classes` classification config: {class name -> matching rule}.
+        Reviewed, versioned, already-ingested data (`data/codes/coding_semantics.json`)
+        that had no `claude_coder`-reachable consumer before this. Cached."""
+        cache = getattr(self, "_semrules", None)
+        if cache is not None:
+            return cache
+        doc, identity = declared_document_snapshot("coding_semantics",
+                                                    SemanticClassUnavailable)
+        classes = doc.get("code_classes")
+        if not isinstance(classes, dict) or not classes:
+            raise SemanticClassUnavailable(
+                f"authoritative coding_semantics at {_source_path('coding_semantics')} "
+                f"declares no non-empty code_classes table")
+        self._bound_sources.bind(identity)
+        self._semrules = classes
+        return classes
+
+    def _icd_chapter_ranges(self) -> list[tuple[int, str, str]]:
+        """[(chapter id, undotted start code, undotted end code)] from the CDC/NCHS
+        chapter boundaries. Cached."""
+        cache = getattr(self, "_icdchap", None)
+        if cache is not None:
+            return cache
+        doc, identity = declared_document_snapshot("icd10cm_chapters",
+                                                    SemanticClassUnavailable)
+        chapters = doc.get("chapters")
+        if not isinstance(chapters, list) or not chapters:
+            raise SemanticClassUnavailable(
+                f"authoritative icd10cm_chapters at {_source_path('icd10cm_chapters')} "
+                f"declares no non-empty chapters table")
+        cache = [(int(c["id"]), str(c["start"]).replace(".", "").upper(),
+                 str(c["end"]).replace(".", "").upper())
+                for c in chapters if isinstance(c, dict) and "id" in c]
+        self._bound_sources.bind(identity)
+        self._icdchap = cache
+        return cache
+
+    def _cpt_categories(self) -> dict[str, frozenset[str]]:
+        """{category name -> frozenset of member codes} from the licensed CPT
+        category membership. Cached."""
+        cache = getattr(self, "_cptcat", None)
+        if cache is not None:
+            return cache
+        doc, identity = declared_document_snapshot("cpt_categories",
+                                                    SemanticClassUnavailable)
+        cats = doc.get("categories")
+        if not isinstance(cats, dict) or not cats:
+            raise SemanticClassUnavailable(
+                f"authoritative cpt_categories at {_source_path('cpt_categories')} "
+                f"declares no non-empty categories table")
+        cache = {str(name): frozenset(str(c) for c in (members or []))
+                 for name, members in cats.items()}
+        self._bound_sources.bind(identity)
+        self._cptcat = cache
+        return cache
+
+    def semantic_class(self, code: str, system: str) -> str | None:
+        """The `coding_semantics.json` class this code matches, or None when no rule
+        matches -- an honest "unclassified", never a guess (issue #6 item 1: "unknown
+        semantics remain unknown").
+
+        Each class declares exactly one authoritative-data rule:
+          - `descriptor_any`: the code's own long/short description contains one of
+            the listed phrases (case-insensitive substring).
+          - `global_days_kind: "numeric"`: the CMS global-surgical-package indicator
+            is a numeric day count (000/010/090), not XXX/YYY/ZZZ/MMM.
+          - `icd_chapter_ids`: the code's 3-character category falls inside one of
+            the listed CDC/NCHS ICD-10-CM chapters.
+          - `cpt_category`: the code is a member of the licensed CPT category.
+          - `pfs_status_any`: NOT YET SATISFIABLE here -- `claude_coder`'s own PFS
+            table (`_pfs_table`, built by `tools/build_global_period.py`) does not
+            carry the CMS status-indicator field this rule reads, only global/bilat.
+            A class whose ONLY rule is `pfs_status_any` is honestly unclassifiable
+            from this source today rather than approximated; the first match wins
+            when a code matches more than one class, so which class table order
+            settles it is a config decision, not a code one.
+        """
+        rules = self._coding_semantics()
+        undot = str(code).replace(".", "").upper()
+        rec = self.lookup(code, system) or {}
+        descriptor = str(rec.get("long_description") or rec.get("description")
+                         or rec.get("short_description") or "").casefold()
+        for name, rule in rules.items():
+            if not isinstance(rule, dict):
+                continue
+            terms = rule.get("descriptor_any")
+            if terms and descriptor and any(str(t).casefold() in descriptor for t in terms):
+                return name
+            if rule.get("global_days_kind") == "numeric" and system in ("cpt", "hcpcs"):
+                gp = self.global_period(code)
+                if gp and gp.isdigit():
+                    return name
+            chapter_ids = rule.get("icd_chapter_ids")
+            if chapter_ids and system == "icd10":
+                # Compare the code's own 3-character CATEGORY, never the full code,
+                # against the (always 3-character) chapter boundaries -- a full code
+                # longer than its category (e.g. "B9999") sorts lexicographically
+                # AFTER a 3-character upper bound ("B99") even though it is a real
+                # member of that chapter, since Python string comparison treats a
+                # proper prefix as "less than" the longer string it prefixes.
+                category = undot[:3]
+                for cid, start, end in self._icd_chapter_ranges():
+                    if cid in chapter_ids and start <= category <= end:
+                        return name
+            category = rule.get("cpt_category")
+            if category and system in ("cpt", "hcpcs"):
+                if code in self._cpt_categories().get(str(category), frozenset()):
+                    return name
+        return None
+
 
 class MockSource:
     """In-memory source for tests. Records use SYNTHETIC identifiers so the test
@@ -1107,7 +1398,9 @@ class MockSource:
                  excludes1: dict[str, set] | None = None,
                  coverage: dict[str, set] | None = None,
                  concept_relation: dict[tuple[str, str], str] | None = None,
-                 concept_lookup: dict[str, dict] | None = None) -> None:
+                 concept_lookup: dict[str, dict] | None = None,
+                 component_relationships: dict[str, dict[str, set]] | None = None,
+                 semantic_class: dict[str, str] | None = None) -> None:
         self._records = records or {}
         self._retrieval = retrieval or {}
         self._ncci = ncci or {}
@@ -1130,6 +1423,13 @@ class MockSource:
                           for k, v in (coverage or {}).items()}
         self._concept_relation_map = concept_relation or {}
         self._concept_lookup_map = concept_lookup or {}
+        self._component_rel_data = {
+            str(k).replace(".", "").upper():
+                {rel: {str(r).replace(".", "").upper() for r in refs}
+                 for rel, refs in (v or {}).items()}
+            for k, v in (component_relationships or {}).items()}
+        self._semantic_class_data = {str(k): str(v)
+                                     for k, v in (semantic_class or {}).items()}
 
     def global_period(self, code):
         return self._gp.get(code)
@@ -1296,8 +1596,12 @@ class MockSource:
                "confidence": 1.0, "term_a": {"term": term_a}, "term_b": {"term": term_b},
                "source_identity": {"source_id": "mock_concept_relation"}}
 
-    def concept_lookup(self, term):
-        if term in self._concept_lookup_map:
+    def concept_lookup(self, axis, term):
+        # Test fixtures configure ONE flat term->record table (the one governed axis
+        # this suite exercises, anatomy) -- gating on axis here mirrors what the real
+        # `AuthoritativeSource` actually does (only "anatomy" has a governed source
+        # today), not a shim papering over a shape mismatch.
+        if axis == "anatomy" and term in self._concept_lookup_map:
             return dict(self._concept_lookup_map[term])
         return {"term": term, "candidates": [], "method": "none", "unique": False,
                "expansions": [], "source_identity": None}
@@ -1310,3 +1614,17 @@ class MockSource:
         for length in range(len(undot), 2, -1):
             out |= self._excl1_data.get(undot[:length], set())
         return out
+
+    def component_relationships(self, code, system):
+        if system != "icd10":
+            return {}
+        excl1 = self.excludes1_refs(code, system)
+        out = {"excludes1": excl1} if excl1 else {}
+        undot = str(code).replace(".", "").upper()
+        for length in range(len(undot), 2, -1):
+            for rel, refs in self._component_rel_data.get(undot[:length], {}).items():
+                out.setdefault(rel, set()).update(refs)
+        return out
+
+    def semantic_class(self, code, system):
+        return self._semantic_class_data.get(str(code))
