@@ -127,6 +127,13 @@ class RetrievalRequest:
     """
     intent: ClaimLineIntent
     fact: ClinicalFact
+    # issue #6 item 5/F8-R2: every OTHER fact `composition.service_intents` grouped
+    # into the SAME service intent as `fact` (via a validated PART_OF/SAME_EPISODE_AS
+    # edge), so semantic eligibility can read what the whole documented service
+    # states, not just one isolated fact. Empty when the fact belongs to no
+    # multi-member intent (the common case) or when a caller does not supply one --
+    # callers that omit it get exactly today's single-fact behavior, never an error.
+    intent_facts: tuple[ClinicalFact, ...] = ()
 
     def __post_init__(self) -> None:
         if self.intent.state is not EligibilityState.ELIGIBLE_FOR_RETRIEVAL:

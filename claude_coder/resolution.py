@@ -235,6 +235,12 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
     if not isinstance(request, RetrievalRequest):
         raise TypeError("code retrieval requires an eligible RetrievalRequest")
     fact = request.fact
+    # issue #6 item 5/F8-R2: semantic eligibility reads what the whole documented
+    # SERVICE states (every fact `composition.service_intents` grouped with this
+    # one), not just this one isolated fact -- falls back to the fact alone when
+    # the caller supplied no grouping (or the fact belongs to no multi-member
+    # intent), which is exactly today's behavior.
+    elig_facts = list(request.intent_facts) or [fact]
     if not fact.billable:
         return ResolvedLine(
             fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
@@ -415,19 +421,27 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                 best[c.code] = c
     pool = sorted(best.values(), key=lambda c: c.score, reverse=True)
 
-    # ---- Semantic eligibility-before-retrieval (issue #6 items 4/5) --------------
-    # Narrows the broad RECALL pool -- never `seeds` below, which are already exact
-    # authoritative term->code hits, not a semantic guess -- to candidates whose
-    # compiled semantic record does not positively conflict with what THIS fact
-    # documents. Absence of a compiled signal on either side never excludes a
-    # candidate; only an actual, documented conflict does.
+    # ---- Semantic eligibility-before-retrieval (issue #6 items 4/5, F8-R2) -------
+    # Narrows EVERY candidate path -- the broad RECALL pool AND the authoritative
+    # index `seeds` alike -- to candidates whose compiled semantic record does not
+    # positively conflict with what THIS fact documents. Seeds are exact term->code
+    # hits, not a semantic guess, but "exact index match" and "semantically
+    # compatible with this documentation" are different questions; an index hit
+    # for the wrong date-of-service or the wrong semantic class is still wrong
+    # (Codex F8-R2: seeds previously bypassed this filter entirely). Absence of a
+    # compiled signal on either side never excludes a candidate; only an actual,
+    # documented conflict does.
     from . import semantic_eligibility as _semelig
-    # issue #6 item 8: recorded over the FULL retrieved pool, before filtering, so
-    # the audit trail shows every candidate's eligibility status -- kept or
-    # excluded -- never only the survivors, on a held/blocked line exactly as much
-    # as a released one.
-    _candidate_eligibility = _semelig.eligibility_report([fact], pool, source, dos)
-    pool = _semelig.eligible_partition([fact], pool, source, dos)
+    # issue #6 item 8: recorded over the FULL candidate universe -- seeds and pool
+    # together, before either is filtered -- so the audit trail shows every
+    # candidate this fact's retrieval ever considered, kept or excluded, and can
+    # never disagree with what was actually enforced below.
+    _all_candidates = list(seeds) + [c for c in pool if c.code not in
+                                     {s.code for s in seeds}]
+    _candidate_eligibility = _semelig.eligibility_report(elig_facts, _all_candidates,
+                                                          source, dos)
+    pool = _semelig.eligible_partition(elig_facts, pool, source, dos)
+    seeds = _semelig.eligible_partition(elig_facts, seeds, source, dos)
 
     # The authoritative index hits (if any) LEAD the shortlist as high-confidence
     # candidates — but they are billed only if propose-then-verify below confirms
@@ -462,8 +476,17 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                     "decision (identify the specific code, or confirm the residual bucket); "
                     "not a provider documentation gap, and not billed on a non-specific code"))
     elif not pool:
+        # F8-R2: distinguish "retrieval found nothing at all" from "retrieval found
+        # candidates, but semantic eligibility excluded every one of them" -- the
+        # honest, typed abstention Codex's acceptance criterion asks for, rather
+        # than silently falling back to an unfiltered pool (removed above).
+        rationale = ("every retrieved candidate conflicted with this fact's own "
+                    "documented semantics (see candidate_eligibility) -- a coder "
+                    "classification decision, never auto-selected from a "
+                    "structurally incompatible pool"
+                    if _all_candidates else "no candidate retrieved for the concept")
         line = ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
-                            rationale="no candidate retrieved for the concept")
+                            rationale=rationale)
     else:
         line = _decide(fact, pool, source=source, dos=dos,
                        reconciliation=reconciliation)

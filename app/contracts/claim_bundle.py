@@ -68,10 +68,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+#: issue #6 item 9/F8-R5: the shape a real git commit SHA / OCI image digest
+#: takes -- used only to reject an obviously-fabricated self-attestation
+#: (`AuthorityBinding.problems()`), never to prove the value is TRUE (that
+#: requires trusting the build pipeline that set the Dockerfile ARG in the
+#: first place; format validation only catches "not even shaped like one").
+_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
+_IMAGE_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
 # --------------------------------------------------------------------------
 # schema identity
@@ -894,8 +903,21 @@ class AuthorityBinding(_Strict):
     #: queried. Sourced from a build-time Dockerfile ARG (never computed here by
     #: introspecting a running process, which could report a stale or hand-patched
     #: checkout): a `docker build --build-arg` at build time, or absent when the
-    #: image was built without one. Absent never blocks a claim -- it only means
-    #: this one binding is missing, matching every other identity field here.
+    #: image was built without one.
+    #:
+    #: Codex F8-R5, honestly stated: absence does NOT currently block a claim, and
+    #: this is a deliberate, disclosed limitation, not an oversight -- no build/
+    #: deploy automation in this repository yet exports `APPLICATION_COMMIT_SHA`/
+    #: `IMAGE_DIGEST` before `docker compose build` (see the Dockerfile/compose
+    #: comments), so making absence a release blocker today would halt every
+    #: encounter's autonomous release on the current deployment with no way to
+    #: satisfy the new requirement. Item 9 is therefore reproducible ONLY when a
+    #: build actually supplies these values; it is not yet a release-ENFORCED
+    #: guarantee, and must not be represented as one until that automation exists.
+    #: What IS enforced now: a SUPPLIED value must be well-formed (`problems()`
+    #: below) -- an arbitrary or malformed string self-attesting as a commit/image
+    #: identity is rejected exactly as if it were absent, never accepted at face
+    #: value.
     application_commit_sha: str = ""
     image_digest: str = ""
 
@@ -910,6 +932,20 @@ class AuthorityBinding(_Strict):
             out.append("no compiled-database snapshot is bound to this claim; the "
                        "edit/coverage decisions cannot be traced to the bytes that "
                        "answered them")
+        # issue #6 item 9/F8-R5: a SUPPLIED application identity must be well-formed
+        # -- a full 40-character git commit SHA, a `sha256:<64-hex>` image digest --
+        # never accepted as arbitrary self-attested text (a prior test literally
+        # used "deadbeef"). Absence of either is NOT flagged here (see the field's
+        # own docstring on why this binding is not yet release-enforced); only a
+        # value that claims to be an identity and is not shaped like one is.
+        sha = self.application_commit_sha
+        if sha and not _COMMIT_SHA_RE.fullmatch(sha):
+            out.append(f"application_commit_sha {sha!r} is not a well-formed "
+                       f"40-character git commit SHA")
+        digest = self.image_digest
+        if digest and not _IMAGE_DIGEST_RE.fullmatch(digest):
+            out.append(f"image_digest {digest!r} is not a well-formed "
+                       f"'sha256:<64-hex>' image digest")
         return tuple(out)
 
 
@@ -1421,6 +1457,18 @@ class ClaimBundle(_Strict):
             out.append("producer did not assert an autonomous release "
                        "(no AUTO_READY verdict with a certificate)")
         out.extend(self.release.holds)
+        # issue #6 item 7/F8-R3: re-derived from the bundle's OWN stored content
+        # (`audit.excluded_lines`), never from trusting `self.release.destination`
+        # alone -- a coded line held for an unresolved administrative fact must
+        # block release even if some producer defect claimed AUTO_READY anyway.
+        # A no-op in the correctly-working case (that destination check above
+        # already caught it); a genuine safety net if it did not.
+        if self.release.destination is ReleaseDestination.AUTO_READY and any(
+                (rec or {}).get("claim_submission_status") == "held"
+                for rec in self.audit.excluded_lines):
+            out.append("a coded line's submission is HELD (unresolved "
+                       "administrative fact) but the release destination claims "
+                       "AUTO_READY -- producer/consumer disagreement, never released")
         if self.certificate is None:
             out.append("no release certificate")
         out.extend(self.context.problems())
@@ -1617,6 +1665,12 @@ def _line_snapshot(line) -> dict[str, Any]:
         "rationale": getattr(line, "rationale", ""),
         "excluded_reason": getattr(line, "excluded_reason", None),
         "documentation_gap": getattr(line, "documentation_gap", None),
+        # issue #6 item 7/F8-R3: a line excluded from `billable_lines` because its
+        # submission is HELD (not because it was bundled/non-covered/excluded)
+        # must say so here -- this is the ONE place its resolved code survives
+        # into the bundle at all now that `billable_lines` excludes it.
+        "claim_submission_status": getattr(
+            getattr(line, "claim_submission_status", None), "value", None),
         "evidence": [str(getattr(s, "text", "") or "")
                      for s in (getattr(fact, "evidence", None) or [])],
     }

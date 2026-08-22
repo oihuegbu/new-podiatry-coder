@@ -566,6 +566,23 @@ def code_encounter(
                 f"independent reading; a service documented only there would be "
                 f"silently omitted from the claim",
                 "independent document recall (issue #6 F7-R3)", retryable=True))
+    # issue #6 item 5/F8-R2: computed BEFORE the retrieval loop (not only for
+    # audit afterward) so each `RetrievalRequest` below can carry every OTHER
+    # fact its own service intent groups it with -- semantic eligibility then
+    # reads what the whole documented service states, never just one isolated
+    # fact. `facts`/`relations` are already final at this point (structural
+    # composition already ran above), so this is the same computation the
+    # audit-only version at the end of this function would produce; computing
+    # it once, here, and reusing it there removes the duplicate work.
+    _service_intents = _compose.service_intents(facts, relations)
+    _facts_by_id = {f.fact_id: f for f in facts if f.fact_id}
+    _intent_facts_by_event: dict[str, tuple] = {}
+    for _si in _service_intents:
+        _members = tuple(_facts_by_id[eid] for eid in _si.component_event_ids
+                         if eid in _facts_by_id)
+        for eid in _si.component_event_ids:
+            _intent_facts_by_event[eid] = _members
+
     lines = []
     for fact in facts:
         # issue #6 item 8: reset every iteration -- a loop-local carried across facts
@@ -636,14 +653,21 @@ def code_encounter(
                 rationale=f"merged into eligible intent {_it.intent_id}; no duplicate retrieval",
                 excluded_reason="duplicate mention represented by canonical claim-line intent")
         else:
+            # issue #6 item 5/F8-R2: every other fact this event's own service
+            # intent groups it with, so semantic eligibility (inside resolve())
+            # reads the whole documented service, not just this one fact in
+            # isolation. Empty tuple (falls back to the fact alone) when this
+            # fact belongs to no multi-member intent -- the common case.
+            _intent_facts = _intent_facts_by_event.get(fact.fact_id, ())
             try:
                 if fact.kind is FactKind.EM:
-                    line = em.resolve_em(RetrievalRequest(_it, fact), source)
+                    line = em.resolve_em(
+                        RetrievalRequest(_it, fact, intent_facts=_intent_facts), source)
                 else:
                     line = resolution.resolve(
-                        RetrievalRequest(_it, fact), source, llm=verify_llm,
-                        corroborate=corroborate_llm, dos=date_of_service,
-                        reconciliation=source_reconciliation)
+                        RetrievalRequest(_it, fact, intent_facts=_intent_facts), source,
+                        llm=verify_llm, corroborate=corroborate_llm,
+                        dos=date_of_service, reconciliation=source_reconciliation)
             except Exception as exc:
                 return _system_hold_result(encounter_id, date_of_service,
                                            f"retrieval_execution:{fact.fact_id}", exc, source)
@@ -758,12 +782,13 @@ def code_encounter(
             line.candidate_eligibility = _candidate_eligibility
         lines.append(line)
 
-    # issue #6 item 8: a read-time projection over the FINAL facts/relations (after
-    # structural composition above), preserved for the audit trail regardless of
-    # whether any of these events ended up billed -- the same "evidence survives a
-    # held outcome" principle `excluded_lines` already carries.
+    # issue #6 item 8: the SAME grouping already computed above (and already fed
+    # into retrieval's semantic eligibility, item 5) -- serialized here for the
+    # audit trail, preserved regardless of whether any of these events ended up
+    # billed. Never recomputed: one grouping, used for both retrieval and audit,
+    # so the two can never silently drift apart.
     service_intents = [{"intent_id": si.intent_id, "component_event_ids": si.component_event_ids}
-                       for si in _compose.service_intents(facts, relations)]
+                       for si in _service_intents]
 
     result = CodingResult(
         encounter_id=encounter_id,

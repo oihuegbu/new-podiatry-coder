@@ -485,20 +485,29 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
                 winner, proof, spans = "second", s_proof, s_spans
                 detail = "the confirmed quotation states this value verbatim"
             elif bool(item.value_primary) != bool(item.value_second):
-                # ASYMMETRIC RECORDING, not a disagreement: one reading simply never
-                # emitted this axis at all -- there is no competing value to
-                # arbitrate between, so the literal-verbatim bar above (designed to
-                # pick a winner between two COMPETING assertions) does not apply
-                # here. The recording reading's own event-evidence is already
-                # source-confirmed (`p_ok and s_ok`, checked above); a normalized
-                # axis value can be supported by that confirmed span without the
-                # exact normalized word appearing in it verbatim.
-                if item.value_primary:
-                    winner, proof, spans = "primary", p_proof, p_spans
-                else:
-                    winner, proof, spans = "second", s_proof, s_spans
-                detail = ("only one reading recorded this axis at all, and its "
-                          "event-evidence is source-confirmed; nothing contradicts it")
+                # ASYMMETRIC RECORDING, not a two-way disagreement: one reading simply
+                # never emitted this axis at all, so `_question()` must never phrase
+                # this as "two readings disagreed" (it already branches on that, see
+                # `_question`'s `len(values) <= 1` case). But that is a QUESTION-
+                # PHRASING fact, not a licence to auto-accept the recorded value.
+                #
+                # By construction, reaching this branch means p_says/s_says (above)
+                # already found the recording reading's value is NOT a token subset
+                # of its own confirmed quotation -- if it were, the p_says/s_says
+                # branch above would have accepted it already. So "the event's own
+                # quotation is source-confirmed" (p_ok and s_ok) is genuinely all
+                # this branch ever has: proof the EVENT happened, never proof of
+                # this specific VALUE. Silence from the other reading is not
+                # corroboration of an otherwise-unsupported inference (Codex F8-R1:
+                # a model-inferred axis value with zero textual relationship to the
+                # quoted text was being promoted to RESOLVED_FROM_SOURCE here on
+                # event-confirmation alone). Left unresolved -- winner stays unset,
+                # falling through to the same honest UNRESOLVED outcome as a genuine
+                # tie below, with a detail that names what actually happened.
+                detail = ("only one reading recorded this axis, and that reading's "
+                          "own stated value is not literally supported by its "
+                          "confirmed quotation -- an unconfirmed reading is not "
+                          "corroborated merely because nothing contradicts it")
             else:
                 detail = ("both readings rest on confirmed quotations and neither "
                           "value is uniquely stated by them")

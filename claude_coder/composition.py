@@ -25,10 +25,20 @@ from .models import ClinicalFact, RelationAssertion, RelationPredicate, Relation
 #: end-of-line anchor right after its colon), mostly uppercase, short.
 _HEADER_LINE = re.compile(r"^[ \t]*([A-Z][A-Z0-9 /&()\-]{1,60})[ \t]*:?[ \t]*$")
 
-#: Relations grouped over for `service_intents`' reachability closure -- the two
-#: predicates that assert events belong to one another's service composition
-#: (`PART_OF`) or session (`SAME_EPISODE_AS`), never a weaker/negated/uncertain edge.
-_COMPOSING_PREDICATES = frozenset({RelationPredicate.PART_OF, RelationPredicate.SAME_EPISODE_AS})
+#: Relations grouped over for `service_intents`' reachability closure -- ONLY
+#: `PART_OF`, never `SAME_EPISODE_AS` (Codex F8-R4). `SAME_EPISODE_AS` asserts
+#: session/episode membership -- two events were documented in the same visit, the
+#: same note section -- which is exactly the CONTEXT-ONLY, non-suppressing scope
+#: `eligibility.ServiceEpisode`'s own docstring already claims for it ("an episode
+#: never suppresses a claim line; it just scopes ... analysis"). It does not assert
+#: those events are components of ONE composed service: two independently
+#: reportable procedures documented under the same heading are still two separate
+#: services, and unioning them into one `ServiceIntent` would incorrectly narrow
+#: retrieval/eligibility to whichever service's vocabulary happens to dominate the
+#: pair. Only `PART_OF` -- an explicit, documented integrality assertion, the same
+#: predicate `eligibility._gate_part_of_demotion` already requires before treating
+#: one event as a component of another -- composes two events into one intent.
+_COMPOSING_PREDICATES = frozenset({RelationPredicate.PART_OF})
 
 
 def _sections(note_text: str) -> list[tuple[str | None, int, int]]:
@@ -133,12 +143,11 @@ class ServiceIntent:
 def service_intents(facts: list[ClinicalFact], relations: list[RelationAssertion]
                     ) -> list[ServiceIntent]:
     """Partition `facts` into `ServiceIntent`s by connected-component reachability
-    over every ASSERTED `PART_OF`/`SAME_EPISODE_AS` edge in `relations` -- structural
-    (this module's) and extracted (`extraction.py`'s) edges alike, since both are, by
-    the time this runs, equally validated `RelationAssertion`s with no marker
-    distinguishing their origin to a reader of the graph. A `NEGATED` or `UNCERTAIN`
-    edge never joins two events into one intent: only a settled, asserted
-    relationship does."""
+    over every ASSERTED `PART_OF` edge in `relations` (never `SAME_EPISODE_AS`, see
+    `_COMPOSING_PREDICATES`) -- extracted (`extraction.py`'s) edges only today, since
+    this module's own `compose()` never emits `PART_OF` itself. A `NEGATED` or
+    `UNCERTAIN` edge never joins two events into one intent: only a settled,
+    asserted relationship does."""
     ids = [f.fact_id for f in facts if f.fact_id]
     parent = {fid: fid for fid in ids}
 

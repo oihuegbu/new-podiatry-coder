@@ -360,8 +360,26 @@ class CodingResult:
 
     @property
     def billable_lines(self) -> list[ResolvedLine]:
+        """Resolved, billable lines READY to submit -- issue #6 item 7/F8-R3: a
+        line the eligibility engine marked `claim_submission_status HELD` has a
+        real code (kept for audit/administrative routing, see
+        `submission_held_lines`) but is NOT submission-ready, so it is excluded
+        here exactly like an unresolved or excluded_reason line already is. A
+        stamp nothing downstream ever reads is not a control."""
         return [ln for ln in self.lines
-                if ln.resolved and ln.fact.billable and not ln.excluded_reason]
+                if ln.resolved and ln.fact.billable and not ln.excluded_reason
+                and ln.claim_submission_status is not ClaimSubmissionStatus.HELD]
+
+    @property
+    def submission_held_lines(self) -> list[ResolvedLine]:
+        """Resolved, otherwise-billable lines held for an unresolved (not
+        contradicted) administrative fact -- e.g. actor ownership
+        (`eligibility.ClaimLineIntent.claim_submission_status`). Coded, but
+        excluded from `billable_lines`; `autonomy.decide` routes these as a
+        blocking administrative item, never silently into AUTO_READY."""
+        return [ln for ln in self.lines
+                if ln.resolved and ln.fact.billable and not ln.excluded_reason
+                and ln.claim_submission_status is ClaimSubmissionStatus.HELD]
 
     @property
     def procedure_lines(self) -> list[ResolvedLine]:

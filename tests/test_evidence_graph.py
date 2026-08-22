@@ -136,19 +136,18 @@ class TwoReadingAxisConsensus(unittest.TestCase):
         self.assertIn("s1", [s.span_id for s in primary[0].evidence])
         self.assertEqual(primary[0].axis_conflicts, [])
 
-    def test_an_axis_only_one_reading_recorded_is_settled_not_a_disagreement(self):
-        """Real-run regression: one reading's own confirmed quotation supports an
-        axis value it recorded; the other reading simply never emitted that axis at
-        all (not an empty/contradicting value -- an absent key). This is not a
-        disagreement to arbitrate -- there is no competing claim -- so it must
-        settle from the recording reading, never reach a provider question, and the
-        question text (if it ever did) must never claim "two independent readings"
-        when only one recorded anything."""
+    def test_an_axis_only_one_reading_recorded_and_grounded_is_settled_not_a_disagreement(self):
+        """Real-run regression: one reading's own confirmed quotation ACTUALLY
+        STATES the axis value it recorded; the other reading simply never emitted
+        that axis at all (not an empty/contradicting value -- an absent key). This
+        is not a disagreement to arbitrate -- there is no competing claim -- so it
+        settles from the recording reading (via the same verbatim-token check a
+        two-sided case uses), never reaches a provider question."""
         primary = [_fact("F1", FactKind.PROCEDURE, "procedure performed",
-                         spans=[_span("A curved incision was made", span_id="p1")],
+                         spans=[_span("An open incision was made", span_id="p1")],
                          attributes={"approach": "open"})]
         second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
-                        spans=[_span("A curved incision was made", span_id="s1")],
+                        spans=[_span("An open incision was made", span_id="s1")],
                         attributes={})]   # approach not recorded at all -- absent, not ""
         report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
         disagreement = next(d for d in report.disagreements if d.axis == "approach")
@@ -157,13 +156,45 @@ class TwoReadingAxisConsensus(unittest.TestCase):
                                               second_by_node, None)
         approach = next(r for r in resolutions if r.axis == "approach")
         self.assertIs(approach.verdict, graph_consensus.AxisVerdict.RESOLVED_FROM_SOURCE,
-                      "an asymmetric axis with no competing value must settle, not hold")
+                      "a value literally stated by its own confirmed quotation must "
+                      "settle, not hold")
         self.assertEqual(approach.accepted_from, "primary")
         self.assertEqual(approach.accepted_value, "open")
         graph_consensus.apply_resolutions(primary_by_id, second_by_node, resolutions)
         self.assertEqual(primary[0].axis_conflicts, [],
-                         "an explicit, uncontested fact must never generate a provider "
-                         "question")
+                         "an explicit, GROUNDED, uncontested fact must never generate a "
+                         "provider question")
+
+    def test_an_axis_only_one_reading_recorded_but_ungrounded_stays_unresolved(self):
+        """Codex F8-R1: an axis value with NO textual relationship to its own
+        confirmed quotation must never be promoted to RESOLVED_FROM_SOURCE just
+        because the other reading stayed silent and nothing "contradicts" it.
+        Event-level source confirmation (the quotation is genuine) is not
+        value-level confirmation (the quotation states this specific inference).
+        Silence from the other reading is not corroboration."""
+        primary = [_fact("F1", FactKind.PROCEDURE, "procedure performed",
+                         spans=[_span("A curved incision was made", span_id="p1")],
+                         # "laparoscopic" appears nowhere in the quoted text --
+                         # an inferred/hallucinated value with zero textual support
+                         attributes={"approach": "laparoscopic"})]
+        second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
+                        spans=[_span("A curved incision was made", span_id="s1")],
+                        attributes={})]
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "approach")
+        self.assertEqual(disagreement.basis, "only one reading recorded a value")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None)
+        approach = next(r for r in resolutions if r.axis == "approach")
+        self.assertIs(approach.verdict, graph_consensus.AxisVerdict.UNRESOLVED,
+                      "an ungrounded inference must never be promoted to "
+                      "RESOLVED_FROM_SOURCE merely because it is uncontested")
+        self.assertTrue(approach.provider_question)
+        self.assertIn("one reading", approach.provider_question)
+        self.assertNotIn("two independent readings", approach.provider_question)
+        graph_consensus.apply_resolutions(primary_by_id, second_by_node, resolutions)
+        self.assertNotEqual(primary[0].axis_conflicts, [],
+                            "an ungrounded inference must hold the fact, not settle it")
 
     def test_question_text_never_claims_two_readings_when_only_one_recorded(self):
         """Direct unit coverage of the message-honesty fix, independent of whether

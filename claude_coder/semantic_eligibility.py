@@ -24,12 +24,18 @@ guess now. What DOES ship here is deterministic and synonym-proof: a documented
 measurement/interval requirement, a semantic-class conflict, and code activity on
 the date of service.
 
-Scope note on grouping: this filters retrieval's already-returned candidate list
-(`resolution.py`'s broad `source.retrieve` pool), one fact at a time. Grouping
-multiple facts of one `composition.ServiceIntent` into a single eligibility check
-is a natural next step once retrieval requests are built per-intent rather than
-per-fact -- not yet true of `eligibility.RetrievalRequest`, so this module accepts
-whatever fact list its caller has (today, always one).
+Scope note on grouping (issue #6 item 5, Codex F8-R2): this module has always
+accepted whatever fact list its caller supplies -- it never assumed exactly one.
+`resolution.resolve()` now supplies every fact `composition.service_intents`
+grouped with the one under retrieval (`eligibility.RetrievalRequest.intent_facts`),
+so this filters against what the whole documented SERVICE states, not one isolated
+fact considered alone, whenever that fact belongs to a multi-member intent.
+
+Scope note on candidate paths (Codex F8-R2): every candidate path is filtered --
+the broad RECALL pool AND the authoritative-index `seeds` in `resolution.py` alike
+-- and `eligible_partition` is a PURE filter with no fallback that restores an
+excluded candidate; see its own docstring for why an earlier version's fallback was
+itself a defect, not a safety net.
 """
 from __future__ import annotations
 
@@ -47,14 +53,29 @@ from .models import ClinicalFact, FactKind, Outcome
 _FACT_KIND_SEMANTIC_CLASS = {FactKind.EM: "evaluation_management"}
 
 
-def _documented_interval(facts: list[ClinicalFact]):
-    """The bounded measurement/interval this documentation states, or None -- reuses
-    `ontology`'s own interval detector (unconditional on descriptor punctuation, so
-    it applies equally well to a fact's natural-prose description) rather than a
-    second implementation."""
-    text = " ".join(f.description for f in facts if f.description)
-    feats = _ontology.parse_descriptor(text)
-    return feats.interval if feats.interval and feats.interval.bounded() else None
+def _has_documented_measurement(facts: list[ClinicalFact]) -> bool:
+    """Whether ANY documented measurement exists for this intent -- either in a
+    fact's own prose description (a bounded interval `ontology.parse_descriptor`
+    detects, e.g. "16 sq cm or less") OR in its structured attributes (e.g.
+    `size_sqcm`, `depth_mm` -- `measurement.measurements_of`, the SAME typed
+    extractor `resolution._decide`/`tiebreak` already use to match a measurement
+    against a candidate's own dimensional constraint).
+
+    A prior version of this check read ONLY the prose description, so a fact
+    whose measurement was extracted into a structured attribute (the common,
+    correctly-extracted case) always looked unmeasured here -- a real gap this
+    eligibility check's own review pass exposed once `eligible_partition`
+    stopped silently restoring an all-excluded pool (Codex F8-R2): the restore-
+    all fallback had been masking this defect, not compensating for a
+    deliberately narrow check."""
+    from . import measurement as _measurement
+    for f in facts:
+        feats = _ontology.parse_descriptor(f.description or "")
+        if feats.interval and feats.interval.bounded():
+            return True
+        if _measurement.measurements_of(f.attributes or {}):
+            return True
+    return False
 
 
 def _ineligibility_reason(candidate, facts: list[ClinicalFact], source,
@@ -69,9 +90,9 @@ def _ineligibility_reason(candidate, facts: list[ClinicalFact], source,
         return None
 
     if "measurement" in (record.get("required_attributes") or []) and \
-            _documented_interval(facts) is None:
+            not _has_documented_measurement(facts):
         return ("candidate's descriptor requires a documented measurement/interval "
-               "the fact's text does not state")
+               "the fact's text or attributes do not state")
 
     fact_kinds = {f.kind for f in facts}
     expected_classes = {_FACT_KIND_SEMANTIC_CLASS[k] for k in fact_kinds
@@ -106,15 +127,20 @@ def eligible_partition(facts: list[ClinicalFact], candidates: list, source,
                        date_of_service: str | None) -> list:
     """`candidates`, narrowed to the ones `eligible()` accepts for `facts`.
 
-    Narrowing ONLY: if every candidate happens to fail (a sign the filter itself
-    does not fit this case, not evidence that nothing retrieved is usable), the
-    original, unfiltered list is returned rather than an empty one -- this
-    mechanism may never single-handedly turn a fact retrieval FOUND candidates for
-    into one that finds none at all."""
-    if not candidates:
-        return candidates
-    kept = [c for c in candidates if eligible(c, facts, source, date_of_service)]
-    return kept if kept else candidates
+    A PURE, monotonic filter -- never restores an excluded candidate for any
+    reason. Codex F8-R2: an earlier version of this function fell back to the
+    unfiltered list whenever every candidate was excluded, reasoning that an
+    all-excluded result was more likely a sign the filter didn't fit this case
+    than evidence nothing retrieved was usable. That reasoning was wrong twice
+    over: it silently let a structurally-incompatible candidate reach the
+    resolver exactly when eligibility had the clearest possible signal against
+    every one of them, AND it made `eligibility_report` (which never applied
+    the same fallback) claim a candidate was excluded when it was actually
+    still processed -- an audit/enforcement mismatch, not merely an
+    over-cautious safety net. The caller (`resolution.resolve`) already treats
+    an empty pool as an honest abstention; that is the correct outcome here
+    too, not a reason to disable the filter."""
+    return [c for c in candidates if eligible(c, facts, source, date_of_service)]
 
 
 def eligibility_report(facts: list[ClinicalFact], candidates: list, source,

@@ -131,17 +131,22 @@ class ServiceIntentsAndCandidateEligibilitySurviveIntoTheBundle(unittest.TestCas
 
 class ApplicationCommitShaFromEnvironment(unittest.TestCase):
     def test_authority_binding_reads_env_when_present(self):
+        # Codex F8-R5: a well-formed 40-hex SHA / sha256:<64-hex> digest -- not
+        # "deadbeef", which `AuthorityBinding.problems()` now correctly rejects
+        # as not shaped like a real commit SHA at all.
         import run as entrypoint
+        sha = "a" * 40
+        digest = "sha256:" + "b" * 64
         old_sha = os.environ.get("APPLICATION_COMMIT_SHA")
         old_digest = os.environ.get("IMAGE_DIGEST")
         try:
-            os.environ["APPLICATION_COMMIT_SHA"] = "deadbeef"
-            os.environ["IMAGE_DIGEST"] = "sha256:beefdead"
+            os.environ["APPLICATION_COMMIT_SHA"] = sha
+            os.environ["IMAGE_DIGEST"] = digest
             source = MockSource()
             result = type("R", (), {"certificate": None})()
             binding = entrypoint.authority_binding(result, source)
-            self.assertEqual(binding.application_commit_sha, "deadbeef")
-            self.assertEqual(binding.image_digest, "sha256:beefdead")
+            self.assertEqual(binding.application_commit_sha, sha)
+            self.assertEqual(binding.image_digest, digest)
         finally:
             for key, old in (("APPLICATION_COMMIT_SHA", old_sha),
                              ("IMAGE_DIGEST", old_digest)):
@@ -165,6 +170,50 @@ class ApplicationCommitShaFromEnvironment(unittest.TestCase):
                 os.environ["APPLICATION_COMMIT_SHA"] = old_sha
             if old_digest is not None:
                 os.environ["IMAGE_DIGEST"] = old_digest
+
+
+class ApplicationIdentityFormatValidation(unittest.TestCase):
+    """Codex F8-R5: a SUPPLIED application identity must be well-formed; absence
+    is not (yet) a release blocker (see AuthorityBinding's own docstring on why),
+    but an arbitrary string self-attesting as one is always rejected."""
+
+    def test_well_formed_commit_sha_and_digest_have_no_problems(self):
+        # Other AuthorityBinding fields (data_fingerprint etc.) have their own,
+        # unrelated problems() checks -- irrelevant here, so only assert that
+        # NEITHER new check fires for a well-formed value.
+        binding = AuthorityBinding(application_commit_sha="a" * 40,
+                                   image_digest="sha256:" + "b" * 64)
+        problems = binding.problems()
+        self.assertFalse(any("application_commit_sha" in p for p in problems))
+        self.assertFalse(any("image_digest" in p for p in problems))
+
+    def test_absent_identity_is_not_a_problem(self):
+        binding = AuthorityBinding()
+        problems = binding.problems()
+        self.assertFalse(any("application_commit_sha" in p for p in problems))
+        self.assertFalse(any("image_digest" in p for p in problems))
+
+    def test_malformed_commit_sha_is_a_problem(self):
+        binding = AuthorityBinding(application_commit_sha="deadbeef")
+        problems = binding.problems()
+        self.assertTrue(any("application_commit_sha" in p for p in problems))
+
+    def test_malformed_image_digest_is_a_problem(self):
+        binding = AuthorityBinding(image_digest="sha256:beefdead")
+        problems = binding.problems()
+        self.assertTrue(any("image_digest" in p for p in problems))
+
+    def test_malformed_identity_blocks_release_via_authority_problems(self):
+        """The consumer-side re-derivation (`release_blockers`) already extends
+        `self.authority.problems()` -- confirming the new format check actually
+        reaches release, not just the unit-level `problems()` call."""
+        bundle = bundle_from_coding_result(
+            type("R", (), {"lines": [], "encounter_id": "e", "date_of_service": None,
+                           "certificate": None})(),
+            source_document=SourceDocument(), context=EncounterContext(),
+            authority=AuthorityBinding(application_commit_sha="deadbeef"))
+        self.assertTrue(any("application_commit_sha" in b
+                            for b in bundle.release_blockers()))
 
 
 if __name__ == "__main__":

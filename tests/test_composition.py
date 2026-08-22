@@ -110,15 +110,28 @@ class ComposeEmitsSameEpisodeAs(unittest.TestCase):
 
 
 class ServiceIntentsReachability(unittest.TestCase):
-    def test_two_facts_joined_by_same_episode_as_form_one_intent(self):
+    def test_two_facts_joined_by_part_of_form_one_intent(self):
+        facts = [ClinicalFact(FactKind.PROCEDURE, "a", fact_id="F1"),
+                 ClinicalFact(FactKind.PROCEDURE, "b", fact_id="F2")]
+        rels = [RelationAssertion(subject_event_id="F1", predicate=RelationPredicate.PART_OF,
+                                  object_event_id="F2", state=RelationState.ASSERTED,
+                                  evidence_span_ids=["s1"])]
+        intents = composition.service_intents(facts, rels)
+        self.assertEqual(len(intents), 1)
+        self.assertEqual(intents[0].component_event_ids, ["F1", "F2"])
+
+    def test_same_episode_as_alone_never_composes_one_intent(self):
+        """Codex F8-R4: SAME_EPISODE_AS is session/episode membership, not service
+        composition -- two independently reportable events documented in the same
+        note section must stay two separate intents."""
         facts = [ClinicalFact(FactKind.PROCEDURE, "a", fact_id="F1"),
                  ClinicalFact(FactKind.PROCEDURE, "b", fact_id="F2")]
         rels = [RelationAssertion(subject_event_id="F1", predicate=RelationPredicate.SAME_EPISODE_AS,
                                   object_event_id="F2", state=RelationState.ASSERTED,
                                   evidence_span_ids=["s1"])]
         intents = composition.service_intents(facts, rels)
-        self.assertEqual(len(intents), 1)
-        self.assertEqual(intents[0].component_event_ids, ["F1", "F2"])
+        self.assertEqual(len(intents), 2)
+        self.assertEqual(sorted(i.component_event_ids[0] for i in intents), ["F1", "F2"])
 
     def test_unlinked_fact_is_its_own_singleton_intent(self):
         facts = [ClinicalFact(FactKind.PROCEDURE, "a", fact_id="F1"),
@@ -171,7 +184,7 @@ class ServiceIntentsReachability(unittest.TestCase):
     def test_intent_id_is_stable_for_the_same_membership(self):
         facts = [ClinicalFact(FactKind.PROCEDURE, "a", fact_id="F1"),
                  ClinicalFact(FactKind.PROCEDURE, "b", fact_id="F2")]
-        rels = [RelationAssertion(subject_event_id="F1", predicate=RelationPredicate.SAME_EPISODE_AS,
+        rels = [RelationAssertion(subject_event_id="F1", predicate=RelationPredicate.PART_OF,
                                   object_event_id="F2", state=RelationState.ASSERTED,
                                   evidence_span_ids=["s1"])]
         first = composition.service_intents(facts, rels)[0].intent_id

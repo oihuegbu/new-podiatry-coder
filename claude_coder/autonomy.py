@@ -167,6 +167,23 @@ def decide(result: CodingResult,
                 route(Destination.REVIEW, ln.fact.description, ln.rationale,
                       fact_id=ln.fact.fact_id)
 
+    # issue #6 item 7/F8-R3: a resolved code held for an unresolved (not
+    # contradicted) administrative fact -- e.g. actor ownership -- is a real
+    # code but not a submittable one. `billable_lines` already excludes it;
+    # routed here, explicitly and blocking, so it can never silently vanish
+    # (dropped from the claim) OR silently auto-release (the stamp existing but
+    # nothing reading it, F8-R3's own finding). PROVIDER_QUERY because the open
+    # question -- who performed this, under which billing entity -- is
+    # administrative, not a clinical judgement a coder owns, and not an
+    # operational/data failure a retry fixes.
+    for ln in result.submission_held_lines:
+        route(Destination.PROVIDER_QUERY, ln.fact.description,
+              f"a defensible code ({ln.chosen.code}) was resolved, but submission "
+              f"is held pending an unresolved administrative fact (claim ownership) "
+              f"-- confirm the performing actor and billing entity before this "
+              f"line is submitted",
+              fact_id=ln.fact.fact_id)
+
     billable = result.billable_lines
     if not billable:
         # A claim with no billable line used to be treated as coding judgement by

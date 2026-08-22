@@ -44,6 +44,16 @@ class MeasurementRequirement(unittest.TestCase):
         fact = _fact(FactKind.PROCEDURE, "repaired a wound measuring 2 cm or less")
         self.assertTrue(semelig.eligible(_candidate("Z1"), [fact], self.source, None))
 
+    def test_candidate_requiring_measurement_kept_when_attribute_documents_one(self):
+        """A prior version of this check read ONLY the fact's prose description --
+        a measurement correctly extracted into a structured attribute (e.g.
+        `size_sqcm`) instead of left in the text always looked unmeasured. Exposed
+        once `eligible_partition` stopped restoring an all-excluded pool (Codex
+        F8-R2); this is the direct regression test."""
+        fact = ClinicalFact(FactKind.PROCEDURE, "repaired a wound",
+                            attributes={"size_sqcm": 2})
+        self.assertTrue(semelig.eligible(_candidate("Z1"), [fact], self.source, None))
+
 
 class SemanticClassConflict(unittest.TestCase):
     def test_em_fact_excludes_a_non_em_classified_candidate(self):
@@ -101,14 +111,23 @@ class EligiblePartition(unittest.TestCase):
                                             source, "2026-01-01")
         self.assertEqual([c.code for c in result], ["Z1"])
 
-    def test_never_returns_empty_when_input_was_not_empty(self):
+    def test_all_ineligible_returns_empty_not_a_restored_pool(self):
+        """Codex F8-R2: an earlier version of `eligible_partition` restored the
+        unfiltered pool whenever every candidate was excluded, reasoning it was
+        more likely a sign the filter didn't fit than evidence nothing retrieved
+        was usable. That silently let a structurally-incompatible candidate reach
+        the resolver on the clearest possible eligibility signal against it, and
+        made `eligibility_report` (never subject to the same fallback) disagree
+        with what was actually enforced. `eligible_partition` is now a pure,
+        monotonic filter -- the caller (`resolution.resolve`) treats an empty
+        result as an honest abstention, not a reason to disable the filter."""
         source = MockSource(records={
             ("Z1", "cpt"): {"long_description": "a service", "active": False},
             ("Z2", "cpt"): {"long_description": "a service", "active": False}})
         fact = _fact(FactKind.PROCEDURE, "did a thing")
         candidates = [_candidate("Z1"), _candidate("Z2")]
         result = semelig.eligible_partition([fact], candidates, source, "2026-01-01")
-        self.assertEqual(result, candidates)
+        self.assertEqual(result, [])
 
 
 if __name__ == "__main__":

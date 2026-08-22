@@ -147,5 +147,75 @@ class PipelineEndToEnd(unittest.TestCase):
         self.assertFalse(billed, "an affirmative ownership contradiction must still block retrieval")
 
 
+class HeldSubmissionIsEnforcedNotOnlyStamped(unittest.TestCase):
+    """Codex F8-R3: `claim_submission_status=HELD` must actually block autonomous
+    release, not merely be readable in the audit trail. Regression across the
+    full producer -> autonomy -> bundle -> release-authorizer chain."""
+
+    def test_held_line_is_excluded_from_billable_lines(self):
+        r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
+                           extract_llm=lambda s, u: _FACTS_UNRESOLVED, verify_llm=_sel,
+                           corroborate_llm=_sel, audit_repository=NullAuditRepository())
+        self.assertTrue(any(ln.chosen and ln.chosen.code == "PROC_X" for ln in r.lines))
+        self.assertFalse(any(ln.chosen and ln.chosen.code == "PROC_X"
+                             for ln in r.billable_lines),
+                         "a HELD line must never be submission-ready")
+        self.assertTrue(any(ln.chosen and ln.chosen.code == "PROC_X"
+                            for ln in r.submission_held_lines),
+                        "the coded line must still be visible for administrative routing")
+
+    def test_autonomy_never_returns_auto_ready_with_a_held_line(self):
+        from claude_coder.models import Destination, Verdict
+        r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
+                           extract_llm=lambda s, u: _FACTS_UNRESOLVED, verify_llm=_sel,
+                           corroborate_llm=_sel, audit_repository=NullAuditRepository())
+        self.assertNotEqual(r.destination, Destination.AUTO_READY)
+        self.assertNotEqual(r.verdict, Verdict.AUTO_READY)
+        self.assertTrue(any(item["destination"] == Destination.PROVIDER_QUERY.value
+                            and item["blocking"] for item in r.routing))
+
+    def test_bundle_excludes_held_line_from_service_lines_but_preserves_it_in_audit(self):
+        from app.contracts.claim_bundle import (AuthorityBinding, EncounterContext,
+                                                 SourceDocument, bundle_from_coding_result)
+        r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
+                           extract_llm=lambda s, u: _FACTS_UNRESOLVED, verify_llm=_sel,
+                           corroborate_llm=_sel, audit_repository=NullAuditRepository())
+        bundle = bundle_from_coding_result(
+            r, source_document=SourceDocument(), context=EncounterContext(),
+            authority=AuthorityBinding())
+        self.assertFalse(any(sl.code == "PROC_X" for sl in bundle.service_lines),
+                         "a HELD line must never reach the submitted claim lines")
+        held_audit = [e for e in bundle.audit.excluded_lines
+                     if e.get("code") == "PROC_X"]
+        self.assertTrue(held_audit, "the coded line must still be visible in the audit trail")
+        self.assertEqual(held_audit[0]["claim_submission_status"], "held")
+        self.assertTrue(bundle.release_blockers(),
+                        "a HELD line present anywhere in this encounter must always "
+                        "produce at least one release blocker")
+
+    def test_release_blockers_flags_a_held_line_even_if_destination_disagrees(self):
+        """Consumer-side independent re-derivation (F8-R3's own acceptance
+        criterion: BOTH producer and consumer must recompute non-releasability),
+        not only trust of the producer's own `release.destination` value."""
+        from app.contracts.claim_bundle import (AuthorityBinding, EncounterContext,
+                                                 ReleaseDestination, SourceDocument,
+                                                 bundle_from_coding_result)
+        r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
+                           extract_llm=lambda s, u: _FACTS_UNRESOLVED, verify_llm=_sel,
+                           corroborate_llm=_sel, audit_repository=NullAuditRepository())
+        bundle = bundle_from_coding_result(
+            r, source_document=SourceDocument(), context=EncounterContext(),
+            authority=AuthorityBinding())
+        # simulate a producer defect: force the destination to claim AUTO_READY
+        # despite a held line still sitting in audit.excluded_lines
+        tampered = bundle.model_copy(update={
+            "release": bundle.release.model_copy(
+                update={"destination": ReleaseDestination.AUTO_READY,
+                       "producer_releasable": True})})
+        blockers = tampered.release_blockers()
+        self.assertTrue(any("HELD" in b for b in blockers),
+                        "the consumer must catch this even when the producer disagrees")
+
+
 if __name__ == "__main__":
     unittest.main()
