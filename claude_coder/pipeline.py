@@ -589,6 +589,7 @@ def code_encounter(
         # would otherwise attach the PREVIOUS fact's candidate eligibility report to
         # a line that never went through resolve() at all this iteration.
         _candidate_eligibility = None
+        _advisory_terminology = None
         _it = _elig_state.get(fact.fact_id)
         if _it is None:
             line = ResolvedLine(
@@ -676,6 +677,9 @@ def code_encounter(
             # why that matters) -- `em.resolve_em` does not run semantic eligibility
             # at all, so this is honestly None for an EM line, never guessed.
             _candidate_eligibility = getattr(line, "candidate_eligibility", None)
+            # issue #6 item 3/F8-R2: same reason, same pattern -- advisory
+            # procedure-synonym recall expansions `resolve()` actually used.
+            _advisory_terminology = getattr(line, "advisory_terminology", None)
         # A fact that went through propose-then-verify is already resolved-or-
         # escalated on authoritative entailment; don't second-guess it with the
         # weaker arbitration fallback. (Diagnoses verify too when they reach the
@@ -780,6 +784,9 @@ def code_encounter(
         # reconstruct `line` and silently drop it back to the dataclass default.
         if _candidate_eligibility is not None:
             line.candidate_eligibility = _candidate_eligibility
+        # issue #6 item 3/F8-R2: same reason, same pattern.
+        if _advisory_terminology is not None:
+            line.advisory_terminology = _advisory_terminology
         lines.append(line)
 
     # issue #6 item 8: the SAME grouping already computed above (and already fed

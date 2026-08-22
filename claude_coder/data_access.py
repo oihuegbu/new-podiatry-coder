@@ -1399,6 +1399,7 @@ class MockSource:
                  coverage: dict[str, set] | None = None,
                  concept_relation: dict[tuple[str, str], str] | None = None,
                  concept_lookup: dict[str, dict] | None = None,
+                 procedure_concept_lookup: dict[str, dict] | None = None,
                  component_relationships: dict[str, dict[str, set]] | None = None,
                  semantic_class: dict[str, str] | None = None) -> None:
         self._records = records or {}
@@ -1423,6 +1424,13 @@ class MockSource:
                           for k, v in (coverage or {}).items()}
         self._concept_relation_map = concept_relation or {}
         self._concept_lookup_map = concept_lookup or {}
+        # A SEPARATE table from `_concept_lookup_map` (anatomy's), not a shared
+        # one keyed on the same term string -- a term configured for one governed
+        # axis must never silently answer a lookup on a different axis, matching
+        # real `AuthoritativeSource` behavior (each axis has its own governed
+        # source, or none) and preserved by a dedicated regression
+        # (`test_semantic_layer.ConceptLookupIsAxisAware`).
+        self._proc_concept_lookup_map = procedure_concept_lookup or {}
         self._component_rel_data = {
             str(k).replace(".", "").upper():
                 {rel: {str(r).replace(".", "").upper() for r in refs}
@@ -1597,12 +1605,14 @@ class MockSource:
                "source_identity": {"source_id": "mock_concept_relation"}}
 
     def concept_lookup(self, axis, term):
-        # Test fixtures configure ONE flat term->record table (the one governed axis
-        # this suite exercises, anatomy) -- gating on axis here mirrors what the real
-        # `AuthoritativeSource` actually does (only "anatomy" has a governed source
-        # today), not a shim papering over a shape mismatch.
-        if axis == "anatomy" and term in self._concept_lookup_map:
-            return dict(self._concept_lookup_map[term])
+        # Each governed/advisory axis reads its OWN configured table -- mirrors the
+        # real `AuthoritativeSource`, where each axis has its own governed source
+        # or none at all, and a term configured for one axis must never silently
+        # answer a lookup on a different one.
+        table = {"anatomy": self._concept_lookup_map,
+                 "procedure": self._proc_concept_lookup_map}.get(axis, {})
+        if term in table:
+            return dict(table[term])
         return {"term": term, "candidates": [], "method": "none", "unique": False,
                "expansions": [], "source_identity": None}
 

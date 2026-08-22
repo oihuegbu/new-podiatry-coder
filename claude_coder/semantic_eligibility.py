@@ -53,28 +53,63 @@ from .models import ClinicalFact, FactKind, Outcome
 _FACT_KIND_SEMANTIC_CLASS = {FactKind.EM: "evaluation_management"}
 
 
-def _has_documented_measurement(facts: list[ClinicalFact]) -> bool:
-    """Whether ANY documented measurement exists for this intent -- either in a
-    fact's own prose description (a bounded interval `ontology.parse_descriptor`
-    detects, e.g. "16 sq cm or less") OR in its structured attributes (e.g.
-    `size_sqcm`, `depth_mm` -- `measurement.measurements_of`, the SAME typed
-    extractor `resolution._decide`/`tiebreak` already use to match a measurement
-    against a candidate's own dimensional constraint).
+def _candidate_measurement_dimension(candidate, source) -> str | None:
+    """The physical DIMENSION (area/length/mass) the candidate's own descriptor's
+    bounded interval is stated in, or None when it cannot be determined (no unit
+    named, or the descriptor carries no bounded interval at all). Read directly
+    from the candidate's own descriptor -- `compiled_record` computes the same
+    interval internally but does not expose the dimension itself, so this reuses
+    `ontology.parse_descriptor`/`measurement.unit_dimension` rather than a second
+    parser."""
+    from . import measurement as _measurement
+    rec = getattr(source, "lookup", None)
+    rec = rec(candidate.code, candidate.system) if callable(rec) else None
+    descriptor = str((rec or {}).get("long_description")
+                     or (rec or {}).get("description")
+                     or (rec or {}).get("short_description") or "")
+    feats = _ontology.parse_descriptor(descriptor)
+    if not (feats.interval and feats.interval.bounded()):
+        return None
+    dimension, _ = _measurement.unit_dimension(feats.interval.unit)
+    return dimension
+
+
+def _has_documented_measurement(facts: list[ClinicalFact], dimension: str | None) -> bool:
+    """Whether a documented measurement exists for this intent that could satisfy
+    a candidate requiring `dimension` -- either in a fact's own prose description
+    (a bounded interval `ontology.parse_descriptor` detects, e.g. "16 sq cm or
+    less") OR in its structured attributes (e.g. `size_sqcm`, `depth_mm` --
+    `measurement.measurements_of`, the SAME typed extractor
+    `resolution._decide`/`tiebreak` already use).
+
+    Scoped to `dimension` when it's known (Codex F8-R2: an earlier version
+    accepted ANY measurement anywhere in the intent for ANY candidate requiring
+    one, so an unrelated AREA measurement on one component could satisfy a
+    candidate requiring LENGTH on a different one) -- an attribute measurement
+    only counts when its own dimension matches; a description-detected interval
+    has no independently-typed dimension to check, so it counts on its own terms
+    exactly as it always could (this module never invented dimension-tagging for
+    prose text, only for the already-typed attribute path). `dimension is None`
+    (the candidate's own requirement could not be determined) falls back to the
+    original, honestly looser "any measurement" check -- absence of information
+    is never a reason to invent a MORE specific requirement than the candidate's
+    own descriptor actually states.
 
     A prior version of this check read ONLY the prose description, so a fact
     whose measurement was extracted into a structured attribute (the common,
     correctly-extracted case) always looked unmeasured here -- a real gap this
     eligibility check's own review pass exposed once `eligible_partition`
-    stopped silently restoring an all-excluded pool (Codex F8-R2): the restore-
-    all fallback had been masking this defect, not compensating for a
+    stopped silently restoring an all-excluded pool (Codex F8-R2, round 1): the
+    restore-all fallback had been masking this defect, not compensating for a
     deliberately narrow check."""
     from . import measurement as _measurement
     for f in facts:
         feats = _ontology.parse_descriptor(f.description or "")
         if feats.interval and feats.interval.bounded():
             return True
-        if _measurement.measurements_of(f.attributes or {}):
-            return True
+        for m in _measurement.measurements_of(f.attributes or {}):
+            if dimension is None or m.dimension == dimension:
+                return True
     return False
 
 
@@ -89,10 +124,12 @@ def _ineligibility_reason(candidate, facts: list[ClinicalFact], source,
     if record is None:
         return None
 
-    if "measurement" in (record.get("required_attributes") or []) and \
-            not _has_documented_measurement(facts):
-        return ("candidate's descriptor requires a documented measurement/interval "
-               "the fact's text or attributes do not state")
+    if "measurement" in (record.get("required_attributes") or []):
+        dimension = _candidate_measurement_dimension(candidate, source)
+        if not _has_documented_measurement(facts, dimension):
+            return ("candidate's descriptor requires a documented measurement/interval "
+                   "the fact's text or attributes do not state" +
+                   (f" (dimension: {dimension})" if dimension else ""))
 
     fact_kinds = {f.kind for f in facts}
     expected_classes = {_FACT_KIND_SEMANTIC_CLASS[k] for k in fact_kinds

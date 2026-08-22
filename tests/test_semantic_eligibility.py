@@ -47,12 +47,52 @@ class MeasurementRequirement(unittest.TestCase):
     def test_candidate_requiring_measurement_kept_when_attribute_documents_one(self):
         """A prior version of this check read ONLY the fact's prose description --
         a measurement correctly extracted into a structured attribute (e.g.
-        `size_sqcm`) instead of left in the text always looked unmeasured. Exposed
+        `length_cm`) instead of left in the text always looked unmeasured. Exposed
         once `eligible_partition` stopped restoring an all-excluded pool (Codex
-        F8-R2); this is the direct regression test."""
+        F8-R2); this is the direct regression test. Dimension-matched to the "Z1"
+        candidate's own "cm" (length) requirement -- see `MeasurementDimensionScoping`
+        for the dimension-MISMATCH case this could otherwise mask."""
         fact = ClinicalFact(FactKind.PROCEDURE, "repaired a wound",
-                            attributes={"size_sqcm": 2})
+                            attributes={"length_cm": 2})
         self.assertTrue(semelig.eligible(_candidate("Z1"), [fact], self.source, None))
+
+
+class MeasurementDimensionScoping(unittest.TestCase):
+    """Codex F8-R2, round 2: a documented measurement must match the CANDIDATE's own
+    required dimension, not merely exist somewhere in the intent. An earlier version
+    accepted ANY measurement anywhere for ANY candidate requiring one, so an
+    unrelated AREA measurement on one component could satisfy a candidate requiring
+    LENGTH on a different one."""
+
+    def setUp(self):
+        self.length_candidate = MockSource(records={
+            ("LEN", "cpt"): {"long_description": "excision, length 5 cm or less"}})
+        self.area_candidate = MockSource(records={
+            ("AREA", "cpt"): {"long_description": "excision, area 16 sq cm or less"}})
+
+    def test_unrelated_dimension_measurement_does_not_satisfy_the_requirement(self):
+        fact = ClinicalFact(FactKind.PROCEDURE, "excision", attributes={"size_sqcm": 10})
+        self.assertFalse(semelig.eligible(_candidate("LEN"), [fact],
+                                          self.length_candidate, None))
+
+    def test_matching_dimension_measurement_satisfies_the_requirement(self):
+        fact = ClinicalFact(FactKind.PROCEDURE, "excision", attributes={"length_cm": 3})
+        self.assertTrue(semelig.eligible(_candidate("LEN"), [fact],
+                                         self.length_candidate, None))
+
+    def test_matching_dimension_from_a_different_intent_component_still_satisfies(self):
+        """Dimension-scoped, not fact-scoped: a measurement documented on ANY member
+        of the intent still counts, as long as its dimension matches."""
+        f1 = ClinicalFact(FactKind.PROCEDURE, "first thing", fact_id="F1")
+        f2 = ClinicalFact(FactKind.PROCEDURE, "second thing", fact_id="F2",
+                          attributes={"length_cm": 3})
+        self.assertTrue(semelig.eligible(_candidate("LEN"), [f1, f2],
+                                         self.length_candidate, None))
+
+    def test_area_requirement_rejects_a_length_only_measurement(self):
+        fact = ClinicalFact(FactKind.PROCEDURE, "excision", attributes={"length_cm": 3})
+        self.assertFalse(semelig.eligible(_candidate("AREA"), [fact],
+                                          self.area_candidate, None))
 
 
 class SemanticClassConflict(unittest.TestCase):

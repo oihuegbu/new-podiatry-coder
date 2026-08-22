@@ -1089,6 +1089,12 @@ class AuditSurface(_Strict):
     #: only the survivor, so an excluded candidate is visible as a decision even
     #: when the line it belongs to never released.
     candidate_eligibility: tuple[dict[str, Any], ...] = ()
+    #: issue #6 item 3/F8-R2: advisory (LLM-generated, round-trip-validated)
+    #: procedure-synonym RECALL expansions any line actually used -- the raw
+    #: phrase, the expansions, and the method/source identity. Recall-only:
+    #: never used to settle identity or authorize release, present here purely
+    #: for provenance.
+    advisory_terminology: tuple[dict[str, Any], ...] = ()
 
 
 # --------------------------------------------------------------------------
@@ -1877,6 +1883,16 @@ def bundle_from_coding_result(
         for line in (getattr(result, "lines", None) or [])
         for report in [getattr(line, "candidate_eligibility", None)]
         if report)
+    # issue #6 item 3/F8-R2: advisory procedure-synonym recall expansions any
+    # line actually used, preserved regardless of billing outcome -- the raw
+    # phrase tried, the expansions it produced, and the method/source identity,
+    # so an advisory match's provenance is auditable without re-running anything.
+    advisory_terminology = tuple(
+        {"fact_id": str(getattr(getattr(line, "fact", None), "fact_id", "") or ""),
+         "expansions": list(entries)}
+        for line in (getattr(result, "lines", None) or [])
+        for entries in [getattr(line, "advisory_terminology", None)]
+        if entries)
 
     encounter = EncounterIdentity(
         encounter_id=str(getattr(result, "encounter_id", "") or ""),
@@ -1940,6 +1956,7 @@ def bundle_from_coding_result(
             excluded_lines=excluded,
             service_intents=service_intents,
             candidate_eligibility=candidate_eligibility,
+            advisory_terminology=advisory_terminology,
         ),
     )
     # ---- Bind the certificate to THIS EXACT claim (issue #6 F7-R1) --------

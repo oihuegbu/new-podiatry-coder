@@ -196,6 +196,58 @@ class TwoReadingAxisConsensus(unittest.TestCase):
         self.assertNotEqual(primary[0].axis_conflicts, [],
                             "an ungrounded inference must hold the fact, not settle it")
 
+    def _reconciliation(self, statuses: dict):
+        from app.contracts.source_evidence import (ReconciliationStatus,
+                                                    SourceReconciliation,
+                                                    SpanReconciliation)
+        return SourceReconciliation(spans=tuple(
+            SpanReconciliation(span_id=span_id, status=ReconciliationStatus[status])
+            for span_id, status in statuses.items()))
+
+    def test_one_event_confirmed_other_not_never_auto_accepts_an_unstated_value(self):
+        """Codex F8-R1, round 2: the primary's EVENT quotation is page-confirmed and
+        the second's is not, but NEITHER reading's quotation states the axis VALUE
+        each recorded -- both quote only generic performed-service text, never the
+        word "axis-alpha" or "axis-beta". Event-level confirmation of one side must
+        never substitute for value-level confirmation of ITS OWN recorded value,
+        regardless of what the other side did or didn't confirm."""
+        primary = [_fact("F1", FactKind.PROCEDURE, "procedure performed",
+                         spans=[_span("synthetic performed service", span_id="p1")],
+                         attributes={"approach": "axis-alpha"})]
+        second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
+                        spans=[_span("synthetic performed service", span_id="s1")],
+                        attributes={"approach": "axis-beta"})]
+        reconciliation = self._reconciliation({"p1": "AGREED", "s1": "DISAGREED"})
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "approach")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, reconciliation)
+        approach = next(r for r in resolutions if r.axis == "approach")
+        self.assertIs(approach.verdict, graph_consensus.AxisVerdict.UNRESOLVED,
+                      "one confirmed EVENT with an unstated value must never "
+                      "auto-accept just because the other reading's event wasn't "
+                      "confirmed either")
+
+    def test_one_event_confirmed_and_its_value_is_stated_still_settles(self):
+        """The mirror, positive case: the SAME one-event-confirmed shape, but this
+        time the confirmed reading's own quotation genuinely states its value --
+        must still settle, exactly as before this fix."""
+        primary = [_fact("F1", FactKind.PROCEDURE, "procedure performed",
+                         spans=[_span("an open incision was made", span_id="p1")],
+                         attributes={"approach": "open"})]
+        second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
+                        spans=[_span("an open incision was made", span_id="s1")],
+                        attributes={"approach": "closed"})]
+        reconciliation = self._reconciliation({"p1": "AGREED", "s1": "DISAGREED"})
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "approach")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, reconciliation)
+        approach = next(r for r in resolutions if r.axis == "approach")
+        self.assertIs(approach.verdict, graph_consensus.AxisVerdict.RESOLVED_FROM_SOURCE)
+        self.assertEqual(approach.accepted_from, "primary")
+        self.assertEqual(approach.accepted_value, "open")
+
     def test_question_text_never_claims_two_readings_when_only_one_recorded(self):
         """Direct unit coverage of the message-honesty fix, independent of whether
         `resolve` manages to settle the case -- the wording itself must never lie
@@ -632,12 +684,19 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
                      if r["destination"] == Destination.PROVIDER_QUERY.value)
         self.assertIn("laterality", query["reason"])
 
-    def test_the_original_page_is_what_settles_it_not_the_two_models(self):
-        """The page verifier from directive §1 decides, and says so in the record.
-
-        The ORIGINAL document contradicts the primary reading's quotation and confirms
-        the second reading's. Neither reading's value is verbatim in its own quotation
-        here, so the ONLY thing that can settle this is the page — which is the point.
+    def test_the_original_page_confirms_an_event_but_still_cannot_settle_an_unstated_value(self):
+        """Codex F8-R1, round 2: the ORIGINAL document contradicts the primary
+        reading's quotation and confirms the second reading's -- but NEITHER
+        reading's own quotation literally states the laterality value it recorded.
+        A prior version of this test's own premise was the bug: it expected page
+        reconciliation of WHICH READING'S EVENT is real to be sufficient, by
+        itself, to accept that reading's axis VALUE, and then relied on a
+        SEPARATE, later gate (source-evidence reconciliation) to still catch the
+        primary's contradicted quotation and block the claim. Now the encounter
+        holds earlier and more precisely, via `_gate_axis_consensus` on the
+        unresolved axis itself -- before retrieval ever runs, so the later gate
+        has no billable line to evaluate at all (NOT_APPLICABLE, not BLOCKED) and
+        that is the correct, cleaner outcome, not a gap.
         """
         import tempfile
         from pathlib import Path as _Path
@@ -670,19 +729,15 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
             source_evidence=document)
         laterality = next(r for r in result.consensus["resolutions"]
                           if r["axis"] == "laterality")
-        self.assertEqual(laterality["verdict"], "resolved_from_source")
-        self.assertEqual(laterality["proof"], "original_page_reconciliation",
-                         "the ORIGINAL PAGE must be what settled it")
-        self.assertEqual(laterality["accepted_from"], "second")
-        self.assertEqual(result.graph.nodes["F1"].attributes["laterality"], "left")
-        # ...and carrying the winning reading's confirmed quotation onto the fact does
-        # NOT launder the primary reading's contradicted one: the source-evidence gate
-        # takes the WORST outcome across every quotation a line rests on, so the
-        # misreading still stops the claim.
-        from claude_coder.models import Outcome as _Outcome
-        gate = next(g for g in result.gates
-                    if g.name == "source_evidence_reconciliation")
-        self.assertIn(gate.outcome, (_Outcome.BLOCKED, _Outcome.UNKNOWN), gate.detail)
+        self.assertEqual(laterality["verdict"], "unresolved",
+                         "page confirmation of an EVENT is not proof of an "
+                         "unstated attribute value")
+        self.assertTrue(laterality["provider_question"])
+        self.assertTrue(result.graph.nodes["F1"].axis_conflicts)
+        self.assertFalse(any(ln.chosen for ln in result.lines),
+                         "an unsettled code-changing axis must stop retrieval "
+                         "entirely, regardless of the primary quotation's own "
+                         "contradiction")
 
     def test_a_second_reading_that_fails_holds_the_encounter_with_zero_retrieval(self):
         """A control that could not run must never look like two readings agreeing."""
@@ -978,12 +1033,17 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
         # whichever mechanism actually obtained it.
         self.assertEqual(result.consensus["recall_page_read_pages"], [1])
         self.assertEqual(result.consensus["escalated_pages"], [])
+        # Codex F8-R1, round 2: the targeted read correctly identifies which
+        # reading's EVENT the page confirms (second) -- but neither reading's own
+        # quotation literally states "left"/"right", so that confirmation alone
+        # must not settle the axis VALUE. The escalation-mechanics assertions
+        # above (exactly one targeted read, aimed at exactly the right page) are
+        # this test's real subject and are unaffected by this axis staying
+        # unresolved.
         laterality = next(r for r in result.consensus["resolutions"]
                           if r["axis"] == "laterality")
-        self.assertEqual(laterality["verdict"], "resolved_from_source")
-        self.assertEqual(laterality["proof"], "original_page_reconciliation")
-        self.assertEqual(laterality["accepted_from"], "second")
-        self.assertEqual(result.graph.nodes["F1"].attributes["laterality"], "left")
+        self.assertEqual(laterality["verdict"], "unresolved")
+        self.assertTrue(laterality["provider_question"])
 
     def test_a_failed_targeted_read_is_a_dependency_failure_not_a_coder_queue(self):
         """The failure path of the escalation: a read that could not happen proves

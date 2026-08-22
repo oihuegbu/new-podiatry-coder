@@ -216,5 +216,95 @@ class ApplicationIdentityFormatValidation(unittest.TestCase):
                             for b in bundle.release_blockers()))
 
 
+class DeterministicIndexPathCarriesEligibilityAudit(unittest.TestCase):
+    """Codex F8-R2 (P2): a deterministic authoritative-index hit (`_take()`'s clean,
+    no-verification-needed path in `resolution.resolve`) must still carry a
+    `candidate_eligibility` audit record -- it skips the RECALL pool's eligibility
+    FILTER by design (these are exact term->code hits, not a semantic guess), but
+    skipping the filter is not license to skip the audit trail too."""
+
+    def test_icd_index_deterministic_hit_carries_candidate_eligibility(self):
+        from claude_coder.resolution import resolve
+        from tests.test_measurement import _request
+
+        source = MockSource(
+            records={("DX1", "icd10"): {"long_description": "a documented condition",
+                                        "active": True}},
+            index={"documented condition": {"DX1"}})
+        fact = ClinicalFact(FactKind.DIAGNOSIS, "documented condition", fact_id="fx")
+        line = resolve(_request(fact), source)
+        self.assertEqual(line.chosen.code if line.chosen else None, "DX1")
+        self.assertIsNotNone(line.candidate_eligibility,
+                             "a deterministic index hit must still carry an "
+                             "eligibility audit record, not an unexplained None")
+        self.assertTrue(line.candidate_eligibility)
+        self.assertEqual(line.candidate_eligibility[0]["code"], "DX1")
+        self.assertTrue(line.candidate_eligibility[0]["eligible"])
+
+
+class AdvisoryProcedureSynonymRecallExpansion(unittest.TestCase):
+    """Codex F8-R2 (escalated, product-owner-narrowed acceptance): the advisory
+    (LLM-generated, round-trip-validated) procedure-synonym index widens RECALL
+    queries only -- it never settles identity, excludes a candidate, or authorizes
+    release. `MockSource.retrieve` here is keyed ONLY by the expanded phrase, not
+    the fact's own raw description or a wildcard, so the candidate is findable
+    ONLY if the expansion query actually ran."""
+
+    def test_a_unique_advisory_match_widens_recall_and_is_recorded(self):
+        from claude_coder.resolution import resolve
+        from tests.test_measurement import _request
+
+        source = MockSource(
+            records={("PROC_X", "cpt"): {"long_description": "Excision, lesion",
+                                         "active": True}},
+            retrieval={("removal of skin lesion", "cpt"):
+                      [CandidateCode("PROC_X", "cpt", "Excision, lesion", 0.9)]},
+            procedure_concept_lookup={"excision of lesion": {
+                "term": "excision of lesion", "candidates": ["PROC_X"],
+                "method": "retrieval_consistency_validated", "unique": True,
+                "expansions": ["removal of skin lesion"], "source_identity": {"v": 1}}})
+        fact = ClinicalFact(FactKind.PROCEDURE, "excision of lesion", fact_id="fx")
+        line = resolve(_request(fact), source)
+        self.assertEqual(line.chosen.code if line.chosen else None, "PROC_X",
+                         "the advisory expansion query must actually widen recall")
+        self.assertIsNotNone(line.advisory_terminology)
+        entry = line.advisory_terminology[0]
+        self.assertEqual(entry["term"], "excision of lesion")
+        self.assertEqual(entry["method"], "retrieval_consistency_validated")
+        self.assertIn("removal of skin lesion", entry["expansions"])
+
+    def test_no_advisory_match_leaves_the_field_honestly_none(self):
+        from claude_coder.resolution import resolve
+        from tests.test_measurement import _request
+
+        source = MockSource(
+            records={("PROC_X", "cpt"): {"long_description": "Excision, lesion",
+                                         "active": True}},
+            retrieval={("*", "cpt"): [CandidateCode("PROC_X", "cpt",
+                                                     "Excision, lesion", 0.9)]})
+        fact = ClinicalFact(FactKind.PROCEDURE, "excision of lesion", fact_id="fx")
+        line = resolve(_request(fact), source)
+        self.assertIsNone(line.advisory_terminology)
+
+    def test_advisory_expansion_never_runs_for_a_diagnosis_fact(self):
+        """ICD-10 has no advisory index -- `_advisory_procedure_expansions` is
+        gated on system (cpt/hcpcs), never called for a diagnosis at all."""
+        from claude_coder.resolution import resolve
+        from tests.test_measurement import _request
+
+        source = MockSource(
+            records={("DX1", "icd10"): {"long_description": "a documented condition",
+                                        "active": True}},
+            retrieval={("*", "icd10"): [CandidateCode("DX1", "icd10",
+                                                       "a documented condition", 0.9)]},
+            concept_lookup={"a documented condition": {
+                "term": "a documented condition", "candidates": ["DX1"],
+                "method": "retrieval_consistency_validated", "unique": True,
+                "expansions": ["should never be used"], "source_identity": {}}})
+        fact = ClinicalFact(FactKind.DIAGNOSIS, "a documented condition", fact_id="fx")
+        line = resolve(_request(fact), source)
+        self.assertIsNone(line.advisory_terminology)
+
+
 if __name__ == "__main__":
     unittest.main()

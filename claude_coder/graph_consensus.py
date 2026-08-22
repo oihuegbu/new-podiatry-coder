@@ -444,10 +444,14 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
             second_by_node: dict, reconciliation) -> list[AxisResolution]:
     """Settle each disagreeing axis against the ORIGINAL DOCUMENT, never by vote.
 
-    A reading wins only when the source confirms its quotations AND the other reading is
-    not equally confirmed on that axis. Where both readings rest on confirmed quotations,
-    the tiebreak is whether the value is LITERALLY PRESENT in the confirmed quotation -
-    the document stating it, rather than a model asserting it. Anything else is
+    A reading wins only when its OWN value is LITERALLY PRESENT in its own
+    source-confirmed quotation -- the document stating the value, never a model
+    asserting it, and never merely the surrounding EVENT being source-confirmed
+    (Codex F8-R1, round 2: a reading whose event quotation reconciled but whose
+    specific attribute value was never checked against that quotation was
+    previously accepted whenever the OTHER reading's event simply wasn't
+    confirmed -- event-level confirmation is not value-level confirmation,
+    regardless of how many readings had a confirmed event). Anything else is
     unresolved, which is a provider question, never a coder queue.
     """
     out: list[AxisResolution] = []
@@ -460,61 +464,43 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
         s_ok, s_proof, s_text, s_spans = (
             _span_support(second, reconciliation) if second is not None
             else (False, "", "", ()))
+        # VALUE-level entailment, gated on the reading's own EVENT actually being
+        # source-confirmed (p_ok/s_ok) -- computed once, applied uniformly to
+        # every case below, so no branch can accept a value its own confirmed
+        # quotation never states, regardless of what the OTHER reading did or
+        # did not confirm.
+        p_says = p_ok and bool(item.value_primary) and _value_tokens(
+            item.value_primary).issubset(_value_tokens(p_text))
+        s_says = s_ok and bool(item.value_second) and _value_tokens(
+            item.value_second).issubset(_value_tokens(s_text))
 
         winner = ""
         proof = ""
         spans: tuple[str, ...] = ()
         detail = ""
-        if p_ok and not s_ok:
+        if p_says and not s_says:
             winner, proof, spans = "primary", p_proof, p_spans
-            detail = ("only the primary reading rests on quotations the source "
-                      "confirms")
-        elif s_ok and not p_ok:
+            detail = "the confirmed quotation states this value verbatim"
+        elif s_says and not p_says:
             winner, proof, spans = "second", s_proof, s_spans
-            detail = ("only the second reading rests on quotations the source "
-                      "confirms")
-        elif p_ok and s_ok:
-            p_says = bool(item.value_primary) and _value_tokens(
-                item.value_primary).issubset(_value_tokens(p_text))
-            s_says = bool(item.value_second) and _value_tokens(
-                item.value_second).issubset(_value_tokens(s_text))
-            if p_says and not s_says:
-                winner, proof, spans = "primary", p_proof, p_spans
-                detail = "the confirmed quotation states this value verbatim"
-            elif s_says and not p_says:
-                winner, proof, spans = "second", s_proof, s_spans
-                detail = "the confirmed quotation states this value verbatim"
-            elif bool(item.value_primary) != bool(item.value_second):
-                # ASYMMETRIC RECORDING, not a two-way disagreement: one reading simply
-                # never emitted this axis at all, so `_question()` must never phrase
-                # this as "two readings disagreed" (it already branches on that, see
-                # `_question`'s `len(values) <= 1` case). But that is a QUESTION-
-                # PHRASING fact, not a licence to auto-accept the recorded value.
-                #
-                # By construction, reaching this branch means p_says/s_says (above)
-                # already found the recording reading's value is NOT a token subset
-                # of its own confirmed quotation -- if it were, the p_says/s_says
-                # branch above would have accepted it already. So "the event's own
-                # quotation is source-confirmed" (p_ok and s_ok) is genuinely all
-                # this branch ever has: proof the EVENT happened, never proof of
-                # this specific VALUE. Silence from the other reading is not
-                # corroboration of an otherwise-unsupported inference (Codex F8-R1:
-                # a model-inferred axis value with zero textual relationship to the
-                # quoted text was being promoted to RESOLVED_FROM_SOURCE here on
-                # event-confirmation alone). Left unresolved -- winner stays unset,
-                # falling through to the same honest UNRESOLVED outcome as a genuine
-                # tie below, with a detail that names what actually happened.
-                detail = ("only one reading recorded this axis, and that reading's "
-                          "own stated value is not literally supported by its "
-                          "confirmed quotation -- an unconfirmed reading is not "
-                          "corroborated merely because nothing contradicts it")
-            else:
-                detail = ("both readings rest on confirmed quotations and neither "
-                          "value is uniquely stated by them")
-        else:
+            detail = "the confirmed quotation states this value verbatim"
+        elif not p_ok and not s_ok:
             detail = ("neither reading rests on quotations the source confirms, so "
                       "this event has a source-integrity problem, not a documentation "
                       "gap")
+        else:
+            # p_ok or s_ok (or both) -- some reading's EVENT is source-confirmed --
+            # but no reading's own recorded value is literally supported by its own
+            # confirmed quotation. Covers every remaining shape uniformly: only one
+            # reading's event confirmed (with or without a recorded value on that
+            # axis), both events confirmed but neither value stated, and a value
+            # recorded by only one reading with nothing to corroborate it. None of
+            # these may auto-accept; `_question()` already phrases the one-reading
+            # vs two-reading cases correctly on its own (`len(values) <= 1`), so this
+            # detail only needs to be honest, not case-specific.
+            detail = ("no reading's own confirmed quotation states this value "
+                      "verbatim -- a reading's EVENT being source-confirmed is not "
+                      "proof of this specific attribute")
 
         if winner:
             out.append(AxisResolution(

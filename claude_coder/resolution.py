@@ -220,6 +220,46 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
     return _Match(cand, feats, cand.score, spec, support, reasons, interval_unsupported=_iu)
 
 
+def _advisory_procedure_expansions(fact, source) -> list[dict]:
+    """Advisory (LLM-generated, round-trip-validated) procedure-synonym RECALL
+    expansion (issue #6 item 3/F8-R2, the product owner's own narrowed
+    acceptance): `data_access.concept_lookup("procedure", term)` reads
+    `cpt_verified_synonyms.json` -- candidate terms KEPT only when they
+    independently round-trip to their own code through the same authoritative
+    retrieval index every other lookup uses. This function only WIDENS the
+    RECALL query set with a unique match's alternate phrasings; it never
+    normalizes `fact.governed_terms` (that stays anatomy's alone,
+    `coreference._CONCEPT_GOVERNED_AXES`), never asserts clinical identity,
+    never excludes a candidate, and never authorizes release -- every candidate
+    an expansion query surfaces still passes the exact same eligibility/
+    entailment/verification path as any other. Tried against the fact's own
+    documented description and its first verbatim quotation, the same two texts
+    `resolve()`'s own multi-query recall already searches -- an advisory match is
+    recorded only when it is UNIQUE (an ambiguous match resolves nothing, exactly
+    like every other governed/advisory lookup in this codebase)."""
+    lookup = getattr(source, "concept_lookup", None)
+    if not callable(lookup) or fact.system not in ("cpt", "hcpcs"):
+        return []
+    candidates_text = [fact.description] + [s.text for s in fact.evidence[:1]]
+    out: list[dict] = []
+    seen_terms: set[str] = set()
+    for text in candidates_text:
+        text = str(text or "").strip()
+        if not text or text in seen_terms:
+            continue
+        seen_terms.add(text)
+        try:
+            result = lookup("procedure", text)
+        except Exception:
+            continue
+        expansions = [str(e) for e in (result.get("expansions") or []) if str(e).strip()]
+        if result.get("unique") and expansions:
+            out.append({"term": text, "method": str(result.get("method") or ""),
+                       "expansions": expansions,
+                       "source_identity": dict(result.get("source_identity") or {})})
+    return out
+
+
 def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
             llm=None, corroborate=None, dos: str | None = None,
             reconciliation=None) -> ResolvedLine:
@@ -274,7 +314,18 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
             return None
         line = _decide(fact, cands, authority=authority, source=source,
                        reconciliation=reconciliation)
-        return line if line.resolved else None
+        if not line.resolved:
+            return None
+        # F8-R2 (P2): a deterministic authoritative-index hit skips the RECALL
+        # pool's eligibility filter entirely (by design -- these are exact
+        # term->code hits, not a semantic guess, so they are never excluded by
+        # it) but must still carry an eligibility AUDIT record, exactly like
+        # every other candidate path, so a reader of `candidate_eligibility`
+        # never sees an unexplained None for a line that resolved this way.
+        from . import semantic_eligibility as _semelig
+        line.candidate_eligibility = _semelig.eligibility_report(
+            elig_facts, cands, source, dos)
+        return line
 
     # AUTHORITATIVE FIRST: for a diagnosis, resolve through the ICD-10-CM
     # Alphabetic Index (clinician term -> code) before any embedding. This is the
@@ -412,6 +463,15 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                 str(v) for k, v in attrs.items() if str(k).lower() != "count")
             if alt_query.strip():
                 queries.append(alt_query.strip())
+    # ADVISORY PROCEDURE-SYNONYM RECALL (issue #6 item 3/F8-R2): widens the query
+    # set only -- see `_advisory_procedure_expansions`'s own docstring for the
+    # trust-tier discipline. Recorded for audit regardless of whether any
+    # resulting candidate ends up billed.
+    _advisory = _advisory_procedure_expansions(fact, source)
+    for entry in _advisory:
+        for alt in entry["expansions"]:
+            if alt.strip():
+                queries.append(alt.strip())
     best: dict[str, CandidateCode] = {}
     for q in queries:
         if not q.strip():
@@ -458,6 +518,24 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
     # verifies the UNGROUNDED embedding picks (the ones that were confidently wrong,
     # e.g. a code asserting a qualifier the documentation does not support). Runs even on
     # an empty recall pool, since a validated proposal can rescue a missed concept.
+    # F8-R2: which reasons semantic eligibility excluded candidates for, over the
+    # FULL candidate universe -- used below both to phrase an empty-pool abstain
+    # honestly and to route it. A measurement gap is answerable by the provider
+    # ("please document the size"), exactly like the interval-constraint failures
+    # `_decide`'s own entailment check already routes as a `documentation_gap`;
+    # this eligibility check can now catch the identical defect EARLIER (before a
+    # candidate ever reaches `_decide` OR `_propose_then_verify`), so it must
+    # route it the same way, regardless of which of those two this fact's kind
+    # sends it through. A semantic-class/date-of-service mismatch is not
+    # something documenting more would fix -- the retrieved candidate is the
+    # wrong SERVICE entirely, a coder classification decision.
+    excluded_reasons = sorted({str(c.get("reason") or "")
+                               for c in _candidate_eligibility
+                               if not c.get("eligible") and c.get("reason")})
+    measurement_gap = bool(excluded_reasons) and all(
+        "measurement" in r for r in excluded_reasons)
+    gap_summary = "; ".join(excluded_reasons)
+
     if llm is not None and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING,
                                          FactKind.DIAGNOSIS):
         line = _propose_then_verify(fact, source, pool, llm, corroborate, dos=dos,
@@ -475,22 +553,38 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                     "clinical term with the documentation -- a coder CLASSIFICATION/mapping "
                     "decision (identify the specific code, or confirm the residual bucket); "
                     "not a provider documentation gap, and not billed on a non-specific code"))
+        # `_propose_then_verify` ran against an EMPTY pool (eligibility excluded
+        # every retrieved candidate before it ever got a chance to check anything)
+        # and, finding no candidate to propose against either, abstained with no
+        # documentation_gap of its own -- stamp the eligibility-derived one so this
+        # still routes as a provider question when the gap is a measurement one,
+        # never silently falling back to a generic coder queue.
+        if not pool and not line.resolved and not line.documentation_gap and measurement_gap:
+            line.documentation_gap = gap_summary
     elif not pool:
         # F8-R2: distinguish "retrieval found nothing at all" from "retrieval found
         # candidates, but semantic eligibility excluded every one of them" -- the
         # honest, typed abstention Codex's acceptance criterion asks for, rather
         # than silently falling back to an unfiltered pool (removed above).
-        rationale = ("every retrieved candidate conflicted with this fact's own "
-                    "documented semantics (see candidate_eligibility) -- a coder "
-                    "classification decision, never auto-selected from a "
-                    "structurally incompatible pool"
-                    if _all_candidates else "no candidate retrieved for the concept")
+        if not _all_candidates:
+            rationale = "no candidate retrieved for the concept"
+        elif measurement_gap:
+            rationale = (f"every retrieved candidate requires a documented "
+                        f"measurement this fact does not state ({gap_summary})")
+        else:
+            rationale = (f"every retrieved candidate conflicted with this fact's "
+                        f"own documented semantics ({gap_summary or 'see candidate_eligibility'}) "
+                        f"-- a coder classification decision, never auto-selected "
+                        f"from a structurally incompatible pool")
         line = ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
-                            rationale=rationale)
+                            rationale=rationale,
+                            documentation_gap=(gap_summary if measurement_gap else None))
     else:
         line = _decide(fact, pool, source=source, dos=dos,
                        reconciliation=reconciliation)
     line.candidate_eligibility = _candidate_eligibility
+    if _advisory:
+        line.advisory_terminology = _advisory
     return line
 
 

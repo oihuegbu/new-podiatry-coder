@@ -231,11 +231,23 @@ class ResolvedLine:
     claim_submission_status: ClaimSubmissionStatus = ClaimSubmissionStatus.READY
     # issue #6 item 8: which retrieved candidates `semantic_eligibility` kept or
     # excluded for this fact, and why -- over the FULL pool, before filtering, so
-    # an excluded candidate is visible as a decision, never an absence. None means
-    # semantic eligibility never ran for this line (an authoritative deterministic
-    # index hit, or an E/M line resolved by `em.resolve_em`) -- a different, honest
-    # thing from "ran and excluded nothing."
+    # an excluded candidate is visible as a decision, never an absence. Populated
+    # for both the broad RECALL path and a deterministic authoritative-index hit
+    # (Codex F8-R2: the latter used to carry no audit record at all -- skipping
+    # the eligibility FILTER by design is not license to skip the audit trail
+    # too). None means an E/M line resolved by `em.resolve_em`, which does not
+    # run semantic eligibility at all -- a different, honest thing from "ran and
+    # excluded nothing."
     candidate_eligibility: list[dict] | None = None
+    # issue #6 item 3/F8-R2: advisory (LLM-generated, round-trip-validated)
+    # procedure-synonym RECALL expansions this fact's retrieval actually used --
+    # see `resolution._advisory_procedure_expansions`'s own docstring for the
+    # trust-tier discipline (widens the query set only; never settles identity,
+    # never excludes a candidate, never authorizes release). None means either
+    # this fact's system has no advisory index (ICD-10, or any system besides
+    # CPT/HCPCS) or no unique advisory match was found -- a different, honest
+    # thing from "found matches and used none of them."
+    advisory_terminology: list[dict] | None = None
 
     @property
     def resolved(self) -> bool:
