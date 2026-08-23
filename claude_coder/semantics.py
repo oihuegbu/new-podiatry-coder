@@ -28,24 +28,6 @@ from typing import Any
 
 from . import ontology as _ontology
 
-#: issue #6 item 1. A small, generic descriptor-grammar vocabulary — exactly the same
-#: character as `ontology._LATERALITY`/`_CARDINALITY` (a handful of ordinary English
-#: words the descriptor's OWN grammar uses, not a clinical judgement about which
-#: procedures use which approach). Absence means "not stated in the descriptor", never
-#: "no approach" — most descriptors simply do not name one this way (issue #6 F7-R3
-#: re-review: real CPT descriptors often bake the approach into the action phrase
-#: itself, e.g. "Unlisted LAPAROSCOPY procedure" — this set only catches the cases
-#: where it appears as a separate, explicit qualifier word).
-_APPROACH_WORDS = ("open", "percutaneous", "closed", "endoscopic", "arthroscopic",
-                   "laparoscopic")
-
-
-def _approach(descriptor: str) -> list[str]:
-    import re
-    d = descriptor.lower()
-    return sorted(w for w in _APPROACH_WORDS if re.search(rf"\b{w}\b", d))
-
-
 def _laterality_behavior(code: str, system: str, descriptor: str, source: Any) -> str:
     """Prefer the CMS PFS bilateral-surgery indicator (a real authoritative field,
     CPT/HCPCS only) over the descriptor's own laterality wording — the PFS indicator
@@ -192,7 +174,9 @@ def compiled_record(code: str, system: str, source: Any,
         "semantic_class": semantic_class,
         "action_concepts": action_concepts,
         "anatomy_concepts": anatomy_concepts,
-        "approach": _approach(descriptor),
+        # No provenance-bound structured approach field is currently available.
+        # Descriptor word scans are not a governed substitute; absence stays honest.
+        "approach": [],
         "temporal_role": [],
         "required_attributes": required_attributes,
         "optional_attributes": [],

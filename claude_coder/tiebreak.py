@@ -115,9 +115,17 @@ class AxisProbe:
     #: an axis still names itself in the provider query, and — because release requires
     #: every axis to be settled — it always holds the line. It never selects a code.
     provable: bool = True
+    #: Whether this axis may eliminate alternatives or produce a winner. Raw
+    #: descriptor-token differences are auditable recall evidence, not typed
+    #: clinical facts, so they are deliberately non-selecting.
+    selectable: bool = True
+    #: Whether an undocumented value on this axis can become a provider question.
+    #: An open-ended descriptor-token bag is never provider-answerable.
+    queryable: bool = True
 
     def as_record(self) -> dict[str, Any]:
         return {"axis": self.axis, "provable": self.provable,
+                "selectable": self.selectable, "queryable": self.queryable,
                 "terms_by_code": {k: list(v)
                                   for k, v in sorted(self.terms_by_code.items())}}
 
@@ -164,14 +172,15 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
         probes.append(AxisProbe(
             AXIS_MEASUREMENT,
             {code: ((key,) if key else ()) for code, key in ivs.items()},
-            provable=False))
+            provable=False, selectable=False))
 
     lat_words = {_sing(w) for terms in lat.values() for w in terms}
     toks = {c.code: _descriptor_tokens(c.descriptor) - lat_words for c in candidates}
     shared = set.intersection(*toks.values()) if toks else set()
     distinct = {code: tuple(sorted(t - shared)) for code, t in toks.items()}
     if any(distinct.values()):
-        probes.append(AxisProbe(AXIS_DESCRIPTOR_TERM, distinct))
+        probes.append(AxisProbe(
+            AXIS_DESCRIPTOR_TERM, distinct, selectable=False, queryable=False))
     return tuple(probes)
 
 
@@ -243,7 +252,7 @@ def provider_query(fact, axes: tuple[AxisProbe, ...]) -> str:
     retrieval's own leftover vocabulary."""
     named = []
     for probe in axes:
-        if probe.axis == AXIS_DESCRIPTOR_TERM:
+        if not probe.queryable:
             continue
         options = sorted({" ".join(terms) for terms in probe.terms_by_code.values()
                           if terms})
@@ -310,7 +319,7 @@ def narrow(fact, candidates: list[CandidateCode],
         documented = [code for code, found in hits.items() if found]
         if documented:
             documented_axes.add(probe.axis)
-        if len(documented) == 1:
+        if probe.selectable and len(documented) == 1:
             settled.add(probe.axis)
         for code, found in hits.items():
             support[code].extend(found)

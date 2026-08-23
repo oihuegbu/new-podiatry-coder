@@ -967,8 +967,9 @@ def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: Cand
     text = " ".join(str(getattr(s, "text", "") or "")
                     for s in (getattr(fact, "evidence", None) or []))
     words = _tiebreak._text_tokens(text)          # SAME tokenizer `narrow` proves axes with
-    loser_terms = {t for probe in tie.axes for t in probe.terms_by_code.get(loser.code, ())}
-    winner_terms = {t for probe in tie.axes
+    loser_terms = {t for probe in tie.axes if probe.provable and probe.selectable
+                   for t in probe.terms_by_code.get(loser.code, ())}
+    winner_terms = {t for probe in tie.axes if probe.provable and probe.selectable
                     for t in probe.terms_by_code.get(winner.code, ())}
     if loser_terms & words:
         return False, (f"the documentation states {sorted(loser_terms & words)}, "

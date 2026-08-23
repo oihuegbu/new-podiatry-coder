@@ -674,13 +674,23 @@ def test_dos_inactive_candidates_filtered_before_shortlist():
 
 def test_llm_proposals_cannot_crowd_out_retrieval():
     """Fix4: with 6 LLM proposals and 4 retrieved candidates whose correct one is ranked
-    LAST, the reserved retrieval floor keeps it in the 8-slot shortlist so verification
-    can select it. Under the old proposals-first ordering it would be crowded out and the
-    line would escalate. Synthetic codes."""
+    LAST, the reserved retrieval floor keeps it in the 8-slot shortlist so it is still a
+    live candidate after verification. Under the old proposals-first ordering it would be
+    crowded out of the shortlist entirely and the line would escalate for a different
+    reason (never entailed at all, not merely undecided). Synthetic codes.
+
+    This fixture's only discriminating axis is a raw descriptor_term token ("retrieved"),
+    which issue #6 F9-R2-B established can be audited but never select a code absent a
+    typed axis or page reconciliation -- so unlike the code's original release assertion,
+    the line correctly abstains rather than deterministically choosing RCODE off that
+    token. The property this test actually guards -- RCODE surviving the retrieval floor
+    instead of being crowded out of the shortlist by the 6 proposals -- is unaffected by
+    that tightening and is what the assertions below check directly."""
     import json
     from claude_coder.resolution import resolve
     from claude_coder.data_access import MockSource
-    from claude_coder.models import ClinicalFact, EvidenceSpan, CandidateCode, FactKind
+    from claude_coder.models import (ClinicalFact, EvidenceSpan, CandidateCode, FactKind,
+                                     ResolutionMethod)
 
     recs = {(f"P{i}", "cpt"): {"long_description": f"proposed service {i}", "active": True}
             for i in range(6)}
@@ -699,7 +709,14 @@ def test_llm_proposals_cannot_crowd_out_retrieval():
                      propose=["P0", "P1", "P2", "P3", "P4", "P5"], reason="retrieved")
 
     line = resolve(_request(fact), src, llm=stub, corroborate=stub)
-    assert line.resolved and line.chosen.code == "RCODE"
+    assert line.tie_record is not None, line.rationale
+    assert "RCODE" in line.tie_record["shortlist"]        # the retrieval floor held
+    assert "RCODE" in line.tie_record["still_entailed"]   # and it was never ruled out
+    # only a raw descriptor token distinguishes it -- no release, and no provider
+    # question either (an untyped tie routes to the coder queue, not the provider)
+    assert not line.resolved and line.chosen is None
+    assert line.method is ResolutionMethod.ABSTAINED
+    assert line.documentation_gap is None
 
 
 # ---- Codex F6-R3: necessity is per-service, requiring an explicit REASON_FOR linkage -----

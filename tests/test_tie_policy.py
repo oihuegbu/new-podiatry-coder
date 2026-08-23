@@ -101,6 +101,8 @@ class DiscriminatingAxesTest(unittest.TestCase):
         # candidate the record means and are not axes.
         self.assertEqual(probe.terms_by_code["CAND_POWERED"], ("powered",))
         self.assertEqual(probe.terms_by_code["CAND_MANUAL"], ("manual",))
+        self.assertFalse(probe.selectable)
+        self.assertFalse(probe.queryable)
 
     def test_laterality_is_reported_as_its_own_named_axis(self):
         left = _cand("CAND_L", "assembly service, left structure", 0.9)
@@ -131,34 +133,31 @@ class DiscriminatingAxesTest(unittest.TestCase):
 # ------------------------------------------------- steps 3 and 4: narrow and release
 class TieNarrowsAgainstTheOriginalDocumentTest(unittest.TestCase):
 
-    def test_genuine_tie_narrows_on_the_discriminating_axis_and_releases(self):
-        """Two candidates satisfy every documented axis. The ORIGINAL PAGE confirms a
-        quotation that states one candidate's distinguishing word and not the other's,
-        so exactly one becomes uniquely entailed and is released — deterministically,
-        with the page named in the audit trail."""
+    def test_untyped_descriptor_word_is_audited_but_does_not_release(self):
+        """A raw descriptor-token difference is source-visible but has no governed
+        semantic role. It remains in the audit record and cannot select a code."""
         fact = _fact("assembly service",
                      "assembly service completed using the powered technique")
         line = resolve(_request(fact), _source(POWERED, MANUAL),
                        reconciliation=_agreed("span-0"))
-        self.assertTrue(line.resolved, line.rationale)
-        self.assertEqual(line.chosen.code, "CAND_POWERED")
-        self.assertIs(line.method, ResolutionMethod.DETERMINISTIC)
-        self.assertIn("tie narrowed against the original document", line.rationale)
-        self.assertIn("original_page_reconciliation", line.rationale)
+        self.assertFalse(line.resolved, line.rationale)
+        self.assertIsNone(line.chosen)
+        self.assertIs(line.method, ResolutionMethod.ABSTAINED)
+        self.assertIsNotNone(line.tie_record)
+        self.assertFalse(line.tie_record["axes"][0]["selectable"])
         self.assertIsNone(line.documentation_gap)
 
-    def test_narrowing_reads_the_page_not_the_retrieval_order(self):
-        """The SAME pool, with the retrieval scores reversed so the other candidate now
-        leads by a wide margin. The document still decides, so the released code does
-        not move — which is the whole point of separating recall from verification."""
+    def test_retrieval_order_cannot_override_an_untyped_tie(self):
+        """Reversing recall order cannot turn audit-only descriptor words into a
+        deterministic code-selection signal."""
         fact = _fact("assembly service",
                      "assembly service completed using the powered technique")
         leader = _cand("CAND_MANUAL", "assembly service, manual technique", 0.99)
         trailer = _cand("CAND_POWERED", "assembly service, powered technique", 0.61)
         line = resolve(_request(fact), _source(leader, trailer),
                        reconciliation=_agreed("span-0"))
-        self.assertTrue(line.resolved, line.rationale)
-        self.assertEqual(line.chosen.code, "CAND_POWERED")
+        self.assertFalse(line.resolved, line.rationale)
+        self.assertIsNone(line.chosen)
 
     def test_unconfirmed_quotations_cannot_narrow_a_tie(self):
         """The page CONTRADICTS the quotation this event rests on. That is a
@@ -640,50 +639,39 @@ class SelectionUniquenessTest(unittest.TestCase):
         self.assertNotIn("documentation_gap", issues)
 
     # ---- the common path must not regress -------------------------------------------
-    def test_a_single_entailed_candidate_still_auto_releases(self):
-        """The overwhelmingly common case: only one shortlisted descriptor survives, both
-        models say so, and the other is eliminated with a NAMED reason. That still
-        releases automatically — tightening uniqueness must not turn the coder off."""
+    def test_model_named_elimination_needs_typed_independent_grounding(self):
+        """Two models naming an elimination plus a raw descriptor-token hit is still
+        not independent typed evidence. Both candidates remain standing."""
         only_one = lambda d: _ONE in d                          # noqa: E731
         line = self._resolve(self.ONE_DOCUMENTED,
                              _judge(only_one), _judge(only_one))
-        self.assertTrue(line.resolved, line.rationale)
-        self.assertEqual(line.chosen.code, "SYN_A")
-        self.assertIs(line.method, ResolutionMethod.VERIFIED)
+        self.assertFalse(line.resolved, line.rationale)
+        self.assertIsNone(line.chosen)
         self.assertIsNone(line.documentation_gap)
-        # the release states WHY the alternative is gone, in the audit record
-        self.assertEqual(line.tie_record["still_entailed"], ["SYN_A"])
-        self.assertTrue(line.tie_record["eliminated"]["SYN_B"])
-        self.assertEqual(line.tie_record["released_code"], "SYN_A")
+        self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
+        self.assertNotIn("SYN_B", line.tie_record["eliminated"])
 
-    def test_a_tie_the_page_settles_releases_through_the_tie_policy(self):
-        """Both models are loose and call BOTH descriptors entailed, but the ORIGINAL
-        DOCUMENT states only one candidate's distinguishing word. The tie policy's step 3
-        narrowing resolves it, so the line still releases — via the document, not via the
-        agreement, and the audit record shows which one settled it."""
+    def test_page_token_hit_does_not_settle_an_untyped_tie(self):
+        """A word in the page is recorded but cannot supply the missing semantic role
+        needed to eliminate the other candidate."""
         both = lambda d: True                                   # noqa: E731
         line = self._resolve(self.ONE_DOCUMENTED,
                              _judge(both, prefers=lambda d: _ONE in d),
                              _judge(both, prefers=lambda d: _ONE in d))
-        self.assertTrue(line.resolved, line.rationale)
-        self.assertEqual(line.chosen.code, "SYN_A")
-        self.assertIs(line.method, ResolutionMethod.VERIFIED)
-        self.assertIn("narrowed against the original document", line.rationale)
-        self.assertEqual(line.tie_record["winner"], "SYN_A")
+        self.assertFalse(line.resolved, line.rationale)
+        self.assertIsNone(line.chosen)
+        self.assertEqual(line.tie_record["winner"], "")
         self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
 
     # ---- what "eliminated" has to mean ----------------------------------------------
-    def test_a_bare_pick_cannot_establish_uniqueness_but_a_named_elimination_can(self):
-        """The same shortlist, judged two ways. When both models NAME why the
-        alternative is out AND the original document itself documents only the winner's
-        distinguishing term (so the elimination is independently GROUNDED, not merely
-        asserted), the line releases. When they answer with a bare pick and say nothing
-        about the alternative, silence is not an elimination and the line holds — the
-        fail-closed default, with no separate code path."""
+    def test_neither_named_nor_bare_model_pick_can_replace_typed_grounding(self):
+        """Naming a reason improves auditability but cannot turn model agreement and
+        a raw word hit into independent elimination evidence."""
         named = _judge(lambda d: _ONE in d)
-        released = self._resolve(self.ONE_DOCUMENTED, named, _judge(lambda d: _ONE in d))
-        self.assertTrue(released.resolved, released.rationale)
-        self.assertEqual(released.chosen.code, "SYN_A")
+        named_held = self._resolve(self.ONE_DOCUMENTED, named,
+                                   _judge(lambda d: _ONE in d))
+        self.assertIsNone(named_held.chosen, named_held.rationale)
+        self.assertEqual(named_held.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
 
         bare = _judge(lambda d: True, prefers=lambda d: _ONE in d, declare=False)
         held = self._resolve(self.BOTH_DOCUMENTED, bare,

@@ -273,11 +273,11 @@ class CompiledRecordAssembly(unittest.TestCase):
         source = MockSource()
         self.assertIsNone(semantics.compiled_record("NOPE", "cpt", source))
 
-    def test_approach_words_are_detected_generically(self):
+    def test_approach_words_are_not_promoted_without_a_governed_field(self):
         source = MockSource(records={("P3", "cpt"): {
             "long_description": "Widget repair, open approach"}})
         rec = semantics.compiled_record("P3", "cpt", source)
-        self.assertIn("open", rec["approach"])
+        self.assertEqual(rec["approach"], [])
 
     def test_required_attributes_flags_a_bounded_measurement_interval(self):
         source = MockSource(records={("P4", "cpt"): {

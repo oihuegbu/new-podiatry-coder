@@ -918,23 +918,23 @@ class SupportRankingTest(unittest.TestCase):
             evidence=[EvidenceSpan(quote, start=0, end=len(quote), anchored=anchored,
                                    span_id=("span-0" if anchored else None))])
 
-    def test_the_document_settles_a_near_tie_toward_the_concept_matching_code(self):
-        """Equal recall, and the neighbour is retrieved first. The page confirms a
-        quotation stating a word only the matching descriptor asserts, so exactly one
-        candidate becomes uniquely entailed and is released."""
+    def test_a_source_anchored_word_hit_cannot_settle_an_untyped_tie(self):
+        """Equal recall, and the neighbour is retrieved first. Even a source-anchored
+        quotation cannot promote an untyped token overlap into clinical-role evidence;
+        both candidates remain alternatives until a typed axis distinguishes them."""
         from app.contracts.source_evidence import (ReconciliationStatus,
                                                    SourceReconciliation,
                                                    SpanReconciliation)
-        from claude_coder.models import ResolutionMethod
         from claude_coder.resolution import resolve
         reconciliation = SourceReconciliation(spans=(
             SpanReconciliation(span_id="span-0", status=ReconciliationStatus.AGREED,
                                pages=(1,)),))
         line = resolve(_request(self._fact(anchored=True)), self._source(),
                        reconciliation=reconciliation)
-        self.assertEqual(line.chosen.code, "P_MATCH", line.rationale)
-        self.assertIs(line.method, ResolutionMethod.DETERMINISTIC)
-        self.assertIn("tie narrowed against the original document", line.rationale)
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual({c.code for c in line.alternatives}, {"P_MATCH", "P_NEIGH"})
+        self.assertEqual(line.tie_record["winner"], "")
+        self.assertFalse(line.tie_record["axes"][0]["selectable"])
 
     def test_token_overlap_alone_cannot_close_the_same_near_tie(self):
         """The identical pool and the identical wording, with the quotation NOT anchored
@@ -1120,17 +1120,14 @@ class ProposeVerifyTest(unittest.TestCase):
         return _sv.judge(entails=(lambda d: "alpha" in d.lower() and "beta" not in d.lower()) if entail else (lambda d: False),
                          propose=propose, reason="documented act matches")
 
-    def test_rejects_near_synonym_accepts_entailed(self):
-        from claude_coder.models import ResolutionMethod
+    def test_near_synonym_model_pick_does_not_establish_uniqueness(self):
         from claude_coder.resolution import resolve
         line = resolve(_request(self._fact()), self._src(), llm=self._llm())
-        self.assertEqual(line.chosen.code, "CODEALPHA")   # not the higher-recall near-synonym
-        # ... but with NO second opinion configured at all there is nothing independent to
-        # confirm it, so the entailment cannot carry the grounded VERIFIED method.
-        self.assertEqual(line.method, ResolutionMethod.ARBITRATED)
-        self.assertIn("not independently corroborated", line.rationale.lower())
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual({c.code for c in line.alternatives},
+                         {"CODEALPHA", "CODEBETA"})
 
-    def test_proposal_surfaces_missed_code(self):
+    def test_proposal_widens_recall_but_does_not_select_from_untyped_terms(self):
         from claude_coder.data_access import MockSource
         from claude_coder.models import ResolutionMethod
         from claude_coder.resolution import resolve
@@ -1143,8 +1140,10 @@ class ProposeVerifyTest(unittest.TestCase):
         line = resolve(_request(self._fact()), src,
                        llm=_from(self._llm(propose=["CODEALPHA"]), "provider-a"),
                        corroborate=_from(self._corroborator(confirm=True), "provider-b"))
-        self.assertEqual(line.method, ResolutionMethod.VERIFIED)
-        self.assertEqual(line.chosen.code, "CODEALPHA")
+        self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
+        self.assertIsNone(line.chosen)
+        self.assertEqual({c.code for c in line.alternatives},
+                         {"CODEALPHA", "CODEBETA"})
 
     def test_escalates_when_nothing_entailed(self):
         from claude_coder.models import ResolutionMethod
@@ -1167,17 +1166,18 @@ class ProposeVerifyTest(unittest.TestCase):
         return _sv.judge(entails=(lambda d: "alpha" in d.lower() and "beta" not in d.lower()) if confirm else (lambda d: False),
                          missing_element=missing, reason="second opinion")
 
-    def test_corroboration_agreement_accepts(self):
-        """CROSS-PROVIDER agreement still works exactly as intended: two DECLARED, distinct
-        origins both find the authoritative descriptor entailed -> grounded VERIFIED."""
+    def test_corroboration_cannot_make_untyped_terms_selecting(self):
+        """Two declared, distinct model origins do not convert a raw descriptor-token
+        difference into independent typed evidence."""
         from claude_coder.models import ResolutionMethod
         from claude_coder.resolution import resolve
         line = resolve(_request(self._fact()), self._src(),
                        llm=_from(self._llm(), "provider-a"),
                        corroborate=_from(self._corroborator(confirm=True), "provider-b"))
-        self.assertEqual(line.method, ResolutionMethod.VERIFIED)
-        self.assertEqual(line.chosen.code, "CODEALPHA")
-        self.assertIn("independently confirmed", line.rationale)
+        self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
+        self.assertIsNone(line.chosen)
+        self.assertEqual(line.tie_record["still_entailed"],
+                         ["CODEBETA", "CODEALPHA"])
 
     def test_missing_element_escalates_as_provider_query(self):
         # second model says the code fits but the note omits a required element ->
@@ -1957,11 +1957,10 @@ class AutonomyVerifiedTest(unittest.TestCase):
 
 
 class DiagnosisVerifyTest(unittest.TestCase):
-    """Diagnoses that reach the embedding fallback are now entailment-verified +
-    cross-model corroborated (same discipline as procedures), so a WRONG-concept
-    code the embedding ranked highest is rejected for the entailed one. Abstract."""
+    """Embedding recall and cross-model agreement cannot replace typed distinction
+    evidence for diagnosis candidates."""
 
-    def test_entailment_overrides_wrong_embedding_top(self):
+    def test_entailment_does_not_override_an_untyped_diagnosis_tie(self):
         import json
         import re
         from claude_coder.data_access import MockSource
@@ -1984,8 +1983,9 @@ class DiagnosisVerifyTest(unittest.TestCase):
                             confidence=0.95)
         line = resolve(_request(fact), src, llm=_from(sel, "provider-a"),
                        corroborate=_from(corr, "provider-b"))
-        self.assertEqual(line.method, ResolutionMethod.VERIFIED)
-        self.assertEqual(line.chosen.code, "DXR")   # not the higher-recall wrong code
+        self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
+        self.assertIsNone(line.chosen)
+        self.assertEqual({c.code for c in line.alternatives}, {"DXW", "DXR"})
 
 
 if __name__ == "__main__":
