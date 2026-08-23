@@ -1311,7 +1311,7 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
                    str(getattr(left, "fact_id", "") or "") for left, right in pairs},
         second_relations=extracted_b.relations,
         taken_ids={str(getattr(f, "fact_id", "") or "") for f in facts},
-        id_prefix=f"{_SECOND_READING_RUN_ID}-")
+        id_prefix=f"{_SECOND_READING_RUN_ID}-", primary_facts=facts)
     report.recovered_events = recovery.as_records()
     return report, source_evidence, recovery, recall
 

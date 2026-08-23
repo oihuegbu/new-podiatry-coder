@@ -1609,6 +1609,146 @@ class EndToEndEventCandidateUnion(unittest.TestCase):
                          [g.name for g in result.gates])
 
 
+class PhysicalLocationIdentityAcrossReadings(unittest.TestCase):
+    """Codex F9-R1: two readings quoting the SAME physical passage of the real
+    document, worded differently enough that text coreference alone cannot confirm
+    SAME_EVENT, must still be recognized as one event once the document has actually
+    been read -- a reconciled page/region match is the one identity signal both
+    readings genuinely share, unlike a reading-scoped character offset."""
+
+    def _reconciliation(self, entries: dict):
+        """entries: {span_id: (status, [pages], region_5tuple_or_None)}"""
+        from app.contracts.source_evidence import (PageRegion, ReconciliationStatus,
+                                                    SourceReconciliation,
+                                                    SpanReconciliation)
+        spans = []
+        for span_id, (status, pages, region) in entries.items():
+            spans.append(SpanReconciliation(
+                span_id=span_id, status=ReconciliationStatus[status],
+                pages=tuple(pages),
+                region=(PageRegion(page_number=region[0], x0=region[1], top=region[2],
+                                   x1=region[3], bottom=region[4])
+                       if region else None)))
+        return SourceReconciliation(spans=tuple(spans))
+
+    def test_same_reconciled_region_merges_despite_undetermined_text_coreference(self):
+        """Reproduces Codex's exact live-note case: "Achilles tendon insertion" vs.
+        "Achilles tendon near its heel attachment" -- two paraphrases of one documented
+        passage, not two occurrences."""
+        from claude_coder import event_union as _union
+
+        primary_span = EvidenceSpan(
+            text="Achilles tendon insertion addressed today", anchored=True,
+            start=0, end=10, span_id="p1", reading_channel_id="")
+        primary = [_fact("F1", FactKind.PROCEDURE,
+                         "debridement of the achilles tendon insertion",
+                         spans=[primary_span])]
+
+        candidate_span = EvidenceSpan(
+            text="Achilles tendon near its heel attachment addressed today",
+            anchored=True, start=0, end=10, span_id="s1",
+            reading_channel_id="second-reading")
+        candidate_fact = _fact("S1", FactKind.PROCEDURE,
+                               "debridement near the heel attachment",
+                               spans=[candidate_span])
+
+        candidates = _union.propose(primary, [candidate_fact])
+        # Sanity check on the test's own premise: text alone must not have settled
+        # it, so the assertions below prove the RECONCILED-LOCATION path, not a text
+        # coincidence, is what does the work.
+        self.assertEqual(candidates[0].verdict, "",
+                         "the fixture must be genuinely undetermined by text alone")
+
+        reconciliation = self._reconciliation({
+            "p1": ("AGREED", [3], (3, 100.0, 200.0, 300.0, 260.0)),
+            "s1": ("AGREED", [3], (3, 110.0, 210.0, 290.0, 250.0)),  # overlaps p1's box
+        })
+        recovery = _union.admit(
+            candidates, reconciliation=reconciliation, alignment={},
+            second_relations=[], taken_ids={"F1"}, id_prefix="second-",
+            primary_facts=primary)
+
+        self.assertEqual(recovery.candidates[0].verdict, _union.DUPLICATE_OF_PRIMARY)
+        self.assertEqual(recovery.candidates[0].merged_into, "F1")
+        self.assertEqual(recovery.facts, (),
+                         "a physically co-located mention must never become a "
+                         "second, independently billable event")
+
+    def test_same_page_but_disjoint_regions_does_not_merge(self):
+        """Same page is not, by itself, proof of the same passage -- two genuinely
+        distinct services documented on one page must not be merged just because
+        neither reading's channel reported fine-grained region geometry differently
+        enough. Here BOTH sides report a region, and the regions plainly do not
+        overlap, so the candidate proceeds to ordinary source-confirmed admission."""
+        from claude_coder import event_union as _union
+
+        primary_span = EvidenceSpan(
+            text="Procedure one performed today", anchored=True,
+            start=0, end=10, span_id="p1", reading_channel_id="")
+        primary = [_fact("F1", FactKind.PROCEDURE, "procedure one performed",
+                         spans=[primary_span])]
+
+        candidate_span = EvidenceSpan(
+            text="Procedure two performed today", anchored=True,
+            start=0, end=10, span_id="s1", reading_channel_id="second-reading")
+        candidate_fact = _fact("S1", FactKind.PROCEDURE, "procedure two performed",
+                               spans=[candidate_span])
+
+        candidates = _union.propose(primary, [candidate_fact])
+        self.assertEqual(candidates[0].verdict, "")
+
+        reconciliation = self._reconciliation({
+            "p1": ("AGREED", [3], (3, 0.0, 0.0, 50.0, 20.0)),
+            "s1": ("AGREED", [3], (3, 400.0, 400.0, 450.0, 420.0)),  # far away, same page
+        })
+        recovery = _union.admit(
+            candidates, reconciliation=reconciliation, alignment={},
+            second_relations=[], taken_ids={"F1"}, id_prefix="second-",
+            primary_facts=primary)
+
+        self.assertEqual(recovery.candidates[0].verdict, _union.ADMITTED)
+        self.assertEqual(len(recovery.facts), 1,
+                         "a genuinely distinct, disjointly-located service on the "
+                         "same page must still be recovered, not merged away")
+
+    def test_same_page_with_no_region_granularity_on_either_side_still_merges(self):
+        """Withholding a region is not evidence the quotations are in different
+        places on the page -- when neither reading's channel reported one, page-level
+        co-location alone is the strongest signal actually established, and the test
+        must not sharpen past what was actually proven."""
+        from claude_coder import event_union as _union
+
+        primary_span = EvidenceSpan(
+            text="Achilles tendon insertion addressed today", anchored=True,
+            start=0, end=10, span_id="p1", reading_channel_id="")
+        primary = [_fact("F1", FactKind.PROCEDURE,
+                         "debridement of the achilles tendon insertion",
+                         spans=[primary_span])]
+
+        candidate_span = EvidenceSpan(
+            text="Achilles tendon near its heel attachment addressed today",
+            anchored=True, start=0, end=10, span_id="s1",
+            reading_channel_id="second-reading")
+        candidate_fact = _fact("S1", FactKind.PROCEDURE,
+                               "debridement near the heel attachment",
+                               spans=[candidate_span])
+
+        candidates = _union.propose(primary, [candidate_fact])
+        self.assertEqual(candidates[0].verdict, "")
+
+        reconciliation = self._reconciliation({
+            "p1": ("AGREED", [3], None),
+            "s1": ("AGREED", [3], None),
+        })
+        recovery = _union.admit(
+            candidates, reconciliation=reconciliation, alignment={},
+            second_relations=[], taken_ids={"F1"}, id_prefix="second-",
+            primary_facts=primary)
+
+        self.assertEqual(recovery.candidates[0].verdict, _union.DUPLICATE_OF_PRIMARY)
+        self.assertEqual(recovery.candidates[0].merged_into, "F1")
+
+
 # ---------------------------------------------------------------------------
 # INDEPENDENT DOCUMENT RECALL, AND OCCURRENCE CARDINALITY (issue #6 F7-R3, reopened)
 #

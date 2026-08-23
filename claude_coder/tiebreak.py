@@ -196,8 +196,30 @@ class TieOutcome:
         }
 
 
+def _isolated_contrast(probe: AxisProbe) -> bool:
+    """Whether `probe`'s undocumented distinguishing vocabulary is ONE isolated,
+    clinically meaningful distinction, not an open-ended bag of leftover descriptor
+    tokens (issue #6 F9-R2: a provider query is permitted only when one nameable,
+    code-changing field is genuinely absent -- never an arbitrary descriptor-token
+    difference).
+
+    Structural, never a vocabulary lookup -- no clinical term is named or enumerated
+    here, only a shape requirement: every candidate's own leftover word set on this
+    axis has to be EXACTLY ONE word (a bag of two or more is retrieval noise, not a
+    single fact a provider could confirm), and every candidate's single word has to
+    differ from every other candidate's (two candidates sharing the same leftover
+    word means the axis does not actually map each candidate to a distinct,
+    unambiguous answer)."""
+    values = [v for v in probe.terms_by_code.values() if v]
+    if not values or any(len(v) != 1 for v in values):
+        return False
+    singles = [v[0] for v in values]
+    return len(singles) == len(set(singles))
+
+
 def provider_query(fact, axes: tuple[AxisProbe, ...]) -> str:
-    """ONE targeted provider query naming exactly what the record must state.
+    """ONE targeted provider query naming exactly what the record must state, or ""
+    when nothing left to ask about is a legitimate, isolated distinguishing fact.
 
     Public because step 5 is reachable from more than one place: a tie the page could
     not settle (below), and a tie the page settled onto a candidate the entailment
@@ -205,18 +227,34 @@ def provider_query(fact, axes: tuple[AxisProbe, ...]) -> str:
     provider the SAME question, built once here from the same descriptors.
 
     Assembled from the candidates' own authoritative descriptors, so it asks for the
-    real distinguishing fact instead of "please clarify"."""
+    real distinguishing fact instead of "please clarify". AXIS_DESCRIPTOR_TERM is an
+    open-ended, unnamed bag of leftover descriptor tokens by construction
+    (`discriminating_axes`' own docstring) -- named here ONLY when `_isolated_contrast`
+    confirms it collapses to one clean, unambiguous word per candidate (issue #6
+    F9-R2); a multi-word bag is never shown to a provider. "Same service family" and
+    "action/anatomy positively compatible with the note" -- the proposal's other two
+    promotion conditions -- are enforced upstream, before a candidate ever reaches a
+    tie: `semantic_eligibility.eligible_partition`'s per-candidate checks (including
+    the action-concepts conflict check) and its `_anatomy_dominance_exclusions` pass
+    already remove a structurally-incompatible sibling from the pool before `narrow`
+    ever sees it. When there is nothing left to name, this returns "" instead of the
+    old generic "please clarify which service was performed" filler -- both callers
+    already treat an empty question as "no documentation gap", which correctly routes
+    the line to the coder queue (`autonomy.decide`) instead of manufacturing a
+    provider question out of words a page reading was never going to settle."""
     named = []
     for probe in axes:
+        if probe.axis == AXIS_DESCRIPTOR_TERM and not _isolated_contrast(probe):
+            continue
         options = sorted({" ".join(terms) for terms in probe.terms_by_code.values()
                           if terms})
         if options:
             named.append(probe.axis + " (" + " vs ".join(options) + ")")
-    what = ("; ".join(named) if named
-            else "which of the retrieved candidate services was performed")
+    if not named:
+        return ""
     subject = str(getattr(fact, "description", "") or "this service")
     return (f"The record does not state the fact that distinguishes the candidate "
-            f"codes for {subject!r}. Please document: {what}.")
+            f"codes for {subject!r}. Please document: {'; '.join(named)}.")
 
 
 def narrow(fact, candidates: list[CandidateCode],

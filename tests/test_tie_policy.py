@@ -244,6 +244,68 @@ class TieThatStaysTiedTest(unittest.TestCase):
         self.assertIn("no differing axis", outcome.detail)
 
 
+# -------------------------------------- issue #6 F9-R2: isolated contrast promotion
+class IsolatedContrastPromotion(unittest.TestCase):
+    """A provider question is permitted only for ONE isolated, clinically meaningful,
+    unambiguous distinction -- never an open-ended bag of leftover descriptor tokens,
+    and never a word two candidates share (which would not map each candidate to a
+    distinct, unambiguous answer)."""
+
+    def test_a_multiword_bag_never_reaches_the_provider(self):
+        """One candidate's descriptor differs from the other's by SEVERAL words, not
+        one -- that is retrieval noise, not a single fact a provider could confirm,
+        and must never surface as a provider question."""
+        wordy = _cand("CAND_WORDY",
+                      "assembly service, powered heavy duty extended reach technique",
+                      0.9)
+        terse = _cand("CAND_TERSE", "assembly service, manual technique", 0.9)
+        fact = _fact("assembly service", "assembly service was completed today")
+        outcome = tiebreak.narrow(fact, [wordy, terse], _agreed("span-0"))
+        self.assertIsNone(outcome.winner)
+        self.assertEqual(outcome.provider_question, "",
+                         "a multi-word descriptor bag must never become a provider "
+                         "question")
+
+    def test_a_multiword_bag_routes_to_review_not_the_provider(self):
+        """The same shape, end to end: with nothing left that is a legitimate
+        provider question, the line falls to the coder queue -- never PROVIDER_QUERY,
+        and never silently unrouted either."""
+        from claude_coder.autonomy import Destination, decide
+        from claude_coder.models import CodingResult
+
+        wordy = _cand("CAND_WORDY",
+                      "assembly service, powered heavy duty extended reach technique",
+                      0.9)
+        terse = _cand("CAND_TERSE", "assembly service, manual technique", 0.9)
+        fact = _fact("assembly service", "assembly service was completed today")
+        line = resolve(_request(fact), _source(wordy, terse),
+                       reconciliation=_agreed("span-0"))
+        self.assertFalse(line.resolved, line.rationale)
+        self.assertFalse(line.documentation_gap, line.documentation_gap)
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14",
+                              lines=[line])
+        verdict = decide(result)
+        kinds = {r["destination"] for r in result.routing}
+        self.assertIn(Destination.REVIEW.value, kinds, result.routing)
+        self.assertNotIn(Destination.PROVIDER_QUERY.value, kinds, result.routing)
+
+    def test_two_candidates_sharing_the_same_word_are_not_an_isolated_contrast(self):
+        """Direct unit coverage of the mapping-ambiguity condition: even a clean
+        one-word-per-candidate shape does not qualify when two candidates map to the
+        SAME word -- the axis would not actually distinguish them."""
+        probe = tiebreak.AxisProbe(
+            tiebreak.AXIS_DESCRIPTOR_TERM,
+            {"CAND_A": ("powered",), "CAND_B": ("powered",), "CAND_C": ("manual",)})
+        self.assertFalse(tiebreak._isolated_contrast(probe))
+
+    def test_one_word_per_candidate_all_distinct_is_an_isolated_contrast(self):
+        """The positive mirror, direct on the same helper."""
+        probe = tiebreak.AxisProbe(
+            tiebreak.AXIS_DESCRIPTOR_TERM,
+            {"CAND_POWERED": ("powered",), "CAND_MANUAL": ("manual",)})
+        self.assertTrue(tiebreak._isolated_contrast(probe))
+
+
 # ------------------------------------------- similarity widens, it never verifies
 class SimilarityMayOnlyWidenThePoolTest(unittest.TestCase):
 

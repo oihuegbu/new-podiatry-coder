@@ -273,6 +273,62 @@ class AdvisoryProcedureSynonymRecallExpansion(unittest.TestCase):
         self.assertEqual(entry["method"], "retrieval_consistency_validated")
         self.assertIn("removal of skin lesion", entry["expansions"])
 
+    def test_a_natural_prose_mention_is_found_by_scan_not_whole_string_equality(self):
+        """Codex F8-R2, escalated re-review: the prior fixture only worked
+        because `fact.description` was byte-identical to the advisory table
+        key. A real note names the term mid-sentence -- the scan must find it
+        there, not only when the whole fact text equals a table entry."""
+        from claude_coder.resolution import resolve
+        from tests.test_measurement import _request
+
+        source = MockSource(
+            records={("PROC_X", "cpt"): {"long_description": "Excision, lesion",
+                                         "active": True}},
+            retrieval={("removal of skin lesion", "cpt"):
+                      [CandidateCode("PROC_X", "cpt", "Excision, lesion", 0.9)]},
+            procedure_concept_lookup={"excision of lesion": {
+                "term": "excision of lesion", "candidates": ["PROC_X"],
+                "method": "retrieval_consistency_validated", "unique": True,
+                "expansions": ["removal of skin lesion"], "source_identity": {"v": 1}}})
+        fact = ClinicalFact(
+            FactKind.PROCEDURE,
+            "The surgeon proceeded with excision of lesion along the plantar "
+            "surface, followed by routine wound closure.", fact_id="fx")
+        line = resolve(_request(fact), source)
+        self.assertEqual(line.chosen.code if line.chosen else None, "PROC_X",
+                         "a phrase embedded mid-sentence must still widen recall")
+        self.assertIsNotNone(line.advisory_terminology)
+        entry = line.advisory_terminology[0]
+        self.assertEqual(entry["term"], "excision of lesion")
+        self.assertEqual(entry["method"], "retrieval_consistency_validated")
+        self.assertEqual(entry["match_kind"], "token_boundary_scan")
+        self.assertEqual(entry["matched_in"], "description")
+
+    def test_overlapping_known_phrases_resolve_to_the_longest_match_only(self):
+        """A longer known phrase must win at each position; the shorter phrase
+        it contains must never also be reported as its own, separate match."""
+        from claude_coder.resolution import _advisory_procedure_expansions
+
+        source = MockSource(
+            procedure_concept_lookup={
+                "tendon repair": {
+                    "term": "tendon repair", "candidates": ["PROC_SHORT"],
+                    "method": "retrieval_consistency_validated", "unique": True,
+                    "expansions": ["short repair"], "source_identity": {}},
+                "achilles tendon repair": {
+                    "term": "achilles tendon repair", "candidates": ["PROC_LONG"],
+                    "method": "retrieval_consistency_validated", "unique": True,
+                    "expansions": ["long repair"], "source_identity": {}}})
+        fact = ClinicalFact(
+            FactKind.PROCEDURE,
+            "Performed an achilles tendon repair without complication.",
+            fact_id="fx")
+        out = _advisory_procedure_expansions(fact, source)
+        terms = [e["term"] for e in out]
+        self.assertEqual(terms, ["achilles tendon repair"],
+                         "the longer known phrase must win; the shorter phrase "
+                         "it contains must not also be reported separately")
+
     def test_no_advisory_match_leaves_the_field_honestly_none(self):
         from claude_coder.resolution import resolve
         from tests.test_measurement import _request

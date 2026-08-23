@@ -230,6 +230,8 @@ class CodeSource(Protocol):
 
     def concept_lookup(self, axis: str, term: str) -> dict: ...
 
+    def concept_scan(self, axis: str, text: str) -> tuple[str, ...]: ...
+
 
 # Data-driven signals that a code is NOT a separately reportable line. These are
 # generic terms found in coverage/status fields or the descriptor itself (e.g.
@@ -511,6 +513,79 @@ class AuthoritativeSource:
         except Exception:
             self._proc_syn_index = False
         return self._proc_syn_index
+
+    def _ensure_procedure_scan_index(self):
+        """Lazy {word-tuple -> term} index derived from `_proc_syn_by_term` --
+        literally that same table, tokenized once -- plus the longest known
+        phrase's word count, so `concept_scan` can find a known short phrase
+        embedded inside a longer sentence by token-bounded windowing, instead
+        of requiring the whole sentence to equal a table key the way
+        `_concept_lookup_procedure`'s exact match does (issue #6, F8-R2
+        escalated re-review: advisory recall found nothing on real prose
+        because it only ever tried whole-string equality).
+        """
+        if getattr(self, "_proc_scan_index", None) is not None:
+            return self._proc_scan_index
+        if not self._ensure_procedure_synonym_index():
+            self._proc_scan_index = False
+            return False
+        from . import ontology as _ontology
+        by_words: dict[tuple[str, ...], str] = {}
+        max_len = 0
+        for term in self._proc_syn_by_term:
+            words = tuple(_ontology._tokens(term))
+            if not words:
+                continue
+            by_words.setdefault(words, term)
+            max_len = max(max_len, len(words))
+        self._proc_scan_by_words = by_words
+        self._proc_scan_max_len = max_len
+        self._proc_scan_index = True
+        return True
+
+    def concept_scan(self, axis: str, text: str) -> tuple[str, ...]:
+        """Every known governed term for `axis` that occurs as a token-bounded
+        phrase inside free-form `text` -- e.g. an advisory procedure synonym
+        named mid-sentence in a fact's own documented description or evidence
+        quote, not only when the whole text equals the term verbatim
+        (`concept_lookup`'s exact-match contract, unchanged -- that is still
+        the only thing that resolves a matched term to codes). Longest match
+        wins at each position and matches never overlap, so a longer known
+        phrase is never also reported as a contained shorter one. No fuzzy
+        matching: token boundaries and case/punctuation normalization only,
+        over exactly the same authoritative table `concept_lookup` already
+        uses -- no new data, no invented terms. A term this finds still has
+        to clear `concept_lookup`'s own `unique` gate before a caller may
+        treat it as anything more than a candidate to try.
+
+        Only "procedure" has a scan index today (`_ensure_procedure_scan_index`,
+        built from `_ensure_procedure_synonym_index`'s existing table); any
+        other axis returns empty, the same honesty discipline as
+        `concept_lookup`.
+        """
+        if axis != "procedure" or not self._ensure_procedure_scan_index():
+            return ()
+        from . import ontology as _ontology
+        words = _ontology._tokens(text)
+        by_words = self._proc_scan_by_words
+        max_len = self._proc_scan_max_len
+        found: list[str] = []
+        seen: set[str] = set()
+        i, n = 0, len(words)
+        while i < n:
+            matched = False
+            for length in range(min(max_len, n - i), 0, -1):
+                term = by_words.get(tuple(words[i:i + length]))
+                if term is not None:
+                    if term not in seen:
+                        seen.add(term)
+                        found.append(term)
+                    i += length
+                    matched = True
+                    break
+            if not matched:
+                i += 1
+        return tuple(found)
 
     def _concept_lookup_anatomy(self, term: str) -> dict:
         from . import terminology as _term
@@ -1615,6 +1690,42 @@ class MockSource:
             return dict(table[term])
         return {"term": term, "candidates": [], "method": "none", "unique": False,
                "expansions": [], "source_identity": None}
+
+    def concept_scan(self, axis, text):
+        # Mirrors AuthoritativeSource.concept_scan: token-bounded windowing over
+        # exactly this axis's own configured `concept_lookup` table, never a
+        # separate table a test could forget to keep in sync with it.
+        from . import ontology as _ontology
+        table = {"anatomy": self._concept_lookup_map,
+                 "procedure": self._proc_concept_lookup_map}.get(axis, {})
+        if not table:
+            return ()
+        by_words: dict[tuple[str, ...], str] = {}
+        max_len = 0
+        for term in table:
+            words = tuple(_ontology._tokens(term))
+            if not words:
+                continue
+            by_words.setdefault(words, term)
+            max_len = max(max_len, len(words))
+        words = _ontology._tokens(text)
+        found: list[str] = []
+        seen: set[str] = set()
+        i, n = 0, len(words)
+        while i < n:
+            matched = False
+            for length in range(min(max_len, n - i), 0, -1):
+                term = by_words.get(tuple(words[i:i + length]))
+                if term is not None:
+                    if term not in seen:
+                        seen.add(term)
+                        found.append(term)
+                    i += length
+                    matched = True
+                    break
+            if not matched:
+                i += 1
+        return tuple(found)
 
     def excludes1_refs(self, code, system):
         if system != "icd10" or not self._excl1_data:

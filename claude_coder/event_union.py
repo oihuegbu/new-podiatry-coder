@@ -37,11 +37,34 @@ It decides exactly two things about an event only the second reading reported:
      performer and the rest of the record's own distinguishing axes. A candidate that
      corefers with a primary event is that event, wherever it was quoted from.
 
-     Where coreference is UNDETERMINED the candidate is admitted, deliberately: it may
-     be the service the primary reading missed, and refusing it would reinstate the
-     silent undercoding this module exists to prevent. What it may never do is multiply
-     the claim -- if it turns out to be a re-description, both mentions resolve to one
-     authoritative code and claim assembly makes them one line with one unit.
+     A SECOND, independent identity signal runs once the original document has actually
+     been read (`admit`, below, is the only stage that HAS a reconciliation -- `propose`
+     runs before any page read, by design, so it can target the escalation at only the
+     candidates that could change the claim): a candidate whose quotation reconciles to
+     the SAME page/region of the real document as an already-admitted primary event's
+     quotation is that event, regardless of what the text coreference test decided.
+     Character offsets are only comparable inside one reading (see `_regions`, below);
+     a RECONCILED page/region is anchored to the physical document itself, so it is the
+     one coordinate system both readings genuinely share. This is what closes the case a
+     paraphrase-sensitive text test cannot: two readings quoting the identical passage in
+     different words (issue #6 F9-R1 -- confirmed on a real note: two differently-worded
+     anatomical phrasings of one documented structure's location read as one documented
+     passage, not a disagreement over two occurrences).
+
+     Where coreference is UNDETERMINED the candidate is admitted, deliberately, exactly
+     as before this fix: it may be the service the primary reading missed, and refusing
+     it would reinstate the silent undercoding this module exists to prevent. Gating
+     admission on a POSITIVELY DISTINCT text verdict was considered and rejected --
+     `coreference.action_identity`'s own docstring records that DISTINCT_EVENT is
+     deliberately unreachable from wording alone (it takes an explicit record
+     separation or a contradicting axis value), so almost every genuinely new,
+     sparsely-worded service would fail that bar and be wrongly held. What it may never
+     do is multiply the claim on TEXT alone -- if it turns out to be a re-description,
+     both mentions resolve to one authoritative code and claim assembly makes them one
+     line with one unit (unchanged downstream safety net); the reconciled-location test
+     above is what catches the case that safety net cannot, a duplicate that resolves to
+     a DIFFERENT candidate code because the two readings described it at different
+     abstraction levels.
 
   2. DOES THE ORIGINAL DOCUMENT BACK IT?  Admission is gated on the SAME source-evidence
      reconciliation every other released fact must pass, through the same one definition
@@ -142,6 +165,17 @@ class EventCandidate:
     reason: str = ""
     #: The primary event this turned out to be another wording of, when duplicate.
     merged_into: str = ""
+    #: AUDIT ONLY -- the text-coreference signal `propose` observed against primary
+    #: events, when it did not itself settle identity (a SAME_EVENT match already
+    #: becomes DUPLICATE_OF_PRIMARY above). Never gates admission: `DISTINCT_EVENT` is
+    #: deliberately unreachable from wording alone
+    #: (`coreference.action_identity`'s own docstring), so requiring it before
+    #: admission would wrongly hold almost every genuinely new, sparsely-worded
+    #: service. Recorded so a reviewer can see what the text test found even when a
+    #: different signal (reconciled location, or source confirmation alone) decided
+    #: the candidate. Empty means untested -- no primary events existed to compare
+    #: against.
+    coreference: str = ""
     #: The id this event carries IN THE CANONICAL GRAPH, when admitted.
     node_id: str = ""
     span_ids: tuple[str, ...] = ()
@@ -164,6 +198,7 @@ class EventCandidate:
             "verdict": self.verdict,
             "reason": self.reason,
             "merged_into": self.merged_into,
+            "coreference": self.coreference,
             "node_id": self.node_id,
             "evidence_span_ids": list(self.span_ids),
         }
@@ -266,34 +301,46 @@ def propose(primary_facts, second_only_facts, source=None) -> list[EventCandidat
         # the candidate the same coreference test everything else takes, never a bypass
         # of it: an event the record already carries, quoted somewhere else in the same
         # document, is still that one event.
-        corefers = _corefers_with_primary(fact, primary, source)
-        if corefers:
+        merged_into, signal = _identity_against_primary(fact, primary, source)
+        if merged_into:
             candidate.verdict = DUPLICATE_OF_PRIMARY
-            candidate.merged_into = corefers
+            candidate.merged_into = merged_into
             candidate.reason = (
                 f"quoted from a region no primary event rests on, but it corefers with "
-                f"primary event {corefers}: the same documented action on the same "
+                f"primary event {merged_into}: the same documented action on the same "
                 f"documented axes, in the same episode. A second place in the record "
                 f"where one event is written about is evidence that the event is "
                 f"documented, never that it happened twice")
+        else:
+            # Not settled by text alone. Recorded for `admit` to weigh alongside the
+            # reconciled-location test, which `propose` cannot run (no page has been
+            # read yet at this stage).
+            candidate.coreference = signal
         out.append(candidate)
     return out
 
 
-def _corefers_with_primary(fact, primary_facts, source=None) -> str:
-    """The primary event this candidate IS, or "" when the record establishes none.
+def _identity_against_primary(fact, primary_facts, source=None) -> tuple[str, str]:
+    """`(merged_into, signal)` for this candidate against every primary event's
+    coreference verdict. `merged_into` is set only on a proven SAME_EVENT match --
+    unchanged behavior, still delegated wholly to `claude_coder.coreference`, so a
+    mention cannot be one event here and two events one stage later. `signal` is
+    `_coref.UNDETERMINED` when at least one primary event's verdict was ambiguous and
+    none was SAME_EVENT -- the record neither proves this is a re-description nor
+    proves it is a distinct occurrence -- otherwise `_coref.DISTINCT_EVENT` (every
+    primary event compared was proven distinct, or there was nothing to compare
+    against at all: the case this module exists for, a service the primary reading
+    missed entirely).
 
-    Delegates the whole judgement to `claude_coder.coreference`, which is also what
-    eligibility and claim assembly consult, so a mention cannot be one event here and
-    two events one stage later. Episodes are not compared: this runs inside ONE
-    encounter on ONE date, so every event here is in the same episode by construction --
-    and passing an episode this module does not have would weaken the test, not
-    strengthen it.
+    Episodes are not compared: this runs inside ONE encounter on ONE date, so every
+    event here is in the same episode by construction -- and passing an episode this
+    module does not have would weaken the test, not strengthen it.
 
     `source` (issue #6 F7-R3-C4) is passed straight through to `event_verdict`.
     """
     from . import coreference as _coref
 
+    undetermined = False
     for other in (primary_facts or []):
         verdict, _reason = _coref.event_verdict(
             left_kind=getattr(fact, "kind", None),
@@ -304,8 +351,10 @@ def _corefers_with_primary(fact, primary_facts, source=None) -> str:
             right_attributes=getattr(other, "attributes", None),
             source=source)
         if verdict == _coref.SAME_EVENT:
-            return _clean(getattr(other, "fact_id", ""))
-    return ""
+            return _clean(getattr(other, "fact_id", "")), _coref.SAME_EVENT
+        if verdict == _coref.UNDETERMINED:
+            undetermined = True
+    return "", (_coref.UNDETERMINED if undetermined else _coref.DISTINCT_EVENT)
 
 
 def pending(candidates) -> list[EventCandidate]:
@@ -383,6 +432,71 @@ def _remap(relation, mapping: dict[str, str]):
                    assertion_origins=list(getattr(relation, "assertion_origins", None) or []))
 
 
+def _region_overlap(a, b) -> bool:
+    """Two reconciled PDF bounding boxes over the same physical page, genuinely
+    overlapping -- not merely both nonempty. Both come from `SpanReconciliation.region`
+    (`app.contracts.source_evidence.PageRegion`), so `x0`/`top`/`x1`/`bottom` are
+    already in the SAME coordinate system regardless of which reading's channel
+    proved which span."""
+    return (a.page_number == b.page_number
+           and a.x0 < b.x1 and b.x0 < a.x1 and a.top < b.bottom and b.top < a.bottom)
+
+
+def _reconciled_location(fact, settled: dict) -> tuple[set[int], list]:
+    """This fact's reconciled pages and regions, from `SourceReconciliation.by_span_id()`
+    -- the ONE coordinate system anchored to the physical document itself, the same for
+    every reading (unlike `_regions`'s reading-scoped character offsets, above). A span
+    with no reconciliation entry (never checked, or checked before this fact's own
+    id existed) contributes nothing; it is not evidence of absence."""
+    pages: set[int] = set()
+    regions: list = []
+    for span in (getattr(fact, "evidence", None) or []):
+        span_id = _clean(getattr(span, "span_id", ""))
+        rec = settled.get(span_id) if span_id else None
+        if rec is None:
+            continue
+        pages.update(rec.pages)
+        if rec.region is not None:
+            regions.append(rec.region)
+    return pages, regions
+
+
+def _physical_duplicates(candidates, primary_facts, reconciliation) -> dict[str, str]:
+    """`{second_event_id -> primary fact_id}` for every candidate whose RECONCILED
+    document location overlaps an already-admitted primary event's reconciled
+    location (issue #6 F9-R1). Same page plus overlapping region when both sides have
+    region granularity; same page alone when either side lacks it -- withholding a
+    reconciled region is not evidence the quotations are in different places on that
+    page, so it must not sharpen the test past what was actually established.
+
+    With no reconciliation, physical location was never established for anything and
+    this check contributes nothing -- identity still rests on `propose`'s text
+    coreference test alone, exactly as before this fix.
+    """
+    if reconciliation is None:
+        return {}
+    settled = reconciliation.by_span_id()
+    primary_locations = [
+        (fid, _reconciled_location(f, settled))
+        for f in (primary_facts or [])
+        for fid in [_clean(getattr(f, "fact_id", ""))] if fid]
+
+    out: dict[str, str] = {}
+    for candidate in candidates:
+        cand_pages, cand_regions = _reconciled_location(candidate.fact, settled)
+        if not cand_pages:
+            continue
+        for primary_id, (p_pages, p_regions) in primary_locations:
+            if not (cand_pages & p_pages):
+                continue
+            if cand_regions and p_regions and not any(
+                    _region_overlap(a, b) for a in cand_regions for b in p_regions):
+                continue          # same page, but demonstrably different regions
+            out[candidate.second_event_id] = primary_id
+            break
+    return out
+
+
 def _source_verdict(candidate: EventCandidate, reconciliation) -> tuple[str, str]:
     """What the ORIGINAL DOCUMENT says about this candidate's quotations.
 
@@ -415,7 +529,7 @@ def _source_verdict(candidate: EventCandidate, reconciliation) -> tuple[str, str
 
 
 def admit(candidates, *, reconciliation, alignment, second_relations,
-          taken_ids, id_prefix: str = "") -> Recovery:
+          taken_ids, id_prefix: str = "", primary_facts=None) -> Recovery:
     """Decide every undecided candidate against the document, and express the survivors
     in canonical graph terms.
 
@@ -423,11 +537,35 @@ def admit(candidates, *, reconciliation, alignment, second_relations,
     so an edge between a recovered event and an event both readings found survives the
     move into the canonical graph.
 
+    `primary_facts` (issue #6 F9-R1) is the primary reading's own fact list, consulted
+    ONLY to test a candidate's RECONCILED document location against each primary
+    event's own reconciled location -- `propose` cannot run this test itself; no page
+    has been read yet at that stage. None/empty degrades it to a no-op, never to a
+    hold: identity still rests on `propose`'s text coreference test alone.
+
     Returns facts/relations for the caller to APPEND to the primary graph inputs. This
     module deliberately does not build a graph, evaluate eligibility or retrieve: doing
     any of that here would be the second code path the finding warns about.
     """
     decided = list(candidates or [])
+
+    # Physical-location identity runs FIRST and can settle an undecided candidate
+    # regardless of what `propose`'s text coreference test found: a reconciled
+    # page/region match is the one identity signal both readings genuinely share, and
+    # it closes the exact case a paraphrase-sensitive text test cannot (two readings
+    # quoting one passage in different words).
+    physical_dup = _physical_duplicates(decided, primary_facts, reconciliation)
+    for candidate in decided:
+        primary_id = physical_dup.get(candidate.second_event_id)
+        if primary_id and not candidate.decided:
+            candidate.verdict = DUPLICATE_OF_PRIMARY
+            candidate.merged_into = primary_id
+            candidate.reason = (
+                f"an independent reading of the original document reconciles this "
+                f"event's quotation to the same page/region as primary event "
+                f"{primary_id}'s quotation -- the same documented event, regardless "
+                f"of how differently the two readings worded it")
+
     for candidate in decided:
         if candidate.decided:
             continue

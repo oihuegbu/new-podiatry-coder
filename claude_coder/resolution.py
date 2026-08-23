@@ -223,40 +223,55 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
 def _advisory_procedure_expansions(fact, source) -> list[dict]:
     """Advisory (LLM-generated, round-trip-validated) procedure-synonym RECALL
     expansion (issue #6 item 3/F8-R2, the product owner's own narrowed
-    acceptance): `data_access.concept_lookup("procedure", term)` reads
-    `cpt_verified_synonyms.json` -- candidate terms KEPT only when they
-    independently round-trip to their own code through the same authoritative
-    retrieval index every other lookup uses. This function only WIDENS the
-    RECALL query set with a unique match's alternate phrasings; it never
-    normalizes `fact.governed_terms` (that stays anatomy's alone,
+    acceptance, escalated re-review: whole-string equality never found a term
+    written mid-sentence in real prose). `data_access.concept_scan("procedure",
+    text)` finds every known synonym phrase that occurs as a token-bounded
+    substring of `text` -- normalization and word boundaries only, no fuzzy
+    matching, over exactly the table `cpt_verified_synonyms.json` already
+    backs. Each matched phrase is then resolved through
+    `concept_lookup("procedure", term)`, unchanged: candidate terms KEPT only
+    when they independently round-trip to their own code through the same
+    authoritative retrieval index every other lookup uses. This function only
+    WIDENS the RECALL query set with a unique match's alternate phrasings; it
+    never normalizes `fact.governed_terms` (that stays anatomy's alone,
     `coreference._CONCEPT_GOVERNED_AXES`), never asserts clinical identity,
     never excludes a candidate, and never authorizes release -- every candidate
     an expansion query surfaces still passes the exact same eligibility/
-    entailment/verification path as any other. Tried against the fact's own
+    entailment/verification path as any other. Scanned against the fact's own
     documented description and its first verbatim quotation, the same two texts
     `resolve()`'s own multi-query recall already searches -- an advisory match is
     recorded only when it is UNIQUE (an ambiguous match resolves nothing, exactly
     like every other governed/advisory lookup in this codebase)."""
     lookup = getattr(source, "concept_lookup", None)
-    if not callable(lookup) or fact.system not in ("cpt", "hcpcs"):
+    scan = getattr(source, "concept_scan", None)
+    if not callable(lookup) or not callable(scan) or fact.system not in ("cpt", "hcpcs"):
         return []
-    candidates_text = [fact.description] + [s.text for s in fact.evidence[:1]]
+    candidates_text = [("description", fact.description)]
+    candidates_text += [("evidence", s.text) for s in fact.evidence[:1]]
     out: list[dict] = []
     seen_terms: set[str] = set()
-    for text in candidates_text:
+    for field, text in candidates_text:
         text = str(text or "").strip()
-        if not text or text in seen_terms:
+        if not text:
             continue
-        seen_terms.add(text)
         try:
-            result = lookup("procedure", text)
+            matched_terms = scan("procedure", text)
         except Exception:
             continue
-        expansions = [str(e) for e in (result.get("expansions") or []) if str(e).strip()]
-        if result.get("unique") and expansions:
-            out.append({"term": text, "method": str(result.get("method") or ""),
-                       "expansions": expansions,
-                       "source_identity": dict(result.get("source_identity") or {})})
+        for term in matched_terms:
+            if term in seen_terms:
+                continue
+            seen_terms.add(term)
+            try:
+                result = lookup("procedure", term)
+            except Exception:
+                continue
+            expansions = [str(e) for e in (result.get("expansions") or []) if str(e).strip()]
+            if result.get("unique") and expansions:
+                out.append({"term": term, "method": str(result.get("method") or ""),
+                           "match_kind": "token_boundary_scan", "matched_in": field,
+                           "expansions": expansions,
+                           "source_identity": dict(result.get("source_identity") or {})})
     return out
 
 
@@ -496,12 +511,24 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
     # together, before either is filtered -- so the audit trail shows every
     # candidate this fact's retrieval ever considered, kept or excluded, and can
     # never disagree with what was actually enforced below.
+    #
+    # F9-R2's anatomy-dominance check is GROUP-level (a candidate is excluded only
+    # when a SIBLING in the SAME pool is positively grounded) -- calling
+    # `eligible_partition` separately on `pool` and `seeds` would run that
+    # comparison over two different, smaller groups than the one the audit report
+    # above was computed over, and could keep a candidate in one partition that the
+    # report -- correctly, seeing the whole union -- already marked excluded because
+    # a grounded sibling existed in the OTHER partition. `pool`/`seeds` are therefore
+    # derived directly FROM the report below, not by a second, independently-scoped
+    # filter call, so enforcement can never drift from what the audit trail states.
     _all_candidates = list(seeds) + [c for c in pool if c.code not in
                                      {s.code for s in seeds}]
     _candidate_eligibility = _semelig.eligibility_report(elig_facts, _all_candidates,
                                                           source, dos)
-    pool = _semelig.eligible_partition(elig_facts, pool, source, dos)
-    seeds = _semelig.eligible_partition(elig_facts, seeds, source, dos)
+    _eligible_ids = {(r["code"], r["system"]) for r in _candidate_eligibility
+                     if r["eligible"]}
+    pool = [c for c in pool if (c.code, c.system) in _eligible_ids]
+    seeds = [c for c in seeds if (c.code, c.system) in _eligible_ids]
 
     # The authoritative index hits (if any) LEAD the shortlist as high-confidence
     # candidates — but they are billed only if propose-then-verify below confirms

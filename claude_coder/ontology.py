@@ -69,6 +69,15 @@ class DescriptorFeatures:
     #: which of its tokens are the action.
     action_tokens: set[str] = field(default_factory=set)
     anatomy_tokens: set[str] = field(default_factory=set)
+    #: The SAME split as `action_tokens`/`anatomy_tokens`, kept as an untokenized
+    #: phrase rather than a token set (issue #6 F9-R2). A concept-relation lookup
+    #: (`AuthoritativeSource.concept_relation`) needs a clean PHRASE to resolve
+    #: against a governed concept graph -- a token set has already thrown away word
+    #: order and adjacency, which a phrase-level concept index needs to normalize
+    #: correctly. Empty exactly when the tokens are: no action/target punctuation to
+    #: split on, or the descriptor too long to trust the convention.
+    action_phrase: str = ""
+    anatomy_phrase: str = ""
 
 
 _NUM = r"(\d+(?:\.\d+)?)"
@@ -150,6 +159,8 @@ def parse_descriptor(descriptor: str) -> DescriptorFeatures:
     if split_at >= 0 and len(descriptor.split()) <= _SPLITTABLE_MAX_WORDS:
         action_tokens = _concept_tokens(descriptor[:split_at])
         anatomy_tokens = _concept_tokens(descriptor[split_at + 1:])
+        action_phrase = descriptor[:split_at].strip()
+        anatomy_phrase = descriptor[split_at + 1:].strip()
     else:
         # No action/target punctuation to split on, or the descriptor is too long
         # to trust the convention holds -- honestly unsplit rather than guessing
@@ -157,10 +168,14 @@ def parse_descriptor(descriptor: str) -> DescriptorFeatures:
         # is asserted as specifically an action or specifically a target.
         action_tokens = set()
         anatomy_tokens = set()
+        action_phrase = ""
+        anatomy_phrase = ""
     return DescriptorFeatures(raw=descriptor, core_tokens=core,
                               laterality=laterality, cardinality=cardinality,
                               interval=interval, action_tokens=action_tokens,
-                              anatomy_tokens=anatomy_tokens)
+                              anatomy_tokens=anatomy_tokens,
+                              action_phrase=action_phrase,
+                              anatomy_phrase=anatomy_phrase)
 
 
 _COUNT_RANGE = [
