@@ -697,8 +697,19 @@ def code_encounter(
         # answered. (Before this, a SUPPLY/DRUG line held for an unsupported bounded
         # measurement went straight to arbitration, which could re-select the very
         # candidate the interval check had just refused.)
+        #
+        # `line.tie_record` is checked too, not only `documentation_gap` (issue #6
+        # F9-R2-B, third pass): the tie policy now correctly leaves `documentation_gap`
+        # empty for a tie no GOVERNED axis distinguishes (an untyped leftover-token
+        # difference is never a provider question) -- but the tie was still genuinely
+        # INSPECTED and left unresolved, and `_tie_escalation` always stamps
+        # `tie_record` regardless of whether it found anything provider-askable. Using
+        # `documentation_gap` alone would have let arbitration re-open a tie the policy
+        # had already, deliberately, declined to settle -- exactly the "bounded model
+        # pick" the tie policy exists to prevent.
         if ((not line.resolved) and line.alternatives and fact.billable
-                and not went_through_pv and not line.documentation_gap):
+                and not went_through_pv and not line.documentation_gap
+                and not line.tie_record):
             line = arbitration.arbitrate(line, arbitrate_llm)
         # AUDIT: a tie that several candidates survived is a claim-affecting decision
         # in its own right -- which axes distinguished them, what the ORIGINAL DOCUMENT

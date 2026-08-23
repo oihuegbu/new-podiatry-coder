@@ -1631,10 +1631,14 @@ class PhysicalLocationIdentityAcrossReadings(unittest.TestCase):
                        if region else None)))
         return SourceReconciliation(spans=tuple(spans))
 
-    def test_same_reconciled_region_merges_despite_undetermined_text_coreference(self):
-        """Reproduces Codex's exact live-note case: "Achilles tendon insertion" vs.
-        "Achilles tendon near its heel attachment" -- two paraphrases of one documented
-        passage, not two occurrences."""
+    def test_same_reconciled_region_holds_ambiguous_when_text_is_undetermined(self):
+        """Codex's exact live-note case -- "Achilles tendon insertion" vs. "Achilles
+        tendon near its heel attachment" -- co-located, but the coreference verdict
+        is UNDETERMINED, not SAME_EVENT (issue #6 F9-R1, third pass: only a
+        POSITIVE SAME_EVENT confirmation may merge; "not proven distinct" is not
+        "proven same"). Held as AMBIGUOUS_COLOCATED -- never merged (which could
+        wrongly suppress a real second service) and never silently admitted as
+        independent either (which could double-bill a re-description)."""
         from claude_coder import event_union as _union
 
         primary_span = EvidenceSpan(
@@ -1668,11 +1672,12 @@ class PhysicalLocationIdentityAcrossReadings(unittest.TestCase):
             second_relations=[], taken_ids={"F1"}, id_prefix="second-",
             primary_facts=primary)
 
-        self.assertEqual(recovery.candidates[0].verdict, _union.DUPLICATE_OF_PRIMARY)
-        self.assertEqual(recovery.candidates[0].merged_into, "F1")
+        self.assertEqual(recovery.candidates[0].verdict, _union.AMBIGUOUS_COLOCATED)
+        self.assertEqual(recovery.candidates[0].merged_into, "",
+                         "an ambiguous candidate must not be silently given identity")
         self.assertEqual(recovery.facts, (),
-                         "a physically co-located mention must never become a "
-                         "second, independently billable event")
+                         "an ambiguous co-located mention must never become an "
+                         "independently billable event either")
 
     def test_same_page_but_disjoint_regions_does_not_merge(self):
         """Same page is not, by itself, proof of the same passage -- two genuinely
@@ -1711,11 +1716,11 @@ class PhysicalLocationIdentityAcrossReadings(unittest.TestCase):
                          "a genuinely distinct, disjointly-located service on the "
                          "same page must still be recovered, not merged away")
 
-    def test_same_page_with_no_region_granularity_on_either_side_still_merges(self):
-        """Withholding a region is not evidence the quotations are in different
-        places on the page -- when neither reading's channel reported one, page-level
-        co-location alone is the strongest signal actually established, and the test
-        must not sharpen past what was actually proven."""
+    def test_same_page_with_no_region_granularity_still_holds_ambiguous(self):
+        """The same shape as above, but with no region on either side -- withholding
+        a region is not evidence the quotations are in different places on the
+        page, but it is also not a SAME_EVENT confirmation. Page-only co-location
+        plus an undetermined text verdict still holds ambiguous, never merges."""
         from claude_coder import event_union as _union
 
         primary_span = EvidenceSpan(
@@ -1745,8 +1750,74 @@ class PhysicalLocationIdentityAcrossReadings(unittest.TestCase):
             second_relations=[], taken_ids={"F1"}, id_prefix="second-",
             primary_facts=primary)
 
-        self.assertEqual(recovery.candidates[0].verdict, _union.DUPLICATE_OF_PRIMARY)
-        self.assertEqual(recovery.candidates[0].merged_into, "F1")
+        self.assertEqual(recovery.candidates[0].verdict, _union.AMBIGUOUS_COLOCATED)
+
+    def test_same_kind_different_action_page_only_evidence_holds_ambiguous(self):
+        """Codex F9-R1, third-pass reproduction, exact: two different PROCEDURE
+        actions (no shared root at all), co-located with page-only evidence. This
+        is the exact operative-note shape where multiple different procedure
+        components can appear in one sentence/box -- must hold ambiguous, never
+        merge."""
+        from claude_coder import event_union as _union
+
+        primary_span = EvidenceSpan(
+            text="Removal of the prominence performed today", anchored=True,
+            start=0, end=10, span_id="p1", reading_channel_id="")
+        primary = [_fact("F1", FactKind.PROCEDURE, "removal of the prominence",
+                         spans=[primary_span])]
+
+        candidate_span = EvidenceSpan(
+            text="Reattachment of the structure performed today", anchored=True,
+            start=0, end=10, span_id="s1", reading_channel_id="second-reading")
+        candidate_fact = _fact("S1", FactKind.PROCEDURE,
+                               "reattachment of the structure", spans=[candidate_span])
+
+        candidates = _union.propose(primary, [candidate_fact])
+        self.assertEqual(candidates[0].verdict, "")
+
+        reconciliation = self._reconciliation({
+            "p1": ("AGREED", [3], None),
+            "s1": ("AGREED", [3], None),
+        })
+        recovery = _union.admit(
+            candidates, reconciliation=reconciliation, alignment={},
+            second_relations=[], taken_ids={"F1"}, id_prefix="second-",
+            primary_facts=primary)
+
+        self.assertEqual(recovery.candidates[0].verdict, _union.AMBIGUOUS_COLOCATED)
+        self.assertEqual(recovery.facts, ())
+
+    def test_same_kind_different_action_shared_box_evidence_holds_ambiguous(self):
+        """The same pair, but with an overlapping reconciled box -- stronger
+        location evidence must still not be sufficient on its own."""
+        from claude_coder import event_union as _union
+
+        primary_span = EvidenceSpan(
+            text="Removal of the prominence performed today", anchored=True,
+            start=0, end=10, span_id="p1", reading_channel_id="")
+        primary = [_fact("F1", FactKind.PROCEDURE, "removal of the prominence",
+                         spans=[primary_span])]
+
+        candidate_span = EvidenceSpan(
+            text="Reattachment of the structure performed today", anchored=True,
+            start=0, end=10, span_id="s1", reading_channel_id="second-reading")
+        candidate_fact = _fact("S1", FactKind.PROCEDURE,
+                               "reattachment of the structure", spans=[candidate_span])
+
+        candidates = _union.propose(primary, [candidate_fact])
+        self.assertEqual(candidates[0].verdict, "")
+
+        reconciliation = self._reconciliation({
+            "p1": ("AGREED", [3], (3, 100.0, 200.0, 300.0, 260.0)),
+            "s1": ("AGREED", [3], (3, 110.0, 210.0, 290.0, 250.0)),
+        })
+        recovery = _union.admit(
+            candidates, reconciliation=reconciliation, alignment={},
+            second_relations=[], taken_ids={"F1"}, id_prefix="second-",
+            primary_facts=primary)
+
+        self.assertEqual(recovery.candidates[0].verdict, _union.AMBIGUOUS_COLOCATED)
+        self.assertEqual(recovery.facts, ())
 
     def test_a_different_kind_co_located_with_no_region_never_merges(self):
         """Codex F9-R1, second-pass reproduction, exact: a performed DRUG and a

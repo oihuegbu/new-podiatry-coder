@@ -383,6 +383,52 @@ class AnatomyPhraseDecomposition(unittest.TestCase):
             [fact], [_candidate("GROUNDED"), _candidate("UNGROUNDED")], source, None)
         self.assertEqual([c.code for c in result], ["GROUNDED"])
 
+    def test_a_slash_separated_composite_mention_grounds_via_its_second_structure(self):
+        """Codex F9-R2-C, third pass: real extraction output commonly uses
+        "structure alpha / structure beta" for a composite mention, not "and" --
+        the slash form must decompose exactly like the "and" form does."""
+        source = MockSource(
+            records={
+                ("GROUNDED", "cpt"): {"long_description": "Excision, calcaneus",
+                                      "active": True},
+                ("UNGROUNDED", "cpt"): {"long_description": "Excision, unrelated site",
+                                        "active": True}},
+            concept_relation={("calcaneus", "calcaneus"): "same"})
+        fact = ClinicalFact(FactKind.PROCEDURE, "a procedure",
+                            attributes={"anatomy": "tendon / calcaneus"})
+        result = semelig.eligible_partition(
+            [fact], [_candidate("GROUNDED"), _candidate("UNGROUNDED")], source, None)
+        self.assertEqual([c.code for c in result], ["GROUNDED"])
+
+    def test_a_candidate_with_alternative_targets_grounds_via_either_one(self):
+        """Codex F9-R2-C, third pass: a candidate descriptor naming "structure alpha
+        or structure beta" legitimately applies to EITHER target. A fact documenting
+        only beta must still ground it -- not leave it UNKNOWN (and so exposed to
+        dominance exclusion) merely because alpha, the OTHER alternative, was not
+        documented."""
+        source = MockSource(
+            records={
+                ("EITHER", "cpt"): {
+                    "long_description": "Excision, structure alpha or structure beta",
+                    "active": True},
+                ("UNGROUNDED", "cpt"): {"long_description": "Excision, unrelated site",
+                                        "active": True}},
+            concept_relation={("structure beta", "structure beta"): "same"})
+        fact = ClinicalFact(FactKind.PROCEDURE, "a procedure",
+                            attributes={"anatomy": "structure beta"})
+        result = semelig.eligible_partition(
+            [fact], [_candidate("EITHER"), _candidate("UNGROUNDED")], source, None)
+        self.assertEqual([c.code for c in result], ["EITHER"])
+
+    def test_with_or_without_idiom_is_not_mis_split_into_alternative_targets(self):
+        """The fixed English idiom "with or without X" qualifies ONE target; it must
+        never be split on "or" into meaningless fragments ("with" / "without X")."""
+        feats = semelig._ontology.parse_descriptor(
+            "Excision, structure gamma, with or without graft")
+        targets = semelig._candidate_anatomy_targets(feats)
+        self.assertNotIn("with", targets)
+        self.assertTrue(any("structure gamma" in t for t in targets), targets)
+
 
 if __name__ == "__main__":
     unittest.main()

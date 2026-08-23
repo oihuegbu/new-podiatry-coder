@@ -776,7 +776,7 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
     # between those is exactly the choice a model may not make alone.
     offered = [c for c in shortlist if c.code != line.chosen.code]
     still_entailed, _elim = _uniqueness_view(fact, offered, picked, judgements, {},
-                                             reconciliation)
+                                             reconciliation, source=source)
     if len(still_entailed) > 1:
         prior = line.chosen
         line.chosen = None
@@ -868,7 +868,7 @@ def _ranked(fact: ClinicalFact, pool: list[CandidateCode],
 
 def _tie_escalation(fact: ClinicalFact, candidates: list[CandidateCode],
                     reconciliation, reason: str, tie=None,
-                    record: dict | None = None) -> ResolvedLine:
+                    record: dict | None = None, source=None) -> ResolvedLine:
     """Tie policy step 5 -- turn an unresolved tie into ONE targeted provider query.
 
     The directive forbids exactly one outcome here: routing the line to generic human
@@ -890,7 +890,7 @@ def _tie_escalation(fact: ClinicalFact, candidates: list[CandidateCode],
     "why not the other candidate?" is answerable from one place.
     """
     if tie is None:
-        tie = _tiebreak.narrow(fact, candidates, reconciliation)
+        tie = _tiebreak.narrow(fact, candidates, reconciliation, source=source)
     # A tie the page DID settle, on a candidate the judgements did not both entail, still
     # leaves a real, answerable question -- narrow only fills `provider_question` when it
     # gives up, so it is rebuilt here rather than degrading into a bare hold with no owner.
@@ -911,7 +911,7 @@ def _tie_escalation(fact: ClinicalFact, candidates: list[CandidateCode],
 
 
 def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: CandidateCode,
-                          reconciliation) -> tuple[bool, str]:
+                          reconciliation, source=None) -> tuple[bool, str]:
     """Codex F8-R1 (round-9 re-review): a model's NAMED reason for ruling out `loser` is
     not, by itself, grounds to remove it from the standing set -- both judging models
     returning SOME non-empty reason string is exactly the "richer JSON shape" of model
@@ -953,7 +953,7 @@ def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: Cand
     an anchored-but-disagreed span and an unanchored, un-locatable span are both "the
     reconciliation channel that was supplied could not confirm this," and must both refuse.
     """
-    tie = _tiebreak.narrow(fact, [winner, loser], reconciliation)
+    tie = _tiebreak.narrow(fact, [winner, loser], reconciliation, source=source)
     if tie.winner is not None and tie.winner.code == winner.code:
         return True, tie.detail
     if not tie.source_integrity:
@@ -982,6 +982,7 @@ def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: Cand
 def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
                      chosen: CandidateCode, judgements: list,
                      eliminated_earlier: dict[str, str], reconciliation=None,
+                     source=None,
                      ) -> tuple[list[CandidateCode], dict[str, str]]:
     """Which shortlisted candidates are STILL ENTAILED once every judging model has
     answered about every one of them, and the NAMED reason each of the others is out.
@@ -1009,7 +1010,7 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
         named = [j.elimination_of(cand.code) for j in judgements]
         if named and all(named):
             grounded, ground_detail = _grounded_elimination(fact, cand, chosen,
-                                                            reconciliation)
+                                                            reconciliation, source=source)
             if grounded:
                 eliminated[cand.code] = (f"{'; '.join(dict.fromkeys(named))} "
                                          f"(document-confirmed: {ground_detail})")
@@ -1021,7 +1022,7 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
 def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
                        shortlist: list[CandidateCode], judgements: list,
                        eliminated_earlier: dict[str, str], why: str,
-                       corroboration: str, reconciliation) -> ResolvedLine:
+                       corroboration: str, reconciliation, source=None) -> ResolvedLine:
     """Release ONLY when exactly one shortlisted candidate is still entailed; otherwise
     hand the survivors to the tie policy the deterministic path already uses.
 
@@ -1032,7 +1033,8 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
     picked this one" is allowed to stand in for uniqueness.
     """
     remaining, eliminated = _uniqueness_view(fact, shortlist, chosen, judgements,
-                                             eliminated_earlier, reconciliation)
+                                             eliminated_earlier, reconciliation,
+                                             source=source)
     # Candidates eliminated BEFORE the shortlist existed (a failed deterministic
     # constraint) belong in the same accounting: the record has to show the whole
     # retrieved pool being disposed of, not only the part the models were shown.
@@ -1052,7 +1054,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
 
     # STEPS 3 and 4 -- several candidates are independently entailed, so the ORIGINAL
     # DOCUMENT decides, exactly as it does for a deterministic tie.
-    tie = _tiebreak.narrow(fact, remaining, reconciliation)
+    tie = _tiebreak.narrow(fact, remaining, reconciliation, source=source)
     winner = tie.winner
     if (winner is not None and all(j.entails(winner.code) for j in judgements)
             and _evaluate(fact, winner) is not None
@@ -1069,7 +1071,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
         f"{len(remaining)} shortlisted candidates are still entailed by the documentation "
         f"({', '.join(c.code for c in remaining)}) -- agreement on one of them is not "
         f"evidence that the others are wrong",
-        tie=tie, record=record)
+        tie=tie, record=record, source=source)
 
 
 def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
@@ -1190,7 +1192,7 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
             # against the original document through the same tie policy.
             return _settle_uniqueness(fact, chosen, shortlist, judgements,
                                       {**constraint_eliminated, **tried}, why,
-                                      corroboration, reconciliation)
+                                      corroboration, reconciliation, source=source)
         if missing:
             # The code is the right KIND of service but its descriptor requires an
             # element the note does not state. Re-selecting a code that omits the
@@ -1218,7 +1220,7 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     return _tie_escalation(
         fact, contested, reconciliation,
         f"independent second-model verification confirmed no candidate after "
-        f"re-selection ({last_reason})")
+        f"re-selection ({last_reason})", source=source)
 
 
 def _bounded_interval_hold(fact: ClinicalFact,
@@ -1352,7 +1354,8 @@ def _decide(fact: ClinicalFact, pool: list[CandidateCode],
     # release the one the page uniquely entails.
     tie = None
     if top is None and len(admitted) > 1:
-        tie = _tiebreak.narrow(fact, [m.candidate for m in admitted], reconciliation)
+        tie = _tiebreak.narrow(fact, [m.candidate for m in admitted], reconciliation,
+                              source=source)
         if tie.winner is not None:
             top = next(m for m in admitted if m.candidate.code == tie.winner.code)
 

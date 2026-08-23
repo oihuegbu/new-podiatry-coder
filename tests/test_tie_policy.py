@@ -63,7 +63,8 @@ def _cand(code, descriptor, score):
 
 def _source(*candidates):
     return MockSource(
-        records={(c.code, "cpt"): {"active": True} for c in candidates},
+        records={(c.code, "cpt"): {"active": True, "long_description": c.descriptor}
+                for c in candidates},
         retrieval={("*", "cpt"): list(candidates)})
 
 
@@ -192,24 +193,24 @@ class TieThatStaysTiedTest(unittest.TestCase):
         return fact, resolve(_request(fact), _source(POWERED, MANUAL),
                              reconciliation=_agreed("span-0"))
 
-    def test_undocumented_distinguishing_fact_becomes_one_targeted_query(self):
-        """The record genuinely does not state the distinguishing fact. The line is held
-        with a SPECIFIC question naming the axis and both descriptors' words — not a
-        'candidates were comparable' shrug."""
+    def test_undocumented_distinguishing_fact_holds_for_a_coder_not_a_provider(self):
+        """The record genuinely does not state the distinguishing fact, but that
+        fact is only an untyped leftover descriptor token (issue #6 F9-R2-B, third
+        pass: token cardinality does not establish clinical meaning) -- never a
+        provider question, regardless of how clean the pair looks. The line still
+        holds, with both candidates visible as alternatives; a CODER decides."""
         _fact_obj, line = self._tied_line()
         self.assertFalse(line.resolved)
         self.assertIs(line.method, ResolutionMethod.ABSTAINED)
-        self.assertTrue(line.documentation_gap)
-        self.assertIn(tiebreak.AXIS_DESCRIPTOR_TERM, line.documentation_gap)
-        self.assertIn("powered", line.documentation_gap)
-        self.assertIn("manual", line.documentation_gap)
+        self.assertIsNone(line.documentation_gap, line.rationale)
         # both candidates stay visible as the rejected alternatives
         self.assertEqual({c.code for c in line.alternatives},
                          {"CAND_POWERED", "CAND_MANUAL"})
 
-    def test_a_tie_produces_a_provider_query_not_generic_coder_review(self):
-        """The directive's forbidden outcome, asserted directly on the two consumers
-        that decide where an unresolved line goes."""
+    def test_a_tie_routes_to_the_coder_queue_not_a_provider_question(self):
+        """The mirror of the directive's forbidden outcome: an untyped tie is
+        correctly a CODER decision (real candidates, no governed distinguishing
+        fact genuinely absent), never manufactured into a provider question."""
         from claude_coder.autonomy import Destination
         from claude_coder.models import CodingResult
         from claude_coder.recommendations import build_recommendations
@@ -217,11 +218,8 @@ class TieThatStaysTiedTest(unittest.TestCase):
         result = CodingResult(encounter_id="enc", date_of_service="2026-03-14",
                               lines=[line])
         issues = {r["issue"] for r in build_recommendations(result)}
-        self.assertIn("documentation_gap", issues)
-        self.assertNotIn("coder_review", issues)
-        self.assertNotIn("unresolved_service", issues)
-        # and the router sends it to the provider, not to a coder queue
-        self.assertNotEqual(Destination.PROVIDER_QUERY, Destination.REVIEW)
+        self.assertIn("coder_review", issues)
+        self.assertNotIn("documentation_gap", issues)
 
     def test_both_candidates_documented_is_still_a_tie(self):
         """When the record states BOTH distinguishing words, the document singles out
@@ -293,33 +291,38 @@ class IsolatedContrastPromotion(unittest.TestCase):
         self.assertIn(Destination.REVIEW.value, kinds, result.routing)
         self.assertNotIn(Destination.PROVIDER_QUERY.value, kinds, result.routing)
 
-    def test_two_candidates_sharing_the_same_word_are_not_an_isolated_contrast(self):
-        """Direct unit coverage of the mapping-ambiguity condition: even a clean
-        one-word-per-candidate shape does not qualify when two candidates map to the
-        SAME word -- the axis would not actually distinguish them."""
-        probe = tiebreak.AxisProbe(
-            tiebreak.AXIS_DESCRIPTOR_TERM,
-            {"CAND_A": ("powered",), "CAND_B": ("powered",), "CAND_C": ("manual",)})
-        self.assertFalse(tiebreak._isolated_contrast(probe))
+    def test_an_arbitrary_single_leftover_word_never_reaches_the_provider(self):
+        """Codex F9-R2-B, third pass: token CARDINALITY does not establish clinical
+        meaning. A clean, one-word-per-candidate, all-distinct AXIS_DESCRIPTOR_TERM
+        contrast -- meaningless placeholder words, not a real qualifier -- must
+        never reach the provider, exactly as a multi-word bag must not. Only a
+        GOVERNED, typed axis (laterality, measurement, approach) may ever be named."""
+        alpha = _cand("CAND_ALPHA", "assembly service, alpha variant", 0.9)
+        beta = _cand("CAND_BETA", "assembly service, beta variant", 0.9)
+        fact = _fact("assembly service", "assembly service was completed today")
+        outcome = tiebreak.narrow(fact, [alpha, beta], _agreed("span-0"),
+                                  source=_source(alpha, beta))
+        self.assertIsNone(outcome.winner)
+        self.assertEqual(outcome.provider_question, "",
+                         "an arbitrary single leftover word is not a governed "
+                         "typed qualifier and must never become a provider question")
 
-    def test_one_word_per_candidate_all_distinct_is_an_isolated_contrast(self):
-        """The positive mirror, direct on the same helper."""
-        probe = tiebreak.AxisProbe(
-            tiebreak.AXIS_DESCRIPTOR_TERM,
-            {"CAND_POWERED": ("powered",), "CAND_MANUAL": ("manual",)})
-        self.assertTrue(tiebreak._isolated_contrast(probe))
-
-    def test_a_silently_unqualified_third_candidate_disqualifies_the_contrast(self):
-        """Codex F9-R2-B, reproduced exactly: a THIRD candidate with NO term on this
-        axis (the "silent, unqualified" candidate `AxisProbe`'s own docstring
-        describes) must disqualify promotion even though the other two are a clean
-        one-word-each pair -- the proposed question cannot distinguish the
-        unqualified candidate from whichever answer is given."""
-        probe = tiebreak.AxisProbe(
-            tiebreak.AXIS_DESCRIPTOR_TERM,
-            {"CAND_POWERED": ("powered",), "CAND_MANUAL": ("manual",),
-             "CAND_UNQUALIFIED": ()})
-        self.assertFalse(tiebreak._isolated_contrast(probe))
+    def test_a_governed_typed_approach_qualifier_does_reach_the_provider(self):
+        """The positive mirror Codex asked for: a REAL governed, versioned typed
+        axis (APPROACH, compiled from authoritative descriptor grammar via
+        `semantics.compiled_record` -- the same closed vocabulary laterality
+        already is) still produces a legitimate, answerable provider question,
+        because it is not an arbitrary leftover token -- it is a compiled field."""
+        open_cand = _cand("CAND_OPEN", "assembly service, open technique", 0.9)
+        percutaneous = _cand("CAND_PERCUTANEOUS",
+                             "assembly service, percutaneous technique", 0.9)
+        fact = _fact("assembly service", "assembly service was completed today")
+        source = _source(open_cand, percutaneous)
+        outcome = tiebreak.narrow(fact, [open_cand, percutaneous], _agreed("span-0"),
+                                  source=source)
+        self.assertIsNone(outcome.winner)
+        self.assertTrue(outcome.provider_question, outcome.detail)
+        self.assertIn(tiebreak.AXIS_APPROACH, outcome.provider_question)
 
     def test_a_value_documented_by_two_candidates_never_reaches_the_provider(self):
         """Codex F9-R2-B, reproduced exactly: the record already states 'right', but
@@ -345,15 +348,17 @@ class SimilarityMayOnlyWidenThePoolTest(unittest.TestCase):
 
     def test_a_large_retrieval_lead_does_not_confirm_a_code(self):
         """The forbidden shortcut, stated as a test: one candidate leads the other by a
-        margin that used to close the decision outright. Nothing in the record
-        distinguishes them, so nothing is billed and the gap is asked about instead."""
+        margin that used to close the decision outright. Nothing GOVERNED in the
+        record distinguishes them, so nothing is billed -- held for a coder, not
+        auto-released on the retrieval margin."""
         leader = _cand("CAND_POWERED", "assembly service, powered technique", 0.98)
         trailer = _cand("CAND_MANUAL", "assembly service, manual technique", 0.72)
         fact = _fact("assembly service", "assembly service was completed today")
         line = resolve(_request(fact), _source(leader, trailer),
                        reconciliation=_agreed("span-0"))
         self.assertFalse(line.resolved, line.rationale)
-        self.assertTrue(line.documentation_gap)
+        self.assertIsNone(line.documentation_gap)
+        self.assertIsNotNone(line.tie_record)
 
     def test_lexical_overlap_with_the_note_does_not_confirm_a_code(self):
         """Token overlap between a descriptor and the note is a RANK signal only. Here
@@ -447,7 +452,7 @@ class TiePolicyEndToEndTest(unittest.TestCase):
         result = self._run(arbitrate)
         (line,) = [ln for ln in result.lines if ln.fact.kind is FactKind.SUPPLY]
         self.assertFalse(line.resolved, line.rationale)
-        self.assertTrue(line.documentation_gap, line.rationale)
+        self.assertIsNotNone(line.tie_record, line.rationale)
         self.assertEqual(called, [], "arbitration decided a tie the document must own")
 
     def test_the_tie_decision_is_written_to_the_audit_trail(self):
@@ -472,9 +477,11 @@ class TiePolicyEndToEndTest(unittest.TestCase):
         self.assertEqual(tie["fact_id"], "F1")
         self.assertEqual([a["axis"] for a in tie["axes"]], ["descriptor_term"])
         self.assertEqual(sorted(tie["unsettled_axes"]), ["descriptor_term"])
-        self.assertTrue(tie["provider_question"])
+        # issue #6 F9-R2-B, third pass: an untyped leftover-token axis is never a
+        # provider question, regardless of shape -- this tie is a coder decision.
+        self.assertEqual(tie["provider_question"], "")
         self.assertFalse(tie["source_integrity"])
-        self.assertEqual(result.destination.value, "PROVIDER_QUERY")
+        self.assertEqual(result.destination.value, "REVIEW")
 
     def test_a_failed_tie_audit_write_holds_the_encounter_instead_of_crashing(self):
         """The failure path of the audit record itself. Durable audit is enforced, so a
@@ -498,16 +505,19 @@ class TiePolicyEndToEndTest(unittest.TestCase):
         self.assertTrue(gate.retryable)
         self.assertEqual(result.lines, [])
 
-    def test_the_encounter_routes_the_tie_to_the_provider_not_to_a_coder(self):
+    def test_the_encounter_routes_an_untyped_tie_to_the_coder_not_the_provider(self):
+        """Issue #6 F9-R2-B, third pass: an untyped leftover-token tie (powered vs.
+        manual, no governed axis distinguishes them) is a real, decided tie -- but
+        never a provider question. It routes to the coder queue."""
         result = self._run(lambda s, u: NO_PICK)
         from claude_coder.autonomy import Destination
         routed = [r for r in result.routing if r.get("fact_id")]
         self.assertTrue(routed, result.routing)
         self.assertEqual({r["destination"] for r in routed},
-                         {Destination.PROVIDER_QUERY.value}, result.routing)
+                         {Destination.REVIEW.value}, result.routing)
         issues = {r["issue"] for r in result.recommendations}
-        self.assertIn("documentation_gap", issues)
-        self.assertNotIn("coder_review", issues)
+        self.assertIn("coder_review", issues)
+        self.assertNotIn("documentation_gap", issues)
 
 
 

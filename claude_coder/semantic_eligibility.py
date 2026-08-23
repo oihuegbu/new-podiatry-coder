@@ -180,7 +180,9 @@ def _fact_attribute_value(facts: list[ClinicalFact], key: str) -> str:
 
 
 #: Generic list/conjunction punctuation -- structural, not clinical vocabulary.
-_LIST_SPLIT = re.compile(r"\s*(?:,|;|\band\b|&)\s*", re.IGNORECASE)
+#: Slash included (issue #6 F9-R2-C, third pass: real extraction output commonly
+#: uses "structure alpha / structure beta" for a composite mention).
+_LIST_SPLIT = re.compile(r"\s*(?:,|;|/|\band\b|&)\s*", re.IGNORECASE)
 
 
 def _fact_anatomy_phrases(facts: list[ClinicalFact]) -> tuple[str, ...]:
@@ -188,8 +190,7 @@ def _fact_anatomy_phrases(facts: list[ClinicalFact]) -> tuple[str, ...]:
     `anatomy` attribute, DECOMPOSED on generic list/conjunction punctuation (a
     composite mention like "structure A and structure B" names TWO structures, not
     one a single `concept_relation` call could ever resolve), plus every governed
-    synonym
-    already resolved for it (`fact.governed_terms["anatomy"]`,
+    synonym already resolved for it (`fact.governed_terms["anatomy"]`,
     `coreference.normalize_fact_terminology`'s own output -- a stable,
     concept-normalized alternate phrasing, not raw prose re-parsed here). Purely
     structural: no clinical term is named or enumerated, only generic punctuation."""
@@ -217,6 +218,36 @@ def _candidate_descriptor_features(candidate, source):
     return _ontology.parse_descriptor(descriptor)
 
 
+#: A fixed English idiom, not clinical vocabulary -- it qualifies ONE target ("with
+#: or without contrast"), it does not name two alternative targets, so it must be
+#: protected before generic alternation-splitting or it fragments into meaningless
+#: pieces ("with" / "without contrast"). Issue #6 F9-R2-C, third pass.
+_WITH_OR_WITHOUT = re.compile(r"\bwith\s+or\s+without\b", re.IGNORECASE)
+#: Generic alternation punctuation for a CANDIDATE's own target list -- "structure
+#: alpha or structure beta" names two alternative targets a single comparison could
+#: never resolve. Deliberately narrower than `_LIST_SPLIT` (no bare "and"/"&"): a
+#: descriptor's target list is far more likely to use "or" for genuine alternatives
+#: and "and"/"&" for a single compound target ("skin and subcutaneous tissue").
+_TARGET_SPLIT = re.compile(r"\s*(?:,|;|/|\bor\b)\s*", re.IGNORECASE)
+
+
+def _candidate_anatomy_targets(feats) -> tuple[str, ...]:
+    """The candidate's own anatomy phrase, decomposed into separate TARGET
+    components (issue #6 F9-R2-C, third pass): "structure alpha or structure beta"
+    names two alternative targets a single `concept_relation` call could never
+    resolve, and comparing only the whole tail wrongly left a candidate that
+    legitimately covers a documented target UNKNOWN (and so exposed to dominance
+    exclusion) whenever that target was only ONE of several the descriptor names.
+    The "with or without" idiom is protected first so it is never mis-split."""
+    text = feats.anatomy_phrase
+    if not text:
+        return ()
+    protected = _WITH_OR_WITHOUT.sub(" ", text)
+    parts = tuple(dict.fromkeys(
+        p.strip() for p in _TARGET_SPLIT.split(protected) if p.strip()))
+    return parts or (text,)
+
+
 def _anatomy_compatibility(candidate, facts: list[ClinicalFact], source) -> str:
     """How this ONE candidate's anatomy relates to what `facts` document -- never a
     comparison between candidates; that comparative step is
@@ -226,9 +257,13 @@ def _anatomy_compatibility(candidate, facts: list[ClinicalFact], source) -> str:
     (left/right/bilateral, `ontology._LATERALITY`) when both sides state one and they
     disagree -- a structural, never a lexical, comparison. SUPPORTED_EXACT/
     SUPPORTED_HIERARCHICAL come only from the governed concept-relation index
-    (SAME / ancestor-descendant); anything else -- nothing documented, no candidate
-    anatomy phrase to compare, no concept-relation capability, or the index itself
-    UNRESOLVED -- is honestly UNKNOWN, never a guess in either direction."""
+    (SAME / ancestor-descendant), tried across every documented fact PHRASE against
+    every candidate TARGET component (issue #6 F9-R2-C, third pass: both sides are
+    now decomposed, not just the fact side, so a fact documenting one of a
+    candidate's several alternative targets still grounds it). Anything else --
+    nothing documented, no candidate target to compare, no concept-relation
+    capability, or the index itself UNRESOLVED for every pair -- is honestly
+    UNKNOWN, never a guess in either direction."""
     feats = _candidate_descriptor_features(candidate, source)
 
     fact_laterality = _fact_attribute_value(facts, "laterality").lower()
@@ -236,7 +271,8 @@ def _anatomy_compatibility(candidate, facts: list[ClinicalFact], source) -> str:
         return _CONTRADICTED_EXPLICIT
 
     anatomy_phrases = _fact_anatomy_phrases(facts)
-    if not anatomy_phrases or not feats.anatomy_phrase:
+    candidate_targets = _candidate_anatomy_targets(feats)
+    if not anatomy_phrases or not candidate_targets:
         return _UNKNOWN
     relate = getattr(source, "concept_relation", None)
     if not callable(relate):
@@ -244,14 +280,15 @@ def _anatomy_compatibility(candidate, facts: list[ClinicalFact], source) -> str:
     from . import terminology as _term
     best = _UNKNOWN
     for phrase in anatomy_phrases:
-        try:
-            verdict = relate(phrase, feats.anatomy_phrase)
-        except Exception:
-            continue
-        if verdict == _term.CONCEPT_SAME:
-            return _SUPPORTED_EXACT
-        if verdict == _term.CONCEPT_RELATED:
-            best = _SUPPORTED_HIERARCHICAL
+        for target in candidate_targets:
+            try:
+                verdict = relate(phrase, target)
+            except Exception:
+                continue
+            if verdict == _term.CONCEPT_SAME:
+                return _SUPPORTED_EXACT
+            if verdict == _term.CONCEPT_RELATED:
+                best = _SUPPORTED_HIERARCHICAL
     return best
 
 

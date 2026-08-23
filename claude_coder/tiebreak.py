@@ -51,6 +51,7 @@ from .terminology import _sing
 #: whatever words the authoritative descriptors actually disagree on.
 AXIS_LATERALITY = "laterality"
 AXIS_MEASUREMENT = "measurement"
+AXIS_APPROACH = "approach"
 AXIS_DESCRIPTOR_TERM = "descriptor_term"
 
 #: English and coding GRAMMAR that can never be a discriminating clinical axis:
@@ -122,13 +123,21 @@ class AxisProbe:
                                   for k, v in sorted(self.terms_by_code.items())}}
 
 
-def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...]:
+def discriminating_axes(candidates: list[CandidateCode],
+                        source: Any = None) -> tuple[AxisProbe, ...]:
     """The axes on which the tied candidates' AUTHORITATIVE descriptors differ.
 
     Derived, never declared: a token every candidate shares says nothing about which of
     them the document means, so only the DIFFERENCE survives. That is what makes the
     re-inspection targeted — the directive asks for the discriminating axes only, not
     for the whole descriptor to be re-read.
+
+    `source` (issue #6 F9-R2-B, third pass) compiles the APPROACH axis from
+    `semantics.compiled_record` -- a governed, versioned closed vocabulary already
+    compiled from authoritative descriptor text (`semantics._APPROACH_WORDS`), the
+    same kind of real typed field `laterality`/`measurement` already are. None
+    degrades this to a no-op, never a hold: the axis simply cannot be computed
+    without a source to compile records from.
     """
     if len(candidates) < 2:
         return ()
@@ -152,8 +161,19 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
             {code: ((key,) if key else ()) for code, key in ivs.items()},
             provable=False))
 
+    appr: dict[str, tuple[str, ...]] = {}
+    if source is not None:
+        from . import semantics as _semantics
+        for c in candidates:
+            record = _semantics.compiled_record(c.code, c.system, source)
+            appr[c.code] = tuple(sorted((record or {}).get("approach") or ()))
+    if appr and len(set(appr.values())) > 1:
+        probes.append(AxisProbe(AXIS_APPROACH, appr))
+
     lat_words = {_sing(w) for terms in lat.values() for w in terms}
-    toks = {c.code: _descriptor_tokens(c.descriptor) - lat_words for c in candidates}
+    appr_words = {_sing(w) for terms in appr.values() for w in terms}
+    toks = {c.code: _descriptor_tokens(c.descriptor) - lat_words - appr_words
+           for c in candidates}
     shared = set.intersection(*toks.values()) if toks else set()
     distinct = {code: tuple(sorted(t - shared)) for code, t in toks.items()}
     if any(distinct.values()):
@@ -202,34 +222,9 @@ class TieOutcome:
         }
 
 
-def _isolated_contrast(probe: AxisProbe) -> bool:
-    """Whether `probe`'s undocumented distinguishing vocabulary is ONE isolated,
-    clinically meaningful distinction, not an open-ended bag of leftover descriptor
-    tokens (issue #6 F9-R2: a provider query is permitted only when one nameable,
-    code-changing field is genuinely absent -- never an arbitrary descriptor-token
-    difference).
-
-    Structural, never a vocabulary lookup -- no clinical term is named or enumerated
-    here, only a shape requirement: EVERY candidate's own leftover word set on this
-    axis has to be EXACTLY ONE word -- including a candidate with NONE (issue #6
-    F9-R2-B: an earlier version filtered empty entries out before checking shape, so
-    a THIRD, unqualified candidate silently vanished from the check; the proposed
-    answer cannot actually distinguish a candidate the axis says nothing about, so
-    its presence must disqualify the promotion, not be ignored). A bag of two or
-    more words is retrieval noise, not a single fact a provider could confirm; every
-    candidate's single word has to differ from every other candidate's, too -- two
-    candidates sharing the same leftover word means the axis does not actually map
-    each candidate to a distinct, unambiguous answer."""
-    values = list(probe.terms_by_code.values())
-    if not values or any(len(v) != 1 for v in values):
-        return False
-    singles = [v[0] for v in values]
-    return len(singles) == len(set(singles))
-
-
 def provider_query(fact, axes: tuple[AxisProbe, ...]) -> str:
     """ONE targeted provider query naming exactly what the record must state, or ""
-    when nothing left to ask about is a legitimate, isolated distinguishing fact.
+    when nothing left to ask about is a governed, typed distinguishing fact.
 
     Public because step 5 is reachable from more than one place: a tie the page could
     not settle (below), and a tie the page settled onto a candidate the entailment
@@ -237,24 +232,24 @@ def provider_query(fact, axes: tuple[AxisProbe, ...]) -> str:
     provider the SAME question, built once here from the same descriptors.
 
     Assembled from the candidates' own authoritative descriptors, so it asks for the
-    real distinguishing fact instead of "please clarify". AXIS_DESCRIPTOR_TERM is an
-    open-ended, unnamed bag of leftover descriptor tokens by construction
-    (`discriminating_axes`' own docstring) -- named here ONLY when `_isolated_contrast`
-    confirms it collapses to one clean, unambiguous word per candidate (issue #6
-    F9-R2); a multi-word bag is never shown to a provider. "Same service family" and
-    "action/anatomy positively compatible with the note" -- the proposal's other two
-    promotion conditions -- are enforced upstream, before a candidate ever reaches a
-    tie: `semantic_eligibility.eligible_partition`'s per-candidate checks (including
-    the action-concepts conflict check) and its `_anatomy_dominance_exclusions` pass
-    already remove a structurally-incompatible sibling from the pool before `narrow`
-    ever sees it. When there is nothing left to name, this returns "" instead of the
-    old generic "please clarify which service was performed" filler -- both callers
-    already treat an empty question as "no documentation gap", which correctly routes
-    the line to the coder queue (`autonomy.decide`) instead of manufacturing a
-    provider question out of words a page reading was never going to settle."""
+    real distinguishing fact instead of "please clarify". AXIS_DESCRIPTOR_TERM is
+    NEVER named here, regardless of shape (issue #6 F9-R2-B, third pass): an earlier
+    version tried to salvage it when it collapsed to one clean word per candidate,
+    but token CARDINALITY does not establish clinical meaning, code-changing status,
+    or a provider-answerable field -- an arbitrary single leftover word (two
+    synonyms retrieval happened to phrase differently, say) is exactly as
+    unpromotable as a whole bag of them. Only a GOVERNED, versioned typed axis
+    compiled from authoritative descriptor data -- laterality, measurement, approach
+    (`discriminating_axes`, all three real closed vocabularies, none enumerated by
+    hand here) -- may ever reach a provider. When there is nothing left to name,
+    this returns "" instead of the old generic "please clarify which service was
+    performed" filler -- both callers already treat an empty question as "no
+    documentation gap", which correctly routes the line to the coder queue
+    (`autonomy.decide`) instead of manufacturing a provider question out of
+    retrieval's own leftover vocabulary."""
     named = []
     for probe in axes:
-        if probe.axis == AXIS_DESCRIPTOR_TERM and not _isolated_contrast(probe):
+        if probe.axis == AXIS_DESCRIPTOR_TERM:
             continue
         options = sorted({" ".join(terms) for terms in probe.terms_by_code.values()
                           if terms})
@@ -268,7 +263,7 @@ def provider_query(fact, axes: tuple[AxisProbe, ...]) -> str:
 
 
 def narrow(fact, candidates: list[CandidateCode],
-           reconciliation=None) -> TieOutcome:
+           reconciliation=None, source: Any = None) -> TieOutcome:
     """Tie policy steps 3 and 4 — re-inspect ONLY the discriminating axes against the
     original document and return the candidate that becomes UNIQUELY ENTAILED.
 
@@ -288,7 +283,7 @@ def narrow(fact, candidates: list[CandidateCode],
     if len(unique) < 2:
         return TieOutcome(winner=(unique[0] if unique else None),
                           detail="no tie to narrow")
-    axes = discriminating_axes(unique)
+    axes = discriminating_axes(unique, source)
     if not axes:
         return TieOutcome(
             detail="the tied candidates' authoritative descriptors state no differing "

@@ -51,20 +51,31 @@ It decides exactly two things about an event only the second reading reported:
      anatomical phrasings of one documented structure's location read as one documented
      passage, not a disagreement over two occurrences).
 
-     Where coreference is UNDETERMINED the candidate is admitted, deliberately, exactly
-     as before this fix: it may be the service the primary reading missed, and refusing
-     it would reinstate the silent undercoding this module exists to prevent. Gating
-     admission on a POSITIVELY DISTINCT text verdict was considered and rejected --
-     `coreference.action_identity`'s own docstring records that DISTINCT_EVENT is
-     deliberately unreachable from wording alone (it takes an explicit record
-     separation or a contradicting axis value), so almost every genuinely new,
-     sparsely-worded service would fail that bar and be wrongly held. What it may never
-     do is multiply the claim on TEXT alone -- if it turns out to be a re-description,
-     both mentions resolve to one authoritative code and claim assembly makes them one
-     line with one unit (unchanged downstream safety net); the reconciled-location test
-     above is what catches the case that safety net cannot, a duplicate that resolves to
-     a DIFFERENT candidate code because the two readings described it at different
-     abstraction levels.
+     Where coreference is UNDETERMINED and the candidate is NOT co-located with any
+     primary event, it is admitted, deliberately: it may be the service the primary
+     reading missed, and refusing it would reinstate the silent undercoding this
+     module exists to prevent. Gating admission on a POSITIVELY DISTINCT text verdict
+     was considered and rejected -- `coreference.action_identity`'s own docstring
+     records that DISTINCT_EVENT is deliberately unreachable from wording alone (it
+     takes an explicit record separation or a contradicting axis value), so almost
+     every genuinely new, sparsely-worded service would fail that bar and be wrongly
+     held. What it may never do is multiply the claim on TEXT alone -- if it turns out
+     to be a re-description, both mentions resolve to one authoritative code and claim
+     assembly makes them one line with one unit (unchanged downstream safety net).
+
+     The reconciled-location test is a THIRD, stricter case, not a relaxation of the
+     other two (issue #6 F9-R1, third pass): "not proven DISTINCT" (UNDETERMINED) is
+     not "proven SAME" -- only a positive SAME_EVENT verdict may merge a co-located
+     candidate into a primary event; `UNDETERMINED` merely means the record has not
+     settled whether they are one event or two, exactly as `event_verdict`'s own
+     docstring states, and treating that absence as sufficient to merge is the same
+     "absence as proof" error the location test exists to correct, one layer narrower.
+     A candidate that IS co-located but never confirmed SAME_EVENT with exactly one
+     primary is `AMBIGUOUS_COLOCATED` -- held, recorded, never silently dropped, but
+     also never admitted as an independent new event: the physical correlation is real
+     evidence something is amiss, not evidence of nothing. Only when a candidate has NO
+     physical overlap with any primary event does the ordinary UNDETERMINED-admits
+     path above apply.
 
   2. DOES THE ORIGINAL DOCUMENT BACK IT?  Admission is gated on the SAME source-evidence
      reconciliation every other released fact must pass, through the same one definition
@@ -108,14 +119,22 @@ REJECTED_SOURCE_CONTRADICTED = "rejected_source_contradicted"
 #: Nothing could confirm or refute it -- an unread page, or relational context that
 #: could not be carried into the graph faithfully. Never admitted, never dropped.
 HELD_UNVERIFIED = "held_unverified"
+#: A candidate whose quotation is co-located with one or more primary events'
+#: quotations, but never confirmed SAME_EVENT with exactly one of them (issue #6
+#: F9-R1, third pass) -- location is real evidence something is amiss, but
+#: `UNDETERMINED` is not `SAME_EVENT`, so it is neither merged nor admitted as an
+#: independent new event. Recorded, never silently dropped.
+AMBIGUOUS_COLOCATED = "ambiguous_colocated"
 
 #: The verdicts that place the event INTO the canonical graph.
 ADMITTING_VERDICTS = frozenset({ADMITTED})
 #: The verdicts that must stop the encounter from presenting as a complete claim. A
 #: candidate here is one an independent reading of the document reported and this run
-#: could neither confirm nor refute; releasing as if the graph were complete would
-#: reinstate exactly the silent omission this module exists to prevent.
-HOLDING_VERDICTS = frozenset({HELD_UNVERIFIED})
+#: could neither confirm nor refute, or could physically co-locate with more than one
+#: (or with none confirmed) primary event; releasing as if the graph were complete
+#: would reinstate exactly the silent omission -- or silent duplication -- this
+#: module exists to prevent.
+HOLDING_VERDICTS = frozenset({HELD_UNVERIFIED, AMBIGUOUS_COLOCATED})
 
 
 def _clean(value: Any) -> str:
@@ -462,11 +481,10 @@ def _reconciled_location(fact, settled: dict) -> tuple[set[int], list]:
 
 
 def _physical_duplicates(candidates, primary_facts, reconciliation,
-                         source=None) -> dict[str, str]:
-    """`{second_event_id -> primary fact_id}` for every candidate whose RECONCILED
-    document location overlaps an already-admitted primary event's reconciled
-    location AND is POSITIVELY event-semantically compatible with it (issue #6
-    F9-R1, second pass).
+                         source=None) -> tuple[dict[str, str], set[str]]:
+    """`({second_event_id -> primary fact_id}, {second_event_id, ...})` -- confirmed
+    duplicates, and CANDIDATES CO-LOCATED BUT NEVER CONFIRMED (issue #6 F9-R1, third
+    pass).
 
     Location alone is a real identity SIGNAL, never proof by itself: a page or even
     one coarse, OCR-derived bounding box can legitimately hold several distinct
@@ -476,29 +494,33 @@ def _physical_duplicates(candidates, primary_facts, reconciliation,
     shared a location). So a location match only PROPOSES an alignment; it is
     confirmed the same way `propose`'s own text-coreference test already confirms
     identity -- `coreference.event_verdict`, the ONE mechanic every stage that
-    compares two documented events already uses -- requiring the verdict is NOT
-    `DISTINCT_EVENT` (matching fact kind, no explicit SEPARATE_FROM, no
-    contradicting closed/governed axis; see `event_verdict`'s own docstring for
-    exactly what that does and does not establish).
+    compares two documented events already uses.
 
-    When a candidate's location overlaps MORE THAN ONE primary event and more than
-    one of them is compatible, the match is genuinely ambiguous -- one location,
-    several equally-plausible primaries -- and the candidate is left unresolved
-    (never merged into ANY of them, never arbitrarily assigned to whichever was
-    checked first) rather than guessed.
+    The confirmation bar is POSITIVE: only a `SAME_EVENT` verdict merges a
+    candidate into a primary. `UNDETERMINED` is not `DISTINCT_EVENT`, but it is
+    also not `SAME_EVENT` -- `event_verdict`'s own docstring states plainly that
+    "whether they are one event or two is not established" for that verdict, so
+    treating it as sufficient to merge would be the same "absence as proof" defect
+    the location test exists to fix, one layer narrower. A co-located candidate
+    that never earns a confirmed SAME_EVENT with exactly one primary (zero
+    confirmed, or more than one -- genuinely ambiguous either way) is reported as
+    AMBIGUOUS rather than merged or silently admitted: the physical correlation IS
+    real evidence something is amiss, so `admit` neither merges it into a
+    caller-guessed primary nor lets it become an independent new billable event on
+    the strength of mere co-location.
 
     Same page plus overlapping region when both sides have region granularity;
     same page alone when either side lacks it -- withholding a reconciled region is
     not evidence the quotations are in different places on that page, so it must
-    not sharpen the LOCATION test past what was actually established (compatibility
+    not sharpen the LOCATION test past what was actually established (confirmation
     is a separate, independent requirement regardless).
 
     With no reconciliation, physical location was never established for anything and
-    this check contributes nothing -- identity still rests on `propose`'s text
-    coreference test alone, exactly as before this fix.
+    this contributes nothing -- identity still rests on `propose`'s text coreference
+    test alone, exactly as before this fix.
     """
     if reconciliation is None:
-        return {}
+        return {}, set()
     from . import coreference as _coref
 
     settled = reconciliation.by_span_id()
@@ -507,7 +529,8 @@ def _physical_duplicates(candidates, primary_facts, reconciliation,
         for f in (primary_facts or [])
         for fid in [_clean(getattr(f, "fact_id", ""))] if fid]
 
-    out: dict[str, str] = {}
+    duplicates: dict[str, str] = {}
+    ambiguous: set[str] = set()
     for candidate in candidates:
         cand_pages, cand_regions = _reconciled_location(candidate.fact, settled)
         if not cand_pages:
@@ -522,7 +545,8 @@ def _physical_duplicates(candidates, primary_facts, reconciliation,
             colocated.append((primary_id, primary_fact))
         if not colocated:
             continue
-        compatible = []
+        same_event = []
+        any_undetermined = False
         for primary_id, primary_fact in colocated:
             verdict, _reason = _coref.event_verdict(
                 left_kind=getattr(candidate.fact, "kind", None),
@@ -532,11 +556,22 @@ def _physical_duplicates(candidates, primary_facts, reconciliation,
                 left_attributes=getattr(candidate.fact, "attributes", None),
                 right_attributes=getattr(primary_fact, "attributes", None),
                 source=source)
-            if verdict != _coref.DISTINCT_EVENT:
-                compatible.append(primary_id)
-        if len(compatible) == 1:
-            out[candidate.second_event_id] = compatible[0]
-    return out
+            if verdict == _coref.SAME_EVENT:
+                same_event.append(primary_id)
+            elif verdict == _coref.UNDETERMINED:
+                any_undetermined = True
+            # DISTINCT_EVENT contributes to neither list -- a co-located primary
+            # the record proves distinct is not evidence of ambiguity at all.
+        if len(same_event) == 1:
+            duplicates[candidate.second_event_id] = same_event[0]
+        elif same_event or any_undetermined:
+            # More than one CONFIRMED match (contradictory), or at least one
+            # UNDETERMINED verdict among the co-located primaries -- genuinely
+            # ambiguous, never a guess.
+            ambiguous.add(candidate.second_event_id)
+        # else: co-located only with primaries the record proves DISTINCT --
+        # not ambiguous, not a duplicate; falls through to ordinary admission.
+    return duplicates, ambiguous
 
 
 def _source_verdict(candidate: EventCandidate, reconciliation) -> tuple[str, str]:
@@ -598,18 +633,34 @@ def admit(candidates, *, reconciliation, alignment, second_relations,
     # regardless of what `propose`'s text coreference test found: a reconciled
     # page/region match is the one identity signal both readings genuinely share, and
     # it closes the exact case a paraphrase-sensitive text test cannot (two readings
-    # quoting one passage in different words).
-    physical_dup = _physical_duplicates(decided, primary_facts, reconciliation, source)
+    # quoting one passage in different words). Only a POSITIVE SAME_EVENT confirmation
+    # merges (issue #6 F9-R1, third pass) -- a co-located candidate never confirmed
+    # with exactly one primary is AMBIGUOUS_COLOCATED, not merged and not silently
+    # admitted either.
+    physical_dup, physical_ambiguous = _physical_duplicates(
+        decided, primary_facts, reconciliation, source)
     for candidate in decided:
+        if candidate.decided:
+            continue
         primary_id = physical_dup.get(candidate.second_event_id)
-        if primary_id and not candidate.decided:
+        if primary_id:
             candidate.verdict = DUPLICATE_OF_PRIMARY
             candidate.merged_into = primary_id
             candidate.reason = (
                 f"an independent reading of the original document reconciles this "
                 f"event's quotation to the same page/region as primary event "
-                f"{primary_id}'s quotation -- the same documented event, regardless "
-                f"of how differently the two readings worded it")
+                f"{primary_id}'s quotation and the record positively confirms it is "
+                f"the same event -- regardless of how differently the two readings "
+                f"worded it")
+        elif candidate.second_event_id in physical_ambiguous:
+            candidate.verdict = AMBIGUOUS_COLOCATED
+            candidate.reason = (
+                "this event's quotation reconciles to the same page/region as one "
+                "or more primary events' quotations, but the record never "
+                "positively confirms it is the SAME documented event as exactly "
+                "one of them -- held rather than merged (which could suppress a "
+                "real service) or admitted as independent (which could double-bill "
+                "a re-description)")
 
     for candidate in decided:
         if candidate.decided:
