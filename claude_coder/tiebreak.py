@@ -169,6 +169,11 @@ class TieOutcome:
     axes: tuple[AxisProbe, ...] = ()
     #: Axes the original document did NOT settle to exactly one candidate.
     unsettled: tuple[str, ...] = ()
+    #: Axes where the proven text confirms AT LEAST ONE candidate's term (issue #6
+    #: F9-R2-B) -- distinct from `unsettled`: two candidates can each state a word
+    #: the page also states, which never settles the axis but the VALUE is
+    #: genuinely documented. Never named in a provider question; see `provider_query`.
+    documented: tuple[str, ...] = ()
     #: candidate code -> the proven words of the document that support it.
     support: dict[str, tuple[str, ...]] = field(default_factory=dict)
     #: `graph_consensus.PROOF_ORIGINAL_PAGE` / `PROOF_ANCHORED_TEXT` / "".
@@ -188,6 +193,7 @@ class TieOutcome:
             "winner": (self.winner.code if self.winner else ""),
             "axes": [a.as_record() for a in self.axes],
             "unsettled_axes": list(self.unsettled),
+            "documented_axes": list(self.documented),
             "support": {k: list(v) for k, v in sorted(self.support.items())},
             "proof": self.proof,
             "detail": self.detail,
@@ -204,13 +210,17 @@ def _isolated_contrast(probe: AxisProbe) -> bool:
     difference).
 
     Structural, never a vocabulary lookup -- no clinical term is named or enumerated
-    here, only a shape requirement: every candidate's own leftover word set on this
-    axis has to be EXACTLY ONE word (a bag of two or more is retrieval noise, not a
-    single fact a provider could confirm), and every candidate's single word has to
-    differ from every other candidate's (two candidates sharing the same leftover
-    word means the axis does not actually map each candidate to a distinct,
-    unambiguous answer)."""
-    values = [v for v in probe.terms_by_code.values() if v]
+    here, only a shape requirement: EVERY candidate's own leftover word set on this
+    axis has to be EXACTLY ONE word -- including a candidate with NONE (issue #6
+    F9-R2-B: an earlier version filtered empty entries out before checking shape, so
+    a THIRD, unqualified candidate silently vanished from the check; the proposed
+    answer cannot actually distinguish a candidate the axis says nothing about, so
+    its presence must disqualify the promotion, not be ignored). A bag of two or
+    more words is retrieval noise, not a single fact a provider could confirm; every
+    candidate's single word has to differ from every other candidate's, too -- two
+    candidates sharing the same leftover word means the axis does not actually map
+    each candidate to a distinct, unambiguous answer."""
+    values = list(probe.terms_by_code.values())
     if not values or any(len(v) != 1 for v in values):
         return False
     singles = [v[0] for v in values]
@@ -294,12 +304,23 @@ def narrow(fact, candidates: list[CandidateCode],
     words = _text_tokens(proven_text)
     support: dict[str, list[str]] = {c.code: [] for c in unique}
     settled: set[str] = set()
+    #: Axes where the proven text confirms AT LEAST ONE candidate's term -- issue #6
+    #: F9-R2-B: settling to exactly ONE candidate (`settled`, above) and the fact
+    #: itself being DOCUMENTED are different questions. Two candidates can each state
+    #: a word the page also states (e.g. both "right"), which never settles the axis
+    #: (len(documented) != 1) but the VALUE is genuinely in the record -- asking the
+    #: provider to "document" a fact already there would be asking for something that
+    #: exists. That is a candidate-mapping ambiguity for a coder, not a documentation
+    #: gap for a provider.
+    documented_axes: set[str] = set()
     for probe in axes:
         if not probe.provable:
             continue
         hits = {code: tuple(t for t in terms if t in words)
                 for code, terms in probe.terms_by_code.items()}
         documented = [code for code, found in hits.items() if found]
+        if documented:
+            documented_axes.add(probe.axis)
         if len(documented) == 1:
             settled.add(probe.axis)
         for code, found in hits.items():
@@ -315,6 +336,7 @@ def narrow(fact, candidates: list[CandidateCode],
         axis_names = ", ".join(sorted(settled))
         return TieOutcome(
             winner=winner, axes=axes, support=frozen_support, proof=proof,
+            documented=tuple(sorted(documented_axes)),
             detail=(f"every discriminating axis ({axis_names}) is settled by the "
                     f"original document, which states {stated!r} — asserted only by "
                     f"this candidate's authoritative descriptor"))
@@ -328,6 +350,10 @@ def narrow(fact, candidates: list[CandidateCode],
     else:
         detail = ("one candidate is documented but these discriminating axes remain "
                   "unsettled: " + ", ".join(unsettled))
+    # Never build a provider question that names an axis the record already
+    # documents (issue #6 F9-R2-B) -- only genuinely UNDOCUMENTED axes are askable.
+    askable = tuple(a for a in axes if a.axis not in documented_axes)
     return TieOutcome(
         axes=axes, unsettled=unsettled, support=frozen_support, proof=proof,
-        detail=detail, provider_question=provider_query(fact, axes))
+        documented=tuple(sorted(documented_axes)),
+        detail=detail, provider_question=provider_query(fact, askable))

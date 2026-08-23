@@ -170,12 +170,19 @@ class EligiblePartition(unittest.TestCase):
         self.assertEqual(result, [])
 
 
-class ActionConceptConflict(unittest.TestCase):
-    """Codex F9-R2: a candidate whose compiled action vocabulary shares nothing
-    with a DIFFERENT, specific procedure the fact's own text uniquely and
-    verifiably names (via the same round-trip-validated synonym scanner advisory
-    recall uses) is excluded -- an unrelated service class must not survive
-    eligibility purely because generic retrieval found it plausible."""
+class AdvisoryTermsNeverExcludeACandidate(unittest.TestCase):
+    """Codex F9-R2-A: a first attempt at an "action concept" eligibility check
+    routed the advisory (LLM-generated, retrieval-consistency-validated) procedure-
+    synonym scan into an EXCLUSION decision. That directly violated the advisory
+    tier's own, already-reviewed trust-tier contract
+    (`resolution._advisory_procedure_expansions`'s own docstring,
+    `ResolvedLine.advisory_terminology`'s own contract): this data may WIDEN RECALL
+    ONLY -- never settle identity, exclude a candidate, or authorize release.
+    Reverted; these are the regressions that must never let it come back,
+    including Codex's own reproduction (one service intent documenting two
+    performed actions, where a naive scan-first-match approach excluded the
+    SECOND action's candidate because the scanner encountered the FIRST action's
+    advisory match first)."""
 
     def _source(self, candidate_descriptor, matched_descriptor):
         return MockSource(
@@ -189,41 +196,29 @@ class ActionConceptConflict(unittest.TestCase):
                 "method": "retrieval_consistency_validated", "unique": True,
                 "expansions": ["removal of skin lesion"], "source_identity": {}}})
 
-    def test_disjoint_action_vocabulary_is_excluded(self):
+    def test_a_uniquely_named_different_procedure_never_excludes_a_candidate(self):
+        """The exact shape the reverted check used to exclude on: the fact's text
+        uniquely names a different, verified procedure with a disjoint compiled
+        action vocabulary. Advisory data may inform recall, never eligibility."""
         source = self._source("Repair, tendon of foot", "Excision, lesion of skin")
         fact = _fact(FactKind.PROCEDURE,
                      "The surgeon proceeded with excision of lesion along the "
                      "plantar surface.")
-        reason = semelig._ineligibility_reason(_candidate("CAND1"), [fact], source, None)
-        self.assertIsNotNone(reason, "an unrelated action vocabulary must exclude")
-        self.assertIn("MATCH1", reason)
+        self.assertTrue(semelig.eligible(_candidate("CAND1"), [fact], source, None),
+                        "advisory terminology must never decide eligibility")
 
-    def test_overlapping_action_vocabulary_stays_eligible(self):
-        """The mirror case: the candidate under test shares the SAME action as
-        the uniquely-named match (both "excision") -- never excluded, even
-        though the anatomy/target wording differs."""
-        source = self._source("Excision, tendon of foot", "Excision, lesion of skin")
-        fact = _fact(FactKind.PROCEDURE,
-                     "The surgeon proceeded with excision of lesion along the "
-                     "plantar surface.")
-        self.assertTrue(semelig.eligible(_candidate("CAND1"), [fact], source, None))
-
-    def test_no_scan_match_never_excludes(self):
-        """Nothing in the fact's text uniquely names a different procedure --
-        the mechanism must degrade to "nothing to check", not invent a
-        conflict from silence."""
+    def test_two_documented_actions_in_one_intent_exclude_neither_candidate(self):
+        """Codex's own reproduction: a multi-fact service intent documents TWO
+        performed actions. Neither candidate -- for either action -- may be
+        excluded because the advisory scanner happened to match a DIFFERENT
+        action first."""
         source = self._source("Repair, tendon of foot", "Excision, lesion of skin")
-        fact = _fact(FactKind.PROCEDURE, "A tendon repair was performed today.")
-        self.assertTrue(semelig.eligible(_candidate("CAND1"), [fact], source, None))
-
-    def test_the_matched_candidate_itself_is_never_excluded_by_its_own_match(self):
-        """A candidate the scan resolves TO is not "a different procedure" from
-        itself -- excluding it would be nonsensical."""
-        source = self._source("Excision, lesion of skin", "Excision, lesion of skin")
-        fact = _fact(FactKind.PROCEDURE,
-                     "The surgeon proceeded with excision of lesion along the "
-                     "plantar surface.")
-        self.assertTrue(semelig.eligible(_candidate("MATCH1"), [fact], source, None))
+        first_action = _fact(FactKind.PROCEDURE,
+                             "excision of lesion performed on the plantar surface")
+        second_action = _fact(FactKind.PROCEDURE, "tendon repair also performed")
+        facts = [first_action, second_action]
+        self.assertTrue(semelig.eligible(_candidate("CAND1"), facts, source, None))
+        self.assertTrue(semelig.eligible(_candidate("MATCH1"), facts, source, None))
 
 
 class AnatomyDominance(unittest.TestCase):
@@ -342,6 +337,51 @@ class AnatomyDominance(unittest.TestCase):
         self.assertTrue(report["GROUNDED"]["eligible"], report)
         if line.chosen is not None:
             self.assertEqual(line.chosen.code, "GROUNDED")
+
+
+class AnatomyPhraseDecomposition(unittest.TestCase):
+    """Codex F9-R2-C: the anatomy check went UNKNOWN almost everywhere on the live
+    note because it only ever tried one raw, possibly-composite attribute string
+    whole. It must decompose a composite mention on generic list/conjunction
+    punctuation, and also consume the ALREADY governed-normalized synonym
+    expansions (`fact.governed_terms["anatomy"]`), not just the raw phrase."""
+
+    def test_a_composite_mention_grounds_via_its_second_structure(self):
+        """"tendon and calcaneus" names TWO structures -- only "calcaneus" grounds
+        the candidate here, and a single whole-string comparison would have missed
+        it entirely."""
+        source = MockSource(
+            records={
+                ("GROUNDED", "cpt"): {"long_description": "Excision, calcaneus",
+                                      "active": True},
+                ("UNGROUNDED", "cpt"): {"long_description": "Excision, unrelated site",
+                                        "active": True}},
+            concept_relation={("calcaneus", "calcaneus"): "same"})
+        fact = ClinicalFact(FactKind.PROCEDURE, "a procedure",
+                            attributes={"anatomy": "tendon and calcaneus"})
+        result = semelig.eligible_partition(
+            [fact], [_candidate("GROUNDED"), _candidate("UNGROUNDED")], source, None)
+        self.assertEqual([c.code for c in result], ["GROUNDED"])
+
+    def test_a_governed_synonym_expansion_grounds_when_the_raw_phrase_does_not(self):
+        """The raw attribute phrase itself doesn't match anything, but a governed
+        synonym expansion already resolved for it (the SAME normalization
+        `coreference.normalize_fact_terminology` writes to `fact.governed_terms`)
+        does."""
+        source = MockSource(
+            records={
+                ("GROUNDED", "cpt"): {"long_description": "Excision, heel bone",
+                                      "active": True},
+                ("UNGROUNDED", "cpt"): {"long_description": "Excision, unrelated site",
+                                        "active": True}},
+            concept_relation={("heel prominence", "heel bone"): "same"})
+        fact = ClinicalFact(
+            FactKind.PROCEDURE, "a procedure",
+            attributes={"anatomy": "raw note phrasing with no direct match"},
+            governed_terms={"anatomy": ("heel prominence",)})
+        result = semelig.eligible_partition(
+            [fact], [_candidate("GROUNDED"), _candidate("UNGROUNDED")], source, None)
+        self.assertEqual([c.code for c in result], ["GROUNDED"])
 
 
 if __name__ == "__main__":

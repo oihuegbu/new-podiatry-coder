@@ -461,13 +461,37 @@ def _reconciled_location(fact, settled: dict) -> tuple[set[int], list]:
     return pages, regions
 
 
-def _physical_duplicates(candidates, primary_facts, reconciliation) -> dict[str, str]:
+def _physical_duplicates(candidates, primary_facts, reconciliation,
+                         source=None) -> dict[str, str]:
     """`{second_event_id -> primary fact_id}` for every candidate whose RECONCILED
     document location overlaps an already-admitted primary event's reconciled
-    location (issue #6 F9-R1). Same page plus overlapping region when both sides have
-    region granularity; same page alone when either side lacks it -- withholding a
-    reconciled region is not evidence the quotations are in different places on that
-    page, so it must not sharpen the test past what was actually established.
+    location AND is POSITIVELY event-semantically compatible with it (issue #6
+    F9-R1, second pass).
+
+    Location alone is a real identity SIGNAL, never proof by itself: a page or even
+    one coarse, OCR-derived bounding box can legitimately hold several distinct
+    documented events (Codex's live-run reproduction: 11 unrelated second-reading
+    events -- distinct procedures, imaging, supplies, a diagnosis, a drug order,
+    future therapy -- all collapsed into one primary procedure purely because they
+    shared a location). So a location match only PROPOSES an alignment; it is
+    confirmed the same way `propose`'s own text-coreference test already confirms
+    identity -- `coreference.event_verdict`, the ONE mechanic every stage that
+    compares two documented events already uses -- requiring the verdict is NOT
+    `DISTINCT_EVENT` (matching fact kind, no explicit SEPARATE_FROM, no
+    contradicting closed/governed axis; see `event_verdict`'s own docstring for
+    exactly what that does and does not establish).
+
+    When a candidate's location overlaps MORE THAN ONE primary event and more than
+    one of them is compatible, the match is genuinely ambiguous -- one location,
+    several equally-plausible primaries -- and the candidate is left unresolved
+    (never merged into ANY of them, never arbitrarily assigned to whichever was
+    checked first) rather than guessed.
+
+    Same page plus overlapping region when both sides have region granularity;
+    same page alone when either side lacks it -- withholding a reconciled region is
+    not evidence the quotations are in different places on that page, so it must
+    not sharpen the LOCATION test past what was actually established (compatibility
+    is a separate, independent requirement regardless).
 
     With no reconciliation, physical location was never established for anything and
     this check contributes nothing -- identity still rests on `propose`'s text
@@ -475,9 +499,11 @@ def _physical_duplicates(candidates, primary_facts, reconciliation) -> dict[str,
     """
     if reconciliation is None:
         return {}
+    from . import coreference as _coref
+
     settled = reconciliation.by_span_id()
     primary_locations = [
-        (fid, _reconciled_location(f, settled))
+        (fid, f, _reconciled_location(f, settled))
         for f in (primary_facts or [])
         for fid in [_clean(getattr(f, "fact_id", ""))] if fid]
 
@@ -486,14 +512,30 @@ def _physical_duplicates(candidates, primary_facts, reconciliation) -> dict[str,
         cand_pages, cand_regions = _reconciled_location(candidate.fact, settled)
         if not cand_pages:
             continue
-        for primary_id, (p_pages, p_regions) in primary_locations:
+        colocated: list[tuple[str, Any]] = []
+        for primary_id, primary_fact, (p_pages, p_regions) in primary_locations:
             if not (cand_pages & p_pages):
                 continue
             if cand_regions and p_regions and not any(
                     _region_overlap(a, b) for a in cand_regions for b in p_regions):
                 continue          # same page, but demonstrably different regions
-            out[candidate.second_event_id] = primary_id
-            break
+            colocated.append((primary_id, primary_fact))
+        if not colocated:
+            continue
+        compatible = []
+        for primary_id, primary_fact in colocated:
+            verdict, _reason = _coref.event_verdict(
+                left_kind=getattr(candidate.fact, "kind", None),
+                right_kind=getattr(primary_fact, "kind", None),
+                left_action=getattr(candidate.fact, "description", ""),
+                right_action=getattr(primary_fact, "description", ""),
+                left_attributes=getattr(candidate.fact, "attributes", None),
+                right_attributes=getattr(primary_fact, "attributes", None),
+                source=source)
+            if verdict != _coref.DISTINCT_EVENT:
+                compatible.append(primary_id)
+        if len(compatible) == 1:
+            out[candidate.second_event_id] = compatible[0]
     return out
 
 
@@ -529,7 +571,7 @@ def _source_verdict(candidate: EventCandidate, reconciliation) -> tuple[str, str
 
 
 def admit(candidates, *, reconciliation, alignment, second_relations,
-          taken_ids, id_prefix: str = "", primary_facts=None) -> Recovery:
+          taken_ids, id_prefix: str = "", primary_facts=None, source=None) -> Recovery:
     """Decide every undecided candidate against the document, and express the survivors
     in canonical graph terms.
 
@@ -538,10 +580,13 @@ def admit(candidates, *, reconciliation, alignment, second_relations,
     move into the canonical graph.
 
     `primary_facts` (issue #6 F9-R1) is the primary reading's own fact list, consulted
-    ONLY to test a candidate's RECONCILED document location against each primary
-    event's own reconciled location -- `propose` cannot run this test itself; no page
-    has been read yet at that stage. None/empty degrades it to a no-op, never to a
-    hold: identity still rests on `propose`'s text coreference test alone.
+    to test a candidate's RECONCILED document location against each primary event's own
+    reconciled location -- `propose` cannot run this test itself; no page has been read
+    yet at that stage -- AND, once co-located, whether the two are positively
+    event-semantically compatible (`source`, the governed concept source
+    `coreference.event_verdict` consults for axis comparison). None/empty degrades to a
+    no-op, never to a hold: identity still rests on `propose`'s text coreference test
+    alone.
 
     Returns facts/relations for the caller to APPEND to the primary graph inputs. This
     module deliberately does not build a graph, evaluate eligibility or retrieve: doing
@@ -554,7 +599,7 @@ def admit(candidates, *, reconciliation, alignment, second_relations,
     # page/region match is the one identity signal both readings genuinely share, and
     # it closes the exact case a paraphrase-sensitive text test cannot (two readings
     # quoting one passage in different words).
-    physical_dup = _physical_duplicates(decided, primary_facts, reconciliation)
+    physical_dup = _physical_duplicates(decided, primary_facts, reconciliation, source)
     for candidate in decided:
         primary_id = physical_dup.get(candidate.second_event_id)
         if primary_id and not candidate.decided:

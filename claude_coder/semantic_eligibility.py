@@ -19,17 +19,19 @@ and lexical overlap cannot tell a genuine mismatch from a clinical synonym
 a false exclusion there means a real service silently drops out of the candidate
 pool.
 
-ACTION now ships (issue #6 F9-R2), routed through the governed procedure-synonym
-axis instead of raw prose: `_fact_named_different_action()` uses the SAME
-round-trip-validated scan advisory recall uses (`data_access.concept_scan`/
-`concept_lookup`) to find whether the fact's own text UNIQUELY names a DIFFERENT,
-specific, verified procedure -- and if so, compares THAT verified match's own
-compiled `action_concepts` against the CANDIDATE's, both derived identically from
-authoritative CPT descriptor grammar (never fact prose against candidate tokens
-directly). A candidate is excluded only when the two action vocabularies share
-NOTHING. This still degrades honestly to "nothing to check" whenever the fact's
-text does not uniquely match anything in the synonym table -- which is common; it
-narrows real cases, it does not replace retrieval or tie-break.
+ACTION stays unimplemented, and an attempt to ship it (issue #6 F9-R2, second pass)
+was REVERTED after Codex's re-review (F9-R2-A): it routed the advisory
+procedure-synonym scan (`data_access.concept_scan`/`concept_lookup`,
+`cpt_verified_synonyms.json`) into an ELIGIBILITY EXCLUSION -- excluding a candidate
+whenever the fact's text uniquely named a different verified procedure with a
+disjoint action vocabulary. That directly violated the advisory tier's own,
+already-reviewed trust-tier contract (`resolution._advisory_procedure_expansions`'s
+own docstring, `ResolvedLine.advisory_terminology`'s own contract): LLM-generated,
+retrieval-consistency-validated terms may WIDEN RECALL ONLY -- never settle
+identity, exclude a candidate, or authorize release. A weaker-tier source deciding
+eligibility is exactly the thing that contract exists to forbid, regardless of how
+narrowly it was scoped. `concept_scan`/`concept_lookup` remain wired into
+`resolution._advisory_procedure_expansions` for recall-widening only, unchanged.
 
 ANATOMY now ships too (issue #6 F9-R2, second pass), but as POSITIVE DOMINANCE, not
 inferred disjointness -- the governed concept-relation index
@@ -50,6 +52,17 @@ supports a real, structural CONTRADICTED_EXPLICIT verdict when both sides state 
 and they disagree -- that comparison was always safe; it was never a concept-graph
 guess.
 
+`_fact_anatomy_phrases()` (issue #6 F9-R2-C) widens what gets COMPARED, not what
+counts as a match: the live note showed this check going UNKNOWN almost everywhere
+because it only ever tried one raw, possibly-composite `fact.attributes["anatomy"]`
+string whole against one candidate phrase. It now also (a) decomposes a composite
+mention on generic list/conjunction punctuation ("structure A and structure B"
+names TWO structures a single comparison could never resolve) and (b) tries every
+governed synonym `coreference.normalize_fact_terminology` already resolved for it
+(`fact.governed_terms["anatomy"]`) -- a stable, concept-normalized phrasing, not
+prose re-parsed here a second time. Still purely structural: no clinical term is
+named or enumerated by this module.
+
 Measurement/interval requirement, semantic-class conflict, and code activity on the
 date of service round out what ships deterministically at the single-candidate
 level.
@@ -68,6 +81,8 @@ excluded candidate; see its own docstring for why an earlier version's fallback 
 itself a defect, not a safety net.
 """
 from __future__ import annotations
+
+import re
 
 from . import ontology as _ontology
 from . import semantics as _semantics
@@ -143,50 +158,6 @@ def _has_documented_measurement(facts: list[ClinicalFact], dimension: str | None
     return False
 
 
-def _fact_named_different_action(facts: list[ClinicalFact], candidate,
-                                 source) -> tuple[str, set[str]] | None:
-    """`(matched_code, action_concepts)` for a DIFFERENT, specific procedure the
-    facts' own text UNIQUELY names, via the same round-trip-validated synonym scan
-    advisory recall uses (`concept_scan`/`concept_lookup`) -- or None when nothing
-    scans, the scan names only THIS candidate, or the match's own action vocabulary
-    could not be compiled. The comparison this feeds is between two CANDIDATES' own
-    compiled `action_concepts`, both derived identically from authoritative CPT
-    descriptor grammar (`ontology.parse_descriptor`) -- never fact prose compared
-    lexically against a candidate's tokens (issue #6 F9-R2)."""
-    scan = getattr(source, "concept_scan", None)
-    lookup = getattr(source, "concept_lookup", None)
-    if not callable(scan) or not callable(lookup):
-        return None
-    for f in facts:
-        if f.system not in ("cpt", "hcpcs"):
-            continue
-        texts = [f.description] + [s.text for s in (f.evidence or [])[:1]]
-        for text in texts:
-            text = str(text or "").strip()
-            if not text:
-                continue
-            try:
-                matched_terms = scan("procedure", text)
-            except Exception:
-                continue
-            for term in matched_terms:
-                try:
-                    result = lookup("procedure", term)
-                except Exception:
-                    continue
-                codes = result.get("candidates") or []
-                if not result.get("unique") or len(codes) != 1:
-                    continue
-                matched_code = codes[0]
-                if matched_code == candidate.code:
-                    continue          # names THIS candidate -- not a conflict signal
-                matched_record = _semantics.compiled_record(matched_code, "cpt", source)
-                action_concepts = set((matched_record or {}).get("action_concepts") or [])
-                if action_concepts:
-                    return matched_code, action_concepts
-    return None
-
-
 #: Verdicts for `_anatomy_compatibility` -- issue #6 F9-R2, second pass. Named to
 #: match the product owner's own vocabulary rather than reusing `coreference`'s
 #: SAME_EVENT/DISTINCT_EVENT/UNDETERMINED, which are about EVENT identity, not
@@ -206,6 +177,36 @@ def _fact_attribute_value(facts: list[ClinicalFact], key: str) -> str:
         if val:
             return val
     return ""
+
+
+#: Generic list/conjunction punctuation -- structural, not clinical vocabulary.
+_LIST_SPLIT = re.compile(r"\s*(?:,|;|\band\b|&)\s*", re.IGNORECASE)
+
+
+def _fact_anatomy_phrases(facts: list[ClinicalFact]) -> tuple[str, ...]:
+    """Every distinct anatomy phrase `facts` document (issue #6 F9-R2-C) -- the raw
+    `anatomy` attribute, DECOMPOSED on generic list/conjunction punctuation (a
+    composite mention like "structure A and structure B" names TWO structures, not
+    one a single `concept_relation` call could ever resolve), plus every governed
+    synonym
+    already resolved for it (`fact.governed_terms["anatomy"]`,
+    `coreference.normalize_fact_terminology`'s own output -- a stable,
+    concept-normalized alternate phrasing, not raw prose re-parsed here). Purely
+    structural: no clinical term is named or enumerated, only generic punctuation."""
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for f in facts:
+        raw = str((f.attributes or {}).get("anatomy") or "").strip()
+        parts = [p.strip() for p in _LIST_SPLIT.split(raw) if p.strip()] if raw else []
+        governed = tuple(str(t).strip() for t in
+                         (getattr(f, "governed_terms", None) or {}).get("anatomy", ())
+                         if str(t).strip())
+        for phrase in (*parts, *governed):
+            key = phrase.lower()
+            if key not in seen:
+                seen.add(key)
+                phrases.append(phrase)
+    return tuple(phrases)
 
 
 def _candidate_descriptor_features(candidate, source):
@@ -234,22 +235,24 @@ def _anatomy_compatibility(candidate, facts: list[ClinicalFact], source) -> str:
     if fact_laterality and feats.laterality and fact_laterality not in feats.laterality:
         return _CONTRADICTED_EXPLICIT
 
-    fact_anatomy = _fact_attribute_value(facts, "anatomy")
-    if not fact_anatomy or not feats.anatomy_phrase:
+    anatomy_phrases = _fact_anatomy_phrases(facts)
+    if not anatomy_phrases or not feats.anatomy_phrase:
         return _UNKNOWN
     relate = getattr(source, "concept_relation", None)
     if not callable(relate):
         return _UNKNOWN
-    try:
-        verdict = relate(fact_anatomy, feats.anatomy_phrase)
-    except Exception:
-        return _UNKNOWN
     from . import terminology as _term
-    if verdict == _term.CONCEPT_SAME:
-        return _SUPPORTED_EXACT
-    if verdict == _term.CONCEPT_RELATED:
-        return _SUPPORTED_HIERARCHICAL
-    return _UNKNOWN
+    best = _UNKNOWN
+    for phrase in anatomy_phrases:
+        try:
+            verdict = relate(phrase, feats.anatomy_phrase)
+        except Exception:
+            continue
+        if verdict == _term.CONCEPT_SAME:
+            return _SUPPORTED_EXACT
+        if verdict == _term.CONCEPT_RELATED:
+            best = _SUPPORTED_HIERARCHICAL
+    return best
 
 
 def _anatomy_dominance_exclusions(facts: list[ClinicalFact], candidates: list,
@@ -323,18 +326,6 @@ def _ineligibility_reason(candidate, facts: list[ClinicalFact], source,
             status = None
         if status is Outcome.BLOCKED:
             return "candidate is not active on the encounter's date of service"
-
-    if candidate.system in ("cpt", "hcpcs"):
-        candidate_actions = set(record.get("action_concepts") or [])
-        if candidate_actions:
-            matched = _fact_named_different_action(facts, candidate, source)
-            if matched:
-                matched_code, matched_actions = matched
-                if candidate_actions.isdisjoint(matched_actions):
-                    return (f"the fact's text uniquely names a different verified "
-                           f"procedure ({matched_code}), whose action vocabulary "
-                           f"{sorted(matched_actions)} shares nothing with this "
-                           f"candidate's {sorted(candidate_actions)}")
 
     return None
 

@@ -1748,6 +1748,118 @@ class PhysicalLocationIdentityAcrossReadings(unittest.TestCase):
         self.assertEqual(recovery.candidates[0].verdict, _union.DUPLICATE_OF_PRIMARY)
         self.assertEqual(recovery.candidates[0].merged_into, "F1")
 
+    def test_a_different_kind_co_located_with_no_region_never_merges(self):
+        """Codex F9-R1, second-pass reproduction, exact: a performed DRUG and a
+        different performed PROCEDURE on the same page, neither with region
+        granularity. Location alone used to be sufficient identity; it is not --
+        the two remain distinct candidate events."""
+        from claude_coder import event_union as _union
+
+        primary_span = EvidenceSpan(
+            text="Procedure alpha performed today", anchored=True,
+            start=0, end=10, span_id="p1", reading_channel_id="")
+        primary = [_fact("F1", FactKind.PROCEDURE, "procedure alpha performed",
+                         spans=[primary_span])]
+
+        candidate_span = EvidenceSpan(
+            text="Drug beta administered today", anchored=True,
+            start=0, end=10, span_id="s1", reading_channel_id="second-reading")
+        candidate_fact = _fact("S1", FactKind.DRUG, "drug beta administered",
+                               spans=[candidate_span])
+
+        candidates = _union.propose(primary, [candidate_fact])
+        self.assertEqual(candidates[0].verdict, "")
+
+        reconciliation = self._reconciliation({
+            "p1": ("AGREED", [3], None),
+            "s1": ("AGREED", [3], None),
+        })
+        recovery = _union.admit(
+            candidates, reconciliation=reconciliation, alignment={},
+            second_relations=[], taken_ids={"F1"}, id_prefix="second-",
+            primary_facts=primary)
+
+        self.assertNotEqual(recovery.candidates[0].verdict, _union.DUPLICATE_OF_PRIMARY,
+                            recovery.candidates[0].reason)
+        self.assertEqual(recovery.candidates[0].verdict, _union.ADMITTED,
+                         recovery.candidates[0].reason)
+        self.assertEqual(len(recovery.facts), 1,
+                         "a different fact kind must never merge into an unrelated "
+                         "primary event just because it shares a page")
+
+    def test_a_different_kind_with_overlapping_boxes_never_merges(self):
+        """The same pair as above, but this time their reconciled regions actually
+        overlap -- location is even stronger here, and it still must not be
+        sufficient on its own."""
+        from claude_coder import event_union as _union
+
+        primary_span = EvidenceSpan(
+            text="Procedure alpha performed today", anchored=True,
+            start=0, end=10, span_id="p1", reading_channel_id="")
+        primary = [_fact("F1", FactKind.PROCEDURE, "procedure alpha performed",
+                         spans=[primary_span])]
+
+        candidate_span = EvidenceSpan(
+            text="Drug beta administered today", anchored=True,
+            start=0, end=10, span_id="s1", reading_channel_id="second-reading")
+        candidate_fact = _fact("S1", FactKind.DRUG, "drug beta administered",
+                               spans=[candidate_span])
+
+        candidates = _union.propose(primary, [candidate_fact])
+        self.assertEqual(candidates[0].verdict, "")
+
+        reconciliation = self._reconciliation({
+            "p1": ("AGREED", [3], (3, 100.0, 200.0, 300.0, 260.0)),
+            "s1": ("AGREED", [3], (3, 110.0, 210.0, 290.0, 250.0)),
+        })
+        recovery = _union.admit(
+            candidates, reconciliation=reconciliation, alignment={},
+            second_relations=[], taken_ids={"F1"}, id_prefix="second-",
+            primary_facts=primary)
+
+        self.assertNotEqual(recovery.candidates[0].verdict, _union.DUPLICATE_OF_PRIMARY,
+                            recovery.candidates[0].reason)
+        self.assertEqual(len(recovery.facts), 1)
+
+    def test_ambiguous_between_two_compatible_primaries_stays_unresolved(self):
+        """One candidate's location overlaps TWO primary events, both of them
+        event-semantically compatible (same kind, no contradiction) -- genuinely
+        ambiguous which one it re-describes, so it must merge into NEITHER rather
+        than guess the first one checked."""
+        from claude_coder import event_union as _union
+
+        p1_span = EvidenceSpan(text="Procedure alpha performed today", anchored=True,
+                               start=0, end=10, span_id="p1", reading_channel_id="")
+        p2_span = EvidenceSpan(text="Procedure gamma performed today", anchored=True,
+                               start=0, end=10, span_id="p2", reading_channel_id="")
+        primary = [
+            _fact("F1", FactKind.PROCEDURE, "procedure alpha performed",
+                 spans=[p1_span]),
+            _fact("F2", FactKind.PROCEDURE, "procedure gamma performed",
+                 spans=[p2_span])]
+
+        candidate_span = EvidenceSpan(
+            text="Procedure beta performed today", anchored=True,
+            start=0, end=10, span_id="s1", reading_channel_id="second-reading")
+        candidate_fact = _fact("S1", FactKind.PROCEDURE, "procedure beta performed",
+                               spans=[candidate_span])
+
+        candidates = _union.propose(primary, [candidate_fact])
+        self.assertEqual(candidates[0].verdict, "")
+
+        reconciliation = self._reconciliation({
+            "p1": ("AGREED", [3], None),
+            "p2": ("AGREED", [3], None),
+            "s1": ("AGREED", [3], None),
+        })
+        recovery = _union.admit(
+            candidates, reconciliation=reconciliation, alignment={},
+            second_relations=[], taken_ids={"F1", "F2"}, id_prefix="second-",
+            primary_facts=primary)
+
+        self.assertNotEqual(recovery.candidates[0].verdict, _union.DUPLICATE_OF_PRIMARY,
+                            recovery.candidates[0].reason)
+
 
 # ---------------------------------------------------------------------------
 # INDEPENDENT DOCUMENT RECALL, AND OCCURRENCE CARDINALITY (issue #6 F7-R3, reopened)

@@ -896,7 +896,12 @@ def _tie_escalation(fact: ClinicalFact, candidates: list[CandidateCode],
     # gives up, so it is rebuilt here rather than degrading into a bare hold with no owner.
     question = tie.provider_question
     if not question and tie.axes and not tie.source_integrity:
-        question = _tiebreak.provider_query(fact, tie.axes)
+        # issue #6 F9-R2-B: never rebuild a question over an axis `narrow` already
+        # found the record documents (`tie.documented`) -- a shared/ambiguous but
+        # confirmed value is a coder's candidate-mapping question, not a provider
+        # documentation gap.
+        askable = tuple(a for a in tie.axes if a.axis not in tie.documented)
+        question = _tiebreak.provider_query(fact, askable)
     return ResolvedLine(
         fact=fact, chosen=None, alternatives=candidates[:5],
         method=ResolutionMethod.ABSTAINED,

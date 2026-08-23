@@ -225,12 +225,16 @@ class TieThatStaysTiedTest(unittest.TestCase):
 
     def test_both_candidates_documented_is_still_a_tie(self):
         """When the record states BOTH distinguishing words, the document singles out
-        nobody. Fail-closed: no winner, and the same targeted question."""
+        nobody. Fail-closed: no winner -- and, issue #6 F9-R2-B, no provider
+        question either: BOTH words are already documented, so nothing is missing
+        for a provider to add. The record contradicting itself is a coder's
+        candidate-mapping judgement, not a documentation gap."""
         fact = _fact("assembly service",
                      "assembly service used a powered step and a manual step")
         outcome = tiebreak.narrow(fact, [POWERED, MANUAL], _agreed("span-0"))
         self.assertIsNone(outcome.winner)
-        self.assertTrue(outcome.provider_question)
+        self.assertEqual(outcome.provider_question, "")
+        self.assertIn(tiebreak.AXIS_DESCRIPTOR_TERM, outcome.documented)
 
     def test_descriptors_that_differ_on_nothing_documentable_hold_without_a_query(self):
         """Identical descriptors leave no fact a provider could be asked for, so the
@@ -304,6 +308,36 @@ class IsolatedContrastPromotion(unittest.TestCase):
             tiebreak.AXIS_DESCRIPTOR_TERM,
             {"CAND_POWERED": ("powered",), "CAND_MANUAL": ("manual",)})
         self.assertTrue(tiebreak._isolated_contrast(probe))
+
+    def test_a_silently_unqualified_third_candidate_disqualifies_the_contrast(self):
+        """Codex F9-R2-B, reproduced exactly: a THIRD candidate with NO term on this
+        axis (the "silent, unqualified" candidate `AxisProbe`'s own docstring
+        describes) must disqualify promotion even though the other two are a clean
+        one-word-each pair -- the proposed question cannot distinguish the
+        unqualified candidate from whichever answer is given."""
+        probe = tiebreak.AxisProbe(
+            tiebreak.AXIS_DESCRIPTOR_TERM,
+            {"CAND_POWERED": ("powered",), "CAND_MANUAL": ("manual",),
+             "CAND_UNQUALIFIED": ()})
+        self.assertFalse(tiebreak._isolated_contrast(probe))
+
+    def test_a_value_documented_by_two_candidates_never_reaches_the_provider(self):
+        """Codex F9-R2-B, reproduced exactly: the record already states 'right', but
+        TWO candidates both carry 'right' as their term (a third states 'left') --
+        the value is genuinely documented, so asking the provider to document it
+        again is asking for a fact already in the note. The real gap (which of the
+        two 'right' candidates applies) is a coder's mapping question."""
+        right_a = _cand("CAND_RIGHT_A", "assembly service, right structure, variant one",
+                        0.9)
+        right_b = _cand("CAND_RIGHT_B", "assembly service, right structure, variant two",
+                        0.9)
+        left = _cand("CAND_LEFT", "assembly service, left structure", 0.9)
+        fact = _fact("assembly service", "assembly service performed on the right side")
+        outcome = tiebreak.narrow(fact, [right_a, right_b, left], _agreed("span-0"))
+        self.assertIsNone(outcome.winner)
+        self.assertEqual(outcome.provider_question, "",
+                         "laterality is already documented -- must never be re-asked")
+        self.assertIn(tiebreak.AXIS_LATERALITY, outcome.documented)
 
 
 # ------------------------------------------- similarity widens, it never verifies
@@ -546,17 +580,20 @@ class SelectionUniquenessTest(unittest.TestCase):
         self.assertIs(line.method, ResolutionMethod.ABSTAINED)
         self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
         self.assertEqual(line.tie_record["selected"], "SYN_A")
-        # and it left through the TIE POLICY: one targeted question naming the axis both
-        # descriptors disagree on, not a generic coder queue.
-        self.assertTrue(line.documentation_gap, line.rationale)
-        self.assertIn(tiebreak.AXIS_DESCRIPTOR_TERM, line.documentation_gap)
-        self.assertIn("one", line.documentation_gap)
-        self.assertIn("two", line.documentation_gap)
+        # BOTH_DOCUMENTED states BOTH distinguishing words ("component one" AND
+        # "component two") -- issue #6 F9-R2-B: an axis the record already documents
+        # must never become a provider question ("please document" a fact that is
+        # already there). The record contradicting itself between two candidates is a
+        # coder's candidate-mapping judgement, not a provider documentation gap.
+        self.assertIsNone(line.documentation_gap, line.rationale)
 
     def test_the_reviewers_reproduction_holds_the_whole_encounter(self):
         """The same reproduction through the real entrypoint, because the finding is
         about what gets BILLED. Nothing may reach the claim, and the encounter must be
-        routed to the provider — not to a coder, and not auto-released."""
+        held -- not auto-released. Routed to the CODER (issue #6 F9-R2-B), not the
+        provider: BOTH_DOCUMENTED states both distinguishing words, so nothing is
+        genuinely undocumented -- the record contradicting itself between two
+        candidates is a candidate-mapping judgement, not a documentation gap."""
         from claude_coder.autonomy import Destination
         from claude_coder.pipeline import code_encounter
         from claude_coder.provenance import NullAuditRepository
@@ -584,11 +621,11 @@ class SelectionUniquenessTest(unittest.TestCase):
         self.assertEqual([ln.chosen.code for ln in result.billable_lines], [])
         (line,) = [ln for ln in result.lines if ln.fact.kind is FactKind.PROCEDURE]
         self.assertIsNone(line.chosen, line.rationale)
-        self.assertTrue(line.documentation_gap, line.rationale)
-        self.assertEqual(result.destination, Destination.PROVIDER_QUERY)
+        self.assertIsNone(line.documentation_gap, line.rationale)
+        self.assertEqual(result.destination, Destination.REVIEW)
         issues = {r["issue"] for r in result.recommendations}
-        self.assertIn("documentation_gap", issues)
-        self.assertNotIn("coder_review", issues)
+        self.assertIn("coder_review", issues)
+        self.assertNotIn("documentation_gap", issues)
 
     # ---- the common path must not regress -------------------------------------------
     def test_a_single_entailed_candidate_still_auto_releases(self):
@@ -660,7 +697,9 @@ class SelectionUniquenessTest(unittest.TestCase):
         line = self._resolve(self.BOTH_DOCUMENTED, _judge(only_one), _judge(only_one))
         self.assertIsNone(line.chosen, line.rationale)
         self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
-        self.assertTrue(line.documentation_gap, line.rationale)
+        # BOTH_DOCUMENTED states both distinguishing words -- issue #6 F9-R2-B: an
+        # axis the record already documents is never a provider question.
+        self.assertIsNone(line.documentation_gap, line.rationale)
         self.assertNotIn("SYN_B", line.tie_record["eliminated"])
 
     def test_a_named_elimination_from_a_disagreed_span_does_not_release(self):
@@ -717,7 +756,9 @@ class SelectionUniquenessTest(unittest.TestCase):
                              _judge(lambda d: True, prefers=lambda d: _ONE in d))
         self.assertIsNone(line.chosen, line.rationale)
         self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
-        self.assertTrue(line.documentation_gap)
+        # BOTH_DOCUMENTED states both distinguishing words -- issue #6 F9-R2-B: an
+        # axis the record already documents is never a provider question.
+        self.assertIsNone(line.documentation_gap)
 
 
 if __name__ == "__main__":
