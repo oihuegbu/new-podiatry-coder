@@ -114,14 +114,14 @@ class AxisProbe:
     #: satisfaction is a typed, unit-converted comparison owned by `resolution`). Such
     #: an axis still names itself in the provider query, and — because release requires
     #: every axis to be settled — it always holds the line. It never selects a code.
-    provable: bool = True
+    provable: bool
     #: Whether this axis may eliminate alternatives or produce a winner. Raw
     #: descriptor-token differences are auditable recall evidence, not typed
     #: clinical facts, so they are deliberately non-selecting.
-    selectable: bool = True
+    selectable: bool
     #: Whether an undocumented value on this axis can become a provider question.
     #: An open-ended descriptor-token bag is never provider-answerable.
-    queryable: bool = True
+    queryable: bool
 
     def as_record(self) -> dict[str, Any]:
         return {"axis": self.axis, "provable": self.provable,
@@ -159,7 +159,9 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
 
     lat = {code: tuple(sorted(f.laterality)) for code, f in feats.items()}
     if len(set(lat.values())) > 1:
-        probes.append(AxisProbe(AXIS_LATERALITY, lat))
+        probes.append(AxisProbe(
+            AXIS_LATERALITY, lat,
+            provable=True, selectable=True, queryable=True))
 
     def _interval_key(f) -> str:
         iv = f.interval
@@ -172,7 +174,7 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
         probes.append(AxisProbe(
             AXIS_MEASUREMENT,
             {code: ((key,) if key else ()) for code, key in ivs.items()},
-            provable=False, selectable=False))
+            provable=False, selectable=False, queryable=True))
 
     lat_words = {_sing(w) for terms in lat.values() for w in terms}
     toks = {c.code: _descriptor_tokens(c.descriptor) - lat_words for c in candidates}
@@ -180,7 +182,8 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
     distinct = {code: tuple(sorted(t - shared)) for code, t in toks.items()}
     if any(distinct.values()):
         probes.append(AxisProbe(
-            AXIS_DESCRIPTOR_TERM, distinct, selectable=False, queryable=False))
+            AXIS_DESCRIPTOR_TERM, distinct,
+            provable=True, selectable=False, queryable=False))
     return tuple(probes)
 
 
@@ -242,9 +245,8 @@ def provider_query(fact, axes: tuple[AxisProbe, ...]) -> str:
     or a provider-answerable field -- an arbitrary single leftover word (two
     synonyms retrieval happened to phrase differently, say) is exactly as
     unpromotable as a whole bag of them. Only a GOVERNED, versioned typed axis
-    compiled from authoritative descriptor data -- laterality, measurement, approach
-    (`discriminating_axes`, all three real closed vocabularies, none enumerated by
-    hand here) -- may ever reach a provider. When there is nothing left to name,
+    compiled from authoritative descriptor data -- currently laterality and
+    measurement -- may ever reach a provider. When there is nothing left to name,
     this returns "" instead of the old generic "please clarify which service was
     performed" filler -- both callers already treat an empty question as "no
     documentation gap", which correctly routes the line to the coder queue

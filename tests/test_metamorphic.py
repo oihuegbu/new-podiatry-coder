@@ -681,7 +681,8 @@ def test_llm_proposals_cannot_crowd_out_retrieval():
 
     This fixture's only discriminating axis is a raw descriptor_term token ("retrieved"),
     which issue #6 F9-R2-B established can be audited but never select a code absent a
-    typed axis or page reconciliation -- so unlike the code's original release assertion,
+    typed axis -- even page reconciliation cannot promote an untyped word -- so unlike
+    the code's original release assertion,
     the line correctly abstains rather than deterministically choosing RCODE off that
     token. The property this test actually guards -- RCODE surviving the retrieval floor
     instead of being crowded out of the shortlist by the 6 proposals -- is unaffected by

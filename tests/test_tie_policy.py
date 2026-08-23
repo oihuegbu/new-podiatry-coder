@@ -94,6 +94,14 @@ MANUAL = _cand("CAND_MANUAL", "assembly service, manual technique", 0.90)
 # ------------------------------------------------------- the axis derivation itself
 class DiscriminatingAxesTest(unittest.TestCase):
 
+    def test_every_probe_must_declare_its_claim_capabilities(self):
+        """A new axis cannot silently acquire selection/provider authority by relying
+        on defaults.  The constructor forces the implementer to make all three
+        capabilities explicit and reviewable."""
+        with self.assertRaises(TypeError):
+            tiebreak.AxisProbe(
+                "future_axis", {"CAND_A": ("alpha",), "CAND_B": ("beta",)})
+
     def test_only_the_difference_between_descriptors_becomes_an_axis(self):
         (probe,) = tiebreak.discriminating_axes([POWERED, MANUAL])
         self.assertEqual(probe.axis, tiebreak.AXIS_DESCRIPTOR_TERM)
@@ -101,6 +109,7 @@ class DiscriminatingAxesTest(unittest.TestCase):
         # candidate the record means and are not axes.
         self.assertEqual(probe.terms_by_code["CAND_POWERED"], ("powered",))
         self.assertEqual(probe.terms_by_code["CAND_MANUAL"], ("manual",))
+        self.assertTrue(probe.provable)
         self.assertFalse(probe.selectable)
         self.assertFalse(probe.queryable)
 
@@ -110,6 +119,9 @@ class DiscriminatingAxesTest(unittest.TestCase):
         axes = {p.axis: p for p in tiebreak.discriminating_axes([left, right])}
         self.assertIn(tiebreak.AXIS_LATERALITY, axes)
         self.assertEqual(axes[tiebreak.AXIS_LATERALITY].terms_by_code["CAND_L"], ("left",))
+        self.assertTrue(axes[tiebreak.AXIS_LATERALITY].provable)
+        self.assertTrue(axes[tiebreak.AXIS_LATERALITY].selectable)
+        self.assertTrue(axes[tiebreak.AXIS_LATERALITY].queryable)
         # laterality words are not double-counted as generic descriptor terms
         self.assertNotIn(tiebreak.AXIS_DESCRIPTOR_TERM, axes)
 
