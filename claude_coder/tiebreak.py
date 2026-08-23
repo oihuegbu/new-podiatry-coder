@@ -51,7 +51,6 @@ from .terminology import _sing
 #: whatever words the authoritative descriptors actually disagree on.
 AXIS_LATERALITY = "laterality"
 AXIS_MEASUREMENT = "measurement"
-AXIS_APPROACH = "approach"
 AXIS_DESCRIPTOR_TERM = "descriptor_term"
 
 #: English and coding GRAMMAR that can never be a discriminating clinical axis:
@@ -123,8 +122,7 @@ class AxisProbe:
                                   for k, v in sorted(self.terms_by_code.items())}}
 
 
-def discriminating_axes(candidates: list[CandidateCode],
-                        source: Any = None) -> tuple[AxisProbe, ...]:
+def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...]:
     """The axes on which the tied candidates' AUTHORITATIVE descriptors differ.
 
     Derived, never declared: a token every candidate shares says nothing about which of
@@ -132,12 +130,19 @@ def discriminating_axes(candidates: list[CandidateCode],
     re-inspection targeted — the directive asks for the discriminating axes only, not
     for the whole descriptor to be re-read.
 
-    `source` (issue #6 F9-R2-B, third pass) compiles the APPROACH axis from
-    `semantics.compiled_record` -- a governed, versioned closed vocabulary already
-    compiled from authoritative descriptor text (`semantics._APPROACH_WORDS`), the
-    same kind of real typed field `laterality`/`measurement` already are. None
-    degrades this to a no-op, never a hold: the axis simply cannot be computed
-    without a source to compile records from.
+    issue #6 F9-R2-B, fourth pass: an APPROACH axis compiled from
+    `semantics._APPROACH_WORDS` was added and then REVERTED. Codex's re-review
+    found it exactly right: that word list has no versioned artifact identity, no
+    semantic-role parse, and no authoritative qualifier field behind it -- it is a
+    fixed token scanner wearing a governed field's name. Two real reproductions:
+    ordinary category wording using "open"/"closed" produced a labelled `approach`
+    provider question, and one candidate's silence on those words was treated as
+    the OPPOSING approach and used to deterministically select its sibling --
+    absence is not evidence, and it was being treated as some. Those six words now
+    fall back into the untyped `AXIS_DESCRIPTOR_TERM` bucket like any other
+    leftover token, which `provider_query` already never names. Only `laterality`
+    (a real closed enumeration) and `measurement` (a real typed, unit-converted
+    interval) are genuinely governed enough to select a code or reach a provider.
     """
     if len(candidates) < 2:
         return ()
@@ -161,19 +166,8 @@ def discriminating_axes(candidates: list[CandidateCode],
             {code: ((key,) if key else ()) for code, key in ivs.items()},
             provable=False))
 
-    appr: dict[str, tuple[str, ...]] = {}
-    if source is not None:
-        from . import semantics as _semantics
-        for c in candidates:
-            record = _semantics.compiled_record(c.code, c.system, source)
-            appr[c.code] = tuple(sorted((record or {}).get("approach") or ()))
-    if appr and len(set(appr.values())) > 1:
-        probes.append(AxisProbe(AXIS_APPROACH, appr))
-
     lat_words = {_sing(w) for terms in lat.values() for w in terms}
-    appr_words = {_sing(w) for terms in appr.values() for w in terms}
-    toks = {c.code: _descriptor_tokens(c.descriptor) - lat_words - appr_words
-           for c in candidates}
+    toks = {c.code: _descriptor_tokens(c.descriptor) - lat_words for c in candidates}
     shared = set.intersection(*toks.values()) if toks else set()
     distinct = {code: tuple(sorted(t - shared)) for code, t in toks.items()}
     if any(distinct.values()):
@@ -263,7 +257,7 @@ def provider_query(fact, axes: tuple[AxisProbe, ...]) -> str:
 
 
 def narrow(fact, candidates: list[CandidateCode],
-           reconciliation=None, source: Any = None) -> TieOutcome:
+           reconciliation=None) -> TieOutcome:
     """Tie policy steps 3 and 4 — re-inspect ONLY the discriminating axes against the
     original document and return the candidate that becomes UNIQUELY ENTAILED.
 
@@ -283,7 +277,7 @@ def narrow(fact, candidates: list[CandidateCode],
     if len(unique) < 2:
         return TieOutcome(winner=(unique[0] if unique else None),
                           detail="no tie to narrow")
-    axes = discriminating_axes(unique, source)
+    axes = discriminating_axes(unique)
     if not axes:
         return TieOutcome(
             detail="the tied candidates' authoritative descriptors state no differing "

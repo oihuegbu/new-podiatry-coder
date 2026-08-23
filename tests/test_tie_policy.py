@@ -296,33 +296,35 @@ class IsolatedContrastPromotion(unittest.TestCase):
         meaning. A clean, one-word-per-candidate, all-distinct AXIS_DESCRIPTOR_TERM
         contrast -- meaningless placeholder words, not a real qualifier -- must
         never reach the provider, exactly as a multi-word bag must not. Only a
-        GOVERNED, typed axis (laterality, measurement, approach) may ever be named."""
+        GOVERNED, typed axis (laterality, measurement) may ever be named."""
         alpha = _cand("CAND_ALPHA", "assembly service, alpha variant", 0.9)
         beta = _cand("CAND_BETA", "assembly service, beta variant", 0.9)
         fact = _fact("assembly service", "assembly service was completed today")
-        outcome = tiebreak.narrow(fact, [alpha, beta], _agreed("span-0"),
-                                  source=_source(alpha, beta))
+        outcome = tiebreak.narrow(fact, [alpha, beta], _agreed("span-0"))
         self.assertIsNone(outcome.winner)
         self.assertEqual(outcome.provider_question, "",
                          "an arbitrary single leftover word is not a governed "
                          "typed qualifier and must never become a provider question")
 
-    def test_a_governed_typed_approach_qualifier_does_reach_the_provider(self):
-        """The positive mirror Codex asked for: a REAL governed, versioned typed
-        axis (APPROACH, compiled from authoritative descriptor grammar via
-        `semantics.compiled_record` -- the same closed vocabulary laterality
-        already is) still produces a legitimate, answerable provider question,
-        because it is not an arbitrary leftover token -- it is a compiled field."""
+    def test_ordinary_category_words_that_look_like_an_approach_never_select_a_code(self):
+        """Codex F9-R2-B, fourth pass: an earlier APPROACH axis treated
+        `semantics._APPROACH_WORDS` as if it were a governed field -- it is a
+        fixed six-word Python tuple with no versioned identity or semantic-role
+        parse, and scanning for those words anywhere in a descriptor cannot tell
+        their genuine clinical role from ordinary category wording. Reverted
+        entirely: "open"/"percutaneous" now fall into the same untyped
+        AXIS_DESCRIPTOR_TERM bucket as any other leftover word, and never
+        select a candidate or reach a provider on their own -- confirmed
+        end-to-end, not just at the tiebreak layer."""
         open_cand = _cand("CAND_OPEN", "assembly service, open technique", 0.9)
         percutaneous = _cand("CAND_PERCUTANEOUS",
                              "assembly service, percutaneous technique", 0.9)
         fact = _fact("assembly service", "assembly service was completed today")
-        source = _source(open_cand, percutaneous)
-        outcome = tiebreak.narrow(fact, [open_cand, percutaneous], _agreed("span-0"),
-                                  source=source)
-        self.assertIsNone(outcome.winner)
-        self.assertTrue(outcome.provider_question, outcome.detail)
-        self.assertIn(tiebreak.AXIS_APPROACH, outcome.provider_question)
+        line = resolve(_request(fact), _source(open_cand, percutaneous),
+                       reconciliation=_agreed("span-0"))
+        self.assertFalse(line.resolved, line.rationale)
+        self.assertIsNone(line.documentation_gap, line.rationale)
+        self.assertIsNotNone(line.tie_record)
 
     def test_a_value_documented_by_two_candidates_never_reaches_the_provider(self):
         """Codex F9-R2-B, reproduced exactly: the record already states 'right', but

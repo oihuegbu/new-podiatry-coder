@@ -421,13 +421,40 @@ class AnatomyPhraseDecomposition(unittest.TestCase):
         self.assertEqual([c.code for c in result], ["EITHER"])
 
     def test_with_or_without_idiom_is_not_mis_split_into_alternative_targets(self):
-        """The fixed English idiom "with or without X" qualifies ONE target; it must
-        never be split on "or" into meaningless fragments ("with" / "without X")."""
+        """Codex F9-R2-C, fourth pass, exact reproduction: "Action, structure
+        gamma, with or without qualifier delta" must yield ONLY "structure gamma"
+        as a target -- "qualifier delta" is a qualifier CLAUSE, dropped wholesale,
+        never promoted into a second, false target."""
         feats = semelig._ontology.parse_descriptor(
-            "Excision, structure gamma, with or without graft")
+            "Excision, structure gamma, with or without qualifier delta")
         targets = semelig._candidate_anatomy_targets(feats)
-        self.assertNotIn("with", targets)
-        self.assertTrue(any("structure gamma" in t for t in targets), targets)
+        self.assertEqual(targets, ("structure gamma",), targets)
+
+    def test_qualifier_clause_cannot_ground_a_candidate_or_dominate_a_sibling(self):
+        """Codex F9-R2-C, fourth pass, claim-level reproduction: even when a
+        governed relation exists for the QUALIFIER phrase itself, it must never
+        be read as anatomy -- it must not ground the candidate that carries it,
+        and must not let dominance remove an otherwise-unknown sibling."""
+        source = MockSource(
+            records={
+                ("QUALIFIED", "cpt"): {
+                    "long_description":
+                        "Excision, structure alpha, with or without qualifier beta",
+                    "active": True},
+                ("UNGROUNDED", "cpt"): {"long_description": "Excision, unrelated site",
+                                        "active": True}},
+            # A governed relation exists for the QUALIFIER phrase, not the real
+            # target -- if the qualifier were wrongly read as anatomy, this would
+            # ground QUALIFIED and let dominance remove UNGROUNDED.
+            concept_relation={("qualifier beta", "qualifier beta"): "same"})
+        fact = ClinicalFact(FactKind.PROCEDURE, "a procedure",
+                            attributes={"anatomy": "qualifier beta"})
+        result = semelig.eligible_partition(
+            [fact], [_candidate("QUALIFIED"), _candidate("UNGROUNDED")], source, None)
+        # Neither candidate is dominance-excluded: QUALIFIED's real target
+        # ("structure alpha") was never documented, and the qualifier clause must
+        # not be read as if it grounded QUALIFIED's anatomy.
+        self.assertEqual({c.code for c in result}, {"QUALIFIED", "UNGROUNDED"})
 
 
 if __name__ == "__main__":

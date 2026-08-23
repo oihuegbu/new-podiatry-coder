@@ -218,11 +218,15 @@ def _candidate_descriptor_features(candidate, source):
     return _ontology.parse_descriptor(descriptor)
 
 
-#: A fixed English idiom, not clinical vocabulary -- it qualifies ONE target ("with
-#: or without contrast"), it does not name two alternative targets, so it must be
-#: protected before generic alternation-splitting or it fragments into meaningless
-#: pieces ("with" / "without contrast"). Issue #6 F9-R2-C, third pass.
-_WITH_OR_WITHOUT = re.compile(r"\bwith\s+or\s+without\b", re.IGNORECASE)
+#: A fixed English idiom, not clinical vocabulary -- "structure alpha, with or
+#: without graft" qualifies ONE target; it does not name "graft" as a second one.
+#: Issue #6 F9-R2-C, fourth pass: an earlier version only deleted the idiom's own
+#: words and still split the surrounding comma, which promoted the qualifier text
+#: itself ("graft") into a false second target. This TRUNCATES the phrase at the
+#: idiom instead -- everything from "with or without" onward (and the list
+#: separator immediately before it, if any) is a qualifier CLAUSE, dropped
+#: wholesale, never treated as a candidate anatomical target.
+_WITH_OR_WITHOUT = re.compile(r"[,;]?\s*\bwith\s+or\s+without\b.*$", re.IGNORECASE)
 #: Generic alternation punctuation for a CANDIDATE's own target list -- "structure
 #: alpha or structure beta" names two alternative targets a single comparison could
 #: never resolve. Deliberately narrower than `_LIST_SPLIT` (no bare "and"/"&"): a
@@ -233,19 +237,23 @@ _TARGET_SPLIT = re.compile(r"\s*(?:,|;|/|\bor\b)\s*", re.IGNORECASE)
 
 def _candidate_anatomy_targets(feats) -> tuple[str, ...]:
     """The candidate's own anatomy phrase, decomposed into separate TARGET
-    components (issue #6 F9-R2-C, third pass): "structure alpha or structure beta"
-    names two alternative targets a single `concept_relation` call could never
-    resolve, and comparing only the whole tail wrongly left a candidate that
-    legitimately covers a documented target UNKNOWN (and so exposed to dominance
-    exclusion) whenever that target was only ONE of several the descriptor names.
-    The "with or without" idiom is protected first so it is never mis-split."""
+    components (issue #6 F9-R2-C): "structure alpha or structure beta" names two
+    alternative targets a single `concept_relation` call could never resolve, and
+    comparing only the whole tail wrongly left a candidate that legitimately covers
+    a documented target UNKNOWN (and so exposed to dominance exclusion) whenever
+    that target was only ONE of several the descriptor names. A trailing "with or
+    without ..." qualifier CLAUSE is truncated first -- dropped wholesale, never
+    split into a false additional target -- because it qualifies the target(s)
+    already named, it does not name a new one."""
     text = feats.anatomy_phrase
     if not text:
         return ()
-    protected = _WITH_OR_WITHOUT.sub(" ", text)
+    truncated = _WITH_OR_WITHOUT.sub("", text).strip()
+    if not truncated:
+        return ()
     parts = tuple(dict.fromkeys(
-        p.strip() for p in _TARGET_SPLIT.split(protected) if p.strip()))
-    return parts or (text,)
+        p.strip() for p in _TARGET_SPLIT.split(truncated) if p.strip()))
+    return parts or (truncated,)
 
 
 def _anatomy_compatibility(candidate, facts: list[ClinicalFact], source) -> str:
