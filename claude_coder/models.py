@@ -85,6 +85,35 @@ class EvidenceSpan:
     reading_channel_id: str | None = None
 
 
+@dataclass(frozen=True)
+class AttributeEvidence:
+    """One verbatim source quote supporting a specific CODE-CHANGING ATTRIBUTE value
+    on a `ClinicalFact` (issue #6 F9-R5) -- the missing per-attribute link between
+    `attributes` (whatever value the model wrote) and `evidence` (the fact's whole,
+    UNDIFFERENTIATED quote pool). Without this link, axis consensus could only prove
+    a disputed value by checking whether its tokens appear ANYWHERE in the fact's
+    entire evidence text -- which cannot distinguish a value stated in a scoped
+    heading/parent event from an unrelated token co-occurrence elsewhere in the same
+    fact's quote pool.
+
+    `span` reuses `EvidenceSpan`'s own anchoring/reconciliation-eligible shape -- this
+    is not a second evidence system, just a per-attribute pointer into the SAME kind
+    of verified quote a fact's own `evidence` list already carries.
+
+    `scope` is `"local"` when the quote sits in THIS fact's own sentence, or
+    `"inherited"` when the value is stated once in a linked parent/section and this
+    fact inherits it. Inheritance is never assumed: it requires `source_relation_id`
+    to name an actual `RelationAssertion` (PART_OF/SAME_EPISODE_AS) connecting the two
+    facts, so an inherited value's provenance is exactly "which relation, and which
+    endpoint's quote" -- reusing `RelationAssertion`'s own span-anchored evidence
+    contract rather than inventing a second one, and nothing here globally propagates
+    a value across the encounter on its own.
+    """
+    span: EvidenceSpan
+    scope: str = "local"
+    source_relation_id: str = ""
+
+
 @dataclass
 class ClinicalFact:
     """A billable clinical event in plain clinical language — never a code.
@@ -130,6 +159,14 @@ class ClinicalFact:
     # confirmed alternate phrasing too, so a code indexed only under the OTHER
     # reading's synonym is not silently unreachable once the two readings merge.
     governed_terms: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Per-attribute source anchoring (issue #6 F9-R5), keyed by the SAME attribute
+    # names as `attributes`. Empty for any attribute (or any fact, or any fact
+    # extracted before this field existed) that never populated it -- axis consensus
+    # falls back to its pre-existing whole-fact-evidence-text check in that case, so
+    # this is a strictly ADDITIVE, backward-compatible signal, never a narrowing of
+    # what already worked.
+    attribute_evidence: dict[str, tuple[AttributeEvidence, ...]] = field(
+        default_factory=dict)
     fact_id: str = ""
 
     @property

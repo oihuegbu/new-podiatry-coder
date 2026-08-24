@@ -20,8 +20,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from typing import Callable
 
-from .models import (ClinicalFact, Disposition, EvidenceSpan, FactKind,
-                     RelationAssertion, RelationPredicate, RelationState)
+from .models import (AttributeEvidence, ClinicalFact, Disposition, EvidenceSpan,
+                     FactKind, RelationAssertion, RelationPredicate, RelationState)
 
 # A callable (system_prompt, user_prompt) -> JSON string. Injectable for tests.
 LLMFn = Callable[[str, str], str]
@@ -44,6 +44,18 @@ For each fact return an object with:
         For performed services also capture actor participation using ONLY ids supplied
         in encounter_context: performer_id, performer_function, organization_id, and
         billing_entity_id. Never invent an id or equate a person with an organization.
+  - "attribute_evidence": for EVERY key you emit in "attributes", one or more
+        {"text": <verbatim quote>, "scope": "local"|"inherited", "parent_fact_id": <id>}
+        entries proving that specific value — the SAME per-endpoint quoting
+        discipline you already use for directional relations below, applied to
+        attributes instead. "scope" is "local" when the quote sits in this fact's
+        own sentence; it is "inherited" only when the value is instead stated once
+        in a heading or a linked parent event and this fact's own sentence does not
+        repeat it — in that case "parent_fact_id" must name that parent fact, and you
+        must ALSO emit a part_of or same_episode_as relation connecting this fact to
+        that exact parent (omit "parent_fact_id" for "local" scope). Never mark a
+        value "inherited" without a real relation behind it, and never fabricate a
+        quote a value is not literally present in.
         For an evaluation_management fact, also give the medical-decision-making
         elements when documented: "problems", "data", "risk" each as one of
         straightforward | low | moderate | high, plus "new_patient" (true/false),
@@ -364,6 +376,26 @@ def _evidence_span(value: Any) -> EvidenceSpan | None:
     return EvidenceSpan(text=value) if value.strip() else None
 
 
+def _attribute_evidence_entry(value: Any) -> tuple[str, str, str] | None:
+    """(text, scope, parent_fact_id) for one raw `attribute_evidence` entry, or None
+    when malformed (the caller raises -- same discipline as `_evidence_span`). Never
+    stringifies a non-quote into a pseudo-quote, matching `_evidence_span`; "local"
+    scope needs no parent, "inherited" scope requires one (resolved against the
+    relations graph by the caller, once relations are parsed -- issue #6 F9-R5)."""
+    if not isinstance(value, dict):
+        return None
+    raw_text = value.get("text", "")
+    if isinstance(raw_text, bool) or not isinstance(raw_text, str) or not raw_text.strip():
+        return None
+    scope = str(value.get("scope", "local") or "local").strip().lower()
+    if scope not in ("local", "inherited"):
+        return None
+    parent = str(value.get("parent_fact_id", "") or "").strip()
+    if scope == "inherited" and not parent:
+        return None
+    return raw_text, scope, parent
+
+
 def _relation(value: Any, index: int) -> RelationAssertion | None:
     """A relation, or None when its identity/shape is malformed (the caller raises).
 
@@ -530,6 +562,10 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
     if not isinstance(relations_in, list):
         raise ExtractionSchemaError("'relations' must be an array when present")
     facts: list[ClinicalFact] = []
+    # (fact_id, attr_name, text, parent_fact_id) for every "inherited"-scope
+    # attribute_evidence entry -- resolved against the relations graph in the second
+    # pass below, once every relation has been parsed (issue #6 F9-R5).
+    pending_inherited: list[tuple[str, str, str, str]] = []
     for i, item in enumerate(facts_in):
         if not isinstance(item, dict):
             raise ExtractionSchemaError(f"fact #{i} is not a JSON object")
@@ -586,6 +622,34 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
         if attrs_in is not None and not isinstance(attrs_in, dict):
             raise ExtractionSchemaError(f"fact #{i} 'attributes' must be an object")
         attributes = dict(attrs_in or {})
+        # R1, same discipline as `evidence`/`attributes`: typed nested shape or a loud
+        # schema error, never a silent drop of a malformed entry (issue #6 F9-R5).
+        # "local"-scope entries need nothing else and are built here; "inherited"-scope
+        # entries are queued in `pending_inherited` and resolved against the relations
+        # graph in the second pass below, once every fact_id and relation exists to
+        # validate against -- an "inherited" claim with no matching relation is never
+        # constructed at all (fail-closed, not silently degraded to "local").
+        attr_ev_in = item.get("attribute_evidence")
+        if attr_ev_in is not None and not isinstance(attr_ev_in, dict):
+            raise ExtractionSchemaError(f"fact #{i} 'attribute_evidence' must be an object")
+        attribute_evidence: dict[str, list[AttributeEvidence]] = {}
+        this_fid = str(item.get("fact_id") or f"F{i+1}").strip()
+        for attr_name, entries in (attr_ev_in or {}).items():
+            if not isinstance(entries, list):
+                raise ExtractionSchemaError(
+                    f"fact #{i} attribute_evidence[{attr_name!r}] must be a list")
+            for entry in entries:
+                parsed = _attribute_evidence_entry(entry)
+                if parsed is None:
+                    raise ExtractionSchemaError(
+                        f"fact #{i} attribute_evidence[{attr_name!r}] has an "
+                        f"empty/malformed entry")
+                text, scope, parent = parsed
+                if scope == "local":
+                    attribute_evidence.setdefault(str(attr_name), []).append(
+                        AttributeEvidence(span=EvidenceSpan(text=text), scope="local"))
+                else:
+                    pending_inherited.append((this_fid, str(attr_name), text, parent))
         # R2: actor identity is resolved EXCLUSIVELY from the structured encounter context.
         # A model-supplied performer/organization id absent from the authoritative roster is
         # invented/unauthorized and is discarded (ownership then resolves to UNKNOWN and
@@ -632,6 +696,7 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
             disposition=_coerce_disposition(item.get("disposition")),
             certain=certain, experiencer=experiencer, evidence=spans,
             confidence=scalar, axis_confidence=axes, fact_id=fid,
+            attribute_evidence={k: tuple(v) for k, v in attribute_evidence.items()},
         ))
     # ONE origin for this whole response: every edge below is stamped with it, so repeating
     # an edge inside this response accumulates raw `support` but NOT independent support.
@@ -644,6 +709,30 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
                 f"relation #{j} is malformed and cannot be safely dropped: {x!r}")
         rel.assertion_origins = [origin.origin_id]
         relations.append(rel)
+    # Second pass (issue #6 F9-R5): resolve every "inherited"-scope attribute_evidence
+    # entry against the NOW-COMPLETE relations graph. A claimed parent only counts when
+    # a real PART_OF/SAME_EPISODE_AS relation connects this fact and that parent, in
+    # EITHER direction -- inheritance is never assumed from the model naming a parent
+    # alone. An entry whose claimed relation was never actually emitted is dropped
+    # entirely, never silently kept as unproven provenance.
+    if pending_inherited:
+        by_fid = {f.fact_id: f for f in facts}
+        scope_predicates = (RelationPredicate.PART_OF, RelationPredicate.SAME_EPISODE_AS)
+        for fid, attr_name, text, parent in pending_inherited:
+            fact = by_fid.get(fid)
+            if fact is None or parent not in by_fid:
+                continue
+            match = next((r for r in relations if r.predicate in scope_predicates
+                         and {r.subject_event_id, r.object_event_id} == {fid, parent}),
+                        None)
+            if match is None:
+                continue
+            entry = AttributeEvidence(span=EvidenceSpan(text=text), scope="inherited",
+                                      source_relation_id=match.relation_id)
+            fact.attribute_evidence = {
+                **fact.attribute_evidence,
+                attr_name: fact.attribute_evidence.get(attr_name, ()) + (entry,),
+            }
     return ExtractionResult(facts=facts, relations=relations, origin=origin)
 
 

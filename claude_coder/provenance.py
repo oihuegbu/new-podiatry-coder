@@ -126,33 +126,57 @@ def anchor_facts(note_text: str, facts: list, document_version: str | None = Non
     so each span is replaced with an anchored copy). Transparent to billing — only adds
     offsets/hash; the span text is unchanged. Repeated quotations are assigned
     successive exact occurrences when available, while an extractor-supplied offset
-    is accepted only after exact slice verification."""
+    is accepted only after exact slice verification.
+
+    Also anchors every `attribute_evidence` span (issue #6 F9-R5), the SAME way and
+    against the SAME occurrence bookkeeping as fact-level `evidence` -- a per-attribute
+    quote is proof only once it carries the same verified offsets/span_id/anchored
+    status a fact-level quote does; without this, `attribute_evidence` would be inert
+    data no reconciliation or axis-consensus check could ever confirm.
+    """
     occurrences: dict[str, list[int]] = {}
     used: dict[str, int] = {}
+
+    def _anchor_one(s):
+        hint = s.start
+        if hint is None and s.text:
+            if s.text not in occurrences:
+                positions, start = [], 0
+                while True:
+                    pos = note_text.find(s.text, start)
+                    if pos < 0:
+                        break
+                    positions.append(pos)
+                    start = pos + max(1, len(s.text))
+                occurrences[s.text] = positions
+            idx = used.get(s.text, 0)
+            positions = occurrences[s.text]
+            if idx < len(positions):
+                hint = positions[idx]
+                used[s.text] = idx + 1
+        return anchor_span(note_text, s, start_hint=hint,
+                           document_version=document_version,
+                           reading_channel_id=reading_channel_id)
+
     for f in facts:
-        anchored = []
-        for s in (f.evidence or []):
-            hint = s.start
-            if hint is None and s.text:
-                if s.text not in occurrences:
-                    positions, start = [], 0
-                    while True:
-                        pos = note_text.find(s.text, start)
-                        if pos < 0:
-                            break
-                        positions.append(pos)
-                        start = pos + max(1, len(s.text))
-                    occurrences[s.text] = positions
-                idx = used.get(s.text, 0)
-                positions = occurrences[s.text]
-                if idx < len(positions):
-                    hint = positions[idx]
-                    used[s.text] = idx + 1
-            anchored.append(anchor_span(note_text, s, start_hint=hint,
-                                        document_version=document_version,
-                                        reading_channel_id=reading_channel_id))
-        f.evidence = anchored
+        f.evidence = [_anchor_one(s) for s in (f.evidence or [])]
+        if getattr(f, "attribute_evidence", None):
+            f.attribute_evidence = {
+                attr: tuple(replace(entry, span=_anchor_one(entry.span))
+                           for entry in entries)
+                for attr, entries in f.attribute_evidence.items()}
     return facts
+
+
+def _fact_spans(fact):
+    """Every span this fact carries that provenance must anchor/reconcile against the
+    source -- its own `evidence` pool AND every `attribute_evidence` quote (issue #6
+    F9-R5). One shared iterator so `span_targets`/`span_targets_by_reading`/
+    `apply_reconciliation` can never drift on which spans they cover."""
+    yield from (fact.evidence or [])
+    for entries in (getattr(fact, "attribute_evidence", None) or {}).values():
+        for entry in entries:
+            yield entry.span
 
 
 def span_targets(facts: list) -> list:
@@ -167,7 +191,7 @@ def span_targets(facts: list) -> list:
     from app.contracts.source_evidence import SpanTarget
     targets = []
     for fact in facts:
-        for span in (fact.evidence or []):
+        for span in _fact_spans(fact):
             if not span.anchored or not span.span_id:
                 continue
             targets.append(SpanTarget(span_id=span.span_id, text=span.text,
@@ -187,7 +211,7 @@ def span_targets_by_reading(facts: list) -> dict[str, list]:
     from app.contracts.source_evidence import SpanTarget
     out: dict[str, list] = {}
     for fact in facts:
-        for span in (fact.evidence or []):
+        for span in _fact_spans(fact):
             if not span.anchored or not span.span_id:
                 continue
             out.setdefault(reading_of(span), []).append(
@@ -196,32 +220,41 @@ def span_targets_by_reading(facts: list) -> dict[str, list]:
     return out
 
 
+def _reconciled_copy(span, index):
+    record = index.get(span.span_id or "")
+    if record is None:
+        return span
+    region = record.region
+    return replace(
+        span,
+        page=(record.pages[0] if record.pages else span.page),
+        page_image_sha256=(record.page_image_sha256[0]
+                           if record.page_image_sha256 else None),
+        region=((region.x0, region.top, region.x1, region.bottom)
+                if region is not None else None),
+        source_reconciliation=record.status.value,
+        verified_by_channel_id=record.verified_by_channel_id or None)
+
+
 def apply_reconciliation(facts: list, reconciliation) -> list:
     """Write each quotation's ORIGINAL-DOCUMENT location and proof back onto its span.
 
     This is what carries page coordinates and reconciliation evidence into every
     `EvidenceSpan` — and therefore into the certificate and the ClaimBundle — rather
     than leaving them in a side report only this module reads (directive §1).
+
+    Also writes back onto every `attribute_evidence` span (issue #6 F9-R5), the SAME
+    way, so a per-attribute quote's page/region/reconciliation status is as durable and
+    auditable as a fact-level quote's.
     """
     index = reconciliation.by_span_id() if reconciliation is not None else {}
     for fact in facts:
-        updated = []
-        for span in (fact.evidence or []):
-            record = index.get(span.span_id or "")
-            if record is None:
-                updated.append(span)
-                continue
-            region = record.region
-            updated.append(replace(
-                span,
-                page=(record.pages[0] if record.pages else span.page),
-                page_image_sha256=(record.page_image_sha256[0]
-                                   if record.page_image_sha256 else None),
-                region=((region.x0, region.top, region.x1, region.bottom)
-                        if region is not None else None),
-                source_reconciliation=record.status.value,
-                verified_by_channel_id=record.verified_by_channel_id or None))
-        fact.evidence = updated
+        fact.evidence = [_reconciled_copy(s, index) for s in (fact.evidence or [])]
+        if getattr(fact, "attribute_evidence", None):
+            fact.attribute_evidence = {
+                attr: tuple(replace(entry, span=_reconciled_copy(entry.span, index))
+                           for entry in entries)
+                for attr, entries in fact.attribute_evidence.items()}
     return facts
 
 

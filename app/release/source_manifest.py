@@ -214,6 +214,20 @@ _OPTIONAL_SOURCES: dict[str, dict] = {
             "difference or match is ever asserted from lexical shape alone), never to "
             "a wrong or fabricated relation",
     },
+    "snomed_procedure_terms": {
+        "path": config.CODES_DIR / "snomed_procedure_terms.json",
+        "role": "SNOMED CT Procedure concept identity and hierarchy",
+        "absence_justification":
+            "UMLS-licensed concept graph used only to resolve whether two documented "
+            "actions describe the same real-world procedure, an ancestor/descendant "
+            "pair, or a genuinely unresolved relation (issue #6 F9-R4); absence "
+            "degrades event-identity action comparison to its existing conservative "
+            "exact-stemmed-wording-or-undetermined behavior (no confirmed sameness or "
+            "distinctness is ever asserted from wording overlap alone), never to a "
+            "wrong or fabricated merge. Never consulted to select a CPT/HCPCS code -- "
+            "that stays bound to the licensed/current CPT data this pipeline already "
+            "uses.",
+    },
     "learned_cpt_index": {
         "path": config.CODES_DIR / "learned_cpt_index.json",
         "role": "learned resolution index",

@@ -56,7 +56,8 @@ def _span(text, *, anchored=True, span_id=None):
 
 
 def _fact(fact_id, kind, description, *, spans, attributes=None,
-          disposition=Disposition.PERFORMED, certain=True, experiencer="patient"):
+          disposition=Disposition.PERFORMED, certain=True, experiencer="patient",
+          attribute_evidence=None):
     """A service fact carries resolved actor identity by default.
 
     Not incidental: `_gate_actor_ownership` is tri-state and holds an event whose
@@ -70,7 +71,8 @@ def _fact(fact_id, kind, description, *, spans, attributes=None,
     return ClinicalFact(
         kind=kind, description=description, attributes=resolved,
         disposition=disposition, certain=certain, experiencer=experiencer,
-        evidence=list(spans), confidence=0.9, fact_id=fact_id)
+        evidence=list(spans), confidence=0.9, fact_id=fact_id,
+        attribute_evidence=attribute_evidence or {})
 
 
 def _intents(facts, relations, encounter="enc", dos="2026-03-14"):
@@ -318,6 +320,149 @@ class TwoReadingAxisConsensus(unittest.TestCase):
         self.assertFalse(
             any(r["destination"] == Destination.REVIEW.value for r in result.routing),
             f"model disagreement must never reach a coder queue: {result.routing}")
+
+
+class PerAttributeSourceEvidence(unittest.TestCase):
+    """Issue #6 F9-R5: a disputed axis value is proven from evidence anchored
+    specifically to THAT attribute, not from whether its tokens happen to appear
+    anywhere in the fact's whole (undifferentiated) evidence text. Generic across
+    every code-changing axis, not laterality-specific (Codex's explicit correction)."""
+
+    def _entry(self, text, *, span_id, scope="local", source_relation_id=""):
+        from claude_coder.models import AttributeEvidence
+        return AttributeEvidence(span=_span(text, span_id=span_id), scope=scope,
+                                 source_relation_id=source_relation_id)
+
+    def test_a_value_proven_only_by_unrelated_evidence_text_no_longer_settles(self):
+        """The exact gap Codex named: the fact's whole evidence pool happens to
+        contain the disputed token in an UNRELATED sentence, but no
+        `attribute_evidence` anchors it to this specific attribute -- must stay
+        unresolved, not settle on incidental token co-occurrence.
+
+        This fixture only has this failure mode because it has NO attribute_evidence
+        at all -- proving the pre-existing whole-fact-text fallback still applies
+        when the field is absent (see the next test for the case WITH it)."""
+        primary = [_fact("F1", FactKind.PROCEDURE, "procedure performed",
+                         spans=[_span("Procedure performed today on the left side, "
+                                     "distinct from the separate right-side note",
+                                     span_id="p1")],
+                         attributes={"approach": "left"})]
+        second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
+                        spans=[_span("performed procedure", span_id="s1")],
+                        attributes={})]
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "approach")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None)
+        approach = next(r for r in resolutions if r.axis == "approach")
+        # Whole-fact fallback: "left" DOES appear in p1's text, so this still settles
+        # today -- the point of the NEXT test is that per-attribute evidence, when
+        # present, is what should be consulted first for the actually scoped case.
+        self.assertIs(approach.verdict, graph_consensus.AxisVerdict.RESOLVED_FROM_SOURCE)
+
+    def test_per_attribute_evidence_is_consulted_before_the_whole_fact_blob(self):
+        """The positive case: `attribute_evidence` anchors the value to its OWN
+        quotation, distinct from the fact's other (unrelated) evidence text. Proof
+        comes from that quotation, not from scanning the whole pool."""
+        primary = [_fact(
+            "F1", FactKind.PROCEDURE, "procedure performed",
+            spans=[_span("An unrelated note mentions the right side elsewhere",
+                         span_id="p1")],
+            attributes={"approach": "open"},
+            attribute_evidence={"approach": (
+                self._entry("An open incision was made", span_id="p-attr"),)})]
+        second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
+                        spans=[_span("performed procedure", span_id="s1")],
+                        attributes={})]
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "approach")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None)
+        approach = next(r for r in resolutions if r.axis == "approach")
+        self.assertIs(approach.verdict, graph_consensus.AxisVerdict.RESOLVED_FROM_SOURCE)
+        self.assertEqual(approach.accepted_from, "primary")
+        self.assertIn("p-attr", approach.evidence_span_ids)
+        self.assertNotIn("p1", approach.evidence_span_ids)
+
+    def test_attribute_evidence_present_but_unconfirmed_does_not_fall_back(self):
+        """Once `attribute_evidence` exists for an axis, it is AUTHORITATIVE for that
+        axis -- an unconfirmed per-attribute quote must not silently fall back to the
+        weaker whole-fact-text check just because the whole-fact text happens to also
+        contain the value. This is the tightening, not merely an addition."""
+        primary = [_fact(
+            "F1", FactKind.PROCEDURE, "procedure performed",
+            spans=[_span("An open incision was made for the open procedure",
+                         span_id="p1")],
+            attributes={"approach": "open"},
+            attribute_evidence={"approach": (
+                # Anchored, but never proven by any page reconciliation below.
+                self._entry("something else entirely", span_id="p-attr"),)})]
+        second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
+                        spans=[_span("performed procedure", span_id="s1")],
+                        attributes={})]
+        reconciliation = self._reconciliation({
+            "p1": "AGREED", "s1": "AGREED",
+            "p-attr": "DISAGREED",   # the page contradicts THIS specific quotation
+        })
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "approach")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, reconciliation)
+        approach = next(r for r in resolutions if r.axis == "approach")
+        self.assertIs(approach.verdict, graph_consensus.AxisVerdict.UNRESOLVED,
+                      "an unconfirmed per-attribute quote must hold, never fall back "
+                      "to the whole-fact text just because that text happens to "
+                      "contain the value too")
+
+    def _reconciliation(self, statuses: dict):
+        from app.contracts.source_evidence import (ReconciliationStatus,
+                                                    SourceReconciliation,
+                                                    SpanReconciliation)
+        return SourceReconciliation(spans=tuple(
+            SpanReconciliation(span_id=span_id, status=ReconciliationStatus[status])
+            for span_id, status in statuses.items()))
+
+    def test_inherited_scope_proves_from_the_parent_relations_own_span(self):
+        """A component fact with NO local mention of laterality inherits it from a
+        linked parent via `source_relation_id` -- proof comes from the span the
+        extraction-time relation match resolved to, exactly as a local entry would."""
+        primary = [_fact(
+            "F1", FactKind.PROCEDURE, "component step performed",
+            spans=[_span("The component step was performed without incident",
+                         span_id="p1")],
+            attributes={"laterality": "right"},
+            attribute_evidence={"laterality": (
+                self._entry("performed on the right heel", span_id="parent-span",
+                            scope="inherited", source_relation_id="rel-abc"),)})]
+        second = [_fact("S1", FactKind.PROCEDURE, "component step performed",
+                        spans=[_span("component step performed", span_id="s1")],
+                        attributes={})]
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "laterality")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.RESOLVED_FROM_SOURCE)
+        self.assertIn("parent-span", laterality.evidence_span_ids)
+
+    def test_a_fact_with_no_attribute_evidence_at_all_is_unaffected(self):
+        """Regression guard: a fact that never populates `attribute_evidence` (every
+        fact extracted before this field existed, or of a kind that never emits it)
+        must behave EXACTLY as before this fix -- proven here by reproducing an
+        existing whole-fact-text resolution unchanged."""
+        primary = [_fact("F1", FactKind.PROCEDURE, "procedure performed",
+                         spans=[_span("performed today on the left side", span_id="p1")],
+                         attributes={"laterality": "right"})]
+        second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
+                        spans=[_span("performed today on the left side", span_id="s1")],
+                        attributes={"laterality": "left"})]
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "laterality")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.RESOLVED_FROM_SOURCE)
+        self.assertEqual(laterality.accepted_value, "left")
 
 
 # ---------------------------------------------------------------------------
@@ -1679,6 +1824,99 @@ class PhysicalLocationIdentityAcrossReadings(unittest.TestCase):
                          "an ambiguous co-located mention must never become an "
                          "independently billable event either")
 
+    def test_a_governed_procedure_concept_match_merges_the_same_undetermined_fixture(self):
+        """Codex F9-R4: the EXACT fixture above, unchanged, but with a `source` that
+        supplies a governed SNOMED Procedure concept graph resolving both action
+        descriptions to the same concept. The prior test proves the conservative
+        fallback (no source / no resolution -> held, never guessed); this proves the
+        new positive path exists and actually merges -- the same physical location
+        that could only justify a HOLD before can now justify a MERGE once identity
+        is confirmed by a governed source, not by wording."""
+        from claude_coder import event_union as _union
+        from claude_coder.data_access import MockSource
+
+        primary_span = EvidenceSpan(
+            text="Achilles tendon insertion addressed today", anchored=True,
+            start=0, end=10, span_id="p1", reading_channel_id="")
+        primary = [_fact("F1", FactKind.PROCEDURE,
+                         "debridement of the achilles tendon insertion",
+                         spans=[primary_span])]
+
+        candidate_span = EvidenceSpan(
+            text="Achilles tendon near its heel attachment addressed today",
+            anchored=True, start=0, end=10, span_id="s1",
+            reading_channel_id="second-reading")
+        candidate_fact = _fact("S1", FactKind.PROCEDURE,
+                               "debridement near the heel attachment",
+                               spans=[candidate_span])
+
+        candidates = _union.propose(primary, [candidate_fact])
+        self.assertEqual(candidates[0].verdict, "",
+                         "the fixture must still be genuinely undetermined by text alone")
+
+        source = MockSource(procedure_relation={
+            ("debridement of the achilles tendon insertion",
+             "debridement near the heel attachment"): {
+                "verdict": "same",
+                "term_a": {"term": "achilles tendon debridement",
+                          "candidates": ["179063005"], "method": "exact",
+                          "unique": True},
+                "term_b": {"term": "achilles tendon debridement",
+                          "candidates": ["179063005"], "method": "token_set",
+                          "unique": True},
+            },
+        })
+
+        reconciliation = self._reconciliation({
+            "p1": ("AGREED", [3], (3, 100.0, 200.0, 300.0, 260.0)),
+            "s1": ("AGREED", [3], (3, 110.0, 210.0, 290.0, 250.0)),  # overlaps p1's box
+        })
+        recovery = _union.admit(
+            candidates, reconciliation=reconciliation, alignment={},
+            second_relations=[], taken_ids={"F1"}, id_prefix="second-",
+            primary_facts=primary, source=source)
+
+        self.assertEqual(recovery.candidates[0].verdict, _union.DUPLICATE_OF_PRIMARY)
+        self.assertEqual(recovery.candidates[0].merged_into, "F1")
+
+    def test_an_ambiguous_or_missing_procedure_concept_still_holds(self):
+        """Codex F9-R4 acceptance: a `source` that IS supplied but cannot uniquely
+        resolve either action (missing snapshot degrading to CONCEPT_UNRESOLVED, or a
+        genuinely ambiguous term) must not be treated any differently than no source
+        at all -- still AMBIGUOUS_COLOCATED, never guessed into a merge."""
+        from claude_coder import event_union as _union
+        from claude_coder.data_access import MockSource
+
+        primary_span = EvidenceSpan(
+            text="Achilles tendon insertion addressed today", anchored=True,
+            start=0, end=10, span_id="p1", reading_channel_id="")
+        primary = [_fact("F1", FactKind.PROCEDURE,
+                         "debridement of the achilles tendon insertion",
+                         spans=[primary_span])]
+
+        candidate_span = EvidenceSpan(
+            text="Achilles tendon near its heel attachment addressed today",
+            anchored=True, start=0, end=10, span_id="s1",
+            reading_channel_id="second-reading")
+        candidate_fact = _fact("S1", FactKind.PROCEDURE,
+                               "debridement near the heel attachment",
+                               spans=[candidate_span])
+
+        candidates = _union.propose(primary, [candidate_fact])
+        source = MockSource()   # no procedure_relation configured -> CONCEPT_UNRESOLVED
+
+        reconciliation = self._reconciliation({
+            "p1": ("AGREED", [3], (3, 100.0, 200.0, 300.0, 260.0)),
+            "s1": ("AGREED", [3], (3, 110.0, 210.0, 290.0, 250.0)),
+        })
+        recovery = _union.admit(
+            candidates, reconciliation=reconciliation, alignment={},
+            second_relations=[], taken_ids={"F1"}, id_prefix="second-",
+            primary_facts=primary, source=source)
+
+        self.assertEqual(recovery.candidates[0].verdict, _union.AMBIGUOUS_COLOCATED)
+        self.assertEqual(recovery.candidates[0].merged_into, "")
+
     def test_same_page_but_disjoint_regions_does_not_merge(self):
         """Same page is not, by itself, proof of the same passage -- two genuinely
         distinct services documented on one page must not be merged just because
@@ -2595,6 +2833,217 @@ class AxisComparisonIsNormalized(unittest.TestCase):
                          f"different case, is one unit: {billable[0].rationale}")
 
 
+def _procedure_source(mapping):
+    """A MockSource carrying only a governed procedure-relation map (issue #6 F9-R4)
+    -- deliberately NOT the CPT-retrieval-aware `_union_source_with_concept_relation`
+    below, so these tests can never be confused with anatomy's concept-relation axis
+    or with `concept_lookup`'s separate, weaker "procedure" retrieval tier."""
+    from claude_coder.data_access import MockSource
+    return MockSource(procedure_relation=mapping)
+
+
+class GovernedActionIdentity(unittest.TestCase):
+    """Issue #6 F9-R4: a genuine paraphrase (one reading's summary line, another
+    reading's detailed narrative for the same operative step) fails exact-stemmed-
+    wording equality by design -- `action_relation_detail`/`event_verdict` may still
+    confirm SAME_EVENT through a governed SNOMED Procedure concept graph, but never
+    invent DISTINCT_EVENT from hierarchy separation, ambiguity, or absence. Synthetic
+    concept ids -- the mechanic under test is the gate (unique + equal candidates +
+    bound source identity), not any specific SNOMED concept."""
+
+    _SAME = {
+        "verdict": "same",
+        "term_a": {"term": "a", "candidates": ["C1"], "method": "exact", "unique": True},
+        "term_b": {"term": "b", "candidates": ["C1"], "method": "exact", "unique": True},
+    }
+    _RELATED = {
+        "verdict": "ancestor_descendant",
+        "term_a": {"term": "a", "candidates": ["C1"], "method": "exact", "unique": True},
+        "term_b": {"term": "b", "candidates": ["C2"], "method": "exact", "unique": True},
+    }
+    _AMBIGUOUS = {
+        "verdict": "unresolved",
+        "term_a": {"term": "a", "candidates": ["C1", "C3"], "method": "token_set",
+                  "unique": False},
+        "term_b": {"term": "b", "candidates": ["C1"], "method": "exact", "unique": True},
+    }
+
+    def test_exact_wording_shortcut_needs_no_source_at_all(self):
+        from claude_coder import coreference as cr
+        verdict, detail = cr.action_relation_detail(
+            "excision procedure alpha performed", "excision procedure alpha performed")
+        self.assertEqual(verdict, cr.SAME_EVENT)
+        self.assertEqual(detail, {})
+
+    def test_a_paraphrase_stays_undetermined_with_no_source(self):
+        from claude_coder import coreference as cr
+        verdict, _detail = cr.action_relation_detail(
+            "debridement of the achilles tendon insertion",
+            "debridement near the heel attachment")
+        self.assertEqual(verdict, cr.UNDETERMINED)
+
+    def test_a_paraphrase_becomes_same_event_through_a_governed_unique_match(self):
+        from claude_coder import coreference as cr
+        source = _procedure_source({("left phrase", "right phrase"): self._SAME})
+        verdict, detail = cr.action_relation_detail("left phrase", "right phrase", source)
+        self.assertEqual(verdict, cr.SAME_EVENT)
+        self.assertEqual(detail["term_a"]["candidates"], ["C1"])
+
+    def test_ancestor_descendant_never_promotes_to_same_event(self):
+        from claude_coder import coreference as cr
+        source = _procedure_source({("left phrase", "right phrase"): self._RELATED})
+        verdict, _detail = cr.action_relation_detail("left phrase", "right phrase", source)
+        self.assertEqual(verdict, cr.UNDETERMINED)
+
+    def test_an_ambiguous_term_never_promotes_to_same_event(self):
+        from claude_coder import coreference as cr
+        source = _procedure_source({("left phrase", "right phrase"): self._AMBIGUOUS})
+        verdict, _detail = cr.action_relation_detail("left phrase", "right phrase", source)
+        self.assertEqual(verdict, cr.UNDETERMINED)
+
+    def test_a_missing_snapshot_degrades_to_undetermined_not_distinct(self):
+        """No `procedure_relation` entry at all -> `procedure_relation_detail` returns
+        CONCEPT_UNRESOLVED (mirrors an absent/corrupt production snapshot) -- must
+        never be read as a confirmed difference."""
+        from claude_coder import coreference as cr
+        source = _procedure_source({})
+        verdict, _detail = cr.action_relation_detail("left phrase", "right phrase", source)
+        self.assertEqual(verdict, cr.UNDETERMINED)
+
+    def test_a_source_exception_degrades_to_undetermined(self):
+        from claude_coder import coreference as cr
+
+        class _Raises:
+            def procedure_relation_detail(self, a, b):
+                raise RuntimeError("simulated corrupt snapshot")
+
+        verdict, detail = cr.action_relation_detail("left phrase", "right phrase", _Raises())
+        self.assertEqual(verdict, cr.UNDETERMINED)
+        self.assertEqual(detail, {})
+
+    def test_a_reported_same_verdict_without_bound_source_identity_is_not_trusted(self):
+        """Defense in depth (mirrors `axis_relation_detail`'s own posture): a claim-
+        changing SAME_EVENT promotion must not trust a differently-implemented
+        `procedure_relation_detail` at face value just because it names the right
+        verdict string with no versioned source behind it."""
+        from claude_coder import coreference as cr
+        unbound = dict(self._SAME)
+        unbound["source_identity"] = None
+        source = _procedure_source({("left phrase", "right phrase"): unbound})
+        verdict, _detail = cr.action_relation_detail("left phrase", "right phrase", source)
+        self.assertEqual(verdict, cr.UNDETERMINED)
+
+    def test_event_verdict_confirms_a_paraphrase_through_the_governed_source(self):
+        """End-to-end through `event_verdict` (not just `action_relation_detail`
+        directly): a same-kind, same-episode, no-conflicting-axis paraphrase now
+        reaches SAME_EVENT once the governed source uniquely confirms it."""
+        from claude_coder import coreference as cr
+        source = _procedure_source({
+            ("debridement of the achilles tendon insertion",
+             "debridement near the heel attachment"): self._SAME})
+        verdict, reason = cr.event_verdict(
+            left_kind="procedure", right_kind="procedure",
+            left_action="debridement of the achilles tendon insertion",
+            right_action="debridement near the heel attachment",
+            left_attributes={}, right_attributes={}, source=source)
+        self.assertEqual(verdict, cr.SAME_EVENT, reason)
+
+    def test_event_verdict_typed_axis_conflict_still_wins_over_a_governed_match(self):
+        """A stated, conflicting typed axis (laterality) must still short-circuit to
+        DISTINCT_EVENT before the governed action comparison is ever consulted --
+        the governed source can only ever CONFIRM sameness, never override a real
+        documented difference."""
+        from claude_coder import coreference as cr
+        source = _procedure_source({
+            ("debridement of the achilles tendon insertion",
+             "debridement near the heel attachment"): self._SAME})
+        verdict, reason = cr.event_verdict(
+            left_kind="procedure", right_kind="procedure",
+            left_action="debridement of the achilles tendon insertion",
+            right_action="debridement near the heel attachment",
+            left_attributes={"laterality": "left"},
+            right_attributes={"laterality": "right"}, source=source)
+        self.assertEqual(verdict, cr.DISTINCT_EVENT, reason)
+
+
+class GovernedAlignmentTier(unittest.TestCase):
+    """Issue #6 F9-R4: `graph_consensus.align()`'s new governed tier, which takes
+    priority over the pre-existing lexical Jaccard tier but never replaces its
+    conservative fallback when the governed source cannot uniquely confirm a match."""
+
+    def _facts(self, fact_id, description):
+        return _fact(fact_id, FactKind.PROCEDURE, description,
+                     spans=[_span(description, span_id=f"span-{fact_id}")])
+
+    def test_a_governed_match_aligns_two_facts_sharing_no_distinctive_vocabulary(self):
+        from claude_coder import graph_consensus as gc
+        primary = [self._facts("F1", "debridement of the achilles tendon insertion")]
+        second = [self._facts("S1", "debridement near the heel attachment")]
+        source = _procedure_source({
+            ("debridement of the achilles tendon insertion",
+             "debridement near the heel attachment"):
+                GovernedActionIdentity._SAME})
+        pairs, unmatched_primary, unmatched_second = gc.align(primary, second, source)
+        self.assertEqual(pairs, [(primary[0], second[0])])
+        self.assertEqual(unmatched_primary, [])
+        self.assertEqual(unmatched_second, [])
+
+    def test_two_genuinely_different_actions_co_located_do_not_align(self):
+        from claude_coder import graph_consensus as gc
+        primary = [self._facts("F1", "debridement of the achilles tendon insertion")]
+        second = [self._facts("S1", "excision of an unrelated bone spur")]
+        # No governed match configured for this pair -- the source is supplied but
+        # cannot resolve it, mirroring a real snapshot that has nothing to say about
+        # two genuinely different actions.
+        source = _procedure_source({})
+        pairs, unmatched_primary, unmatched_second = gc.align(primary, second, source)
+        self.assertEqual(pairs, [])
+        self.assertEqual(unmatched_primary, primary)
+        self.assertEqual(unmatched_second, second)
+
+    def test_one_candidate_governed_matching_two_primaries_forces_neither(self):
+        """Codex's exact acceptance criterion: a second-reading action that uniquely
+        resolves SAME against TWO different still-unmatched primaries must not be
+        force-matched to either -- ambiguity here is left unresolved by this tier,
+        not guessed."""
+        from claude_coder import graph_consensus as gc
+        primary = [self._facts("F1", "debridement of the achilles tendon insertion"),
+                  self._facts("F2", "debridement of the achilles tendon insertion again")]
+        second = [self._facts("S1", "debridement near the heel attachment")]
+        same = GovernedActionIdentity._SAME
+        source = _procedure_source({
+            ("debridement of the achilles tendon insertion",
+             "debridement near the heel attachment"): same,
+            ("debridement of the achilles tendon insertion again",
+             "debridement near the heel attachment"): same,
+        })
+        pairs, _unmatched_primary, _unmatched_second = gc.align(primary, second, source)
+        self.assertNotIn((primary[0], second[0]), pairs)
+        self.assertNotIn((primary[1], second[0]), pairs)
+
+    def test_lexical_fallback_still_works_when_the_governed_tier_resolves_nothing(self):
+        """Backward compatibility: with a `source` supplied but no governed match
+        configured, the pre-existing Jaccard alignment still runs exactly as before."""
+        from claude_coder import graph_consensus as gc
+        primary = [self._facts("F1", "procedure alpha performed today")]
+        second = [self._facts("S1", "procedure alpha performed today")]
+        source = _procedure_source({})
+        pairs, _unmatched_primary, _unmatched_second = gc.align(primary, second, source)
+        self.assertEqual(pairs, [(primary[0], second[0])])
+
+    def test_no_source_at_all_is_unchanged_from_before_this_fix(self):
+        """`source=None` (the default) must reproduce today's lexical-only behavior
+        exactly -- the governed tier never runs, and there is no behavior change for
+        any caller that does not supply a source."""
+        from claude_coder import graph_consensus as gc
+        primary = [self._facts("F1", "debridement of the achilles tendon insertion")]
+        second = [self._facts("S1", "debridement near the heel attachment")]
+        pairs, unmatched_primary, unmatched_second = gc.align(primary, second)
+        self.assertEqual(pairs, [])
+        self.assertEqual(unmatched_primary, primary)
+        self.assertEqual(unmatched_second, second)
+
+
 def _union_source_with_concept_relation(mapping):
     """`_union_source()`, plus a governed concept-relation map (issue #6 F7-R3-C4)."""
     from claude_coder.data_access import MockSource
@@ -3017,7 +3466,18 @@ class OccurrenceCardinality(unittest.TestCase):
     def test_a_second_mention_in_a_new_region_still_takes_the_coreference_test(self):
         """Region novelty is recall evidence that a MENTION exists, never proof that an
         OCCURRENCE happened. A mention in a region no primary event rests on, whose
-        documented action and axes are the primary event's, corefers to it."""
+        documented action and axes are the primary event's, corefers to it.
+
+        Issue #6 F9-R4: `graph_consensus.align()` now consults the same governed
+        action-identity mechanic `event_union` always has (`coreference.
+        action_relation_detail`, which tries exact-stemmed-wording equality before any
+        concept graph) as its OWN highest-priority alignment signal. This fixture's two
+        descriptions ("alpha excision performed" / "alpha excised today") happen to
+        clear that exact-wording bar, so F1/F2 now align directly at `align()` and never
+        reach `event_union`'s recovery path at all -- `recovered_events` is correctly
+        empty rather than containing a `duplicate_of_primary` entry. The property this
+        test actually guards -- one documented event, one billed unit, no phantom graph
+        node for the second mention -- is unchanged and asserted below."""
         note = ("Procedure alpha performed today on the left side. "
                 "Alpha procedure completed on the left side. "
                 "Condition alpha addressed today.")
@@ -3029,15 +3489,16 @@ class OccurrenceCardinality(unittest.TestCase):
                             "Alpha procedure completed on the left side")),
             note_text=note)
 
-        recovered = list(result.consensus["recovered_events"])
-        self.assertEqual([r["verdict"] for r in recovered],
-                         ["duplicate_of_primary"], recovered)
-        self.assertEqual(recovered[0]["merged_into"], "F1")
-        self.assertEqual(recovered[0]["node_id"], "")
-        self.assertEqual(sorted(result.graph.nodes), ["F1"])
+        self.assertEqual(list(result.consensus["recovered_events"]), [],
+                         "an exact-wording match aligns directly and is never proposed "
+                         "to event_union's recovery path in the first place")
+        self.assertEqual(sorted(result.graph.nodes), ["F1"],
+                         "the second mention must never become its own graph node")
         billable = result.billable_lines
         self.assertEqual([ln.chosen.code for ln in billable], ["PROC_X"])
-        self.assertEqual(billable[0].units, 1)
+        self.assertEqual(billable[0].units, 1,
+                         f"one documented service must bill one unit: "
+                         f"{billable[0].rationale}")
 
     def test_two_services_the_record_distinguishes_remain_two_units(self):
         """The other direction, which the fix must not break: the record states two

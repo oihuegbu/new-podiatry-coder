@@ -152,6 +152,55 @@ def action_identity(left: Any, right: Any) -> str:
     return UNDETERMINED
 
 
+def action_relation_detail(left: Any, right: Any, source: Any = None
+                           ) -> tuple[str, dict]:
+    """SAME_EVENT when two action phrases are the same action -- either by
+    `action_identity`'s exact-wording shortcut, or, when `source` supplies a governed
+    SNOMED Procedure concept graph (issue #6 F9-R4), because both phrases uniquely
+    resolve to the SAME procedure concept. Returns `(verdict, detail)`: `detail` is
+    `{}` for the wording shortcut, else the full auditable basis from
+    `source.procedure_relation_detail`.
+
+    A genuine paraphrase (one reading's summary line, another reading's detailed
+    narrative for the same operative step) fails `action_identity`'s exact-set
+    equality by design -- wording was never supposed to be the only way to confirm
+    sameness, only the cheapest. This is the SECOND, source-anchored way: a governed
+    concept graph, not a lexical heuristic, and still never a way to assert
+    DISTINCT_EVENT -- ancestor/descendant concepts, multiple candidate matches on
+    either side, a missing/stale/corrupt snapshot, or any source exception all stay
+    UNDETERMINED, exactly like `action_identity`'s own wording-mismatch case. Requires
+    BOTH sides to resolve UNIQUELY to the SAME candidate set (Codex F9-R4): an
+    ambiguous term's candidates merely overlapping the other side's is not a confirmed
+    match, because the ambiguous term itself might name a different one of its own
+    candidates.
+    """
+    if action_identity(left, right) == SAME_EVENT:
+        return SAME_EVENT, {}
+    resolver = getattr(source, "procedure_relation_detail", None)
+    if not callable(resolver):
+        return UNDETERMINED, {}
+    from .terminology import CONCEPT_SAME
+    try:
+        detail = dict(resolver(str(left or ""), str(right or "")) or {})
+    except Exception:
+        return UNDETERMINED, {}
+    # Belt-and-suspenders beyond `verdict == CONCEPT_SAME` (which the real
+    # `ConceptRelationIndex.relation_detail` already only returns after this exact
+    # uniqueness/equal-candidates check -- see `terminology.py:relation_detail`):
+    # a claim-changing SAME_EVENT promotion must not trust a differently-implemented
+    # `procedure_relation_detail` at face value just because it names the right verdict
+    # string, matching `axis_relation_detail`'s own source_identity-bound-trust posture.
+    term_a, term_b = detail.get("term_a") or {}, detail.get("term_b") or {}
+    if (detail.get("verdict") == CONCEPT_SAME
+            and detail.get("source_identity")
+            and term_a.get("unique") is True
+            and term_b.get("unique") is True
+            and term_a.get("candidates")
+            and term_a.get("candidates") == term_b.get("candidates")):
+        return SAME_EVENT, detail
+    return UNDETERMINED, detail
+
+
 #: Axes carrying a STABLE IDENTIFIER (a system key, not free clinical text): compared
 #: literally, never normalized. An identifier is either the same identifier or it is
 #: not; stemming one could accidentally equate two different ids or split one in half.
@@ -519,8 +568,11 @@ def event_verdict(*, left_kind: Any, right_kind: Any,
     `source` is optional and, when supplied, is consulted for axes in
     `_CONCEPT_GOVERNED_AXES` (issue #6 F7-R3-C) to confirm an inexact lexical match on
     those axes as a governed SAME relation instead of defaulting every inexact match
-    straight to `UNDETERMINED`. It can only ever confirm a match, never a difference
-    (issue #6 F7-R3-C3).
+    straight to `UNDETERMINED`, AND for the action comparison itself (issue #6 F9-R4)
+    via `action_relation_detail`, which confirms a paraphrased action as the same
+    procedure through a governed SNOMED Procedure concept graph when exact wording
+    equality does not resolve it. In both cases `source` can only ever confirm a
+    match, never a difference (issue #6 F7-R3-C3, F9-R4).
     """
     lk = str(getattr(left_kind, "value", left_kind) or "")
     rk = str(getattr(right_kind, "value", right_kind) or "")
@@ -546,7 +598,7 @@ def event_verdict(*, left_kind: Any, right_kind: Any,
     le, re_ = str(left_episode or ""), str(right_episode or "")
     if le and re_ and le != re_:
         return DISTINCT_EVENT, "documented in different service episodes"
-    if action_identity(left_action, right_action) == SAME_EVENT:
+    if action_relation_detail(left_action, right_action, source)[0] == SAME_EVENT:
         return SAME_EVENT, ("the same documented action on the same documented axes "
                             "in the same episode")
     return UNDETERMINED, (

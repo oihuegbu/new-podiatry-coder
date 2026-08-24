@@ -33,6 +33,11 @@ LICENSED (fetched from YOUR configured source — never a public download):
       (issue #6 F7-R3-C). Same release, same discovery order as snomed_icd10; if no
       release is present the stage is SKIPPED and axis comparison degrades to its
       existing lexical-identity-only behavior.
+  • snomed_procedure_terms – the SAME RF2 release -> build_snomed_procedure_terms.py
+      Procedure concept identity/hierarchy for event-identity action comparison
+      (issue #6 F9-R4). Same release, same discovery order as snomed_icd10; if no
+      release is present the stage is SKIPPED and action comparison degrades to its
+      existing exact-wording-identity-only behavior.
 
 Usage
 -----
@@ -204,6 +209,13 @@ SOURCES: dict[str, dict] = {
         "output": "snomed_concept_terms.json",
         "cadence": "biannual",
         "prepare": lambda tmp, args: [PY, "tools/build_snomed_concept_terms.py"],
+    },
+    "snomed_procedure_terms": {
+        # Same release as snomed_icd10/snomed_concept_terms -- Procedure concept
+        # identity/hierarchy for event-identity action comparison (issue #6 F9-R4).
+        "output": "snomed_procedure_terms.json",
+        "cadence": "biannual",
+        "prepare": lambda tmp, args: [PY, "tools/build_snomed_procedure_terms.py"],
     },
     "icd10cm_index": {
         "output": "icd10cm_index_terms.json",

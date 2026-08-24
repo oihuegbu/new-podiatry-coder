@@ -340,3 +340,98 @@ def test_malformed_context_fails_before_the_extraction_call():
     with pytest.raises(ExtractionSchemaError):
         extract_note("note", _llm, billing_context={"participants": [{"id": "a"}]})
     assert calls == []
+
+
+# --------------------------------------------------------- F9-R5 attribute_evidence
+def test_malformed_attribute_evidence_shape_raises():
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [
+            _fact(attribute_evidence={"laterality": "not-a-list"})]}))
+
+
+def test_empty_attribute_evidence_entry_raises():
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [
+            _fact(attribute_evidence={"laterality": [{"text": "  ", "scope": "local"}]})]}))
+
+
+def test_a_local_scope_entry_needs_no_parent_and_is_kept():
+    result = extract_note("note", _stub({"facts": [_fact(
+        attributes={"laterality": "right"},
+        attribute_evidence={"laterality": [
+            {"text": "performed on the right side", "scope": "local"}]})]}))
+    entries = result.facts[0].attribute_evidence["laterality"]
+    assert len(entries) == 1
+    assert entries[0].scope == "local"
+    assert entries[0].span.text == "performed on the right side"
+    assert entries[0].source_relation_id == ""
+
+
+def test_an_inherited_entry_resolves_only_against_a_real_relation():
+    """Codex F9-R5: an "inherited" claim is kept ONLY when a real part_of/
+    same_episode_as relation actually connects this fact to the named parent --
+    naming a parent alone is never enough."""
+    payload = {
+        "facts": [
+            _fact(fact_id="F1", description="parent step",
+                 evidence=["The parent step was performed on the right side"]),
+            _fact(fact_id="F2", description="component step",
+                 attributes={"laterality": "right"},
+                 attribute_evidence={"laterality": [
+                     {"text": "performed on the right side", "scope": "inherited",
+                      "parent_fact_id": "F1"}]}),
+        ],
+        "relations": [{"subject_event_id": "F2", "predicate": "part_of",
+                       "object_event_id": "F1", "state": "asserted"}],
+    }
+    result = extract_note("note", _stub(payload))
+    component = next(f for f in result.facts if f.fact_id == "F2")
+    entries = component.attribute_evidence["laterality"]
+    assert len(entries) == 1
+    assert entries[0].scope == "inherited"
+    assert entries[0].span.text == "performed on the right side"
+    rel = next(r for r in result.relations if r.subject_event_id == "F2")
+    assert entries[0].source_relation_id == rel.relation_id
+
+
+def test_an_inherited_entry_with_no_matching_relation_is_dropped_not_kept_unproven():
+    """The claimed parent exists as a fact, but NO part_of/same_episode_as relation
+    was actually emitted connecting the two -- the entry must be dropped entirely,
+    never kept as an unproven inheritance claim."""
+    payload = {
+        "facts": [
+            _fact(fact_id="F1", description="parent step"),
+            _fact(fact_id="F2", description="component step",
+                 attributes={"laterality": "right"},
+                 attribute_evidence={"laterality": [
+                     {"text": "performed on the right side", "scope": "inherited",
+                      "parent_fact_id": "F1"}]}),
+        ],
+        "relations": [],
+    }
+    result = extract_note("note", _stub(payload))
+    component = next(f for f in result.facts if f.fact_id == "F2")
+    assert component.attribute_evidence == {}
+
+
+def test_an_inherited_entry_naming_an_unknown_parent_is_dropped():
+    """An unknown parent_fact_id is not itself a schema error (a claimed parent that
+    is not any fact's real id simply can never resolve against a relation) -- the
+    entry is dropped, not kept and not a crash."""
+    payload = {
+        "facts": [_fact(fact_id="F1", description="component step",
+                        attributes={"laterality": "right"},
+                        attribute_evidence={"laterality": [
+                            {"text": "right side", "scope": "inherited",
+                             "parent_fact_id": "GHOST"}]})],
+        "relations": [],
+    }
+    result = extract_note("note", _stub(payload))
+    assert result.facts[0].attribute_evidence == {}
+
+
+def test_inherited_scope_without_a_parent_fact_id_is_malformed():
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [_fact(
+            attribute_evidence={"laterality": [
+                {"text": "right side", "scope": "inherited"}]})]}))

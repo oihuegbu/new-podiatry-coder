@@ -300,13 +300,20 @@ class ConceptRelationIndex:
         return m, tuple(t for t in expansions if t != _norm(term))
 
     @classmethod
-    def load_snapshot(cls) -> tuple["ConceptRelationIndex", dict]:
+    def load_snapshot(cls, source_id: str = "snomed_concept_terms"
+                      ) -> tuple["ConceptRelationIndex", dict]:
         """(index, content identity of the exact bytes parsed) -- same binding
         discipline as `TerminologyIndex.load_snapshot`: the identity is captured at
         the parse because the graph then answers every later relation from memory.
+
+        `source_id` selects WHICH governed concept graph to load -- this class is
+        root-concept-agnostic (issue #6 F9-R4), so the same code loads the Body
+        Structure snapshot (the default, preserving every existing call site) or the
+        Procedure snapshot (`source_id="snomed_procedure_terms"`) without any class
+        changes; only the declared source differs.
         """
         from app.release.source_manifest import (DeclaredSourceUnavailable,
                                                  declared_document_snapshot)
-        document, identity = declared_document_snapshot("snomed_concept_terms",
+        document, identity = declared_document_snapshot(source_id,
                                                         DeclaredSourceUnavailable)
         return cls(document.get("concepts", {})), identity

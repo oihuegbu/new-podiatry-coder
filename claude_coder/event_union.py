@@ -416,7 +416,8 @@ def _copy_fact(fact, node_id: str):
         attributes=dict(getattr(fact, "attributes", None) or {}),
         evidence=list(getattr(fact, "evidence", None) or []),
         axis_confidence=dict(getattr(fact, "axis_confidence", None) or {}),
-        axis_conflicts=list(getattr(fact, "axis_conflicts", None) or []))
+        axis_conflicts=list(getattr(fact, "axis_conflicts", None) or []),
+        attribute_evidence=dict(getattr(fact, "attribute_evidence", None) or {}))
 
 
 def _remap(relation, mapping: dict[str, str]):

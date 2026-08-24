@@ -1225,7 +1225,7 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
     # ONE alignment, shared: an event the axis comparison counted as MATCHED must never
     # also be proposed to the union as a new event, and the only way to guarantee that is
     # for both to read the same correspondence rather than recompute it.
-    alignment = _gc.align(facts, extracted_b.facts)
+    alignment = _gc.align(facts, extracted_b.facts, source=source)
     report, primary_by_id, second_by_node = _gc.compare(
         facts, extracted_b.facts, second_origin=extracted_b.origin, alignment=alignment,
         source=source)

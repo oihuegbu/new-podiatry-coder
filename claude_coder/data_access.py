@@ -228,6 +228,8 @@ class CodeSource(Protocol):
 
     def concept_relation_detail(self, term_a: str, term_b: str) -> dict: ...
 
+    def procedure_relation_detail(self, term_a: str, term_b: str) -> dict: ...
+
     def concept_lookup(self, axis: str, term: str) -> dict: ...
 
     def concept_scan(self, axis: str, text: str) -> tuple[str, ...]: ...
@@ -263,6 +265,8 @@ class AuthoritativeSource:
         self._snomed = None
         self._concept_relation_index = None
         self._concept_relation_identity = None
+        self._procedure_relation_index = None
+        self._procedure_relation_identity = None
         self._cptidx = None
         self._learned = None
         self._drug = None
@@ -461,6 +465,66 @@ class AuthoritativeSource:
             "source_identity": dict(self._concept_relation_identity or {}),
         }
 
+    def _ensure_procedure_relation_index(self):
+        """Same lazy-load-and-degrade discipline as `_ensure_concept_relation_index`,
+        against the SEPARATE SNOMED CT Procedure hierarchy snapshot (issue #6 F9-R4).
+        Kept as its own cached index/identity pair rather than a second root loaded
+        into the same instance -- the two hierarchies answer different questions
+        (anatomy sameness vs. action/event sameness) and must be able to degrade
+        independently."""
+        from . import terminology as _term
+        if self._procedure_relation_index is None:
+            try:
+                index, identity = _term.ConceptRelationIndex.load_snapshot(
+                    source_id="snomed_procedure_terms")
+                self._procedure_relation_index = index
+                self._procedure_relation_identity = identity
+                self._bound_sources.bind(identity)
+            except Exception:
+                # A reviewed-OPTIONAL concept graph: absence can only leave a relation
+                # UNRESOLVED, never assert a wrong one, so it degrades rather than
+                # holding. Nothing is bound in that case -- no bytes were parsed.
+                self._procedure_relation_index = False
+        return self._procedure_relation_index
+
+    def procedure_relation_detail(self, term_a: str, term_b: str) -> dict:
+        """The full auditable basis (same shape as `concept_relation_detail`) for
+        whether two documented ACTIONS describe the same real-world procedure, from
+        the authoritative SNOMED CT Procedure concept graph (issue #6 F9-R4) --
+        never from lexical shape. `coreference.action_relation_detail` uses this to
+        tell a genuine paraphrase (one reading's summary line vs. another reading's
+        detailed narrative for the same operative step) apart from wording that
+        merely overlaps, which exact-stemmed-token-set equality alone cannot do.
+
+        This is a SEPARATE, more strongly governed mechanic than `concept_lookup`'s
+        existing "procedure" axis (see `_GOVERNED_LOOKUP_AXES` below), which is
+        deliberately backed by the weaker, non-authoritative CPT-synonym recall aid
+        and stays that way -- this method must NEVER be used to select or expand a
+        CPT/HCPCS code, only to compare two ACTION DESCRIPTIONS for event identity.
+        REVIEWED-OPTIONAL: absence returns `terminology.CONCEPT_UNRESOLVED`, which
+        `coreference.action_relation_detail` already treats as UNDETERMINED -- the
+        same conservative direction event identity already defaults to without
+        concept data; see tools/build_snomed_procedure_terms.py.
+        """
+        from . import terminology as _term
+        index = self._ensure_procedure_relation_index()
+        if not index:
+            return {"verdict": _term.CONCEPT_UNRESOLVED, "source_identity": None}
+        detail = index.relation_detail(term_a, term_b)
+        return {
+            "verdict": detail.verdict,
+            "confidence": detail.confidence,
+            "term_a": {"term": detail.match_a.term,
+                      "candidates": list(detail.match_a.candidates),
+                      "method": detail.match_a.method,
+                      "unique": detail.match_a.unique},
+            "term_b": {"term": detail.match_b.term,
+                      "candidates": list(detail.match_b.candidates),
+                      "method": detail.match_b.method,
+                      "unique": detail.match_b.unique},
+            "source_identity": dict(self._procedure_relation_identity or {}),
+        }
+
     #: Governed axes THIS source can route `concept_lookup` to a real concept graph
     #: for. Only "anatomy" has one today (the SNOMED CT Body Structure hierarchy) --
     #: adding a "procedure" axis needs a real licensed/verified procedure-terminology
@@ -473,6 +537,11 @@ class AuthoritativeSource:
     #: a governed concept graph -- see `_ensure_procedure_synonym_index`. Any OTHER
     #: axis honestly reports no governed source rather than being backed by data
     #: explicitly disclaimed as non-authoritative.
+    #:
+    #: This is UNRELATED to `procedure_relation_detail` above (issue #6 F9-R4), which
+    #: IS backed by a real governed SNOMED Procedure concept graph -- that method
+    #: compares two ACTION DESCRIPTIONS for event identity, never selects or expands
+    #: a code, and is deliberately not routed through this axis dispatch.
     _GOVERNED_LOOKUP_AXES = frozenset({"anatomy", "procedure"})
 
     _EMPTY_CONCEPT_LOOKUP = {"candidates": [], "method": "none", "unique": False,
@@ -1473,6 +1542,7 @@ class MockSource:
                  excludes1: dict[str, set] | None = None,
                  coverage: dict[str, set] | None = None,
                  concept_relation: dict[tuple[str, str], str] | None = None,
+                 procedure_relation: dict[tuple[str, str], dict] | None = None,
                  concept_lookup: dict[str, dict] | None = None,
                  procedure_concept_lookup: dict[str, dict] | None = None,
                  component_relationships: dict[str, dict[str, set]] | None = None,
@@ -1498,6 +1568,13 @@ class MockSource:
                           {str(x).replace(".", "").upper() for x in v}
                           for k, v in (coverage or {}).items()}
         self._concept_relation_map = concept_relation or {}
+        # {(term_a, term_b) -> full detail dict, minus "source_identity"/"confidence"
+        # which the mock fills in} -- a SEPARATE governed graph from anatomy's
+        # `_concept_relation_map` (issue #6 F9-R4), test-configured with the real
+        # candidates/unique/method shape `action_relation_detail` requires rather
+        # than synthesized from a bare verdict string, so a test can exercise the
+        # strict uniqueness/equal-candidates gate directly.
+        self._procedure_relation_map = procedure_relation or {}
         self._concept_lookup_map = concept_lookup or {}
         # A SEPARATE table from `_concept_lookup_map` (anatomy's), not a shared
         # one keyed on the same term string -- a term configured for one governed
@@ -1678,6 +1755,17 @@ class MockSource:
         return {"verdict": self.concept_relation(term_a, term_b),
                "confidence": 1.0, "term_a": {"term": term_a}, "term_b": {"term": term_b},
                "source_identity": {"source_id": "mock_concept_relation"}}
+
+    def procedure_relation_detail(self, term_a, term_b):
+        from .terminology import CONCEPT_UNRESOLVED
+        entry = (self._procedure_relation_map.get((term_a, term_b))
+                or self._procedure_relation_map.get((term_b, term_a)))
+        if entry is None:
+            return {"verdict": CONCEPT_UNRESOLVED, "source_identity": None}
+        detail = dict(entry)
+        detail.setdefault("confidence", 1.0)
+        detail.setdefault("source_identity", {"source_id": "mock_procedure_relation"})
+        return detail
 
     def concept_lookup(self, axis, term):
         # Each governed/advisory axis reads its OWN configured table -- mirrors the

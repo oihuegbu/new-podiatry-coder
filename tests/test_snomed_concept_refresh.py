@@ -126,6 +126,87 @@ class SnomedConceptTermsRefreshRegression(unittest.TestCase):
                 refresh.CODES = old_codes
 
 
+_PROC_ROOT = "71388002"   # SNOMED's own Procedure root -- an RF2 format id, not vocabulary.
+
+
+def _write_procedure_fixture(release_dir: Path) -> None:
+    snap = release_dir / "Snapshot" / "Terminology"
+    snap.mkdir(parents=True)
+    rel = ["1\t20260101\t1\t9\tPROC1\t" + _PROC_ROOT + f"\t0\t{_IS_A}\t{_INFERRED}\t0",
+          "2\t20260101\t1\t9\tPROC2\tPROC1\t0\t" + _IS_A + f"\t{_INFERRED}\t0"]
+    (snap / "sct2_Relationship_Snapshot_TEST_20260101.txt").write_text(
+        _RELATIONSHIP_HEADER + "\n".join(rel) + "\n")
+    desc = [f"10\t20260101\t1\t9\tPROC1\ten\t{_SYNONYM}\tsynthetic procedure one\t0",
+           f"11\t20260101\t1\t9\tPROC1\ten\t{_FSN}\tsynthetic procedure one (procedure)\t0",
+           f"12\t20260101\t1\t9\tPROC2\ten\t{_SYNONYM}\tsynthetic procedure two\t0"]
+    (snap / "sct2_Description_Snapshot-en_TEST_20260101.txt").write_text(
+        _DESCRIPTION_HEADER + "\n".join(desc) + "\n")
+
+
+class SnomedProcedureTermsRefreshRegression(unittest.TestCase):
+    """Same regression as `SnomedConceptTermsRefreshRegression`, for the sibling
+    Procedure builder (issue #6 F9-R4) -- proves `tools/build_snomed_procedure_
+    terms.py` and `_verify()`'s generic "concepts" container / `*_sha256` digest
+    checks agree on a real build, exactly as they already do for Body Structure."""
+
+    def test_prepare_and_verify_agree_on_a_real_build(self):
+        import tools.build_snomed_procedure_terms as builder
+        import tools.refresh_authoritative_data as refresh
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            release_dir = tmp / "SnomedCT_TEST_20260101T120000Z"
+            _write_procedure_fixture(release_dir)
+            data_dir = tmp / "data"
+            (data_dir / "codes").mkdir(parents=True)
+
+            old_argv, old_data_dir, old_codes = (
+                sys.argv, builder.DATA_DIR, refresh.CODES)
+            sys.argv = ["build_snomed_procedure_terms.py", "--release", str(release_dir)]
+            builder.DATA_DIR = data_dir
+            refresh.CODES = data_dir / "codes"
+            try:
+                exit_code = builder.main()
+                self.assertEqual(exit_code, 0)
+                out = data_dir / "codes" / "snomed_procedure_terms.json"
+                self.assertTrue(out.exists())
+
+                # The exact call the refresh stage makes after `prepare`. Must succeed,
+                # not raise "prepared but empty" against a real build.
+                record = refresh._verify("snomed_procedure_terms.json")
+            finally:
+                sys.argv, builder.DATA_DIR, refresh.CODES = (
+                    old_argv, old_data_dir, old_codes)
+
+        self.assertEqual(record["codes"], 2, record)   # PROC1 (root child) + PROC2 (leaf)
+        self.assertTrue(record["provenance"])
+        self.assertTrue(record["sha256"])
+
+    def test_no_release_found_exits_cleanly_without_writing(self):
+        """No RF2 release present -> exit 0, nothing written -- event-identity action
+        comparison must degrade gracefully, never crash the refresh batch."""
+        import tools.build_snomed_procedure_terms as builder
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td) / "data"
+            (data_dir / "codes").mkdir(parents=True)
+            old_argv, old_data_dir, old_env = (
+                sys.argv, builder.DATA_DIR, dict(__import__("os").environ))
+            sys.argv = ["build_snomed_procedure_terms.py", "--release",
+                       str(Path(td) / "does-not-exist")]
+            builder.DATA_DIR = data_dir
+            import os
+            os.environ.pop("SNOMED_RF2_DIR", None)
+            try:
+                exit_code = builder.main()
+                self.assertEqual(exit_code, 0)
+                self.assertFalse((data_dir / "codes" / "snomed_procedure_terms.json").exists())
+            finally:
+                sys.argv, builder.DATA_DIR = old_argv, old_data_dir
+                os.environ.clear()
+                os.environ.update(old_env)
+
+
 def _staged_builder_script(payload_json: str, *, echo_published: Path | None = None) -> list[str]:
     """A fake builder command matching the REAL contract every builder follows
     (issue #6 F7-R3-C5, exact-SHA re-review, eighth pass): it resolves its OWN output

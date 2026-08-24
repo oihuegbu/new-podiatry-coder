@@ -277,28 +277,73 @@ class ConsensusReport:
 
 
 # ------------------------------------------------------------------- alignment
-def align(primary: list, second: list) -> tuple[list[tuple[Any, Any]], list, list]:
+def align(primary: list, second: list, source: Any = None
+         ) -> tuple[list[tuple[Any, Any]], list, list]:
     """Match each second-reading event to the primary event it describes.
 
-    Greedy best-first over same-kind pairs, so the strongest correspondence is taken
-    first and nothing is matched twice. Wording is never compared for equality - only
-    distinctive-token overlap - which is precisely what stops differing prose from
-    becoming a disagreement.
+    TWO tiers, in priority order:
+
+    1. GOVERNED (issue #6 F9-R4): when `source` supplies a SNOMED Procedure concept
+       graph, a pair whose actions uniquely resolve to the SAME procedure concept
+       (`coreference.action_relation_detail`) is a source-anchored, highest-priority
+       match -- this is what lets a note's own summary line align with its detailed
+       procedure narrative for the same step even though the two share little
+       distinctive vocabulary. Only forces a match when the governed verdict names
+       EXACTLY ONE same-kind counterpart on each side; an action that governed-
+       matches more than one still-unmatched candidate is left unresolved by this
+       tier rather than guessed at (never both, never an arbitrary pick).
+    2. LEXICAL (unchanged): greedy best-first Jaccard overlap over same-kind pairs
+       neither side of which tier 1 already matched, so the strongest remaining
+       correspondence is taken first and nothing is matched twice. Wording is never
+       compared for equality - only distinctive-token overlap - which is precisely
+       what stops differing prose from becoming a disagreement. This tier is now an
+       OBSERVATIONAL tiebreak among pairs tier 1 did not resolve, never semantic
+       proof on its own (Codex F9-R4).
     """
+    used_primary: set[int] = set()
+    used_second: set[int] = set()
+    pairs: list[tuple[Any, Any]] = []
+
+    if source is not None:
+        from . import coreference as _coref
+        governed: set[tuple[int, int]] = set()
+        for i, left in enumerate(primary):
+            for j, right in enumerate(second):
+                if _kind(left) != _kind(right):
+                    continue
+                verdict, _detail = _coref.action_relation_detail(
+                    getattr(left, "description", ""),
+                    getattr(right, "description", ""), source)
+                if verdict == _coref.SAME_EVENT:
+                    governed.add((i, j))
+        by_primary: dict[int, int] = {}
+        by_second: dict[int, int] = {}
+        for i, j in governed:
+            by_primary[i] = by_primary.get(i, 0) + 1
+            by_second[j] = by_second.get(j, 0) + 1
+        for i, j in sorted(governed):
+            if i in used_primary or j in used_second:
+                continue
+            if by_primary[i] == 1 and by_second[j] == 1:
+                used_primary.add(i)
+                used_second.add(j)
+                pairs.append((primary[i], second[j]))
+
     scored: list[tuple[float, int, int]] = []
     primary_tokens = [_tokens(getattr(f, "description", "")) for f in primary]
     second_tokens = [_tokens(getattr(f, "description", "")) for f in second]
     for i, left in enumerate(primary):
+        if i in used_primary:
+            continue
         for j, right in enumerate(second):
+            if j in used_second:
+                continue
             if _kind(left) != _kind(right):
                 continue
             score = _similarity(primary_tokens[i], second_tokens[j])
             if score >= ALIGNMENT_THRESHOLD:
                 scored.append((score, i, j))
     scored.sort(key=lambda item: (-item[0], item[1], item[2]))
-    used_primary: set[int] = set()
-    used_second: set[int] = set()
-    pairs: list[tuple[Any, Any]] = []
     for _score, i, j in scored:
         if i in used_primary or j in used_second:
             continue
@@ -380,15 +425,16 @@ def compare_axes(pairs: list[tuple[Any, Any]],
 
 
 # ------------------------------------------------------------------ resolution
-def _span_support(fact, reconciliation) -> tuple[bool, str, str, tuple[str, ...]]:
-    """Is this reading of the event backed by the SOURCE, and what did the source say?
+def _spans_support(spans: list, reconciliation) -> tuple[bool, str, str, tuple[str, ...]]:
+    """The shared mechanic behind `_span_support`/`_attribute_span_support`: is THIS
+    list of spans backed by the SOURCE, and what did the source say?
 
-    Returns (supported, proof, verified_text, span_ids). Fail-closed: an event with no
-    anchored quotation, or any quotation the original page did not confirm, is NOT
-    supported - "we could not check" is never "confirmed".
+    Returns (supported, proof, verified_text, span_ids). Fail-closed: no anchored
+    span, or any quotation the original page did not confirm, is NOT supported --
+    "we could not check" is never "confirmed".
     """
-    spans = [s for s in (getattr(fact, "evidence", None) or [])
-             if getattr(s, "anchored", False) and str(getattr(s, "span_id", "") or "")]
+    spans = [s for s in spans
+            if getattr(s, "anchored", False) and str(getattr(s, "span_id", "") or "")]
     if not spans:
         return False, "", "", ()
     span_ids = tuple(str(s.span_id) for s in spans)
@@ -407,6 +453,37 @@ def _span_support(fact, reconciliation) -> tuple[bool, str, str, tuple[str, ...]
         if outcome is None or outcome.status not in permitted:
             return False, "", "", span_ids
     return True, PROOF_ORIGINAL_PAGE, text, span_ids
+
+
+def _span_support(fact, reconciliation) -> tuple[bool, str, str, tuple[str, ...]]:
+    """Is this reading of the EVENT backed by the SOURCE, and what did the source say?
+    See `_spans_support` for the mechanic; this scopes it to the fact's whole
+    (undifferentiated) evidence pool."""
+    return _spans_support(getattr(fact, "evidence", None) or [], reconciliation)
+
+
+def _attribute_span_support(fact, attr_name: str, reconciliation
+                            ) -> tuple[bool, str, str, tuple[str, ...]] | None:
+    """Per-attribute proof (issue #6 F9-R5): the SAME shape as `_span_support`, scoped
+    to evidence anchored specifically to `attr_name` rather than the fact's whole
+    evidence pool -- so a value stated once in a scoped heading/parent event can be
+    proven without one of its tokens happening to also appear elsewhere in the fact's
+    unrelated evidence text. Returns `None` (not a tuple) when the fact has no
+    `attribute_evidence` for this attribute at all, so the caller falls back to
+    `_span_support`'s whole-fact-text check -- a strictly ADDITIVE signal, never a
+    narrowing of what already worked.
+
+    An "inherited" entry's span was anchored against a DIFFERENT reading position than
+    a local one would be -- correct, since the whole point is a value stated once on a
+    linked parent/section, not repeated in this fact's own sentence -- so it is judged
+    on its own span exactly like a local one; `source_relation_id` was already
+    validated at extraction time against a real, emitted PART_OF/SAME_EPISODE_AS
+    relation before this entry could ever exist (`extraction.extract_note`).
+    """
+    entries = (getattr(fact, "attribute_evidence", None) or {}).get(attr_name)
+    if not entries:
+        return None
+    return _spans_support([e.span for e in entries], reconciliation)
 
 
 def source_support(fact, reconciliation) -> tuple[bool, str, str, tuple[str, ...]]:
@@ -453,16 +530,27 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
     confirmed -- event-level confirmation is not value-level confirmation,
     regardless of how many readings had a confirmed event). Anything else is
     unresolved, which is a provider question, never a coder queue.
+
+    Proof is now PER-ATTRIBUTE first (issue #6 F9-R5): when a reading carries
+    `attribute_evidence` for this specific axis, that -- not the fact's whole,
+    undifferentiated evidence text -- is what the value is checked against, so a
+    value stated once in a scoped heading/parent event can be proven without one of
+    its tokens merely happening to co-occur elsewhere in the fact's evidence pool.
+    Falls back to `_span_support`'s whole-fact-text check when no per-attribute
+    evidence was recorded for this axis -- strictly additive, never a narrowing of
+    what already resolved before this field existed.
     """
     out: list[AxisResolution] = []
     for item in disagreements:
         primary = primary_by_id.get(item.node_id)
         second = second_by_node.get(item.node_id)
         p_ok, p_proof, p_text, p_spans = (
-            _span_support(primary, reconciliation) if primary is not None
+            (_attribute_span_support(primary, item.axis, reconciliation)
+             or _span_support(primary, reconciliation)) if primary is not None
             else (False, "", "", ()))
         s_ok, s_proof, s_text, s_spans = (
-            _span_support(second, reconciliation) if second is not None
+            (_attribute_span_support(second, item.axis, reconciliation)
+             or _span_support(second, reconciliation)) if second is not None
             else (False, "", "", ()))
         # VALUE-level entailment, gated on the reading's own EVENT actually being
         # source-confirmed (p_ok/s_ok) -- computed once, applied uniformly to
