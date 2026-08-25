@@ -269,6 +269,7 @@ class AuthoritativeSource:
         self._concept_relation_identity = None
         self._procedure_relation_index = None
         self._procedure_relation_identity = None
+        self._umls_crosswalk = None
         self._cptidx = None
         self._learned = None
         self._drug = None
@@ -533,6 +534,43 @@ class AuthoritativeSource:
                       "unique": detail.match_b.unique},
             "source_identity": dict(self._procedure_relation_identity or {}),
         }
+
+    def umls_crosswalk_entry(self, code: str, system: str) -> dict:
+        """The UMLS-derived CPT/HCPCS<->SNOMED CT concept crosswalk entry for one
+        code (issue #6, UMLS 2026AA ingestion) -- `{"cuis": [...], "matched_snomed_
+        concept_ids": [...]}`, or `{}` when the code has no crosswalk entry or the
+        source itself is absent.
+
+        RECALL/AUDIT ARTIFACT ONLY, same boundary as `procedure_relation_detail`
+        above and `tools/build_snomed_procedure_terms.py`'s own docstring, stated
+        here a third time for the same reason: this method must NEVER be used to
+        select or expand a CPT/HCPCS code. A shared UMLS concept (or CUI) does not
+        establish CPT billing-code equivalence -- CPT carves the same real-world
+        clinical action into billing-specific categories (site, technique,
+        complexity tier) that do not line up 1:1 with SNOMED's or UMLS's own concept
+        granularity. No caller in this codebase consults this method for candidate
+        selection; it exists to be queryable and auditable, not to be wired in.
+
+        REVIEWED-OPTIONAL: fail-safe empty when the crosswalk file is absent -- it
+        needs a UMLS license and NLM's own MetamorphoSys tool to build; see
+        tools/build_umls_crosswalk.py."""
+        if system not in ("cpt", "hcpcs"):
+            return {}
+        if self._umls_crosswalk is None:
+            try:
+                document, identity = declared_document_snapshot(
+                    "umls_crosswalk", AuthoritativeDataUnavailable)
+                self._umls_crosswalk = document.get("crosswalk", {}) or {}
+                self._bound_sources.bind(identity)
+            except Exception:
+                # A reviewed-OPTIONAL recall/audit aid: absence removes nothing a
+                # decision depends on, so it degrades rather than holding. Nothing
+                # is bound in that case -- no bytes were parsed to attest to.
+                self._umls_crosswalk = False
+        if not self._umls_crosswalk:
+            return {}
+        entry = self._umls_crosswalk.get(str(code))
+        return dict(entry) if isinstance(entry, dict) else {}
 
     #: Governed axes THIS source can route `concept_lookup` to a real concept graph
     #: for. Only "anatomy" has one today (the SNOMED CT Body Structure hierarchy) --
@@ -1470,6 +1508,46 @@ class AuthoritativeSource:
             out |= table.get(undot[:length], set())
         return tuple(sorted(out))
 
+    def record_snapshot_identity(self, code: str, system: str) -> dict[str, Any]:
+        """The exact bound source identity (whole-file sha256/size) plus release
+        edition/effective-window a compiled descriptor-term requirement for `code`
+        actually rested on (issue #6 F9-R6-R5, fourth re-review). No source file
+        here carries genuine per-record versioning -- the file's own identity plus
+        the record's own `code` as the stable key is the real, honest granularity
+        this data has; this does not invent finer-grained provenance than exists.
+        {} for a system with no rich-record source (`_RICH_RECORD_SOURCES`) or
+        before any table has bound (should not happen in practice, since calling
+        `descriptions()` below is what binds it)."""
+        source_id = self._RICH_RECORD_SOURCES.get(system)
+        if not source_id:
+            return {}
+        self.descriptions(code, system)   # ensures the table (and its identity) is bound
+        identity = self._bound_sources.identities.get(source_id)
+        if not identity:
+            return {}
+        from app.release.source_manifest import release_metadata
+        edition = {k: v for k, v in release_metadata(source_id).items() if v}
+        return {"source_id": source_id, "sha256": identity.get("sha256", ""),
+                "size": identity.get("size", 0), "stable_key": code, **edition}
+
+    def instructional_terms_snapshot(self) -> dict[str, Any]:
+        """The bound `instructional_notes` source identity a compiled inclusion-term
+        requirement actually rested on. No release/edition window exists for this
+        source in this codebase's manifest (it ships with the code edition rather
+        than a separate release window, confirmed deliberate in
+        `RELEASE_METADATA_SOURCES`) -- so, unlike `record_snapshot_identity`, this
+        never has an edition to report. {} when the table cannot be bound at all
+        (degrades the same fail-closed way `instructional_terms` itself does)."""
+        try:
+            self.instructional_terms("", "icd10")   # no-op lookup, ensures table bound
+        except Exception:
+            return {}
+        identity = self._bound_sources.identities.get("instructional_notes")
+        if not identity:
+            return {}
+        return {"source_id": "instructional_notes", "sha256": identity.get("sha256", ""),
+                "size": identity.get("size", 0)}
+
     # -- semantic classification (issue #6, compiled-semantic-layer plan item 1) --
     def _coding_semantics(self) -> dict:
         """The `code_classes` classification config: {class name -> matching rule}.
@@ -1609,7 +1687,9 @@ class MockSource:
                  procedure_concept_lookup: dict[str, dict] | None = None,
                  component_relationships: dict[str, dict[str, set]] | None = None,
                  instructional_terms: dict[str, set] | None = None,
-                 semantic_class: dict[str, str] | None = None) -> None:
+                 semantic_class: dict[str, str] | None = None,
+                 snapshot: dict[str, Any] | None = None,
+                 umls_crosswalk: dict[str, dict] | None = None) -> None:
         self._records = records or {}
         self._retrieval = retrieval or {}
         self._ncci = ncci or {}
@@ -1656,6 +1736,14 @@ class MockSource:
                                      for k, v in (instructional_terms or {}).items()}
         self._semantic_class_data = {str(k): str(v)
                                      for k, v in (semantic_class or {}).items()}
+        # issue #6 F9-R6-R5, fourth re-review: configurable snapshot-identity mirror
+        # for `AuthoritativeSource.record_snapshot_identity`/
+        # `instructional_terms_snapshot`, matching `instructional_terms`'s own
+        # test-configured-dict pattern -- a test that wants to assert on
+        # `source_identity["snapshot"]` supplies it here; unconfigured tests get {},
+        # exercising the real fail-closed degrade path.
+        self._snapshot_data = dict(snapshot or {})
+        self._umls_crosswalk_data = {str(k): dict(v) for k, v in (umls_crosswalk or {}).items()}
 
     def global_period(self, code):
         return self._gp.get(code)
@@ -1912,3 +2000,14 @@ class MockSource:
 
     def semantic_class(self, code, system):
         return self._semantic_class_data.get(str(code))
+
+    def record_snapshot_identity(self, code, system):
+        return dict(self._snapshot_data)
+
+    def instructional_terms_snapshot(self):
+        return dict(self._snapshot_data)
+
+    def umls_crosswalk_entry(self, code, system):
+        if system not in ("cpt", "hcpcs"):
+            return {}
+        return dict(self._umls_crosswalk_data.get(str(code), {}))

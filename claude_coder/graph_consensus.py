@@ -543,6 +543,8 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
     evidence was recorded for this axis -- strictly additive, never a narrowing of
     what already resolved before this field existed.
     """
+    from . import tiebreak as _tiebreak
+
     out: list[AxisResolution] = []
     for item in disagreements:
         primary = primary_by_id.get(item.node_id)
@@ -560,10 +562,22 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
         # every case below, so no branch can accept a value its own confirmed
         # quotation never states, regardless of what the OTHER reading did or
         # did not confirm.
-        p_says = p_ok and bool(item.value_primary) and _value_tokens(
-            item.value_primary).issubset(_value_tokens(p_text))
-        s_says = s_ok and bool(item.value_second) and _value_tokens(
-            item.value_second).issubset(_value_tokens(s_text))
+        #
+        # Uses `tiebreak.asserted_status`, not a bare token-subset test (issue #6
+        # F9-R6-R2, fourth re-review): the old `_value_tokens(...).issubset(...)`
+        # check is an unordered bag-of-tokens comparison with zero negation
+        # awareness, so "not left, but right" would let value_primary="left"
+        # pass as literally stated -- the same defect this round already fixed
+        # in `tiebreak.narrow`'s own lexical matching, present here first, since
+        # this is what actually populates `fact.attributes[axis]` on acceptance.
+        # `asserted_status` is a strictly STRONGER test than the old subset
+        # check (clause-scoped contiguous phrase match, not just co-occurring
+        # tokens), so this can only make acceptance more conservative, never
+        # accept something the old check would have refused.
+        p_says = p_ok and bool(item.value_primary) and _tiebreak.asserted_status(
+            (item.value_primary,), p_text) == "supported"
+        s_says = s_ok and bool(item.value_second) and _tiebreak.asserted_status(
+            (item.value_second,), s_text) == "supported"
 
         winner = ""
         proof = ""

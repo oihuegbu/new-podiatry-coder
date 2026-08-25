@@ -1071,9 +1071,22 @@ def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: Cand
         return False, tie.detail
     text = " ".join(str(getattr(s, "text", "") or "")
                     for s in (getattr(fact, "evidence", None) or []))
-    loser_terms = {t for probe in tie.axes if probe.provable and probe.selectable
+    # issue #6 F9-R6-R2, fourth re-review: AXIS_LATERALITY is excluded here.
+    # Laterality is the only axis that is ever both `provable` and `selectable`
+    # today, so leaving it in this loop would silently re-derive it by the same
+    # fixed-token-window lexical matching `tiebreak.narrow` was just changed to
+    # never use for this axis -- reintroducing the exact wrong-side-selection
+    # danger that fix closed, one call site later, the moment `tie.winner` comes
+    # back None. Laterality is now exclusively the typed-attribute path's
+    # responsibility (`tiebreak._typed_laterality_support`, consulted inside the
+    # `tie = _tiebreak.narrow(...)` call just above). This filter is a no-op for
+    # every axis kind that isn't laterality and stays ready for a future
+    # genuinely-new selectable axis that isn't laterality.
+    loser_terms = {t for probe in tie.axes
+                   if probe.provable and probe.selectable and probe.axis != _tiebreak.AXIS_LATERALITY
                    for t in probe.terms_by_code.get(loser.code, ())}
-    winner_terms = {t for probe in tie.axes if probe.provable and probe.selectable
+    winner_terms = {t for probe in tie.axes
+                    if probe.provable and probe.selectable and probe.axis != _tiebreak.AXIS_LATERALITY
                     for t in probe.terms_by_code.get(winner.code, ())}
     # issue #6 F9-R6-R2/R6-R6 re-review: `_tiebreak.asserted_status`, not a bare
     # contiguous-phrase check -- a requirement-derived term can be a whole

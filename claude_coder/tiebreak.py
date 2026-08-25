@@ -433,6 +433,25 @@ def provider_query(fact, axes: tuple[AxisProbe, ...]) -> str:
             f"codes for {subject!r}. Please document: {'; '.join(named)}.")
 
 
+def _typed_laterality_support(fact, probe: AxisProbe) -> dict[str, tuple[str, ...]] | None:
+    """Laterality settled via the FACT's own typed `attributes["laterality"]`
+    value -- now safe to trust after `graph_consensus.resolve`'s matching negation-
+    aware fix (issue #6 F9-R6-R2, fourth re-review) -- never re-derived by lexical
+    matching against raw text, which cannot correctly resolve arbitrary-distance
+    negation scope (a fixed token window around a phrase match cannot tell "left
+    but not right" from "right but not left" once the negation cue falls outside
+    the window). Returns None when this probe is not the laterality axis, or the
+    fact carries no laterality value at all; the caller must NOT fall back to
+    lexical matching for this axis when None -- fail closed, never guess."""
+    if probe.axis != AXIS_LATERALITY:
+        return None
+    value = str((getattr(fact, "attributes", None) or {}).get("laterality") or "").strip().lower()
+    if not value:
+        return None
+    return {code: tuple(t for t in terms if t == value)
+           for code, terms in probe.terms_by_code.items()}
+
+
 def narrow(fact, candidates: list[CandidateCode],
            reconciliation=None, requirements: tuple = ()) -> TieOutcome:
     """Tie policy steps 3 and 4 — re-inspect ONLY the discriminating axes against the
@@ -461,6 +480,12 @@ def narrow(fact, candidates: list[CandidateCode],
     issue #6 F9-R6-R2/R6-R6 re-review: axis matching is negation-aware
     (`asserted_status`) -- "not on the right, but the left" settles to LEFT,
     never treats the negated mention of "right" as the document stating it.
+
+    issue #6 F9-R6-R2, fourth re-review: laterality specifically no longer
+    uses lexical matching at all -- it is settled from the fact's own typed
+    `attributes["laterality"]` value (see `_typed_laterality_support`), fail-
+    closed when absent, since a fixed-token-window lexical heuristic cannot
+    correctly resolve arbitrary-distance grammatical negation scope.
     """
     from . import graph_consensus as _gc
 
@@ -499,12 +524,23 @@ def narrow(fact, candidates: list[CandidateCode],
     for probe in axes:
         if not probe.provable:
             continue
-        # issue #6 F9-R6-R2/R6-R6 re-review: negation-aware -- "not on the right,
-        # but the left" must never count "right" as the document stating it.
-        # asserted_status is clause-scoped so a negation in one sentence never
-        # bleeds into an unrelated later one.
-        hits = {code: tuple(t for t in terms if asserted_status((t,), proven_text) == "supported")
-                for code, terms in probe.terms_by_code.items()}
+        # issue #6 F9-R6-R2, fourth re-review: laterality is settled EXCLUSIVELY
+        # from the fact's own typed attribute now, never re-derived lexically --
+        # a fixed-token-window heuristic cannot correctly resolve arbitrary-
+        # distance negation scope (proven: "right ... ultimately ruled out" wins
+        # RIGHT under a window-based check). A fact with no typed laterality
+        # value fails closed (no hits) instead of falling back to the unsafe
+        # lexical path. Every other axis kind is unaffected and keeps the
+        # existing negation-aware lexical match ("not on the right, but the
+        # left" must never count "right" as the document stating it).
+        typed = _typed_laterality_support(fact, probe)
+        if typed is not None:
+            hits = typed
+        elif probe.axis == AXIS_LATERALITY:
+            hits = {code: () for code in probe.terms_by_code}
+        else:
+            hits = {code: tuple(t for t in terms if asserted_status((t,), proven_text) == "supported")
+                    for code, terms in probe.terms_by_code.items()}
         documented = [code for code, found in hits.items() if found]
         if documented:
             documented_axes.add(probe.axis)

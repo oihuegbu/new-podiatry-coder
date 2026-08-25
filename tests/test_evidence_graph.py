@@ -502,6 +502,31 @@ class PerAttributeSourceEvidence(unittest.TestCase):
         self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.RESOLVED_FROM_SOURCE)
         self.assertEqual(laterality.accepted_value, "left")
 
+    def test_a_value_whose_only_textual_support_is_negated_is_never_accepted(self):
+        """issue #6 F9-R6-R2, fourth re-review, ROOT CAUSE: this is what actually
+        writes `fact.attributes[axis]` on acceptance -- the old
+        `_value_tokens(...).issubset(...)` check is an unordered bag-of-tokens
+        comparison with zero negation awareness, so a reading claiming "left"
+        would have been accepted here even though its own quotation states
+        "not left, but right" -- "left" appears only negated, never asserted.
+        Fixed by routing through `tiebreak.asserted_status` instead, which this
+        proves stays UNRESOLVED rather than wrongly RESOLVED_FROM_SOURCE."""
+        primary = [_fact("F1", FactKind.PROCEDURE, "procedure performed",
+                         spans=[_span("The procedure was performed, not left, but right",
+                                     span_id="p1")],
+                         attributes={"laterality": "left"})]
+        second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
+                        spans=[_span("performed procedure", span_id="s1")],
+                        attributes={})]
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "laterality")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED,
+                      "a value stated only in a negated clause must never be "
+                      "accepted as this reading's own asserted value")
+
 
 class AttributeEvidenceGraphAndCertificateLineage(unittest.TestCase):
     """Issue #6 F9-R5-B: per-attribute evidence is part of the clinical graph's own

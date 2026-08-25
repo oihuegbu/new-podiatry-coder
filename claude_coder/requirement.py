@@ -106,13 +106,34 @@ class CoverageCorpus:
     uncovered_pages: tuple[int, ...] = ()
     page_image_sha256: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        """Self-validate identity at construction, not on first read (issue #6
+        F9-R6-R4, fourth re-review): the old `.complete` check never verified
+        `channel_id`/`covered_pages` were populated at all, or that `text_sha256`
+        genuinely matches `text` -- a blank-channel, zero-page, or wrong-hash
+        corpus could report `complete=True` today. A frozen dataclass may still
+        raise from `__post_init__` (it only forbids ASSIGNING fields here),
+        so this fails fast and loud instead of silently validating a corpus
+        that never proves what it claims to."""
+        import hashlib
+        if not self.channel_id or not self.covered_pages:
+            raise ValueError(
+                "CoverageCorpus must identify a channel and at least one covered page")
+        if self.text_sha256 != hashlib.sha256(self.text.encode("utf-8")).hexdigest():
+            raise ValueError("CoverageCorpus.text_sha256 does not match its own text")
+        if len(self.page_image_sha256) != len(self.covered_pages):
+            raise ValueError(
+                "CoverageCorpus needs exactly one page_image_sha256 per covered page")
+
     @property
     def complete(self) -> bool:
         """Both gates a validated absence needs, together: real text AND no
         page this channel failed to cover. Neither alone is sufficient -- a
         zero-page or fully-uncovered-but-nonempty-flag document must never
-        let NOT_DOCUMENTED validate."""
-        return bool(self.text) and not self.uncovered_pages
+        let NOT_DOCUMENTED validate. `channel_id`/`covered_pages`/hash identity
+        are now guaranteed by `__post_init__`, so this property only needs to
+        check what can still vary AFTER construction succeeds."""
+        return bool(self.text.strip()) and bool(self.covered_pages) and not self.uncovered_pages
 
     def as_record(self) -> dict[str, Any]:
         return {"channel_id": self.channel_id, "text_sha256": self.text_sha256,
@@ -221,6 +242,19 @@ def compile_requirements(candidates: list[CandidateCode], source: Any = None
             if found is None:
                 continue
             clause, offset = found
+            # issue #6 F9-R6-R5, fourth re-review: the bound WHOLE-FILE snapshot
+            # identity (sha256/size/edition) the descriptor table was actually
+            # parsed from, keyed to this specific code -- duck-typed and
+            # fail-closed to {} exactly like `instructional_terms` below, since
+            # not every `source` implementation supplies it (e.g. a bare test
+            # double built before this method existed).
+            snap_fn = getattr(source, "record_snapshot_identity", None)
+            snapshot: dict[str, Any] = {}
+            if callable(snap_fn):
+                try:
+                    snapshot = snap_fn(code, candidate.system) or {}
+                except Exception:
+                    snapshot = {}
             out.append(DescriptorRequirement(
                 requirement_id=f"{probe.axis}:{code}:{len(out)}",
                 axis=probe.axis, candidate_code=code, required=probe.selectable,
@@ -233,12 +267,24 @@ def compile_requirements(candidates: list[CandidateCode], source: Any = None
                 # auditor tell WHICH edition of the descriptor this requirement
                 # was compiled against.
                 source_identity={"kind": "descriptor", "system": candidate.system,
-                                 "authority": dict(candidate.authority or {})},
+                                 "authority": dict(candidate.authority or {}),
+                                 "snapshot": snapshot},
                 selectable=probe.selectable, queryable=probe.queryable))
 
     if source is not None:
         resolver = getattr(source, "instructional_terms", None)
+        snapshot_fn = getattr(source, "instructional_terms_snapshot", None)
         if callable(resolver):
+            # issue #6 F9-R6-R5, fourth re-review: bound once per compile call
+            # (the instructional_notes table is one file shared by every
+            # candidate/term below, unlike descriptors which are per-system) --
+            # duck-typed and fail-closed to {} the same way `resolver` itself is.
+            inclusion_snapshot: dict[str, Any] = {}
+            if callable(snapshot_fn):
+                try:
+                    inclusion_snapshot = snapshot_fn() or {}
+                except Exception:
+                    inclusion_snapshot = {}
             for candidate in sorted(candidates, key=lambda c: c.code):
                 if candidate.system != "icd10":
                     continue
@@ -268,7 +314,8 @@ def compile_requirements(candidates: list[CandidateCode], source: Any = None
                         authority_offset=offset, authority_source_text=term,
                         source_identity={"kind": "instructional_notes",
                                          "system": candidate.system,
-                                         "authority": dict(candidate.authority or {})},
+                                         "authority": dict(candidate.authority or {}),
+                                         "snapshot": inclusion_snapshot},
                         selectable=False, queryable=False))
     return tuple(out)
 

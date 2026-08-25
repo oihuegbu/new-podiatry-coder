@@ -106,6 +106,56 @@ class CompileRequirementsTest(unittest.TestCase):
         self.assertEqual(target.source_identity["authority"],
                          {"index": "rag-hybrid", "system": "cpt"})
 
+    def test_descriptor_requirement_carries_the_bound_source_snapshot_identity(self):
+        """issue #6 F9-R6-R5, fourth re-review: when `source` supplies
+        `record_snapshot_identity`, a compiled descriptor requirement's
+        `source_identity["snapshot"]` carries the exact bound source
+        identity -- distinct from `authority` (the candidate's own retrieval
+        provenance), this is the WHOLE-FILE identity the descriptor table was
+        actually parsed from."""
+        source = MockSource(snapshot={"source_id": "cpt_codes", "sha256": "abc123",
+                                      "size": 4096})
+        reqs = req.compile_requirements([LEFT, RIGHT], source=source)
+        target = next(r for r in reqs if r.candidate_code == "CAND_LEFT")
+        self.assertEqual(target.source_identity["snapshot"],
+                         {"source_id": "cpt_codes", "sha256": "abc123", "size": 4096})
+
+    def test_descriptor_requirement_snapshot_degrades_to_empty_without_the_method(self):
+        """A source that doesn't implement `record_snapshot_identity` at all (an
+        older test double) must never raise -- the requirement compiles exactly
+        as before, just with an empty snapshot."""
+        reqs = req.compile_requirements([LEFT, RIGHT], source=None)
+        target = next(r for r in reqs if r.candidate_code == "CAND_LEFT")
+        self.assertEqual(target.source_identity["snapshot"], {})
+
+    def test_descriptor_requirement_snapshot_degrades_when_the_source_raises(self):
+        class _Raises:
+            def record_snapshot_identity(self, code, system):
+                raise RuntimeError("simulated unavailable manifest identity")
+        reqs = req.compile_requirements([LEFT, RIGHT], source=_Raises())
+        target = next(r for r in reqs if r.candidate_code == "CAND_LEFT")
+        self.assertEqual(target.source_identity["snapshot"], {})
+
+    def test_inclusion_term_requirement_carries_the_bound_source_snapshot_identity(self):
+        source = MockSource(instructional_terms={"A000": {"classical cholera"}},
+                            snapshot={"source_id": "instructional_notes",
+                                     "sha256": "def456", "size": 2048})
+        icd_a = _cand("A00.0", "cholera, unspecified", system="icd10")
+        icd_b = _cand("A00.1", "cholera, another type", system="icd10")
+        reqs = req.compile_requirements([icd_a, icd_b], source=source)
+        incl = next(r for r in reqs if r.axis == "inclusion_term")
+        self.assertEqual(incl.source_identity["snapshot"],
+                         {"source_id": "instructional_notes", "sha256": "def456",
+                          "size": 2048})
+
+    def test_inclusion_term_requirement_snapshot_degrades_to_empty_without_the_method(self):
+        icd_a = _cand("A00.0", "cholera, unspecified", system="icd10")
+        icd_b = _cand("A00.1", "cholera, another type", system="icd10")
+        source = MockSource(instructional_terms={"A000": {"classical cholera"}})
+        reqs = req.compile_requirements([icd_a, icd_b], source=source)
+        incl = next(r for r in reqs if r.axis == "inclusion_term")
+        self.assertEqual(incl.source_identity["snapshot"], {})
+
     def test_inclusion_term_requirements_only_for_icd10_when_source_supplies_them(self):
         icd_a = _cand("A00.0", "cholera, unspecified", system="icd10")
         icd_b = _cand("A00.1", "cholera, another type", system="icd10")
@@ -153,6 +203,59 @@ class CompileRequirementsTest(unittest.TestCase):
         self.assertEqual([r for r in reqs if r.axis == "inclusion_term"], [])
 
 
+class CoverageCorpusValidationTest(unittest.TestCase):
+    """issue #6 F9-R6-R4, fourth re-review: `CoverageCorpus` self-validates at
+    construction. The old `.complete` property never checked `channel_id`/
+    `covered_pages` were populated at all, or that `text_sha256` genuinely
+    matches `text` -- a blank-channel, zero-page, or wrong-hash corpus could
+    report `complete=True`. A frozen dataclass may still raise from
+    `__post_init__` (it only forbids ASSIGNING fields there), so construction
+    now fails fast instead of silently validating a corpus that never proves
+    what it claims to."""
+
+    TEXT = "assembly service performed on the left"
+
+    def _hash(self, text):
+        import hashlib
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    def test_wrong_text_sha256_raises(self):
+        with self.assertRaises(ValueError):
+            req.CoverageCorpus(channel_id="ch1", text=self.TEXT, text_sha256="wrong",
+                               covered_pages=(1,), page_image_sha256=("h1",))
+
+    def test_empty_channel_id_raises_even_with_real_text_and_hash(self):
+        with self.assertRaises(ValueError):
+            req.CoverageCorpus(channel_id="", text=self.TEXT,
+                               text_sha256=self._hash(self.TEXT),
+                               covered_pages=(1,), page_image_sha256=("h1",))
+
+    def test_empty_covered_pages_raises_even_with_real_text_and_hash(self):
+        with self.assertRaises(ValueError):
+            req.CoverageCorpus(channel_id="ch1", text=self.TEXT,
+                               text_sha256=self._hash(self.TEXT),
+                               covered_pages=(), page_image_sha256=())
+
+    def test_mismatched_page_image_sha256_cardinality_raises(self):
+        with self.assertRaises(ValueError):
+            req.CoverageCorpus(channel_id="ch1", text=self.TEXT,
+                               text_sha256=self._hash(self.TEXT),
+                               covered_pages=(1, 2), page_image_sha256=("h1",))
+
+    def test_a_correctly_constructed_fully_covered_corpus_is_complete(self):
+        corpus = req.CoverageCorpus(channel_id="ch1", text=self.TEXT,
+                                    text_sha256=self._hash(self.TEXT),
+                                    covered_pages=(1,), page_image_sha256=("h1",))
+        self.assertTrue(corpus.complete)
+
+    def test_a_corpus_with_uncovered_pages_is_not_complete(self):
+        corpus = req.CoverageCorpus(channel_id="ch1", text=self.TEXT,
+                                    text_sha256=self._hash(self.TEXT),
+                                    covered_pages=(1,), page_image_sha256=("h1",),
+                                    uncovered_pages=(2,))
+        self.assertFalse(corpus.complete)
+
+
 class ValidatedRequirementTest(unittest.TestCase):
     """issue #6 F9-R6-R2, TWO rounds of re-review: `validated_requirement` no
     longer trusts a cited span's mere existence/reconciliation status. SUPPORTED
@@ -189,7 +292,8 @@ class ValidatedRequirementTest(unittest.TestCase):
     def _coverage(self, text):
         import hashlib
         return req.CoverageCorpus(channel_id="test-channel", text=text,
-                                  text_sha256=hashlib.sha256(text.encode()).hexdigest())
+                                  text_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                                  covered_pages=(1,), page_image_sha256=("stub-hash",))
 
     def test_wrong_requirement_id_never_validates(self):
         r = self._req()
@@ -385,9 +489,12 @@ class ValidatedRequirementTest(unittest.TestCase):
         judgement = req.RequirementJudgement(
             requirement_id=r.requirement_id, status=req.RequirementStatus.NOT_DOCUMENTED,
             evidence_span_ids=())
-        incomplete = req.CoverageCorpus(channel_id="test-channel",
-                                        text=self.UNDOCUMENTED, text_sha256="x",
-                                        uncovered_pages=(3,))
+        import hashlib
+        incomplete = req.CoverageCorpus(
+            channel_id="test-channel", text=self.UNDOCUMENTED,
+            text_sha256=hashlib.sha256(self.UNDOCUMENTED.encode()).hexdigest(),
+            covered_pages=(1, 2), page_image_sha256=("h1", "h2"),
+            uncovered_pages=(3,))
         self.assertFalse(req.validated_requirement(r, judgement, coverage=incomplete))
 
     def test_no_reconciliation_at_all_never_validates_a_cited_span(self):
@@ -415,6 +522,7 @@ class DeterministicStatusTest(unittest.TestCase):
         import hashlib
         return req.CoverageCorpus(channel_id="test-channel", text=text,
                                   text_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                                  covered_pages=(1,), page_image_sha256=("stub-hash",),
                                   uncovered_pages=uncovered_pages)
 
     def test_present_phrase_is_supported(self):

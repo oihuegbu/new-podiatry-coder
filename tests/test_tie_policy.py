@@ -303,22 +303,101 @@ class NegatedAxisNarrowingTest(unittest.TestCase):
     """issue #6 F9-R6-R6 (self-discovered, adjacent to Codex's finding): the
     negation-blindness fix extends to `tiebreak.narrow`'s own axis matching --
     the mechanism grounding LATERALITY, the most-trusted, longest-standing
-    axis in this system, not just the newer requirement-derived ones."""
+    axis in this system, not just the newer requirement-derived ones.
+
+    issue #6 F9-R6-R2, fourth re-review: laterality is now settled exclusively
+    via the fact's own typed `attributes["laterality"]` (see
+    `TypedLateralitySelectionTest` below for the fail-closed/no-typed-value
+    cases and the exact dangerous case a lexical window cannot resolve). These
+    two tests are updated to populate that typed attribute -- the value a
+    correctly-fixed `graph_consensus.resolve()` would itself have written from
+    this exact raw text upstream of `narrow()` -- so they keep proving the
+    document, not just narrow()'s own internals, settles to LEFT and never
+    the negated mention of RIGHT."""
 
     def test_a_negated_mention_of_one_side_never_grounds_that_side(self):
         fact = _fact("assembly service",
-                     "assembly service performed, not on the right, but the left")
+                     "assembly service performed, not on the right, but the left",
+                     attributes={"laterality": "left"})
         line = resolve(_request(fact), _source(LAT_LEFT, LAT_RIGHT),
                        reconciliation=_agreed("span-0"))
         self.assertEqual(line.chosen.code if line.chosen else None, "CAND_LEFT",
                          line.rationale)
 
-    def test_narrow_directly_settles_via_the_unnegated_side_only(self):
+    def test_narrow_directly_settles_via_the_typed_attribute(self):
         outcome = tiebreak.narrow(
             _fact("assembly service",
-                 "assembly service performed, not on the right, but the left"),
+                 "assembly service performed, not on the right, but the left",
+                 attributes={"laterality": "left"}),
             [LAT_LEFT, LAT_RIGHT], _agreed("span-0"))
         self.assertEqual(outcome.winner.code if outcome.winner else None, "CAND_LEFT")
+
+
+class TypedLateralitySelectionTest(unittest.TestCase):
+    """issue #6 F9-R6-R2, fourth re-review: a fixed-token-window lexical
+    heuristic cannot correctly resolve arbitrary-distance grammatical negation
+    scope -- Codex's own conclusion, and this class's last two tests are the
+    exact reproductions that proved it (both "left but not right" wrongly
+    negating the asserted side, and, far more dangerously, an explicitly
+    ruled-out side being positively SELECTED because the negation cue fell
+    outside the window). The fix moves laterality selection off lexical
+    matching entirely onto the fact's own typed `attributes["laterality"]`
+    value, which by this point is itself proven negation-safe
+    (`graph_consensus.resolve`'s matching fix). `narrow()` must never even
+    LOOK at the raw text for this axis any more -- proven here by giving the
+    typed attribute a value the raw text does not literally contain at all,
+    and confirming it still wins."""
+
+    def test_typed_value_wins_even_when_the_raw_text_does_not_literally_state_it(self):
+        """Proves narrow() no longer consults raw text for laterality at all: the
+        typed attribute says "left", but the raw text mentions only "right"."""
+        outcome = tiebreak.narrow(
+            _fact("assembly service", "assembly service performed on the right",
+                 attributes={"laterality": "left"}),
+            [LAT_LEFT, LAT_RIGHT], _agreed("span-0"))
+        self.assertEqual(outcome.winner.code if outcome.winner else None, "CAND_LEFT")
+
+    def test_no_typed_value_fails_closed_even_when_the_raw_text_is_unambiguous(self):
+        """The fail-closed guarantee: a fact with NO typed laterality value never
+        falls back to lexical matching, even though the raw text plainly and
+        unambiguously states "left" with no negation anywhere."""
+        outcome = tiebreak.narrow(
+            _fact("assembly service", "assembly service performed on the left"),
+            [LAT_LEFT, LAT_RIGHT], _agreed("span-0"))
+        self.assertIsNone(outcome.winner)
+
+    def test_empty_typed_value_fails_closed(self):
+        outcome = tiebreak.narrow(
+            _fact("assembly service", "assembly service performed on the left",
+                 attributes={"laterality": ""}),
+            [LAT_LEFT, LAT_RIGHT], _agreed("span-0"))
+        self.assertIsNone(outcome.winner)
+
+    def test_left_but_not_right_no_longer_wrongly_negates_the_typed_left_value(self):
+        """The first reproduction Codex supplied: a bidirectional token window
+        around "right" reaches backward far enough to also flag "left" as
+        negated in "left but not right". Settled via the typed attribute, this
+        can never happen -- the raw text is not consulted for this axis."""
+        outcome = tiebreak.narrow(
+            _fact("assembly service", "left but not right",
+                 attributes={"laterality": "left"}),
+            [LAT_LEFT, LAT_RIGHT], _agreed("span-0"))
+        self.assertEqual(outcome.winner.code if outcome.winner else None, "CAND_LEFT")
+
+    def test_ruled_out_side_is_never_selected_regardless_of_token_distance(self):
+        """The DANGEROUS reproduction: "right involvement was considered but was
+        ultimately ruled out" -- the negation cue is 7 tokens from the match,
+        outside any fixed window, so the old lexical mechanism POSITIVELY
+        SELECTED the ruled-out side. With no typed laterality value recorded
+        (exactly what a correctly-fixed `graph_consensus.resolve` would leave
+        when its own negation-aware check refuses to accept "right" as stated),
+        the axis must fail closed -- RIGHT must never win."""
+        outcome = tiebreak.narrow(
+            _fact("assembly service",
+                 "right involvement was considered but was ultimately ruled out"),
+            [LAT_LEFT, LAT_RIGHT], _agreed("span-0"))
+        self.assertIsNone(outcome.winner)
+        self.assertNotEqual(outcome.winner.code if outcome.winner else None, "CAND_RIGHT")
 
 
 # ------------------------------------------------- steps 3 and 4: narrow and release
@@ -521,13 +600,19 @@ class IsolatedContrastPromotion(unittest.TestCase):
         TWO candidates both carry 'right' as their term (a third states 'left') --
         the value is genuinely documented, so asking the provider to document it
         again is asking for a fact already in the note. The real gap (which of the
-        two 'right' candidates applies) is a coder's mapping question."""
+        two 'right' candidates applies) is a coder's mapping question.
+
+        issue #6 F9-R6-R2, fourth re-review: laterality is now settled via the
+        fact's own typed `attributes["laterality"]`, not raw-text lexical
+        matching -- set here to what a correctly-fixed `graph_consensus.resolve`
+        would itself have written from this exact unnegated raw text."""
         right_a = _cand("CAND_RIGHT_A", "assembly service, right structure, variant one",
                         0.9)
         right_b = _cand("CAND_RIGHT_B", "assembly service, right structure, variant two",
                         0.9)
         left = _cand("CAND_LEFT", "assembly service, left structure", 0.9)
-        fact = _fact("assembly service", "assembly service performed on the right side")
+        fact = _fact("assembly service", "assembly service performed on the right side",
+                     attributes={"laterality": "right"})
         outcome = tiebreak.narrow(fact, [right_a, right_b, left], _agreed("span-0"))
         self.assertIsNone(outcome.winner)
         self.assertEqual(outcome.provider_question, "",
@@ -1011,6 +1096,7 @@ class RequirementGroundedEliminationTest(unittest.TestCase):
         t = text if text is not None else self.ALPHA_DOCUMENTED
         return req.CoverageCorpus(channel_id="test-channel", text=t,
                                   text_sha256=hashlib.sha256(t.encode()).hexdigest(),
+                                  covered_pages=(1,), page_image_sha256=("stub-hash",),
                                   uncovered_pages=uncovered_pages)
 
     def _resolve(self, primary, second, reconciliation=None,
@@ -1150,6 +1236,7 @@ class MustSupportGroundedEliminationTest(unittest.TestCase):
         import hashlib
         return req.CoverageCorpus(channel_id="test-channel", text=text,
                                   text_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                                  covered_pages=(1,), page_image_sha256=("stub-hash",),
                                   uncovered_pages=uncovered_pages)
 
     def _resolve(self, primary, second, coverage, reconciliation=None):
@@ -1223,8 +1310,14 @@ class MustSupportGroundedEliminationTest(unittest.TestCase):
     def test_laterality_still_grounds_through_the_pre_existing_path_unchanged(self):
         """Confirms this phase's new code does not disturb the ALREADY-selectable
         laterality axis, which `tiebreak.narrow` alone already grounded before F9-R6
-        existed -- this is a regression check, not proof of new capability."""
-        fact = _fact("assembly service", "assembly service performed on the left")
+        existed -- this is a regression check, not proof of new capability.
+
+        issue #6 F9-R6-R2, fourth re-review: laterality now grounds via the fact's
+        own typed `attributes["laterality"]`, never raw-text lexical matching --
+        the typed value is set here so this keeps passing MEANINGFULLY, not by
+        accident via a lexical path that no longer runs for this axis."""
+        fact = _fact("assembly service", "assembly service performed on the left",
+                     attributes={"laterality": "left"})
         judge = _sv.judge(entails=lambda d: "left" in d, prefer=lambda d: "left" in d)
         line = resolve(_request(fact), _source(LAT_LEFT, LAT_RIGHT),
                        llm=_pinned(judge, "provider-a"),
