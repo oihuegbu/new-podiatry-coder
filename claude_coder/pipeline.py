@@ -681,7 +681,14 @@ def code_encounter(
                         # can only ground an elimination when an independent reading
                         # actually swept every page.
                         document_fully_covered=(consensus is not None
-                                                and not consensus.recall_uncovered_pages))
+                                                and not consensus.recall_uncovered_pages),
+                        # issue #6 F9-R6-R4: the SAME independent channel's full,
+                        # whole-document reading `recall_uncovered_pages` above is
+                        # computed from -- never `fact.evidence` alone -- so a
+                        # NOT_DOCUMENTED verdict can be deterministically checked
+                        # against the real document, not just this fact's own
+                        # narrow evidence excerpt.
+                        searchable_text=(recall.text if recall is not None else ""))
             except Exception as exc:
                 return _system_hold_result(encounter_id, date_of_service,
                                            f"retrieval_execution:{fact.fact_id}", exc, source)

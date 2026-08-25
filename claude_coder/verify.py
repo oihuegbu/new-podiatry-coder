@@ -321,13 +321,44 @@ def _evidence_options(fact: ClinicalFact) -> tuple[str, dict[str, str]]:
     """Evidence rendered with a stable bracketed id per quote, and the id->real
     span_id map used to validate a model's cited ids afterward. An unanchored span
     (no span_id yet) still renders -- so the model can still read it -- but is never
-    a valid citation target (its id maps to "")."""
+    a valid citation target (its id maps to "").
+
+    issue #6 F9-R6-R4: also renders `fact.attribute_evidence`'s spans -- without
+    this, a correctly inherited, independently validated attribute (e.g. a
+    laterality/site value stated once on a parent fact and inherited from there)
+    could settle graph consensus but could never be cited by the requirement
+    verifier at all, since it never appears in `fact.evidence`. Uses the SAME
+    usability filter `graph_consensus._attribute_span_support` already applies --
+    a `"local"` entry is always usable; an `"inherited"` entry needs
+    `scope_validated=True` (never a bare `scope_validated=True` filter on its
+    own, which would wrongly suppress every local entry too, since those default
+    `scope_validated=False`). A span already shown via `fact.evidence` is never
+    duplicated under a second tag.
+    """
     lines = []
     id_to_span: dict[str, str] = {}
-    for i, s in enumerate(fact.evidence):
-        tag = f"e{i + 1}"
+    seen_spans: set[str] = set()
+    n = 0
+    for s in fact.evidence:
+        n += 1
+        tag = f"e{n}"
         lines.append(f"[{tag}] {s.text}")
-        id_to_span[tag] = str(getattr(s, "span_id", "") or "")
+        sid = str(getattr(s, "span_id", "") or "")
+        id_to_span[tag] = sid
+        if sid:
+            seen_spans.add(sid)
+    for attr_name, entries in sorted((fact.attribute_evidence or {}).items()):
+        for e in entries:
+            if not (e.scope == "local" or e.scope_validated):
+                continue
+            sid = str(getattr(e.span, "span_id", "") or "")
+            if not sid or sid in seen_spans:
+                continue
+            seen_spans.add(sid)
+            n += 1
+            tag = f"e{n}"
+            lines.append(f"[{tag}] {e.span.text}")
+            id_to_span[tag] = sid
     return " | ".join(lines), id_to_span
 
 

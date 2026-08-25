@@ -593,6 +593,16 @@ class ConceptRelationIndexTest(unittest.TestCase):
                   "parents": ["C1"]},
             "C3": {"terms": ["leaf structure", "the leaf"], "parents": ["C2"]},
             "C9": {"terms": ["other structure", "shared name"], "parents": []},
+            # issue #6 F9-R4-R2: two DIFFERENT-width, unrelated governed terms,
+            # needed to reproduce/pin the cross-width masking bug -- every term
+            # above is 2 tokens, which cannot expose it (a single-width table
+            # never masks itself).
+            "C10": {"terms": ["repair"], "parents": []},
+            # A 1-token term that is also the FIRST token of "leaf structure"
+            # (C3) -- a genuinely different concept, so preferring the longer
+            # phrase at this shared start position is a real, checkable choice,
+            # not a vacuous one (nothing else names "leaf" alone).
+            "C11": {"terms": ["leaf"], "parents": []},
         })
 
     def test_two_synonyms_of_the_same_concept_are_same(self):
@@ -660,21 +670,44 @@ class ConceptRelationIndexTest(unittest.TestCase):
         self.assertTrue(m.method.startswith("token_scan"))
 
     def test_match_longest_prefers_the_longest_matching_phrase(self):
-        """A longer, more specific governed phrase must win over a shorter one it
-        contains -- 'middle structure' must not be matched inside a sentence that
-        actually names the longer, more specific 'leaf structure' phrase elsewhere,
-        and a genuinely longer phrase in the table must be preferred when both could
-        match different windows of the same text."""
+        """issue #6 F9-R4-R2: "longest wins" applies where it actually means
+        something -- two governed phrases that could BOTH start at the SAME
+        position. "leaf" (C11) is a real, different governed concept that is
+        also the first token of "leaf structure" (C3); at that shared start
+        position, the longer phrase must win and C11 must never appear."""
         idx = self._index()
-        # Only "leaf structure" (2 tokens) is present; "structure" alone is not itself
-        # a governed term here, so the longest (and only) real hit is the 2-token one.
         m = idx.match_longest("today we addressed the leaf structure fully")
         self.assertEqual(m.candidates, ("C3",))
+        self.assertNotIn("C11", m.candidates)
 
     def test_match_longest_is_insensitive_to_surrounding_punctuation(self):
         idx = self._index()
         m = idx.match_longest("Procedure: leaf structure, performed today.")
         self.assertEqual(m.candidates, ("C3",))
+
+    def test_match_longest_finds_two_different_width_concepts_in_one_text(self):
+        """issue #6 F9-R4-R2, Codex's exact reproduction: a compound action naming
+        TWO separate governed procedures of DIFFERENT phrase lengths must find
+        BOTH, never let the wider phrase's match suppress the scan for the other
+        ("removal of bone spur and tenotomy were performed" -> both procedures)."""
+        idx = self._index()
+        m = idx.match_longest("today we performed leaf structure and repair together")
+        self.assertEqual(set(m.candidates), {"C3", "C10"})
+        self.assertFalse(m.unique)
+
+    def test_match_longest_non_overlapping_matches_do_not_double_count(self):
+        """Two DIFFERENT 2-token governed phrases, directly adjacent with no
+        separator token between them, must each be found once -- the cursor
+        advances past a match's own consumed tokens, never re-scanning inside it
+        or skipping the very next token that starts a second, real match."""
+        idx = self._index()
+        m = idx.match_longest("leaf structure other structure")
+        self.assertEqual(set(m.candidates), {"C3", "C9"})
+
+    def test_match_longest_two_different_widths_survives_punctuation(self):
+        idx = self._index()
+        m = idx.match_longest("Procedure: leaf structure. Repair performed.")
+        self.assertEqual(set(m.candidates), {"C3", "C10"})
 
     def test_match_longest_two_different_embedded_concepts_is_ambiguous(self):
         """Codex's acceptance criterion: two different governed concepts both occurring

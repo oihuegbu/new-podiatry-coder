@@ -77,6 +77,33 @@ class CompileRequirementsTest(unittest.TestCase):
         ids = [r.requirement_id for r in reqs]
         self.assertEqual(len(ids), len(set(ids)))
 
+    def test_as_record_includes_authority_source_text(self):
+        """issue #6 F9-R6-R5: without the full source text, an auditor cannot
+        reproduce the clause-offset check from the record alone."""
+        reqs = req.compile_requirements([LEFT, RIGHT])
+        left_req = next(r for r in reqs if r.candidate_code == "CAND_LEFT")
+        record = left_req.as_record()
+        self.assertEqual(record["authority_source_text"], left_req.authority_source_text)
+        start, end = record["authority_offset"]
+        self.assertEqual(record["authority_source_text"][start:end],
+                         record["authority_clause"])
+
+    def test_source_identity_carries_the_candidate_authority(self):
+        """issue #6 F9-R6-R5: the candidate's own real provenance, not just the
+        axis's kind/system, so an auditor can tell which edition of the
+        descriptor a requirement was compiled against."""
+        provenanced = CandidateCode(code="CAND_LEFT2", system="cpt",
+                                    descriptor="assembly service performed on the left",
+                                    score=0.9, source="retrieval",
+                                    authority={"index": "rag-hybrid", "system": "cpt"})
+        other = CandidateCode(code="CAND_RIGHT2", system="cpt",
+                              descriptor="assembly service performed on the right",
+                              score=0.9, source="retrieval")
+        reqs = req.compile_requirements([provenanced, other])
+        target = next(r for r in reqs if r.candidate_code == "CAND_LEFT2")
+        self.assertEqual(target.source_identity["authority"],
+                         {"index": "rag-hybrid", "system": "cpt"})
+
     def test_inclusion_term_requirements_only_for_icd10_when_source_supplies_them(self):
         icd_a = _cand("A00.0", "cholera, unspecified", system="icd10")
         icd_b = _cand("A00.1", "cholera, another type", system="icd10")
@@ -119,6 +146,16 @@ class CompileRequirementsTest(unittest.TestCase):
 
 
 class ValidatedRequirementTest(unittest.TestCase):
+    """issue #6 F9-R6-R2 re-review: `validated_requirement` no longer trusts a
+    cited span's mere existence/reconciliation status -- it must also
+    independently, deterministically confirm the requirement's `expected` term
+    actually appears (SUPPORTED) or is genuinely absent (NOT_DOCUMENTED) in a
+    real `searchable_text` corpus. CONTRADICTED is retired entirely: it can
+    never validate, for any axis, regardless of citation (see `requirement.
+    validated_requirement`'s docstring for the full reasoning)."""
+
+    DOCUMENTED = "assembly service performed on the left"
+    UNDOCUMENTED = "assembly service performed, no laterality stated"
 
     def _req(self):
         return req.DescriptorRequirement(
@@ -144,7 +181,7 @@ class ValidatedRequirementTest(unittest.TestCase):
             requirement_id="not-the-same-id", status=req.RequirementStatus.SUPPORTED,
             evidence_span_ids=("s1",))
         self.assertFalse(req.validated_requirement(
-            r, judgement, self._reconciliation({"s1": "AGREED"})))
+            r, judgement, self._reconciliation({"s1": "AGREED"}), self.DOCUMENTED))
 
     def test_a_clause_that_does_not_reproduce_never_validates(self):
         """The clause claims to come from the candidate's own descriptor but the
@@ -156,7 +193,18 @@ class ValidatedRequirementTest(unittest.TestCase):
             requirement_id=r.requirement_id, status=req.RequirementStatus.SUPPORTED,
             evidence_span_ids=("s1",))
         self.assertFalse(req.validated_requirement(
-            tampered, judgement, self._reconciliation({"s1": "AGREED"})))
+            tampered, judgement, self._reconciliation({"s1": "AGREED"}), self.DOCUMENTED))
+
+    def test_contradicted_never_validates_regardless_of_citation(self):
+        """issue #6 F9-R6-R2: the direct regression pin -- a well-formed,
+        reconciled, correctly-cited CONTRADICTED judgement must never validate,
+        for any axis. Retired permanently, not merely tightened."""
+        r = self._req()
+        judgement = req.RequirementJudgement(
+            requirement_id=r.requirement_id, status=req.RequirementStatus.CONTRADICTED,
+            evidence_span_ids=("s1",))
+        self.assertFalse(req.validated_requirement(
+            r, judgement, self._reconciliation({"s1": "AGREED"}), self.DOCUMENTED))
 
     def test_supported_with_an_agreed_span_validates(self):
         r = self._req()
@@ -164,7 +212,7 @@ class ValidatedRequirementTest(unittest.TestCase):
             requirement_id=r.requirement_id, status=req.RequirementStatus.SUPPORTED,
             evidence_span_ids=("s1",))
         self.assertTrue(req.validated_requirement(
-            r, judgement, self._reconciliation({"s1": "AGREED"})))
+            r, judgement, self._reconciliation({"s1": "AGREED"}), self.DOCUMENTED))
 
     def test_supported_with_a_vacuous_span_validates(self):
         r = self._req()
@@ -172,15 +220,32 @@ class ValidatedRequirementTest(unittest.TestCase):
             requirement_id=r.requirement_id, status=req.RequirementStatus.SUPPORTED,
             evidence_span_ids=("s1",))
         self.assertTrue(req.validated_requirement(
-            r, judgement, self._reconciliation({"s1": "VACUOUS"})))
+            r, judgement, self._reconciliation({"s1": "VACUOUS"}), self.DOCUMENTED))
 
-    def test_a_disagreed_span_never_validates(self):
+    def test_supported_requires_the_phrase_to_actually_be_present(self):
+        """issue #6 F9-R6-R2: the core content-check pin. A SUPPORTED judgement
+        whose cited span is properly reconciled but whose expected phrase is
+        genuinely absent from `searchable_text` must never validate -- the
+        citation's mere reality is not enough."""
         r = self._req()
         judgement = req.RequirementJudgement(
-            requirement_id=r.requirement_id, status=req.RequirementStatus.CONTRADICTED,
+            requirement_id=r.requirement_id, status=req.RequirementStatus.SUPPORTED,
             evidence_span_ids=("s1",))
         self.assertFalse(req.validated_requirement(
-            r, judgement, self._reconciliation({"s1": "DISAGREED"})))
+            r, judgement, self._reconciliation({"s1": "AGREED"}), self.UNDOCUMENTED))
+
+    def test_a_disagreed_span_never_validates(self):
+        """Repurposed (issue #6 F9-R6-R2 re-review) from CONTRADICTED, which now
+        fails unconditionally at the very first status check and could no longer
+        isolate this gate. SUPPORTED here, with the phrase genuinely present
+        (content check passes) but the cited span DISAGREED (reconciliation
+        check must be what fails)."""
+        r = self._req()
+        judgement = req.RequirementJudgement(
+            requirement_id=r.requirement_id, status=req.RequirementStatus.SUPPORTED,
+            evidence_span_ids=("s1",))
+        self.assertFalse(req.validated_requirement(
+            r, judgement, self._reconciliation({"s1": "DISAGREED"}), self.DOCUMENTED))
 
     def test_an_unlisted_span_never_validates(self):
         r = self._req()
@@ -188,33 +253,99 @@ class ValidatedRequirementTest(unittest.TestCase):
             requirement_id=r.requirement_id, status=req.RequirementStatus.SUPPORTED,
             evidence_span_ids=("never-reconciled",))
         self.assertFalse(req.validated_requirement(
-            r, judgement, self._reconciliation({"s1": "AGREED"})))
+            r, judgement, self._reconciliation({"s1": "AGREED"}), self.DOCUMENTED))
 
-    def test_supported_or_contradicted_with_no_span_never_validates(self):
-        """An evaluator claiming SUPPORTED/CONTRADICTED must cite something -- unlike
+    def test_supported_with_no_span_never_validates(self):
+        """An evaluator claiming SUPPORTED must cite something -- unlike
         NOT_DOCUMENTED, absence-of-citation is not itself evidence here."""
         r = self._req()
         judgement = req.RequirementJudgement(
             requirement_id=r.requirement_id, status=req.RequirementStatus.SUPPORTED,
             evidence_span_ids=())
-        self.assertFalse(req.validated_requirement(r, judgement, self._reconciliation({})))
+        self.assertFalse(req.validated_requirement(
+            r, judgement, self._reconciliation({}), self.DOCUMENTED))
 
     def test_not_documented_with_no_span_validates(self):
         """Absence has nothing to cite by definition -- validating this is NOT, on
         its own, sufficient to eliminate anything (see resolution._grounded_
-        elimination's deliberate non-use of NOT_DOCUMENTED)."""
+        elimination's deliberate additional gating)."""
         r = self._req()
         judgement = req.RequirementJudgement(
             requirement_id=r.requirement_id, status=req.RequirementStatus.NOT_DOCUMENTED,
             evidence_span_ids=())
-        self.assertTrue(req.validated_requirement(r, judgement, self._reconciliation({})))
+        self.assertTrue(req.validated_requirement(
+            r, judgement, self._reconciliation({}), self.UNDOCUMENTED))
+
+    def test_not_documented_requires_the_phrase_to_be_genuinely_absent(self):
+        """issue #6 F9-R6-R4: a NOT_DOCUMENTED verdict for a phrase that IS
+        actually present in `searchable_text` must never validate -- the
+        judgement's claim contradicts the deterministic truth."""
+        r = self._req()
+        judgement = req.RequirementJudgement(
+            requirement_id=r.requirement_id, status=req.RequirementStatus.NOT_DOCUMENTED,
+            evidence_span_ids=())
+        self.assertFalse(req.validated_requirement(
+            r, judgement, self._reconciliation({}), self.DOCUMENTED))
+
+    def test_supported_never_validates_with_empty_searchable_text(self):
+        r = self._req()
+        judgement = req.RequirementJudgement(
+            requirement_id=r.requirement_id, status=req.RequirementStatus.SUPPORTED,
+            evidence_span_ids=("s1",))
+        self.assertFalse(req.validated_requirement(
+            r, judgement, self._reconciliation({"s1": "AGREED"}), ""))
+
+    def test_not_documented_never_validates_with_empty_searchable_text(self):
+        """issue #6 F9-R6-R4: no real corpus was supplied, so no claim -- positive
+        OR negative -- can be made. Must fail closed, matching
+        `document_fully_covered=False`'s existing default-refuse posture."""
+        r = self._req()
+        judgement = req.RequirementJudgement(
+            requirement_id=r.requirement_id, status=req.RequirementStatus.NOT_DOCUMENTED,
+            evidence_span_ids=())
+        self.assertFalse(req.validated_requirement(r, judgement, self._reconciliation({}), ""))
 
     def test_no_reconciliation_at_all_never_validates_a_cited_span(self):
         r = self._req()
         judgement = req.RequirementJudgement(
             requirement_id=r.requirement_id, status=req.RequirementStatus.SUPPORTED,
             evidence_span_ids=("s1",))
-        self.assertFalse(req.validated_requirement(r, judgement, None))
+        self.assertFalse(req.validated_requirement(r, judgement, None, self.DOCUMENTED))
+
+
+class DeterministicStatusTest(unittest.TestCase):
+    """Direct unit coverage of `requirement.deterministic_status` -- the actual
+    text search `validated_requirement` defers to, never a verifier's claim."""
+
+    def _req(self, expected=("left",)):
+        return req.DescriptorRequirement(
+            requirement_id="laterality:CAND_LEFT:0", axis="laterality",
+            candidate_code="CAND_LEFT", required=True, expected=expected,
+            authority_clause=expected[0], authority_offset=(0, len(expected[0])),
+            authority_source_text=expected[0], selectable=True, queryable=True)
+
+    def test_present_phrase_is_supported(self):
+        self.assertEqual(
+            req.deterministic_status(self._req(), "assembly service performed on the left"),
+            req.RequirementStatus.SUPPORTED)
+
+    def test_absent_phrase_is_not_documented(self):
+        self.assertEqual(
+            req.deterministic_status(self._req(), "assembly service performed"),
+            req.RequirementStatus.NOT_DOCUMENTED)
+
+    def test_empty_searchable_text_is_none(self):
+        self.assertIsNone(req.deterministic_status(self._req(), ""))
+
+    def test_any_one_of_several_expected_terms_present_is_supported(self):
+        """A candidate's inclusion-term requirement may list more than one
+        alternative phrase (each compiled as its own DescriptorRequirement in
+        production, but the underlying search itself must recognize any of a
+        requirement's `expected` alternatives, not just the first)."""
+        r = self._req(expected=("classic presentation", "atypical presentation"))
+        self.assertEqual(
+            req.deterministic_status(r, "documented as atypical presentation today"),
+            req.RequirementStatus.SUPPORTED)
 
 
 class InstructionalTermsMockSourceTest(unittest.TestCase):

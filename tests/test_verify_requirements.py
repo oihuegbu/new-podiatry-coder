@@ -10,7 +10,8 @@ import unittest
 
 from claude_coder import requirement as req
 from claude_coder import verify as _verify
-from claude_coder.models import CandidateCode, ClinicalFact, EvidenceSpan, FactKind
+from claude_coder.models import (AttributeEvidence, CandidateCode, ClinicalFact,
+                                 EvidenceSpan, FactKind)
 
 
 def _fact(*evidence_texts):
@@ -66,6 +67,60 @@ class ShortlistPromptTest(unittest.TestCase):
         self.assertNotIn("REQUIREMENT", _verify._SELECT_SYSTEM)
         with_contract = _verify._SELECT_SYSTEM + _verify._REQUIREMENTS_CONTRACT
         self.assertIn("REQUIREMENT", with_contract)
+
+
+class AttributeEvidenceCitabilityTest(unittest.TestCase):
+    """issue #6 F9-R6-R4: `_evidence_options` must also surface `fact.
+    attribute_evidence`'s spans -- otherwise a correctly inherited, independently
+    validated attribute (e.g. a laterality/site value stated once on a parent
+    fact) can settle graph consensus but can never be cited by the requirement
+    verifier at all."""
+
+    def test_local_attribute_evidence_span_is_rendered_as_an_additional_citable_id(self):
+        from dataclasses import replace
+        fact = _fact("performed on the left")
+        extra = EvidenceSpan(text="left side confirmed", start=0, end=20,
+                             anchored=True, span_id="attr-span")
+        fact = replace(fact, attribute_evidence={
+            "laterality": (AttributeEvidence(span=extra, scope="local"),)})
+        prompt, id_map = _verify._evidence_options(fact)
+        self.assertIn("[e2]", prompt)
+        self.assertIn("left side confirmed", prompt)
+        self.assertEqual(id_map["e2"], "attr-span")
+
+    def test_unvalidated_inherited_attribute_evidence_is_not_citable(self):
+        from dataclasses import replace
+        fact = _fact("performed on the left")
+        extra = EvidenceSpan(text="inherited elsewhere", start=0, end=19,
+                             anchored=True, span_id="inherited-span")
+        fact = replace(fact, attribute_evidence={
+            "laterality": (AttributeEvidence(span=extra, scope="inherited",
+                                             scope_validated=False),)})
+        prompt, id_map = _verify._evidence_options(fact)
+        self.assertNotIn("inherited elsewhere", prompt)
+        self.assertNotIn("inherited-span", id_map.values())
+
+    def test_validated_inherited_attribute_evidence_is_citable(self):
+        from dataclasses import replace
+        fact = _fact("performed on the left")
+        extra = EvidenceSpan(text="inherited and validated", start=0, end=24,
+                             anchored=True, span_id="validated-span")
+        fact = replace(fact, attribute_evidence={
+            "laterality": (AttributeEvidence(span=extra, scope="inherited",
+                                             scope_validated=True),)})
+        prompt, id_map = _verify._evidence_options(fact)
+        self.assertIn("inherited and validated", prompt)
+        self.assertIn("validated-span", id_map.values())
+
+    def test_attribute_evidence_span_already_in_fact_evidence_is_not_duplicated(self):
+        from dataclasses import replace
+        fact = _fact("performed on the left")
+        same_span = fact.evidence[0]
+        fact = replace(fact, attribute_evidence={
+            "laterality": (AttributeEvidence(span=same_span, scope="local"),)})
+        prompt, id_map = _verify._evidence_options(fact)
+        self.assertEqual(prompt.count("[e"), 1)
+        self.assertEqual(len(id_map), 1)
 
 
 class RequirementJudgementParsingTest(unittest.TestCase):

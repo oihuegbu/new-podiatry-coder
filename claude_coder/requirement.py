@@ -20,6 +20,26 @@ Never medical vocabulary in Python: every requirement's `expected` value and
 (`CandidateCode.descriptor`), or the CDC/NCHS ICD-10-CM Tabular's own
 `inclusionTerm` field (`AuthoritativeSource.instructional_terms`) — never a
 hardcoded term/code/family/specialty list.
+
+Why `instructional_terms` is ICD-10-CM-only, researched and not just assumed
+(issue #6, post-F9-R6 follow-up): neither `data/codes/cpt_codes.json` nor
+`hcpcs_codes.json` carries any field resembling ICD-10-CM's `inclusionTerm` —
+CPT records hold only description tiers + `concept_id` + `effective_date`;
+HCPCS's non-description fields (`coverage_code`, `betos`, `statute`, ...) are
+payment/coverage metadata, already consumed elsewhere in `app/compliance/`, not
+clinical-disambiguation text. The real analog — AMA CPT's parenthetical/
+cross-reference notes — is not public domain (AMA copyright) and is not present
+in this repo's CPT extract at all. The closest available public-domain
+alternative, the CMS NCCI Policy Manual (`data/policy/ncci_policy_manual.txt`,
+already fetched and used by `tools/policy_corpus.py` for a DIFFERENT purpose —
+verifying a model-supplied quote isn't invented), is organized by billing-rule
+topic/chapter, not per individual CPT/HCPCS code, so there is no reliable way to
+extract a candidate-code's own disambiguating term from it without either
+brittle text-search heuristics or a model doing the extraction — the latter
+being exactly the untrusted-self-report pattern this module exists to avoid.
+Closing this gap for real needs a genuine structured, per-code, public-domain
+(or licensed) data source that does not currently exist in this repo; it is not
+a wiring gap the way ICD-10-CM's `inclusionTerm` was.
 """
 from __future__ import annotations
 
@@ -64,6 +84,11 @@ class DescriptorRequirement:
                 "expected": list(self.expected),
                 "authority_clause": self.authority_clause,
                 "authority_offset": list(self.authority_offset),
+                # issue #6 F9-R6-R5: without the full source text, an auditor
+                # cannot reproduce the clause-offset check this record claims to
+                # support -- `authority_clause`/`authority_offset` alone are not
+                # self-contained.
+                "authority_source_text": self.authority_source_text,
                 "selectable": self.selectable, "queryable": self.queryable,
                 "source_identity": dict(self.source_identity)}
 
@@ -131,7 +156,12 @@ def compile_requirements(candidates: list[CandidateCode], source: Any = None
                 axis=probe.axis, candidate_code=code, required=probe.selectable,
                 expected=tuple(terms), authority_clause=clause,
                 authority_offset=offset, authority_source_text=candidate.descriptor,
-                source_identity={"kind": "descriptor", "system": candidate.system},
+                # issue #6 F9-R6-R5: the candidate's own real, already-populated
+                # provenance dict, not just the axis's kind/system -- lets an
+                # auditor tell WHICH edition of the descriptor this requirement
+                # was compiled against.
+                source_identity={"kind": "descriptor", "system": candidate.system,
+                                 "authority": dict(candidate.authority or {})},
                 selectable=probe.selectable, queryable=probe.queryable))
 
     if source is not None:
@@ -155,36 +185,101 @@ def compile_requirements(candidates: list[CandidateCode], source: Any = None
                         required=True, expected=(term,), authority_clause=clause,
                         authority_offset=offset, authority_source_text=term,
                         source_identity={"kind": "instructional_notes",
-                                         "system": candidate.system},
+                                         "system": candidate.system,
+                                         "authority": dict(candidate.authority or {})},
                         selectable=True, queryable=False))
     return tuple(out)
 
 
+def deterministic_status(req: DescriptorRequirement, searchable_text: str
+                         ) -> RequirementStatus | None:
+    """The TRUE relation between `req.expected` and `searchable_text`, found by
+    ACTUALLY SEARCHING the text -- never a verifier's self-report standing in for
+    it (issue #6 F9-R6-R2 re-review). Uses the SAME contiguous, ordered phrase
+    matcher `tiebreak.narrow` proves its own axes with (`tiebreak._token_sequence`/
+    `_phrase_present`), so "the document states this" means the same thing
+    wherever it's checked in this codebase.
+
+    Returns `None` when `searchable_text` is empty: no claim, positive OR
+    negative, can be made about a document nobody supplied -- the caller
+    (`validated_requirement`) must fail closed on `None`, exactly as
+    `document_fully_covered=False` already fails closed on no coverage proof.
+
+    Only ever returns SUPPORTED or NOT_DOCUMENTED. CONTRADICTED is not
+    derivable here (see `validated_requirement`'s docstring for why) and
+    UNRESOLVED is not a claim this function is positioned to make -- absence
+    from `searchable_text` is exactly what NOT_DOCUMENTED means.
+    """
+    if not searchable_text:
+        return None
+    tokens = _tiebreak._token_sequence(searchable_text)
+    present = any(_tiebreak._phrase_present(term, tokens) for term in req.expected)
+    return RequirementStatus.SUPPORTED if present else RequirementStatus.NOT_DOCUMENTED
+
+
 def validated_requirement(req: DescriptorRequirement, judgement: RequirementJudgement,
-                          reconciliation: Any = None) -> bool:
+                          reconciliation: Any = None, searchable_text: str = "") -> bool:
     """Does an evaluator's judgement of `req` deserve to affect selection?
 
-    The clause must actually reproduce from the record it claims to come from (a
-    hallucinated/paraphrased clause is never grounds to eliminate anything), and
-    every cited span must be reconciled to a member of `{AGREED, VACUOUS}` — the
-    SAME bar `graph_consensus._spans_support` already holds fact-level evidence to.
-    A NOT_DOCUMENTED verdict citing no span is permitted — absence has nothing to
-    quote by definition — but validating it here is not, on its own, sufficient to
-    eliminate anything: `resolution._grounded_elimination` (issue #6 F9-R6 Phase 3)
-    additionally requires `document_fully_covered=True` before a validated,
-    unanimous NOT_DOCUMENTED verdict may eliminate — a fact this module deliberately
-    does not know and cannot supply, since trusting a model's self-reported coverage
-    would repeat the exact mistake issue #6 F8-R1 already found and closed for a
-    different mechanism. The caller alone (`pipeline.code_encounter`, from
-    `graph_consensus.ConsensusReport.recall_uncovered_pages`) may assert coverage.
+    issue #6 F9-R6-R2 (Codex re-review): the ORIGINAL version of this function
+    checked only that a cited span was REAL and page-reconciled -- never that the
+    span's actual CONTENT related to `req.expected` at all. A model could cite any
+    real, unrelated, agreed span and claim CONTRADICTED, and this function
+    returned True. The shipped Phase-2 positive-path test proved this empirically:
+    it cited deliberately neutral text as "proof" of a contradiction, and
+    validation passed.
+
+    The fix is two-fold, and both parts are PERMANENT design decisions, not
+    interim patches:
+
+    1. CONTRADICTED is retired as elimination grounds, for every axis,
+       unconditionally -- see the `if judgement.status not in (...)` check below.
+       Confirming a phrase-type requirement is genuinely CONTRADICTED (the note
+       actively states the opposite, not merely that it's silent) needs real
+       negation-detection this codebase does not have and building it would be
+       exactly the kind of unsound guess this module exists to prevent. Laterality
+       is the one axis with a real closed-enumeration contradiction ("left" stated
+       when the candidate needs "right") -- that is already, and remains, fully
+       handled by the pre-existing, judgement-INDEPENDENT `tiebreak.narrow`
+       document-proof fallback in `resolution._grounded_elimination`, so nothing
+       is lost by retiring the judgement path for it too.
+    2. SUPPORTED and NOT_DOCUMENTED must now be independently, deterministically
+       confirmed by `deterministic_status` actually searching `searchable_text` --
+       the verifier's own status becomes a mere PROPOSAL that this function either
+       confirms or refuses; it is never trusted on its own. `searchable_text`
+       empty (no real corpus supplied) means neither status can ever validate --
+       fails closed, matching `document_fully_covered=False`'s existing default-
+       refuse posture. This closes a related gap (issue #6 F9-R6-R4): a NOT_
+       DOCUMENTED verdict from a verifier shown only `fact.evidence` (this one
+       fact's own narrow excerpt) is a claim about that excerpt, not about the
+       whole document -- `searchable_text` must be the full, independently-read
+       document text (see `pipeline.code_encounter`'s call site) for a NOT_
+       DOCUMENTED verdict to mean what it claims.
+
+    On top of the content check: the clause must still actually reproduce from
+    the record it claims to come from (a hallucinated/paraphrased clause is never
+    grounds to eliminate anything), and every cited span must be reconciled to a
+    member of `{AGREED, VACUOUS}` — the SAME bar `graph_consensus._spans_support`
+    already holds fact-level evidence to. A NOT_DOCUMENTED verdict citing no span
+    is permitted — absence has nothing to quote by definition — but validating it
+    here is not, on its own, sufficient to eliminate anything:
+    `resolution._grounded_elimination` additionally requires
+    `document_fully_covered=True` AND a non-empty `searchable_text` before a
+    validated, unanimous NOT_DOCUMENTED verdict may eliminate.
     """
     if judgement.requirement_id != req.requirement_id:
         return False
     start, end = req.authority_offset
     if req.authority_source_text[start:end] != req.authority_clause:
         return False
-    if judgement.status is RequirementStatus.NOT_DOCUMENTED and not judgement.evidence_span_ids:
-        return True
+    if judgement.status not in (RequirementStatus.SUPPORTED,
+                                RequirementStatus.NOT_DOCUMENTED):
+        return False   # CONTRADICTED retired -- see docstring above
+    truth = deterministic_status(req, searchable_text)
+    if truth is None or truth is not judgement.status:
+        return False
+    if judgement.status is RequirementStatus.NOT_DOCUMENTED:
+        return not judgement.evidence_span_ids
     if not judgement.evidence_span_ids:
         return False
     if reconciliation is None:

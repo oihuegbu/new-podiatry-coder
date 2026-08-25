@@ -2440,6 +2440,15 @@ class IndependentDocumentRecall(unittest.TestCase):
         self.assertTrue(all(flag is False for flag in covered_flags),
                         "an uncovered page must never let a resolved line's own "
                         "record report full document coverage")
+        # issue #6 F9-R6-R4: a failed/unusable recall channel means `recall is
+        # None` at the real call site -- `searchable_text` must be "" too, never
+        # just `document_fully_covered` alone. Both gates are independent, and a
+        # caller must never let one substitute for the other.
+        searchable_flags = [ln.tie_record.get("searchable_text_available")
+                            for ln in result.lines if ln.tie_record is not None]
+        self.assertTrue(all(flag is False for flag in searchable_flags),
+                        "an unusable recall channel must never let a resolved "
+                        "line's own record report a real searchable corpus")
 
     def test_an_unreadable_independent_read_still_holds_the_claim(self):
         """Codex F7-R3-A, exact-SHA re-review, second pass: a `PageRead` record

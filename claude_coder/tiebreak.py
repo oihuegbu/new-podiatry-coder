@@ -70,25 +70,47 @@ _GRAMMAR = frozenset({
 })
 
 
-def _phrase_present(term: str, words: set[str]) -> bool:
-    """Whether every token of an axis term is present in the proven text's token set.
+def _token_sequence(text: str) -> tuple[str, ...]:
+    """Every token of TEXT, in ORDER -- the ordered counterpart to `_text_tokens`'s
+    unordered set, needed wherever a phrase's word ADJACENCY must actually be
+    checked (issue #6 F9-R6-R2 re-review), not merely which words occur somewhere
+    in the text."""
+    return tuple(t for t in re.split(r"[^a-z0-9]+", (text or "").lower()) if t)
+
+
+def _phrase_present(term: str, tokens: tuple[str, ...]) -> bool:
+    """Whether TERM occurs as a CONTIGUOUS, ORDERED run of tokens within `tokens`
+    (the ordered output of `_token_sequence`, never `_text_tokens`'s unordered set).
 
     Every axis before issue #6 F9-R6 Phase 4 (laterality, measurement, descriptor
-    words) stated its terms as single tokens, so a bare `term in words` membership
-    test was equivalent to this. `requirement`-derived axes (currently ICD-10-CM
-    `inclusion_term`) state theirs as whole clinical PHRASES ("classic
-    presentation") that a single-token set can never contain as one member -- a
-    bare membership test would silently never match a real, multi-word inclusion
-    term, which would make Phase 4's whole narrowing mechanism inert for the exact
-    axis it was built to add, mirroring the identical class of bug F9-R4-R1 already
-    found and fixed for embedded action-phrase matching elsewhere in this codebase.
-    A bag-of-words check (ignoring adjacency, since `words` is already an unordered
-    set with no adjacency information to check against) is the correct, minimal
-    generalization: for a single-token term it reduces to exact membership,
-    unchanged from before this axis kind existed.
+    words) stated its terms as single tokens, so a bare set-membership test was
+    equivalent to a real phrase match. `requirement`-derived axes (currently
+    ICD-10-CM `inclusion_term`) state theirs as whole clinical PHRASES ("classic
+    presentation") -- a single-token set membership test would silently never
+    match a real, multi-word inclusion term at all, and the FIRST bag-of-words
+    fix for that (checking each word's presence anywhere, unordered) turned out
+    to have its own gap (Codex F9-R6-R2 re-review): "classic" and "presentation"
+    occurring anywhere in the document, in any order, arbitrarily far apart, would
+    wrongly count as the document stating the phrase "classic presentation" --
+    the same masking-by-approximation bug class F9-R4-R1/F9-R4-R2 already found
+    and fixed for embedded action-phrase matching elsewhere in this codebase. A
+    genuine sliding-window CONTIGUOUS match is the correct fix: for a single-token
+    term it reduces to exact membership, unchanged from before this axis kind
+    existed. Each position tolerates the text token's own spelling OR its
+    singular form -- the SAME plural/singular tolerance the prior bag-of-words
+    check gave via `_text_tokens`'s union, preserved exactly, checked per
+    position instead of as a global set (the TERM side stays unsingularized,
+    matching the prior asymmetric direction).
     """
-    term_tokens = {t for t in re.split(r"[^a-z0-9]+", (term or "").lower()) if t}
-    return bool(term_tokens) and term_tokens <= words
+    term_tokens = tuple(t for t in re.split(r"[^a-z0-9]+", (term or "").lower()) if t)
+    if not term_tokens:
+        return False
+    n = len(term_tokens)
+    for start in range(len(tokens) - n + 1):
+        if all(tt in (tokens[start + j], _sing(tokens[start + j]))
+              for j, tt in enumerate(term_tokens)):
+            return True
+    return False
 
 
 def _text_tokens(text: str) -> set[str]:
@@ -375,7 +397,7 @@ def narrow(fact, candidates: list[CandidateCode],
             detail="the original document does not confirm this event's quotations, so "
                    "its discriminating axes cannot be re-inspected against the page")
 
-    words = _text_tokens(proven_text)
+    tokens = _token_sequence(proven_text)
     support: dict[str, list[str]] = {c.code: [] for c in unique}
     settled: set[str] = set()
     #: Axes where the proven text confirms AT LEAST ONE candidate's term -- issue #6
@@ -390,7 +412,7 @@ def narrow(fact, candidates: list[CandidateCode],
     for probe in axes:
         if not probe.provable:
             continue
-        hits = {code: tuple(t for t in terms if _phrase_present(t, words))
+        hits = {code: tuple(t for t in terms if _phrase_present(t, tokens))
                 for code, terms in probe.terms_by_code.items()}
         documented = [code for code, found in hits.items() if found]
         if documented:

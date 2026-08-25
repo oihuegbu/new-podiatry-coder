@@ -255,29 +255,45 @@ class ConceptRelationIndex:
     def match_longest(self, text: str) -> ConceptMatch:
         """Like `match`, but for a full action DESCRIPTION rather than a bare term
         (issue #6 F9-R4-R1): tries a whole-string `match` first (unchanged), and only
-        when that finds nothing, scans `text` for the LONGEST governed phrase occurring
-        anywhere inside it, longest window first so a longer, more specific phrase
-        always wins over a shorter one it contains. Deliberately NOT fuzzy/edit-
-        distance/phonetic -- only an EXACT token-boundary phrase from the governed term
-        table, found at any position. A window (or two different windows at the same
-        width) matching more than one concept leaves `candidates` with all of them,
+        when that finds nothing, scans `text` LEFT TO RIGHT for governed phrases,
+        taking the LONGEST governed phrase that starts AT EACH POSITION and unioning
+        concepts from every non-overlapping match found along the way. Deliberately
+        NOT fuzzy/edit-distance/phonetic -- only an EXACT token-boundary phrase from
+        the governed term table. A window (or two different windows at the same
+        position) matching more than one concept leaves `candidates` with all of them,
         which `ConceptMatch.unique` already turns into a non-unique, non-SAME-eligible
         result -- no separate ambiguity handling needed here.
+
+        issue #6 F9-R4-R2 (Codex re-review): an earlier version stopped scanning as
+        soon as ANY width had ANY hit anywhere in the text, so a longer governed
+        phrase silently masked a separate, shorter governed phrase mentioned
+        elsewhere in the same compound action ("removal of bone spur and tenotomy
+        were performed" only ever found "removal of bone spur", never "tenotomy").
+        Scanning every position and only skipping past a match's own consumed
+        tokens fixes that while keeping "longest wins" exactly where it actually
+        applies: two phrases that could both start at the SAME position.
         """
         direct = self.match(text)
         if direct.candidates:
             return direct
         tokens = tuple(_norm(text).split())
-        for width in range(min(len(tokens), self._max_phrase_tokens), 0, -1):
-            table = self._phrases.get(width)
-            if not table:
-                continue
-            hits: set[str] = set()
-            for start in range(0, len(tokens) - width + 1):
-                hits.update(table.get(tokens[start:start + width], ()))
-            if hits:
-                return ConceptMatch(text, tuple(sorted(hits)), f"token_scan:{width}")
-        return ConceptMatch(text, (), "none")
+        hits: set[str] = set()
+        matched_widths: list[int] = []
+        cursor = 0
+        while cursor < len(tokens):
+            found = False
+            for width in range(min(self._max_phrase_tokens, len(tokens) - cursor), 0, -1):
+                concepts = self._phrases.get(width, {}).get(tokens[cursor:cursor + width])
+                if concepts:
+                    hits.update(concepts)
+                    matched_widths.append(width)
+                    cursor += width
+                    found = True
+                    break
+            if not found:
+                cursor += 1
+        method = ("token_scan:" + ",".join(map(str, matched_widths))) if hits else "none"
+        return ConceptMatch(text, tuple(sorted(hits)), method)
 
     def _ancestors(self, concept_id: str) -> set[str]:
         seen: set[str] = set()
