@@ -30,6 +30,8 @@ data/compliance.db
 repo.zip
 data/codes/snomed_icd10_map.json
 data/codes/snomed_concept_terms.json
+data/codes/snomed_procedure_terms.json
+data/codes/umls_cpt_snomed_crosswalk.json
 data/codes/learned_observations.jsonl
 data/codes/learned_cpt_index.json
 # NCCI PTP edits — a ~300MB build product rebuilt from the current CMS quarter by

@@ -217,6 +217,16 @@ SOURCES: dict[str, dict] = {
         "cadence": "biannual",
         "prepare": lambda tmp, args: [PY, "tools/build_snomed_procedure_terms.py"],
     },
+    "umls_crosswalk": {
+        # A DIFFERENT release artifact from the three snomed_* entries above --
+        # requires a full UMLS Metathesaurus release run through NLM's own
+        # MetamorphoSys tool (headless Batch Subset mode, SAB in {CPT,HCPT,HCPCS,
+        # SNOMEDCT_US}) to produce an MRCONSO.RRF subset, not a SNOMED RF2 release.
+        # Cadence matches UMLS's own AA/AB (spring/fall) release cycle.
+        "output": "umls_cpt_snomed_crosswalk.json",
+        "cadence": "biannual",
+        "prepare": lambda tmp, args: [PY, "tools/build_umls_crosswalk.py"],
+    },
     "icd10cm_index": {
         "output": "icd10cm_index_terms.json",
         "cadence": "annual",     # NCHS ICD-10-CM: FY effective Oct 1
@@ -264,8 +274,9 @@ SOURCES: dict[str, dict] = {
 #: (concept id -> record) used a different, equally valid container field -- so a
 #: correctly-built 43,459-concept artifact counted as 0 and the refresh reported a
 #: truthful build as an empty-output failure. New keyed-map outputs must add their
-#: container field here, or `_verify` cannot count them.
-_KEYED_MAP_CONTAINERS = ("terms", "codes", "concepts")
+#: container field here, or `_verify` cannot count them. "crosswalk" added for
+#: umls_cpt_snomed_crosswalk.json (code -> {cuis, matched_snomed_concept_ids}).
+_KEYED_MAP_CONTAINERS = ("terms", "codes", "concepts", "crosswalk")
 
 
 def _verify(output: str, base: Path | None = None) -> dict:
@@ -291,7 +302,7 @@ def _verify(output: str, base: Path | None = None) -> dict:
         # build defect in its own right even when the record container is non-empty --
         # a partial or misconfigured run could still emit real-looking records against
         # a digest it never actually validated.
-        for digest_field in ("relationship_sha256", "description_sha256"):
+        for digest_field in ("relationship_sha256", "description_sha256", "mrconso_sha256"):
             digest = data.get(digest_field)
             if digest is not None and not str(digest).strip():
                 raise RuntimeError(f"{output}: {digest_field} present but empty")

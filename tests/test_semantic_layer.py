@@ -84,6 +84,51 @@ class ComponentRelationshipsAccessor(unittest.TestCase):
         self.assertEqual(source.component_relationships("X99", "icd10"), {})
 
 
+class UmlsCrosswalkAccessor(unittest.TestCase):
+    """`AuthoritativeSource.umls_crosswalk_entry` / `MockSource`'s mirror (issue #6,
+    UMLS 2026AA ingestion). Recall/audit-only accessor -- these tests only prove it
+    reads and degrades correctly, never that anything consumes it for selection
+    (nothing does)."""
+
+    def test_mock_source_returns_the_configured_entry(self):
+        source = MockSource(umls_crosswalk={
+            "99213": {"cuis": ["C0000001"], "matched_snomed_concept_ids": ["12345"]},
+        })
+        self.assertEqual(source.umls_crosswalk_entry("99213", "cpt"),
+                         {"cuis": ["C0000001"], "matched_snomed_concept_ids": ["12345"]})
+
+    def test_mock_source_unconfigured_code_returns_empty_not_an_error(self):
+        source = MockSource(umls_crosswalk={"99213": {"cuis": ["C0000001"]}})
+        self.assertEqual(source.umls_crosswalk_entry("99999", "cpt"), {})
+
+    def test_mock_source_non_cpt_hcpcs_system_returns_empty(self):
+        source = MockSource(umls_crosswalk={"A00.0": {"cuis": ["C0000001"]}})
+        self.assertEqual(source.umls_crosswalk_entry("A00.0", "icd10"), {})
+
+    def test_mock_source_hcpcs_system_is_recognized(self):
+        source = MockSource(umls_crosswalk={
+            "J1234": {"cuis": ["C0000002"], "matched_snomed_concept_ids": ["67890"]},
+        })
+        self.assertEqual(source.umls_crosswalk_entry("J1234", "hcpcs"),
+                         {"cuis": ["C0000002"], "matched_snomed_concept_ids": ["67890"]})
+
+    def test_a_source_with_no_crosswalk_configured_degrades_to_empty(self):
+        self.assertEqual(MockSource().umls_crosswalk_entry("99213", "cpt"), {})
+
+    def test_real_source_never_raises_and_returns_a_well_formed_result(self):
+        """The real, un-mocked AuthoritativeSource. umls_cpt_snomed_crosswalk.json is
+        a UMLS-licensed derived artifact that is never committed to git (gitignored,
+        same as snomed_concept_terms.json/snomed_icd10_map.json) -- most checkouts
+        genuinely lack it, proving the fail-safe-empty path for real rather than via
+        a bare/raising test double, but a box that already built it (this repo's own
+        EC2 deployment, after tools/build_umls_crosswalk.py has run) legitimately has
+        it. Either way this must never raise, and a made-up code the crosswalk almost
+        certainly never contains must return {} regardless of which state holds."""
+        source = AuthoritativeSource()
+        result = source.umls_crosswalk_entry("ZZ_NOT_A_REAL_CODE_ZZ", "cpt")
+        self.assertEqual(result, {})
+
+
 class SemanticClassMatchingRules(unittest.TestCase):
     """`AuthoritativeSource.semantic_class`'s rule interpreter, isolated from real
     data by pre-populating its lazy caches directly (the same objects the real

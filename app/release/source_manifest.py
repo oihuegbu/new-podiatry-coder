@@ -228,6 +228,16 @@ _OPTIONAL_SOURCES: dict[str, dict] = {
             "that stays bound to the licensed/current CPT data this pipeline already "
             "uses.",
     },
+    "umls_crosswalk": {
+        "path": config.CODES_DIR / "umls_cpt_snomed_crosswalk.json",
+        "role": "CPT/HCPCS-to-SNOMED CT concept crosswalk (UMLS Metathesaurus)",
+        "absence_justification":
+            "UMLS-licensed concept crosswalk (MRCONSO.RRF atoms sharing a CUI), "
+            "recall/audit aid only; absence makes this crosswalk unavailable but "
+            "changes no coding decision, since candidate selection never depends on "
+            "it -- same boundary as snomed_procedure_terms above, for the same reason: "
+            "a shared UMLS concept does not establish CPT billing-code equivalence.",
+    },
     "learned_cpt_index": {
         "path": config.CODES_DIR / "learned_cpt_index.json",
         "role": "learned resolution index",
