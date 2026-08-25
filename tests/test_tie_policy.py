@@ -21,6 +21,7 @@ grammar, never a term list.
 """
 import unittest
 
+from claude_coder import requirement as req
 from claude_coder import tiebreak
 from claude_coder.data_access import MockSource
 from claude_coder.models import (CandidateCode, ClinicalFact, Disposition, EvidenceSpan,
@@ -149,10 +150,13 @@ class RequirementDerivedAxisTest(unittest.TestCase):
     rather than only through a full `resolve()` round trip."""
 
     def _req(self, axis, code, expected, selectable=True, queryable=False):
-        from claude_coder.requirement import DescriptorRequirement
+        from claude_coder.requirement import DescriptorRequirement, RequirementRole
         return DescriptorRequirement(
             requirement_id=f"{axis}:{code}:0", axis=axis, candidate_code=code,
-            required=selectable, expected=expected, authority_clause="",
+            required=selectable,
+            role=(RequirementRole.MUST_SUPPORT if selectable
+                 else RequirementRole.POSITIVE_ALIAS),
+            expected=expected, authority_clause="",
             authority_offset=(0, 0), authority_source_text="",
             selectable=selectable, queryable=queryable)
 
@@ -225,6 +229,96 @@ class RequirementDerivedAxisTest(unittest.TestCase):
         fact = _fact("condition alpha", "condition alpha, classic presentation noted")
         outcome = tiebreak.narrow(fact, [a, b], _agreed("span-0"), reqs)
         self.assertEqual(outcome.winner.code if outcome.winner else None, "CAND_A")
+
+
+# ------------------------------ issue #6 F9-R6-R2/R6-R6: negation-aware assertion
+class AssertedStatusTest(unittest.TestCase):
+    """`tiebreak.asserted_status` -- the shared, clause-scoped, negation-aware
+    primitive both `narrow()`'s own axis matching and `requirement.py`'s
+    validation build on. A bare contiguous phrase match is never enough: "no
+    classic presentation" must never count as the document stating "classic
+    presentation"."""
+
+    def test_unnegated_phrase_is_supported(self):
+        self.assertEqual(
+            tiebreak.asserted_status(("classic presentation",),
+                                     "documented as classic presentation today"),
+            "supported")
+
+    def test_phrase_absent_entirely_is_absent(self):
+        self.assertEqual(
+            tiebreak.asserted_status(("classic presentation",),
+                                     "condition alpha, as clinically documented"),
+            "absent")
+
+    def test_no_x_is_negated(self):
+        self.assertEqual(
+            tiebreak.asserted_status(("classic presentation",),
+                                     "condition alpha, no classic presentation"),
+            "negated")
+
+    def test_denies_x_is_negated(self):
+        self.assertEqual(
+            tiebreak.asserted_status(("classic presentation",),
+                                     "patient denies classic presentation"),
+            "negated")
+
+    def test_x_ruled_out_is_negated(self):
+        self.assertEqual(
+            tiebreak.asserted_status(("classic presentation",),
+                                     "classic presentation ruled out"),
+            "negated")
+
+    def test_negation_several_words_back_still_negates(self):
+        self.assertEqual(
+            tiebreak.asserted_status(("classic presentation",),
+                                     "denies any history of classic presentation"),
+            "negated")
+
+    def test_negation_in_an_earlier_clause_never_negates_a_later_one(self):
+        """A clause boundary (here, a period) must stop the negation window --
+        "no fever. classic presentation noted." states the phrase in its OWN,
+        separate, unnegated clause."""
+        self.assertEqual(
+            tiebreak.asserted_status(("classic presentation",),
+                                     "no fever. classic presentation noted."),
+            "supported")
+
+    def test_one_unnegated_occurrence_wins_over_a_negated_one_elsewhere(self):
+        self.assertEqual(
+            tiebreak.asserted_status(
+                ("classic presentation",),
+                "denies classic presentation on exam one. classic presentation "
+                "confirmed on exam two."),
+            "supported")
+
+    def test_multiple_term_options_any_one_supported_wins(self):
+        self.assertEqual(
+            tiebreak.asserted_status(("classic presentation", "atypical presentation"),
+                                     "documented as atypical presentation today"),
+            "supported")
+
+
+class NegatedAxisNarrowingTest(unittest.TestCase):
+    """issue #6 F9-R6-R6 (self-discovered, adjacent to Codex's finding): the
+    negation-blindness fix extends to `tiebreak.narrow`'s own axis matching --
+    the mechanism grounding LATERALITY, the most-trusted, longest-standing
+    axis in this system, not just the newer requirement-derived ones."""
+
+    def test_a_negated_mention_of_one_side_never_grounds_that_side(self):
+        fact = _fact("assembly service",
+                     "assembly service performed, not on the right, but the left")
+        line = resolve(_request(fact), _source(LAT_LEFT, LAT_RIGHT),
+                       reconciliation=_agreed("span-0"))
+        self.assertEqual(line.chosen.code if line.chosen else None, "CAND_LEFT",
+                         line.rationale)
+
+    def test_narrow_directly_settles_via_the_unnegated_side_only(self):
+        outcome = tiebreak.narrow(
+            _fact("assembly service",
+                 "assembly service performed, not on the right, but the left"),
+            [LAT_LEFT, LAT_RIGHT], _agreed("span-0"))
+        self.assertEqual(outcome.winner.code if outcome.winner else None, "CAND_LEFT")
 
 
 # ------------------------------------------------- steps 3 and 4: narrow and release
@@ -883,39 +977,44 @@ def _icd_source(*candidates, instructional_terms=None):
 
 
 class RequirementGroundedEliminationTest(unittest.TestCase):
-    """Issue #6 F9-R6: a candidate whose own authoritative record's mandatory
-    (selectable) requirement is validated NOT_DOCUMENTED, by every alternative
-    on that axis, by every evaluator, in a fully-covered and actually-searched
-    source, may now be eliminated intrinsically -- without a raw descriptor-token
-    comparison against a winner. The positive-path tests use ICD `inclusion_term`
-    requirements specifically because that is the genuinely NEW grounding
-    capability this mechanism adds (see `DX_ALPHA`/`DX_BETA`'s comment) --
-    descriptor_term stays deliberately non-selectable, unchanged, per this same
-    engagement's earlier, hard-won finding that raw descriptor words are never
-    typed clinical evidence.
+    """Issue #6 F9-R6: a candidate whose own authoritative record's MUST_SUPPORT
+    requirement is validated NOT_DOCUMENTED, by every alternative on that axis,
+    by every evaluator, in a `coverage.complete` source, may now be eliminated
+    intrinsically -- without a raw descriptor-token comparison against a winner.
+
+    issue #6 F9-R6-R3, R6-R6 re-review (a SCOPE-NARROWING correction, disclosed):
+    ICD `inclusion_term` requirements were the ORIGINAL Phase 2 positive-path
+    proof, but are now compiled `role=POSITIVE_ALIAS` and structurally NEVER
+    enter `_grounded_elimination`'s loop at all -- non-exhaustive EXAMPLES per
+    the ICD-10-CM guidelines can never disprove a candidate by their absence,
+    no matter how many are unanimously reported absent. The positive-path proof
+    now uses LATERALITY (`LAT_LEFT`/`LAT_RIGHT`) instead -- the one axis that
+    still compiles a `MUST_SUPPORT` requirement -- since it's currently the
+    only axis this mechanism can actually ground an elimination through.
+    `DX_ALPHA`/`DX_BETA` (identical descriptors, inclusion-term-only) now prove
+    the OPPOSITE: that absence, however complete and unanimous, structurally
+    never eliminates a POSITIVE_ALIAS-only candidate.
 
     issue #6 F9-R6-R2 re-review: CONTRADICTED is retired as elimination grounds
-    entirely (see `requirement.validated_requirement`'s docstring) -- these tests
-    were rewritten accordingly; a model's CONTRADICTED claim is now pinned as
-    something that must NEVER eliminate, for any citation, rather than being the
-    positive-path proof it used to be. NOT_DOCUMENTED, now backed by a genuine
-    deterministic content search rather than an unchecked citation, is the sole
-    remaining elimination path this mechanism proves."""
+    entirely (see `requirement.validated_requirement`'s docstring) -- a model's
+    CONTRADICTED claim must NEVER eliminate, for any citation."""
 
-    # issue #6 F9-R6 Phase 4: deliberately states NEITHER candidate's inclusion term
-    # ("classic presentation" / "modern presentation") -- these evaluator-gated
-    # elimination tests must isolate `_grounded_elimination`'s judgement-validation
-    # logic from `tiebreak.narrow`'s OWN, separate, judgement-independent
-    # direct-document-narrowing path (Phase 4's new capability, proven on its own
-    # fixture below), which would otherwise settle some of these ties by itself
-    # regardless of what the judgements under test claim. issue #6 F9-R6-R4: this
-    # SAME text now also doubles as the default `searchable_text` -- it is exactly
-    # the "fully covered, actually searched" corpus a NOT_DOCUMENTED verdict about
-    # either candidate's inclusion term is deterministically checked against.
+    # Deliberately states NEITHER candidate's inclusion term ("classic
+    # presentation" / "modern presentation") -- these evaluator-gated tests
+    # must isolate `_grounded_elimination`'s judgement-validation logic from
+    # `tiebreak.narrow`'s OWN, separate, judgement-independent
+    # direct-document-narrowing path.
     ALPHA_DOCUMENTED = "condition alpha, as clinically documented"
 
+    def _coverage(self, text=None, uncovered_pages=()):
+        import hashlib
+        t = text if text is not None else self.ALPHA_DOCUMENTED
+        return req.CoverageCorpus(channel_id="test-channel", text=t,
+                                  text_sha256=hashlib.sha256(t.encode()).hexdigest(),
+                                  uncovered_pages=uncovered_pages)
+
     def _resolve(self, primary, second, reconciliation=None,
-                terms=None, document_fully_covered=False, searchable_text=None):
+                terms=None, coverage=None):
         fact = _fact("condition alpha", self.ALPHA_DOCUMENTED, kind=FactKind.DIAGNOSIS)
         source = _icd_source(DX_ALPHA, DX_BETA, instructional_terms=(
             terms if terms is not None else
@@ -926,9 +1025,7 @@ class RequirementGroundedEliminationTest(unittest.TestCase):
                        reconciliation=(reconciliation
                                        if reconciliation is not None
                                        else _agreed("span-0")),
-                       document_fully_covered=document_fully_covered,
-                       searchable_text=(searchable_text if searchable_text is not None
-                                        else self.ALPHA_DOCUMENTED))
+                       coverage=coverage)
 
     def test_a_unanimous_contradiction_never_eliminates(self):
         """issue #6 F9-R6-R2, the direct regression pin: CONTRADICTED is retired
@@ -938,129 +1035,30 @@ class RequirementGroundedEliminationTest(unittest.TestCase):
         how well-cited the claim looks."""
         judge = _sv.judge(pick=1,
                           requirement_status={"inclusion_term:SYNDX2": "contradicted"})
-        line = self._resolve(judge, judge)
+        line = self._resolve(judge, judge, coverage=self._coverage())
         self.assertIsNone(line.chosen, line.rationale)
         self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
 
-    def test_only_one_evaluator_answering_the_requirement_still_holds(self):
-        """The second evaluator's response never mentions the requirement at all
-        (no "requirements" key) -- "not every evaluator answered" must hold, not
-        silently treat silence as agreement."""
-        primary = _sv.judge(pick=1,
-                            requirement_status={"inclusion_term:SYNDX2": "not_documented"})
-        second = _sv.judge(pick=1)
-        line = self._resolve(primary, second, document_fully_covered=True)
-        self.assertIsNone(line.chosen, line.rationale)
-        self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
-
-    def test_supported_status_never_eliminates_anything(self):
-        """A requirement judged SUPPORTED (not NOT_DOCUMENTED) grounds nothing --
-        only a unanimous, validated, fully-covered-and-searched NOT_DOCUMENTED
-        verdict may eliminate."""
-        judge = _sv.judge(pick=1,
-                          requirement_status={"inclusion_term:SYNDX2": "supported"})
-        line = self._resolve(judge, judge, document_fully_covered=True)
-        self.assertIsNone(line.chosen, line.rationale)
-        self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
-
-    def test_not_documented_status_never_eliminates_anything_without_full_coverage(self):
-        """NOT_DOCUMENTED may only ground an elimination when the caller can show the
-        WHOLE document was actually read (issue #6 F9-R6 Phase 3) -- by default (as
-        every caller except `pipeline.code_encounter` behaves), no such signal is
-        supplied, so absence of documentation must never be treated as proof of
-        absence."""
+    def test_positive_alias_never_enters_the_elimination_loop_even_when_fully_covered(self):
+        """issue #6 F9-R6-R3 re-review, the core positive-alias regression: SYNDX2's
+        inclusion-term requirement is unanimously, validly reported NOT_DOCUMENTED
+        (absence genuinely confirmed against the real `coverage` corpus), yet must
+        NEVER eliminate -- `role=POSITIVE_ALIAS` structurally excludes it from
+        `_grounded_elimination`'s loop, unconditionally, regardless of how strong
+        the absence evidence looks."""
         judge = _sv.judge(pick=1,
                           requirement_status={"inclusion_term:SYNDX2": "not_documented"})
-        line = self._resolve(judge, judge, document_fully_covered=False)
+        line = self._resolve(judge, judge, coverage=self._coverage())
         self.assertIsNone(line.chosen, line.rationale)
         self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
 
-    def test_unanimous_validated_not_documented_releases_when_fully_covered(self):
-        """issue #6 F9-R6 Phase 3's positive path: both evaluators unanimously and
-        validly report SYNDX2's inclusion-term requirement as NOT_DOCUMENTED (citing
-        no span -- absence has nothing to quote), the caller supplies
-        `document_fully_covered=True` -- an independent reading actually swept every
-        page -- and (issue #6 F9-R6-R4) the deterministic search of the real
-        `searchable_text` corpus confirms the term is genuinely absent. Only then
-        may the absence itself ground the elimination."""
-        judge = _sv.judge(pick=1,
-                          requirement_status={"inclusion_term:SYNDX2": "not_documented"})
-        line = self._resolve(judge, judge, document_fully_covered=True)
-        self.assertEqual(line.chosen.code if line.chosen else None, "SYNDX1",
-                         line.rationale)
-        self.assertIn("SYNDX2", line.tie_record["eliminated"])
-        self.assertIn("NOT_DOCUMENTED", line.tie_record["eliminated"]["SYNDX2"])
-        self.assertTrue(line.tie_record["document_fully_covered"])
-        self.assertTrue(line.tie_record["searchable_text_available"])
-
-    def test_not_documented_disagreement_still_holds_even_when_fully_covered(self):
-        """Full page coverage is necessary but not sufficient -- the evaluators still
-        have to unanimously agree the requirement is undocumented. One says
-        NOT_DOCUMENTED, the other SUPPORTED: not unanimous, so the candidate stays
-        standing regardless of coverage."""
-        primary = _sv.judge(pick=1,
-                            requirement_status={"inclusion_term:SYNDX2": "not_documented"})
-        second = _sv.judge(pick=1,
-                           requirement_status={"inclusion_term:SYNDX2": "supported"})
-        line = self._resolve(primary, second, document_fully_covered=True)
-        self.assertIsNone(line.chosen, line.rationale)
-        self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
-
-    def test_grounded_elimination_never_validates_a_not_documented_claim_the_document_contradicts(self):
-        """issue #6 F9-R6-R4: a NOT_DOCUMENTED verdict for a phrase that IS
-        actually present in `searchable_text` must never ground elimination -- the
-        judgement's claim contradicts the deterministic truth about the real,
-        fully-covered corpus."""
-        judge = _sv.judge(pick=1,
-                          requirement_status={"inclusion_term:SYNDX2": "not_documented"})
-        line = self._resolve(judge, judge, document_fully_covered=True,
-                             searchable_text="condition alpha, modern presentation noted")
-        self.assertIsNone(line.chosen, line.rationale)
-        self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
-
-    def test_searchable_text_empty_never_grounds_not_documented_elimination(self):
-        """issue #6 F9-R6-R4: `document_fully_covered=True` alone is not enough --
-        without a real corpus to actually search, NOT_DOCUMENTED can never be
-        deterministically confirmed and must never ground an elimination, no
-        matter how the coverage flag reads. The empty-document AND-gate edge
-        case: a caller must never simplify the two gates into one."""
-        judge = _sv.judge(pick=1,
-                          requirement_status={"inclusion_term:SYNDX2": "not_documented"})
-        line = self._resolve(judge, judge, document_fully_covered=True,
-                             searchable_text="")
-        self.assertIsNone(line.chosen, line.rationale)
-        self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
-
-    def test_partial_inclusion_term_coverage_does_not_eliminate(self):
-        """issue #6 F9-R6-R3, the core Bug B regression: ICD inclusion terms are
-        non-exhaustive EXAMPLES, not a checklist. SYNDX2 has TWO listed inclusion
-        terms; only ONE is validly, unanimously reported NOT_DOCUMENTED -- the
-        other is never judged at all. Absence of ONE alternative must never
-        eliminate a candidate that might still be documented via another.
-
-        Targets the FULL, real requirement_id (not a bare axis prefix, which
-        would ambiguously match every inclusion-term requirement SYNDX2 has) --
-        `_sv.requirement_ids` reads back exactly what was actually compiled and
-        shown this run, so the test never has to predict the compiled id."""
-        terms = {"SYNDX1": {"classic presentation"},
-                 "SYNDX2": {"modern presentation", "atypical presentation"}}
-
-        def _judge(system, user):
-            if "propose" in system.lower():
-                return _sv.judge(pick=1, propose=())(system, user)
-            shown = [rid for rid in _sv.requirement_ids(user)
-                    if rid.startswith("inclusion_term:SYNDX2:")]
-            statuses = {shown[0]: "not_documented"} if shown else {}
-            return _sv.verdict(user, pick=1, requirement_status=statuses)
-        line = self._resolve(_judge, _judge, terms=terms, document_fully_covered=True)
-        self.assertIsNone(line.chosen, line.rationale)
-        self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
-
-    def test_all_inclusion_terms_not_documented_eliminates(self):
-        """The positive counterpart: SYNDX2's two inclusion terms are BOTH
-        independently, unanimously, validly reported NOT_DOCUMENTED, and the
-        real searchable text genuinely lacks both -- only then does the whole
-        axis group ground the elimination."""
+    def test_all_inclusion_terms_not_documented_still_never_eliminates(self):
+        """The old "all aliases absent" rule (issue #6 F9-R6-R3, first fix) is
+        ALSO now insufficient -- both of SYNDX2's two inclusion terms
+        independently, unanimously, validly reported NOT_DOCUMENTED, against a
+        corpus that genuinely lacks both, must still never eliminate. Absence of
+        every LISTED example is not the same as disproof: an unlisted synonym
+        can map to the same code."""
         terms = {"SYNDX1": {"classic presentation"},
                  "SYNDX2": {"modern presentation", "atypical presentation"}}
 
@@ -1071,61 +1069,39 @@ class RequirementGroundedEliminationTest(unittest.TestCase):
             statuses = {rid: "not_documented" for rid in shown
                        if rid.startswith("inclusion_term:SYNDX2")}
             return _sv.verdict(user, pick=1, requirement_status=statuses)
-        line = self._resolve(_judge, _judge, terms=terms, document_fully_covered=True)
-        self.assertEqual(line.chosen.code if line.chosen else None, "SYNDX1",
-                         line.rationale)
-        self.assertIn("SYNDX2", line.tie_record["eliminated"])
+        line = self._resolve(_judge, _judge, terms=terms, coverage=self._coverage())
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
 
     def test_the_compiled_requirement_matrix_is_bound_into_the_tie_record(self):
         """issue #6 F9-R6 Phase 5: the tie record carries the compiled requirement
-        DEFINITIONS (axis, candidate, required, expected terms, authority clause +
-        offset, source identity, and now -- issue #6 F9-R6-R5 -- the full
+        DEFINITIONS (axis, candidate, required, role, expected terms, authority
+        clause + offset, source identity, and -- issue #6 F9-R6-R5 -- the full
         `authority_source_text` too) alongside the per-evaluator verdicts already
-        in `judgements` -- an auditor can reproduce `requirement.
-        validated_requirement` from this one record instead of trusting the
-        elimination prose on its own."""
+        in `judgements`, and a typed `coverage` record -- an auditor can reproduce
+        `requirement.validated_requirement` from this one record instead of
+        trusting the elimination prose on its own."""
         judge = _sv.judge(pick=1,
                           requirement_status={"inclusion_term:SYNDX2": "not_documented"})
-        line = self._resolve(judge, judge, document_fully_covered=True)
+        line = self._resolve(judge, judge, coverage=self._coverage())
         requirements = line.tie_record["requirements"]
         self.assertTrue(requirements)
         by_id = {r["requirement_id"]: r for r in requirements}
         target = next(r for r in by_id.values()
                      if r["axis"] == "inclusion_term" and r["candidate_code"] == "SYNDX2")
         self.assertEqual(target["expected"], ["modern presentation"])
-        self.assertTrue(target["required"])
+        self.assertFalse(target["required"])
+        self.assertEqual(target["role"], "positive_alias")
         self.assertEqual(target["authority_source_text"], "modern presentation")
         self.assertIn("authority_clause", target)
         self.assertIn("authority_offset", target)
-
-    def test_a_genuine_tie_is_narrowed_by_an_inclusion_term_the_page_states(self):
-        """issue #6 F9-R6 Phase 4: NEITHER candidate is named-eliminated by either
-        evaluator here (both simply find the byte-identical descriptor entailed) --
-        a genuine, un-eliminated tie that reaches `tiebreak.narrow`'s step 3/4, not
-        `_grounded_elimination`. The document's own text states SYNDX1's inclusion
-        term ("classic presentation") and not SYNDX2's ("modern presentation"), so
-        the tie is narrowed the same way laterality already could -- proving the new
-        axis can WIN a tie outright, not only eliminate a loser. Deliberately its
-        OWN fact text (not the class's `ALPHA_DOCUMENTED`, which is neutral on
-        purpose for the judgement-gated elimination tests above)."""
-        fact = _fact("condition alpha", "condition alpha, classic presentation documented",
-                     kind=FactKind.DIAGNOSIS)
-        source = _icd_source(DX_ALPHA, DX_BETA, instructional_terms={
-            "SYNDX1": {"classic presentation"}, "SYNDX2": {"modern presentation"}})
-        judge = _sv.judge(entails=lambda d: True)
-        line = resolve(_request(fact), source,
-                       llm=_pinned(judge, "provider-a"),
-                       corroborate=_pinned(judge, "provider-b"),
-                       reconciliation=_agreed("span-0"))
-        self.assertEqual(line.chosen.code if line.chosen else None, "SYNDX1",
-                         line.rationale)
-        axis_names = {a["axis"] for a in line.tie_record["axes"]}
-        self.assertIn("inclusion_term", axis_names)
+        self.assertIsNotNone(line.tie_record["coverage"])
+        self.assertTrue(line.tie_record["coverage"]["complete"])
 
     def test_a_genuine_tie_with_neither_inclusion_term_stated_stays_open(self):
-        """The page states neither candidate's inclusion term -- Phase 4's new axis
-        must fail closed exactly like every existing axis: nothing documented, no
-        winner, one targeted provider-answerable axis or an explicit hold."""
+        """The page states neither candidate's inclusion term -- and since
+        inclusion terms are `selectable=False` now too, they can never WIN a tie
+        either, exactly like every axis correctly fails closed on silence."""
         fact = _fact("condition alpha", "condition alpha noted", kind=FactKind.DIAGNOSIS)
         source = _icd_source(DX_ALPHA, DX_BETA, instructional_terms={
             "SYNDX1": {"classic presentation"}, "SYNDX2": {"modern presentation"}})
@@ -1136,6 +1112,97 @@ class RequirementGroundedEliminationTest(unittest.TestCase):
                        reconciliation=_agreed("span-0"))
         self.assertIsNone(line.chosen, line.rationale)
         self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
+
+    def test_an_inclusion_term_the_page_states_no_longer_narrows_a_tie(self):
+        """issue #6 F9-R6-R3/R6-R6 re-review, disclosed scope narrowing: the
+        SAME fixture that used to prove Phase 4's inclusion-term tie-narrowing
+        now proves the OPPOSITE -- `selectable=False` means the axis can no
+        longer WIN a tie either, until a real asserted-span selection control
+        exists for POSITIVE_ALIAS requirements (not built this round)."""
+        fact = _fact("condition alpha", "condition alpha, classic presentation documented",
+                     kind=FactKind.DIAGNOSIS)
+        source = _icd_source(DX_ALPHA, DX_BETA, instructional_terms={
+            "SYNDX1": {"classic presentation"}, "SYNDX2": {"modern presentation"}})
+        judge = _sv.judge(entails=lambda d: True)
+        line = resolve(_request(fact), source,
+                       llm=_pinned(judge, "provider-a"),
+                       corroborate=_pinned(judge, "provider-b"),
+                       reconciliation=_agreed("span-0"))
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
+
+
+class MustSupportGroundedEliminationTest(unittest.TestCase):
+    """issue #6 F9-R6-R3/R6-R6 re-review: the general MUST_SUPPORT
+    NOT_DOCUMENTED elimination mechanism, demonstrated through LATERALITY --
+    currently the only axis that compiles a `role=MUST_SUPPORT` requirement, so
+    it's the only one that can exercise `_grounded_elimination`'s judgement path
+    end to end. `tiebreak.narrow`'s OWN, separate, judgement-independent
+    document-proof fallback already grounds ordinary laterality ties (see
+    `RequirementGroundedEliminationTest`'s sibling test below) -- these tests
+    specifically prove the NEWER, judgement-based mechanism, distinguishing it
+    from the fallback by asserting on the elimination detail's own wording,
+    which only the new mechanism produces."""
+
+    NOT_MENTIONED = "assembly service performed"   # states NEITHER side
+
+    def _coverage(self, text, uncovered_pages=()):
+        import hashlib
+        return req.CoverageCorpus(channel_id="test-channel", text=text,
+                                  text_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                                  uncovered_pages=uncovered_pages)
+
+    def _resolve(self, primary, second, coverage, reconciliation=None):
+        fact = _fact("assembly service", self.NOT_MENTIONED)
+        return resolve(_request(fact), _source(LAT_LEFT, LAT_RIGHT),
+                       llm=_pinned(primary, "provider-a"),
+                       corroborate=_pinned(second, "provider-b"),
+                       reconciliation=(reconciliation if reconciliation is not None
+                                       else _agreed("span-0")),
+                       coverage=coverage)
+
+    def test_unanimous_validated_not_documented_grounds_a_must_support_elimination(self):
+        """The positive-path proof: both evaluators unanimously, validly report
+        CAND_RIGHT's own laterality requirement ("right") as NOT_DOCUMENTED,
+        against a `coverage` corpus that genuinely never mentions either side --
+        only MUST_SUPPORT requirements can ground this way."""
+        judge = _sv.judge(pick=1, requirement_status={"laterality:CAND_RIGHT": "not_documented"})
+        line = self._resolve(judge, judge, self._coverage(self.NOT_MENTIONED))
+        self.assertEqual(line.chosen.code if line.chosen else None, "CAND_LEFT",
+                         line.rationale)
+        self.assertIn("CAND_RIGHT", line.tie_record["eliminated"])
+        # This exact phrasing is only ever produced by _grounded_elimination's
+        # NEW judgement-based path -- distinguishes it from tiebreak.narrow's
+        # own, separate fallback, which would phrase it differently.
+        self.assertIn("validated NOT_DOCUMENTED by every evaluator",
+                      line.tie_record["eliminated"]["CAND_RIGHT"])
+
+    def test_disagreement_never_grounds_a_must_support_elimination(self):
+        primary = _sv.judge(pick=1, requirement_status={"laterality:CAND_RIGHT": "not_documented"})
+        second = _sv.judge(pick=1, requirement_status={"laterality:CAND_RIGHT": "supported"})
+        line = self._resolve(primary, second, self._coverage(self.NOT_MENTIONED))
+        self.assertIsNone(line.chosen, line.rationale)
+
+    def test_negated_mention_never_grounds_a_must_support_elimination(self):
+        """issue #6 F9-R6-R6: "not on the right" is a genuinely different,
+        more specific claim than silence -- the deterministic truth is
+        CONTRADICTED (negated), not NOT_DOCUMENTED, so the judgement's claim
+        must fail to validate."""
+        judge = _sv.judge(pick=1, requirement_status={"laterality:CAND_RIGHT": "not_documented"})
+        line = self._resolve(judge, judge,
+                             self._coverage("assembly service, not on the right"))
+        self.assertIsNone(line.chosen, line.rationale)
+
+    def test_incomplete_coverage_never_grounds_a_must_support_elimination(self):
+        judge = _sv.judge(pick=1, requirement_status={"laterality:CAND_RIGHT": "not_documented"})
+        line = self._resolve(judge, judge,
+                             self._coverage(self.NOT_MENTIONED, uncovered_pages=(2,)))
+        self.assertIsNone(line.chosen, line.rationale)
+
+    def test_no_coverage_at_all_never_grounds_a_must_support_elimination(self):
+        judge = _sv.judge(pick=1, requirement_status={"laterality:CAND_RIGHT": "not_documented"})
+        line = self._resolve(judge, judge, None)
+        self.assertIsNone(line.chosen, line.rationale)
 
     def test_no_typed_requirements_falls_back_to_pre_existing_behavior_unchanged(self):
         """The graceful-degradation confirmation: two candidates differing only on an

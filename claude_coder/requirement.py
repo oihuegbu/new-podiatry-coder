@@ -5,15 +5,23 @@ ever loosening WHAT COUNTS as reaching that bar.
 
 This module sits strictly downstream of `tiebreak.discriminating_axes` — it is a
 mechanical PROJECTION of each `AxisProbe` into one or more `DescriptorRequirement`
-records per candidate, never an independent axis compiler. `required = probe.
-selectable`, so mandatory maps exactly onto today's selectable/non-selectable line:
-an axis that could never eliminate a candidate before this module existed still
-cannot after it. Only `provable` axes (a quotation's WORDS can settle them) compile
-into text-clause requirements at all — `AXIS_MEASUREMENT` (a typed, unit-converted
-interval comparison, never provable by words) is deliberately not compiled here;
-`resolution._grounded_elimination` reasons about it directly against `fact.
-attributes` via the existing `_measure_in_range`/`_interval_unsupported`, never
-through a fabricated text clause.
+records per candidate, never an independent axis compiler. For axis-derived
+requirements, `required = probe.selectable`: an axis that could never eliminate a
+candidate before this module existed still cannot after it. Only `provable` axes
+(a quotation's WORDS can settle them) compile into text-clause requirements at
+all — `AXIS_MEASUREMENT` (a typed, unit-converted interval comparison, never
+provable by words) is deliberately not compiled here; `resolution.
+_grounded_elimination` reasons about it directly against `fact.attributes` via
+the existing `_measure_in_range`/`_interval_unsupported`, never through a
+fabricated text clause.
+
+`RequirementRole` (issue #6 F9-R6-R3/R6-R6 re-review) is the finer-grained,
+authoritative discriminator for what a requirement's outcome may actually DO:
+`MUST_SUPPORT` (validated absence may disqualify), `POSITIVE_ALIAS` (a
+non-exhaustive example that may help narrow when present, but whose absence
+proves nothing — ICD inclusion terms are always this), or `EXCLUSION` (reserved,
+unpopulated). `required`/`selectable` stay as fields, kept consistent WITH role
+at every construction site rather than independently meaningful.
 
 Never medical vocabulary in Python: every requirement's `expected` value and
 `authority_clause` come from DATA — a candidate's own AMA/CMS descriptor text
@@ -58,18 +66,79 @@ class RequirementStatus(str, Enum):
     UNRESOLVED = "unresolved"
 
 
+class RequirementRole(str, Enum):
+    """What a requirement's outcome is actually allowed to DO (issue #6
+    F9-R6-R3/R6-R6 re-review) -- a strictly finer discriminator than the
+    boolean `required`/`selectable` pair, which conflated "this axis kind can
+    ever eliminate/select" with "this SPECIFIC requirement's absence disproves
+    the candidate", a distinction the ICD-10-CM inclusion-term finding proved
+    matters.
+    """
+    #: This requirement's own absence, once validated, may disqualify the
+    #: candidate. Only axes with a real closed/typed shape (currently:
+    #: laterality) ever earn this.
+    MUST_SUPPORT = "must_support"
+    #: A non-exhaustive EXAMPLE that may help narrow/select when genuinely,
+    #: assertedly present, but whose absence proves nothing -- the record may
+    #: simply describe the same condition a different, unlisted way. ICD
+    #: inclusion terms are always this. Never enters elimination.
+    POSITIVE_ALIAS = "positive_alias"
+    #: Reserved for a genuinely exclusionary source fact (not populated by
+    #: any compiler yet) -- kept distinct from MUST_SUPPORT so a future
+    #: exclusion-shaped source never has to overload "this axis is required".
+    EXCLUSION = "exclusion"
+
+
+@dataclass(frozen=True)
+class CoverageCorpus:
+    """The identity of the ONE independently-read document text a
+    NOT_DOCUMENTED or SUPPORTED verdict may be deterministically checked
+    against (issue #6 F9-R6-R4/R5 re-review) -- never a bare string. Binds
+    WHICH channel was searched, a content hash (so the audit record can prove
+    the same corpus was used without embedding the whole document text), and
+    page coverage, so "not documented" can never quietly mean "in an
+    unidentified or partial excerpt".
+    """
+    channel_id: str
+    text: str
+    text_sha256: str
+    covered_pages: tuple[int, ...] = ()
+    uncovered_pages: tuple[int, ...] = ()
+    page_image_sha256: tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        """Both gates a validated absence needs, together: real text AND no
+        page this channel failed to cover. Neither alone is sufficient -- a
+        zero-page or fully-uncovered-but-nonempty-flag document must never
+        let NOT_DOCUMENTED validate."""
+        return bool(self.text) and not self.uncovered_pages
+
+    def as_record(self) -> dict[str, Any]:
+        return {"channel_id": self.channel_id, "text_sha256": self.text_sha256,
+                "covered_pages": list(self.covered_pages),
+                "uncovered_pages": list(self.uncovered_pages),
+                "page_image_sha256": list(self.page_image_sha256),
+                "complete": self.complete}
+
+
 @dataclass(frozen=True)
 class DescriptorRequirement:
     """One typed, source-anchored fact a candidate's own authoritative record
     states — compiled from an `AxisProbe` `tiebreak.discriminating_axes` already
     derived, never a separately invented axis. `required` mirrors the originating
     probe's `selectable`: only an axis that could already eliminate/select a
-    candidate before this module existed can be `required` here.
+    candidate before this module existed can be `required` here. `role`
+    (issue #6 F9-R6-R3/R6-R6 re-review) is the authoritative elimination-
+    eligibility discriminator now used at the call site -- `required` stays
+    for backward-compatible audit/prompt display, kept consistent with `role`
+    at every construction site rather than independently meaningful.
     """
     requirement_id: str
     axis: str
     candidate_code: str
     required: bool
+    role: RequirementRole
     expected: tuple[str, ...]
     authority_clause: str
     authority_offset: tuple[int, int]
@@ -81,6 +150,7 @@ class DescriptorRequirement:
     def as_record(self) -> dict[str, Any]:
         return {"requirement_id": self.requirement_id, "axis": self.axis,
                 "candidate_code": self.candidate_code, "required": self.required,
+                "role": self.role.value,
                 "expected": list(self.expected),
                 "authority_clause": self.authority_clause,
                 "authority_offset": list(self.authority_offset),
@@ -154,6 +224,8 @@ def compile_requirements(candidates: list[CandidateCode], source: Any = None
             out.append(DescriptorRequirement(
                 requirement_id=f"{probe.axis}:{code}:{len(out)}",
                 axis=probe.axis, candidate_code=code, required=probe.selectable,
+                role=(RequirementRole.MUST_SUPPORT if probe.selectable
+                     else RequirementRole.POSITIVE_ALIAS),
                 expected=tuple(terms), authority_clause=clause,
                 authority_offset=offset, authority_source_text=candidate.descriptor,
                 # issue #6 F9-R6-R5: the candidate's own real, already-populated
@@ -182,90 +254,107 @@ def compile_requirements(candidates: list[CandidateCode], source: Any = None
                     out.append(DescriptorRequirement(
                         requirement_id=f"inclusion_term:{candidate.code}:{len(out)}",
                         axis="inclusion_term", candidate_code=candidate.code,
-                        required=True, expected=(term,), authority_clause=clause,
+                        # issue #6 F9-R6-R3 re-review: inclusion terms are
+                        # non-exhaustive EXAMPLES per the ICD-10-CM guidelines
+                        # -- absence of even every listed example never
+                        # disproves the diagnosis, since an unlisted synonym
+                        # can map to the same code. POSITIVE_ALIAS, never
+                        # required, never selectable: may widen retrieval
+                        # (unaffected, upstream of this compiler) and may only
+                        # narrow/select once a real asserted-span control
+                        # exists for this axis kind -- not wired here.
+                        required=False, role=RequirementRole.POSITIVE_ALIAS,
+                        expected=(term,), authority_clause=clause,
                         authority_offset=offset, authority_source_text=term,
                         source_identity={"kind": "instructional_notes",
                                          "system": candidate.system,
                                          "authority": dict(candidate.authority or {})},
-                        selectable=True, queryable=False))
+                        selectable=False, queryable=False))
     return tuple(out)
 
 
-def deterministic_status(req: DescriptorRequirement, searchable_text: str
+def deterministic_status(req: DescriptorRequirement, coverage: CoverageCorpus | None
                          ) -> RequirementStatus | None:
-    """The TRUE relation between `req.expected` and `searchable_text`, found by
-    ACTUALLY SEARCHING the text -- never a verifier's self-report standing in for
-    it (issue #6 F9-R6-R2 re-review). Uses the SAME contiguous, ordered phrase
-    matcher `tiebreak.narrow` proves its own axes with (`tiebreak._token_sequence`/
-    `_phrase_present`), so "the document states this" means the same thing
-    wherever it's checked in this codebase.
+    """The TRUE relation between `req.expected` and the ONE independently-read
+    `coverage` corpus, found by ACTUALLY SEARCHING the text -- never a
+    verifier's self-report standing in for it (issue #6 F9-R6-R2 re-review).
+    Uses `tiebreak.asserted_status`, the SAME clause-scoped, negation-aware
+    primitive `tiebreak.narrow` proves its own axes with, so "the document
+    states this" means the same thing wherever it's checked in this codebase.
 
-    Returns `None` when `searchable_text` is empty: no claim, positive OR
-    negative, can be made about a document nobody supplied -- the caller
-    (`validated_requirement`) must fail closed on `None`, exactly as
-    `document_fully_covered=False` already fails closed on no coverage proof.
+    Returns `None` when `coverage` is missing or `not coverage.complete`: no
+    claim, positive OR negative, can be made about a document nobody fully
+    supplied -- the caller (`validated_requirement`) must fail closed on
+    `None`.
 
-    Only ever returns SUPPORTED or NOT_DOCUMENTED. CONTRADICTED is not
-    derivable here (see `validated_requirement`'s docstring for why) and
-    UNRESOLVED is not a claim this function is positioned to make -- absence
-    from `searchable_text` is exactly what NOT_DOCUMENTED means.
+    Maps `asserted_status`'s three-way answer onto `RequirementStatus`:
+    "supported" -> SUPPORTED, "absent" -> NOT_DOCUMENTED, and (issue #6
+    F9-R6-R6 re-review) "negated" -> CONTRADICTED -- a phrase that appears
+    ONLY negated ("no classic presentation") is a genuinely different, more
+    specific claim than silence, and must validate NEITHER a SUPPORTED NOR a
+    NOT_DOCUMENTED verdict (`validated_requirement` rejects CONTRADICTED
+    outright on the judgement side regardless, so this never reopens a
+    judgement-driven elimination path for it -- it only makes the OTHER two
+    statuses correctly refuse to validate against a negated occurrence).
     """
-    if not searchable_text:
+    if coverage is None or not coverage.complete:
         return None
-    tokens = _tiebreak._token_sequence(searchable_text)
-    present = any(_tiebreak._phrase_present(term, tokens) for term in req.expected)
-    return RequirementStatus.SUPPORTED if present else RequirementStatus.NOT_DOCUMENTED
+    status = _tiebreak.asserted_status(req.expected, coverage.text)
+    return {"supported": RequirementStatus.SUPPORTED,
+           "negated": RequirementStatus.CONTRADICTED,
+           "absent": RequirementStatus.NOT_DOCUMENTED}[status]
 
 
 def validated_requirement(req: DescriptorRequirement, judgement: RequirementJudgement,
-                          reconciliation: Any = None, searchable_text: str = "") -> bool:
+                          *, evidence_by_span_id: dict[str, str] | None = None,
+                          reconciliation: Any = None,
+                          coverage: CoverageCorpus | None = None) -> bool:
     """Does an evaluator's judgement of `req` deserve to affect selection?
 
-    issue #6 F9-R6-R2 (Codex re-review): the ORIGINAL version of this function
-    checked only that a cited span was REAL and page-reconciled -- never that the
-    span's actual CONTENT related to `req.expected` at all. A model could cite any
-    real, unrelated, agreed span and claim CONTRADICTED, and this function
-    returned True. The shipped Phase-2 positive-path test proved this empirically:
-    it cited deliberately neutral text as "proof" of a contradiction, and
-    validation passed.
+    issue #6 F9-R6-R2 (Codex re-review, two rounds): the ORIGINAL version of
+    this function checked only that a cited span was REAL and page-reconciled
+    -- never that the span's actual CONTENT related to `req.expected` at all.
+    The FIRST fix added a deterministic whole-document search, but still
+    validated SUPPORTED against a span that was merely reconciled, not
+    against what that SPECIFIC cited span's own text says -- a model could
+    cite a real but unrelated span, as long as the phrase happened to appear
+    ANYWHERE ELSE in the document. This version fixes both, permanently:
 
-    The fix is two-fold, and both parts are PERMANENT design decisions, not
-    interim patches:
+    1. CONTRADICTED never validates as a JUDGEMENT status, for any axis,
+       unconditionally -- see the `if judgement.status not in (...)` check
+       below. Confirming a phrase-type requirement is genuinely contradicted
+       (the note actively states the opposite, not merely silent) needs real
+       negation-detection -- which this module now HAS
+       (`tiebreak.asserted_status`), but the judgement-driven CONTRADICTED
+       path stays retired regardless: a model's own CONTRADICTED claim is
+       still never trusted, deterministic negation detection is used instead,
+       purely to make SUPPORTED/NOT_DOCUMENTED correctly refuse a negated
+       occurrence rather than to resurrect CONTRADICTED as a judgement-driven
+       elimination path. Laterality's real closed-enumeration contradiction
+       remains fully handled by the pre-existing, judgement-INDEPENDENT
+       `tiebreak.narrow` document-proof fallback in
+       `resolution._grounded_elimination`.
+    2. SUPPORTED requires EVERY cited span to, INDIVIDUALLY, genuinely and
+       un-negatedly support the term -- checked against that span's own text
+       (`evidence_by_span_id`), never the whole document standing in for a
+       specific citation's content. NOT_DOCUMENTED requires the WHOLE
+       `coverage` corpus to show genuine absence -- "negated" (found, but
+       explicitly negated) is a different, more specific claim than silence
+       and must not validate NOT_DOCUMENTED either. `coverage` missing or
+       incomplete means NOT_DOCUMENTED can never validate -- fails closed,
+       matching `CoverageCorpus.complete`'s own posture.
 
-    1. CONTRADICTED is retired as elimination grounds, for every axis,
-       unconditionally -- see the `if judgement.status not in (...)` check below.
-       Confirming a phrase-type requirement is genuinely CONTRADICTED (the note
-       actively states the opposite, not merely that it's silent) needs real
-       negation-detection this codebase does not have and building it would be
-       exactly the kind of unsound guess this module exists to prevent. Laterality
-       is the one axis with a real closed-enumeration contradiction ("left" stated
-       when the candidate needs "right") -- that is already, and remains, fully
-       handled by the pre-existing, judgement-INDEPENDENT `tiebreak.narrow`
-       document-proof fallback in `resolution._grounded_elimination`, so nothing
-       is lost by retiring the judgement path for it too.
-    2. SUPPORTED and NOT_DOCUMENTED must now be independently, deterministically
-       confirmed by `deterministic_status` actually searching `searchable_text` --
-       the verifier's own status becomes a mere PROPOSAL that this function either
-       confirms or refuses; it is never trusted on its own. `searchable_text`
-       empty (no real corpus supplied) means neither status can ever validate --
-       fails closed, matching `document_fully_covered=False`'s existing default-
-       refuse posture. This closes a related gap (issue #6 F9-R6-R4): a NOT_
-       DOCUMENTED verdict from a verifier shown only `fact.evidence` (this one
-       fact's own narrow excerpt) is a claim about that excerpt, not about the
-       whole document -- `searchable_text` must be the full, independently-read
-       document text (see `pipeline.code_encounter`'s call site) for a NOT_
-       DOCUMENTED verdict to mean what it claims.
-
-    On top of the content check: the clause must still actually reproduce from
-    the record it claims to come from (a hallucinated/paraphrased clause is never
-    grounds to eliminate anything), and every cited span must be reconciled to a
-    member of `{AGREED, VACUOUS}` — the SAME bar `graph_consensus._spans_support`
-    already holds fact-level evidence to. A NOT_DOCUMENTED verdict citing no span
-    is permitted — absence has nothing to quote by definition — but validating it
-    here is not, on its own, sufficient to eliminate anything:
-    `resolution._grounded_elimination` additionally requires
-    `document_fully_covered=True` AND a non-empty `searchable_text` before a
-    validated, unanimous NOT_DOCUMENTED verdict may eliminate.
+    On top of the content checks: the clause must still actually reproduce
+    from the record it claims to come from (a hallucinated/paraphrased clause
+    is never grounds to eliminate anything), and every cited span must be
+    reconciled to a member of `{AGREED, VACUOUS}` — the SAME bar
+    `graph_consensus._spans_support` already holds fact-level evidence to. A
+    NOT_DOCUMENTED verdict citing no span is permitted — absence has nothing
+    to quote by definition — but validating it here is not, on its own,
+    sufficient to eliminate anything: `resolution._grounded_elimination`
+    additionally requires `req.role` to actually be elimination-eligible
+    (`MUST_SUPPORT`/`EXCLUSION`, never `POSITIVE_ALIAS`) before a validated,
+    unanimous NOT_DOCUMENTED verdict may eliminate.
     """
     if judgement.requirement_id != req.requirement_id:
         return False
@@ -274,18 +363,24 @@ def validated_requirement(req: DescriptorRequirement, judgement: RequirementJudg
         return False
     if judgement.status not in (RequirementStatus.SUPPORTED,
                                 RequirementStatus.NOT_DOCUMENTED):
-        return False   # CONTRADICTED retired -- see docstring above
-    truth = deterministic_status(req, searchable_text)
-    if truth is None or truth is not judgement.status:
-        return False
+        return False   # CONTRADICTED never validates as a judgement -- see docstring
     if judgement.status is RequirementStatus.NOT_DOCUMENTED:
-        return not judgement.evidence_span_ids
-    if not judgement.evidence_span_ids:
-        return False
-    if reconciliation is None:
+        if judgement.evidence_span_ids:
+            return False
+        return deterministic_status(req, coverage) is RequirementStatus.NOT_DOCUMENTED
+    # SUPPORTED: every cited span must itself, individually, genuinely and
+    # un-negatedly support the term.
+    if not judgement.evidence_span_ids or reconciliation is None or evidence_by_span_id is None:
         return False
     from app.contracts.source_evidence import ReconciliationStatus
     settled = reconciliation.by_span_id()
     permitted = {ReconciliationStatus.AGREED, ReconciliationStatus.VACUOUS}
-    return all(sid in settled and settled[sid].status in permitted
-              for sid in judgement.evidence_span_ids)
+    for sid in judgement.evidence_span_ids:
+        if sid not in settled or settled[sid].status not in permitted:
+            return False
+        span_text = evidence_by_span_id.get(sid)
+        if span_text is None:
+            return False
+        if _tiebreak.asserted_status(req.expected, span_text) != "supported":
+            return False
+    return True

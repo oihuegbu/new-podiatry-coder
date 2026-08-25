@@ -240,6 +240,20 @@ def attribute_evidence_records(fact: Any) -> list[dict[str, Any]]:
     return out
 
 
+def selection_proof_record(line: Any) -> dict[str, Any]:
+    """The uniqueness/requirement-validation record a released or held line's
+    OWN resolution produced (issue #6 F9-R6-R5 re-review) -- `dict(line.
+    tie_record)` when present, `{}` otherwise. One place both the certificate
+    and the ClaimBundle read from, so they can't drift into two different
+    accounts of why a line released -- the compiled `DescriptorRequirement`
+    matrix, per-evaluator `RequirementJudgement`s, and the `CoverageCorpus`
+    identity a NOT_DOCUMENTED elimination was checked against, not just an
+    opaque audit-repository hash pointer.
+    """
+    tie_record = getattr(line, "tie_record", None)
+    return dict(tie_record) if tie_record else {}
+
+
 # --------------------------------------------------------------------------
 # enums
 # --------------------------------------------------------------------------
@@ -461,6 +475,12 @@ class _CodedLine(_Strict):
     rationale: str = ""
     evidence: tuple[EvidenceReference, ...] = ()
     authority: CodeAuthority = Field(default_factory=CodeAuthority)
+    #: issue #6 F9-R6-R5 re-review: the full uniqueness/requirement-validation
+    #: record (`selection_proof_record`) -- the compiled requirement matrix,
+    #: per-evaluator judgements, and coverage-corpus identity a tie/elimination
+    #: decision actually rested on, not only an opaque audit-repository hash.
+    #: `{}` for a line that never reached a tie (a unique deterministic pick).
+    selection_proof: dict[str, Any] = Field(default_factory=dict)
 
 
 class DiagnosisLine(_CodedLine):
@@ -1792,6 +1812,7 @@ def bundle_from_coding_result(
             rationale=str(getattr(line, "rationale", "") or ""),
             evidence=_evidence_of(fact),
             authority=_authority_of(chosen),
+            selection_proof=selection_proof_record(line),
             primary=(sequence == 1),
         ))
         if event_id:
@@ -1835,6 +1856,7 @@ def bundle_from_coding_result(
             rationale=str(getattr(line, "rationale", "") or ""),
             evidence=_evidence_of(fact),
             authority=_authority_of(chosen),
+            selection_proof=selection_proof_record(line),
             units=_units_of(line),
             modifiers=tuple(str(m) for m in (getattr(line, "modifiers", None) or [])),
             diagnosis_pointers=tuple(sorted(pointers)),

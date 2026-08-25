@@ -26,7 +26,7 @@ from typing import Any
 # finding; importing the shared one removes it by construction.
 from app.contracts.claim_bundle import canonical_json as _canonical
 from app.contracts.claim_bundle import (attribute_evidence_records, content_digest,
-                                        evidence_records)
+                                        evidence_records, selection_proof_record)
 
 from .models import CodingResult
 
@@ -71,6 +71,15 @@ def build_certificate(result: CodingResult, note_text: str,
         # clinical graph use -- so a released line can directly show its own
         # per-attribute justification, not just the fact's whole evidence pool.
         "attribute_evidence": attribute_evidence_records(ln.fact),
+        # issue #6 F9-R6-R5 re-review: the full uniqueness/requirement-
+        # validation record this line's own resolution produced -- the
+        # compiled requirement matrix, per-evaluator judgements, and coverage-
+        # corpus identity a tie/elimination decision actually rested on, not
+        # only an opaque audit-repository hash pointer. Through the SAME
+        # shared projector `app.contracts.claim_bundle.bundle_from_coding_
+        # result` uses, so the certificate and the ClaimBundle can never give
+        # two different accounts of why a line released.
+        "selection_proof": selection_proof_record(ln),
         "authority": ln.chosen.authority,
     } for ln in result.billable_lines]
 

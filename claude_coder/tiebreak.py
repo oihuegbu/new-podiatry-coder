@@ -102,15 +102,99 @@ def _phrase_present(term: str, tokens: tuple[str, ...]) -> bool:
     position instead of as a global set (the TERM side stays unsingularized,
     matching the prior asymmetric direction).
     """
+    return bool(_phrase_positions(term, tokens))
+
+
+def _phrase_positions(term: str, tokens: tuple[str, ...]) -> tuple[int, ...]:
+    """Every start position where TERM occurs as a contiguous, ordered run
+    within `tokens` -- the position-returning core `_phrase_present` and
+    `asserted_status`'s negation-window check both build on."""
     term_tokens = tuple(t for t in re.split(r"[^a-z0-9]+", (term or "").lower()) if t)
     if not term_tokens:
-        return False
+        return ()
     n = len(term_tokens)
-    for start in range(len(tokens) - n + 1):
-        if all(tt in (tokens[start + j], _sing(tokens[start + j]))
-              for j, tt in enumerate(term_tokens)):
-            return True
-    return False
+    return tuple(start for start in range(len(tokens) - n + 1)
+                if all(tt in (tokens[start + j], _sing(tokens[start + j]))
+                      for j, tt in enumerate(term_tokens)))
+
+
+#: Clinical-documentation negation cues (issue #6 F9-R6-R2/R6-R6, Codex
+#: re-review) -- English documentation grammar, not medical vocabulary, the
+#: SAME exemption `_GRAMMAR` above already relies on. A phrase occurring only
+#: after one of these within its own clause is NEGATED, not stated -- "no
+#: classic presentation" must never count as the document stating "classic
+#: presentation". Deliberately NOT sourced from `provenance.py`'s
+#: `relation_evidence_grammar.json`: that manifest-bound config is real and
+#: authoritative but scoped to a narrower purpose (CMS-cited relation-linkage
+#: grammar between two event mentions) and is fail-closed by design -- making
+#: `narrow()`, a foundational function with zero external file dependencies
+#: today, hard-depend on that file for every single axis match would be a far
+#: bigger, more fragile change than fixing negation-blindness requires.
+_NEGATION = (
+    "no", "not", "never", "without", "denies", "denied", "denying",
+    "negative for", "absent", "absence of", "ruled out", "rule out",
+    "r/o", "unremarkable for",
+)
+#: Clause boundaries -- a negation cue in an EARLIER sentence must never
+#: negate a phrase in a LATER, unrelated one.
+_CLAUSE_TERMINATORS = frozenset({".", ";", ":", "!", "?", "\n", "\r", "|", "•"})
+
+
+def _split_clauses(text: str) -> list[str]:
+    pattern = "[" + re.escape("".join(_CLAUSE_TERMINATORS)) + "]"
+    return [c for c in re.split(pattern, text or "") if c.strip()]
+
+
+#: How far back (in tokens, within the SAME clause) a negation cue can still
+#: reach a phrase -- "denies any history of X" (4 tokens back) still negates
+#: X, but an unrelated EARLIER clause-internal aside must not. A short,
+#: bounded window (not "anywhere in the clause") is deliberate: "not on the
+#: right, but the left" must negate "right" without also negating "left",
+#: even though both share one clause and "not" precedes both positionally --
+#: the corrective "but the left" sits well outside a short negation window
+#: from "not", the same scope convention standard clinical-negation detectors
+#: (e.g. NegEx) use.
+_NEGATION_WINDOW = 5
+
+
+def _term_length(term: str) -> int:
+    return len([t for t in re.split(r"[^a-z0-9]+", (term or "").lower()) if t])
+
+
+def _negated_nearby(tokens: tuple[str, ...], start: int, length: int) -> bool:
+    """Whether any negation cue occurs within `_NEGATION_WINDOW` tokens
+    immediately BEFORE or AFTER a phrase match, bounded to the SAME clause.
+    Covers both pre-positive clinical negation ("no X", "denies X") and
+    post-positive ("X ruled out", "X denied") -- checking only one direction
+    would miss the other's ordinary phrasing entirely."""
+    before = tokens[max(0, start - _NEGATION_WINDOW):start]
+    after = tokens[start + length:start + length + _NEGATION_WINDOW]
+    return (any(_phrase_positions(marker, before) for marker in _NEGATION) or
+           any(_phrase_positions(marker, after) for marker in _NEGATION))
+
+
+def asserted_status(term_options: tuple[str, ...], text: str) -> str:
+    """"supported" | "negated" | "absent" -- the TRUE, clause-scoped,
+    negation-aware status of ANY of `term_options` within `text`. Never trusts
+    a bare contiguous match on its own: a phrase occurring only alongside a
+    negation cue (before OR after it) within its own clause is NEGATED, not
+    asserted. Any ONE unnegated occurrence anywhere is enough to call it
+    "supported" -- a negated mention elsewhere in the same text does not
+    retract a genuine, separate assertion. Only when EVERY occurrence found is
+    negated (or none occur at all) does the negative/absent distinction matter
+    to the caller.
+    """
+    found_negated = False
+    for clause in _split_clauses(text):
+        tokens = _token_sequence(clause)
+        for term in term_options:
+            length = _term_length(term)
+            for pos in _phrase_positions(term, tokens):
+                if _negated_nearby(tokens, pos, length):
+                    found_negated = True
+                else:
+                    return "supported"
+    return "negated" if found_negated else "absent"
 
 
 def _text_tokens(text: str) -> set[str]:
@@ -373,6 +457,10 @@ def narrow(fact, candidates: list[CandidateCode],
     Fail-closed at every branch: no discriminating axis, no source-confirmed text,
     nothing documented, or more than one candidate documented all return no winner
     together with the reason the caller must report.
+
+    issue #6 F9-R6-R2/R6-R6 re-review: axis matching is negation-aware
+    (`asserted_status`) -- "not on the right, but the left" settles to LEFT,
+    never treats the negated mention of "right" as the document stating it.
     """
     from . import graph_consensus as _gc
 
@@ -397,7 +485,6 @@ def narrow(fact, candidates: list[CandidateCode],
             detail="the original document does not confirm this event's quotations, so "
                    "its discriminating axes cannot be re-inspected against the page")
 
-    tokens = _token_sequence(proven_text)
     support: dict[str, list[str]] = {c.code: [] for c in unique}
     settled: set[str] = set()
     #: Axes where the proven text confirms AT LEAST ONE candidate's term -- issue #6
@@ -412,7 +499,11 @@ def narrow(fact, candidates: list[CandidateCode],
     for probe in axes:
         if not probe.provable:
             continue
-        hits = {code: tuple(t for t in terms if _phrase_present(t, tokens))
+        # issue #6 F9-R6-R2/R6-R6 re-review: negation-aware -- "not on the right,
+        # but the left" must never count "right" as the document stating it.
+        # asserted_status is clause-scoped so a negation in one sentence never
+        # bleeds into an unrelated later one.
+        hits = {code: tuple(t for t in terms if asserted_status((t,), proven_text) == "supported")
                 for code, terms in probe.terms_by_code.items()}
         documented = [code for code, found in hits.items() if found]
         if documented:

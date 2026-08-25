@@ -13,10 +13,12 @@ method -> authority) so any decision can be explained.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 
 from . import arbitration, certificate, em, extraction, gates, ontology, resolution
+from . import requirement as _requirement
 from .arbitration import LLMFn
 from .autonomy import decide
 from .data_access import AuthoritativeSource, CodeSource
@@ -675,20 +677,27 @@ def code_encounter(
                         RetrievalRequest(_it, fact, intent_facts=_intent_facts), source,
                         llm=verify_llm, corroborate=corroborate_llm,
                         dos=date_of_service, reconciliation=source_reconciliation,
-                        # issue #6 F9-R6 Phase 3: real, non-model-self-report page
-                        # coverage -- `consensus` is None whenever there was no second
-                        # reading to measure coverage against, so absence of documentation
-                        # can only ground an elimination when an independent reading
-                        # actually swept every page.
-                        document_fully_covered=(consensus is not None
-                                                and not consensus.recall_uncovered_pages),
-                        # issue #6 F9-R6-R4: the SAME independent channel's full,
-                        # whole-document reading `recall_uncovered_pages` above is
-                        # computed from -- never `fact.evidence` alone -- so a
-                        # NOT_DOCUMENTED verdict can be deterministically checked
-                        # against the real document, not just this fact's own
-                        # narrow evidence excerpt.
-                        searchable_text=(recall.text if recall is not None else ""))
+                        # issue #6 F9-R6 Phase 3, `CoverageCorpus`-typed since the
+                        # F9-R6-R4/R5 re-review: real, non-model-self-report page
+                        # coverage -- `recall` is None whenever there was no second
+                        # reading to measure coverage against, so absence of
+                        # documentation can only ground an elimination when an
+                        # independent channel's OWN, whole-document reading
+                        # (`recall.text` -- never `fact.evidence` alone) actually
+                        # swept every page AND is what gets deterministically
+                        # searched.
+                        coverage=(_requirement.CoverageCorpus(
+                            channel_id=recall.channel_id, text=recall.text,
+                            text_sha256=hashlib.sha256(
+                                recall.text.encode("utf-8")).hexdigest(),
+                            covered_pages=recall.covered_pages,
+                            uncovered_pages=recall.uncovered_pages,
+                            page_image_sha256=tuple(
+                                (source_evidence.page(n).image_sha256
+                                 if source_evidence is not None and source_evidence.page(n)
+                                 else "")
+                                for n in recall.covered_pages))
+                            if recall is not None else None))
             except Exception as exc:
                 return _system_hold_result(encounter_id, date_of_service,
                                            f"retrieval_execution:{fact.fact_id}", exc, source)

@@ -549,6 +549,68 @@ class AttributeEvidenceGraphAndCertificateLineage(unittest.TestCase):
         self.assertEqual(billed["attribute_evidence"][0]["span_id"], "attr-1")
 
 
+class SelectionProofLineageTest(unittest.TestCase):
+    """issue #6 F9-R6-R5 re-review: the full uniqueness/requirement-validation
+    record a line's own resolution produced is bound into BOTH the release
+    certificate and the ClaimBundle, through the SAME shared projector
+    (`app.contracts.claim_bundle.selection_proof_record`), so the two can
+    never give different accounts of why a line released -- not just an
+    opaque audit-repository hash pointer."""
+
+    def _tie_record(self):
+        return {"stage": "code_selection_uniqueness", "shortlist": ["X1", "X2"],
+                "selected": "X1", "still_entailed": ["X1"],
+                "eliminated": {"X2": "not entailed"},
+                "judgements": [], "requirements": [], "coverage": None}
+
+    def test_certificate_line_carries_the_selection_proof(self):
+        from claude_coder import certificate
+        from claude_coder.models import (CandidateCode, CodingResult, ResolutionMethod,
+                                         ResolvedLine)
+        fact = _fact("F1", FactKind.PROCEDURE, "procedure performed",
+                    spans=[_span("procedure performed today", span_id="p1")])
+        line = ResolvedLine(fact=fact, chosen=CandidateCode("X1", "cpt", "descriptor", 0.9),
+                            method=ResolutionMethod.DETERMINISTIC, units=1,
+                            tie_record=self._tie_record())
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14", lines=[line])
+        cert = certificate.build_certificate(result, "procedure performed today")
+        proof = cert["lines"][0]["selection_proof"]
+        self.assertEqual(proof["selected"], "X1")
+        self.assertEqual(proof["still_entailed"], ["X1"])
+
+    def test_certificate_line_selection_proof_is_empty_for_a_unique_deterministic_pick(self):
+        """A line that never reached a tie (no `tie_record` at all) carries an
+        empty, not fabricated, selection_proof."""
+        from claude_coder import certificate
+        from claude_coder.models import (CandidateCode, CodingResult, ResolutionMethod,
+                                         ResolvedLine)
+        fact = _fact("F1", FactKind.PROCEDURE, "procedure performed",
+                    spans=[_span("procedure performed today", span_id="p1")])
+        line = ResolvedLine(fact=fact, chosen=CandidateCode("X1", "cpt", "descriptor", 0.9),
+                            method=ResolutionMethod.DETERMINISTIC, units=1)
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14", lines=[line])
+        cert = certificate.build_certificate(result, "procedure performed today")
+        self.assertEqual(cert["lines"][0]["selection_proof"], {})
+
+    def test_bundle_service_line_carries_the_same_selection_proof(self):
+        from app.contracts.claim_bundle import (AuthorityBinding, EncounterContext,
+                                                 SourceDocument, bundle_from_coding_result)
+        from claude_coder.models import (CandidateCode, CodingResult, ResolutionMethod,
+                                         ResolvedLine)
+        fact = _fact("F1", FactKind.PROCEDURE, "procedure performed",
+                    spans=[_span("procedure performed today", span_id="p1")])
+        line = ResolvedLine(fact=fact, chosen=CandidateCode("X1", "cpt", "descriptor", 0.9),
+                            method=ResolutionMethod.DETERMINISTIC, units=1,
+                            tie_record=self._tie_record())
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14")
+        result.lines = [line]
+        bundle = bundle_from_coding_result(
+            result, source_document=SourceDocument(filename="n"),
+            context=EncounterContext(), authority=AuthorityBinding())
+        self.assertEqual(len(bundle.service_lines), 1)
+        self.assertEqual(bundle.service_lines[0].selection_proof["selected"], "X1")
+
+
 # ---------------------------------------------------------------------------
 class EligibilityBeforeRetrievalRole(unittest.TestCase):
     """Directive §3: a condition may be retrieved as a condition, never as a service."""
@@ -2404,14 +2466,16 @@ class IndependentDocumentRecall(unittest.TestCase):
         self.assertIs(gate.outcome, Outcome.UNKNOWN, gate.detail)
         self.assertTrue(gate.retryable)
 
-    def test_document_fully_covered_flag_reflects_the_real_coverage_signal(self):
-        """issue #6 F9-R6 Phase 3: the `document_fully_covered` flag that gates
-        NOT_DOCUMENTED elimination in `resolution._grounded_elimination` must come
-        from the SAME real, independently-computed page-coverage signal
-        `recall_uncovered_pages` already exposes (proven by the SAME failed-page-read
-        fixture as the test above, Codex F7-R3-A) -- never a model's self-report of
-        having read everything. Every resolved line's own `tie_record` carries the
-        flag `pipeline.code_encounter` actually computed and handed to `resolve`."""
+    def test_coverage_record_reflects_the_real_coverage_signal(self):
+        """issue #6 F9-R6 Phase 3, `CoverageCorpus`-typed since the F9-R6-R4/R5
+        re-review: the `coverage` record that gates NOT_DOCUMENTED elimination in
+        `resolution._grounded_elimination` must come from the SAME real,
+        independently-computed page-coverage signal `recall_uncovered_pages`
+        already exposes (proven by the SAME failed-page-read fixture as the test
+        above, Codex F7-R3-A) -- never a model's self-report of having read
+        everything. Every resolved line's own `tie_record` carries the coverage
+        record `pipeline.code_encounter` actually computed and handed to
+        `resolve`."""
         from app.contracts.source_evidence import ChannelKind, ReadChannel
         from app.ingestion.source_evidence import SECONDARY_VISION_CHANNEL_ID
 
@@ -2433,22 +2497,17 @@ class IndependentDocumentRecall(unittest.TestCase):
             source_reader=_FailingReader())
 
         self.assertEqual(result.consensus["recall_uncovered_pages"], [1])
-        covered_flags = [ln.tie_record.get("document_fully_covered")
-                         for ln in result.lines if ln.tie_record is not None]
-        self.assertTrue(covered_flags, "at least one resolved line must carry a "
-                                       "tie_record to check this against")
-        self.assertTrue(all(flag is False for flag in covered_flags),
-                        "an uncovered page must never let a resolved line's own "
-                        "record report full document coverage")
         # issue #6 F9-R6-R4: a failed/unusable recall channel means `recall is
-        # None` at the real call site -- `searchable_text` must be "" too, never
-        # just `document_fully_covered` alone. Both gates are independent, and a
-        # caller must never let one substitute for the other.
-        searchable_flags = [ln.tie_record.get("searchable_text_available")
-                            for ln in result.lines if ln.tie_record is not None]
-        self.assertTrue(all(flag is False for flag in searchable_flags),
+        # None` at the real call site -- the whole `coverage` record must be
+        # `None` too, never a partially-populated one that could be mistaken
+        # for a real, searched corpus.
+        coverages = [ln.tie_record.get("coverage")
+                    for ln in result.lines if ln.tie_record is not None]
+        self.assertTrue(coverages, "at least one resolved line must carry a "
+                                   "tie_record to check this against")
+        self.assertTrue(all(c is None for c in coverages),
                         "an unusable recall channel must never let a resolved "
-                        "line's own record report a real searchable corpus")
+                        "line's own record report a real, complete coverage corpus")
 
     def test_an_unreadable_independent_read_still_holds_the_claim(self):
         """Codex F7-R3-A, exact-SHA re-review, second pass: a `PageRead` record

@@ -123,6 +123,41 @@ class AttributeEvidenceCitabilityTest(unittest.TestCase):
         self.assertEqual(len(id_map), 1)
 
 
+class EvidenceTextBySpanIdTest(unittest.TestCase):
+    """issue #6 F9-R6-R2, second re-review: `evidence_text_by_span_id` is the
+    span_id -> text lookup `requirement.validated_requirement` uses to check a
+    SUPPORTED citation's own content -- built from the SAME `_citable_evidence`
+    source `_evidence_options` renders, so the two can never define "citable"
+    differently."""
+
+    def test_matches_the_same_spans_evidence_options_renders(self):
+        from dataclasses import replace
+        fact = _fact("performed on the left")
+        extra = EvidenceSpan(text="left side confirmed", start=0, end=20,
+                             anchored=True, span_id="attr-span")
+        fact = replace(fact, attribute_evidence={
+            "laterality": (AttributeEvidence(span=extra, scope="local"),)})
+        _, id_to_span = _verify._evidence_options(fact)
+        text_by_id = _verify.evidence_text_by_span_id(fact)
+        self.assertEqual(set(text_by_id), set(id_to_span.values()) - {""})
+        self.assertEqual(text_by_id["attr-span"], "left side confirmed")
+
+    def test_fact_evidence_span_text_is_looked_up_correctly(self):
+        fact = _fact("performed on the left")
+        text_by_id = _verify.evidence_text_by_span_id(fact)
+        self.assertEqual(text_by_id["s0"], "performed on the left")
+
+    def test_unvalidated_inherited_span_is_not_in_the_lookup(self):
+        from dataclasses import replace
+        fact = _fact("performed on the left")
+        extra = EvidenceSpan(text="inherited elsewhere", start=0, end=19,
+                             anchored=True, span_id="inherited-span")
+        fact = replace(fact, attribute_evidence={
+            "laterality": (AttributeEvidence(span=extra, scope="inherited",
+                                             scope_validated=False),)})
+        self.assertNotIn("inherited-span", _verify.evidence_text_by_span_id(fact))
+
+
 class RequirementJudgementParsingTest(unittest.TestCase):
 
     def test_no_requirements_compiled_never_parses_a_requirements_field_even_if_present(self):

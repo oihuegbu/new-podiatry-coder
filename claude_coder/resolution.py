@@ -277,8 +277,8 @@ def _advisory_procedure_expansions(fact, source) -> list[dict]:
 
 def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
             llm=None, corroborate=None, dos: str | None = None,
-            reconciliation=None, document_fully_covered: bool = False,
-            searchable_text: str = "") -> ResolvedLine:
+            reconciliation=None,
+            coverage: "_requirement.CoverageCorpus | None" = None) -> ResolvedLine:
     """Resolve an eligible retrieval request, never a raw clinical fact.
 
     `reconciliation` is the encounter's `SourceReconciliation` (directive section 1).
@@ -288,25 +288,20 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
     encounter; the tie policy then falls back to the anchored transcription, exactly as
     `graph_consensus.source_support` already does for fact axes.
 
-    `document_fully_covered` (issue #6 F9-R6, Phase 3): True only when the CALLER can
-    show every page of the source document was actually read by an independent
-    channel this run -- NEVER a model's self-reported claim of having read
-    everything (the exact mistake this session's F8-R1 finding already closed for a
-    different mechanism). The one caller that supplies True is `pipeline.
-    code_encounter`, computed from `graph_consensus.ConsensusReport.
-    recall_uncovered_pages` being empty -- a deterministic fact about which pages an
-    independent reading actually covered, not a model's opinion of its own thoroughness.
-    Defaults to False (never assume complete coverage) for every other caller.
-
-    `searchable_text` (issue #6 F9-R6-R4): the SAME independent channel's full,
-    reconciled document text `document_fully_covered` is computed from --
-    `pipeline.code_encounter` passes `recall.text` (the real, whole-document
-    reading `channel_reading()` builds, the same one `recall_uncovered_pages`
-    already relies on), never `fact.evidence` alone. This is what a NOT_DOCUMENTED
-    verdict is actually checked against (`requirement.deterministic_status`) --
-    without it, "not documented" could only ever mean "not in the narrow excerpt
-    the verifier happened to be shown," not "not documented anywhere." Defaults
-    to `""` (never assume a search was possible) for every other caller."""
+    `coverage` (issue #6 F9-R6 Phase 3, `CoverageCorpus`-typed since the
+    F9-R6-R4/R5 re-review): identifies the ONE independently-read document text
+    a NOT_DOCUMENTED verdict may be deterministically checked against -- NEVER
+    a model's self-reported claim of having read everything (the exact mistake
+    this session's F8-R1 finding already closed for a different mechanism).
+    `coverage.complete` requires BOTH real text AND no page the independent
+    channel failed to cover -- neither alone is sufficient. The one caller
+    that supplies a real `CoverageCorpus` is `pipeline.code_encounter`, built
+    from `recall: ChannelReading` (the same whole-document reading
+    `graph_consensus.ConsensusReport.recall_uncovered_pages` is computed
+    from), never `fact.evidence` alone -- without this, "not documented" could
+    only ever mean "not in the narrow excerpt the verifier happened to be
+    shown," not "not documented anywhere." Defaults to `None` (never assume a
+    complete, searched document) for every other caller."""
     from .eligibility import RetrievalRequest
     if not isinstance(request, RetrievalRequest):
         raise TypeError("code retrieval requires an eligible RetrievalRequest")
@@ -588,8 +583,7 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                                          FactKind.DIAGNOSIS):
         line = _propose_then_verify(fact, source, pool, llm, corroborate, dos=dos,
                                     reconciliation=reconciliation,
-                                    document_fully_covered=document_fully_covered,
-                                    searchable_text=searchable_text)
+                                    coverage=coverage)
         # #1 grounding: a DIAGNOSIS that verified only to a residual/catch-all category
         # with no distinctive descriptor overlap is an ungrounded guess (entailment
         # against a catch-all is near-tautological) -- escalate, never bill it verified.
@@ -937,40 +931,42 @@ def _tie_escalation(fact: ClinicalFact, candidates: list[CandidateCode],
 def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: CandidateCode,
                           reconciliation, requirements: tuple = (),
                           judgements: list = (),
-                          document_fully_covered: bool = False,
-                          searchable_text: str = "") -> tuple[bool, str]:
+                          coverage: "_requirement.CoverageCorpus | None" = None
+                          ) -> tuple[bool, str]:
     """issue #6 F9-R6: when `requirements` compiled a MANDATORY (`required=True`)
     requirement for `loser`'s own descriptor, elimination is decided from that first
     -- intrinsic to the loser, no comparison to `winner` needed -- rather than from
     the pairwise tiebreak/word-overlap check below.
 
-    issue #6 F9-R6-R2/R3 re-review, two permanent design changes from the original
-    Phase 2/3 version:
+    issue #6 F9-R6-R2/R3/R4/R5/R6, permanent design changes across two rounds of
+    re-review from the original Phase 2/3 version:
 
     1. CONTRADICTED is retired as elimination grounds entirely (see `requirement.
        validated_requirement`'s docstring for the full reasoning) -- only a
-       unanimous, validated NOT_DOCUMENTED verdict, with `document_fully_covered`
-       True AND a non-empty `searchable_text`, may ground an elimination now.
+       unanimous, validated NOT_DOCUMENTED verdict, with `coverage.complete`
+       True, may ground an elimination now.
     2. Requirements are grouped BY AXIS, and elimination requires EVERY
        requirement in that axis group to be independently validated
-       NOT_DOCUMENTED -- not just one. ICD-10-CM inclusion terms are
-       non-exhaustive EXAMPLES per the coding guidelines, not a checklist: a
-       candidate with several listed inclusion terms is not disproven by the
-       absence of ONE of them while another goes unmentioned or unchecked.
-       Laterality (and every other axis) only ever compiles exactly one
-       requirement per candidate, so grouping is a no-op for it.
+       NOT_DOCUMENTED -- not just one. Only requirements with an elimination-
+       eligible `role` (`MUST_SUPPORT`/`EXCLUSION`, never `POSITIVE_ALIAS`)
+       enter the loop at all -- ICD-10-CM inclusion terms are non-exhaustive
+       EXAMPLES per the coding guidelines, not a checklist, and structurally
+       cannot ground an elimination anymore regardless of how many are
+       unanimously reported absent. Laterality (and every other MUST_SUPPORT
+       axis) only ever compiles exactly one requirement per candidate, so
+       grouping is a no-op for it.
 
     Any requirement in a group failing its own checks (incomplete judging, an
     unvalidated citation, non-unanimous or non-NOT_DOCUMENTED statuses)
     disqualifies the WHOLE axis group for that loser -- fail-closed, and
-    deliberately conservative: a candidate with several inclusion terms is
-    harder to eliminate than a single-term candidate, which is the correct
-    direction for "non-exhaustive examples" semantics, not an accident.
+    deliberately conservative: a candidate with several must-support
+    requirements is harder to eliminate than a single-requirement candidate,
+    not an accident.
 
-    Anything short of full-group validated NOT_DOCUMENTED agreement (no compiled
-    requirement for this loser, not every evaluator answered, an unvalidated
-    citation, disagreement among evaluators, incomplete page coverage, or an
-    empty `searchable_text`) falls through to the pairwise check below UNCHANGED
+    Anything short of full-group validated NOT_DOCUMENTED agreement (no
+    elimination-eligible requirement for this loser, not every evaluator
+    answered, an unvalidated citation, disagreement among evaluators, or an
+    incomplete `coverage`) falls through to the pairwise check below UNCHANGED
     -- this is a STRUCTURAL fallback, not a flag: a candidate this phase doesn't
     yet have a typed answer for is judged exactly as it always was.
 
@@ -1016,16 +1012,19 @@ def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: Cand
     reconciliation channel that was supplied could not confirm this," and must both refuse.
     """
     from . import requirement as _requirement
+    from . import verify as _verify
     loser_reqs = [r for r in requirements
-                 if r.candidate_code == loser.code and r.required]
+                 if r.candidate_code == loser.code
+                 and r.role in (_requirement.RequirementRole.MUST_SUPPORT,
+                               _requirement.RequirementRole.EXCLUSION)]
     by_axis: dict[str, list] = {}
     for r in loser_reqs:
         by_axis.setdefault(r.axis, []).append(r)
+    if by_axis and (coverage is None or not coverage.complete):
+        by_axis = {}     # NOT_DOCUMENTED is the only remaining grounding status,
+                          # and it needs a fully-covered, real corpus to search
+    evidence_by_span_id = _verify.evidence_text_by_span_id(fact) if by_axis else {}
     for axis, axis_reqs in by_axis.items():
-        if not (document_fully_covered and searchable_text):
-            continue        # NOT_DOCUMENTED is the only remaining grounding status,
-                             # and it needs BOTH a fully-covered source AND a real
-                             # corpus to search -- neither alone is sufficient
         grounded_reqs: list | None = []
         for req in axis_reqs:
             outcomes = [rj for j in judgements for rj in j.requirement_judgements
@@ -1034,7 +1033,8 @@ def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: Cand
                 grounded_reqs = None
                 break            # not every evaluator answered -- whole axis standing
             if not all(_requirement.validated_requirement(
-                    req, rj, reconciliation, searchable_text) for rj in outcomes):
+                    req, rj, evidence_by_span_id=evidence_by_span_id,
+                    reconciliation=reconciliation, coverage=coverage) for rj in outcomes):
                 grounded_reqs = None
                 break            # an uncited, unreproduced, or content-mismatched
                                  # verdict -- whole axis standing
@@ -1071,18 +1071,17 @@ def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: Cand
         return False, tie.detail
     text = " ".join(str(getattr(s, "text", "") or "")
                     for s in (getattr(fact, "evidence", None) or []))
-    tokens = _tiebreak._token_sequence(text)       # SAME tokenizer `narrow` proves axes with
     loser_terms = {t for probe in tie.axes if probe.provable and probe.selectable
                    for t in probe.terms_by_code.get(loser.code, ())}
     winner_terms = {t for probe in tie.axes if probe.provable and probe.selectable
                     for t in probe.terms_by_code.get(winner.code, ())}
-    # issue #6 F9-R6 Phase 4: `_tiebreak._phrase_present`, not raw set intersection --
-    # a requirement-derived term can be a whole multi-word phrase ("classic
-    # presentation"), which a single-token `words` set can never contain as one
-    # element; a bare `&` would silently never match it, the same bug class F9-R4-R1
-    # already found and fixed for embedded action-phrase matching.
-    loser_hits = {t for t in loser_terms if _tiebreak._phrase_present(t, tokens)}
-    winner_hits = {t for t in winner_terms if _tiebreak._phrase_present(t, tokens)}
+    # issue #6 F9-R6-R2/R6-R6 re-review: `_tiebreak.asserted_status`, not a bare
+    # contiguous-phrase check -- a requirement-derived term can be a whole
+    # multi-word phrase ("classic presentation"), and a NEGATED mention ("not
+    # classic presentation") must never count as the document stating it, the
+    # same reasoning `narrow()` itself now applies.
+    loser_hits = {t for t in loser_terms if _tiebreak.asserted_status((t,), text) == "supported"}
+    winner_hits = {t for t in winner_terms if _tiebreak.asserted_status((t,), text) == "supported"}
     if loser_hits:
         return False, (f"the documentation states {sorted(loser_hits)}, "
                        f"{loser.code}'s own distinguishing term")
@@ -1096,8 +1095,7 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
                      chosen: CandidateCode, judgements: list,
                      eliminated_earlier: dict[str, str], reconciliation=None,
                      requirements: tuple = (),
-                     document_fully_covered: bool = False,
-                     searchable_text: str = "",
+                     coverage: "_requirement.CoverageCorpus | None" = None,
                      ) -> tuple[list[CandidateCode], dict[str, str]]:
     """Which shortlisted candidates are STILL ENTAILED once every judging model has
     answered about every one of them, and the NAMED reason each of the others is out.
@@ -1112,9 +1110,9 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
     fail-closed direction, because a standing alternative BLOCKS the release rather than
     permitting one.
 
-    `document_fully_covered`/`searchable_text` (issue #6 F9-R6 Phases 3-4) are
-    passed straight through to `_grounded_elimination`, the only place either is
-    actually read -- see that function for what they gate.
+    `coverage` (issue #6 F9-R6 Phases 3-4, `CoverageCorpus`-typed since the
+    F9-R6-R4/R5 re-review) is passed straight through to `_grounded_elimination`,
+    the only place it is actually read -- see that function for what it gates.
     """
     remaining: list[CandidateCode] = []
     eliminated: dict[str, str] = {}
@@ -1131,8 +1129,7 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
             grounded, ground_detail = _grounded_elimination(fact, cand, chosen,
                                                             reconciliation,
                                                             requirements, judgements,
-                                                            document_fully_covered,
-                                                            searchable_text)
+                                                            coverage)
             if grounded:
                 eliminated[cand.code] = (f"{'; '.join(dict.fromkeys(named))} "
                                          f"(document-confirmed: {ground_detail})")
@@ -1146,8 +1143,8 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
                        eliminated_earlier: dict[str, str], why: str,
                        corroboration: str, reconciliation,
                        requirements: tuple = (),
-                       document_fully_covered: bool = False,
-                       searchable_text: str = "") -> ResolvedLine:
+                       coverage: "_requirement.CoverageCorpus | None" = None
+                       ) -> ResolvedLine:
     """Release ONLY when exactly one shortlisted candidate is still entailed; otherwise
     hand the survivors to the tie policy the deterministic path already uses.
 
@@ -1159,8 +1156,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
     """
     remaining, eliminated = _uniqueness_view(fact, shortlist, chosen, judgements,
                                              eliminated_earlier, reconciliation,
-                                             requirements, document_fully_covered,
-                                             searchable_text)
+                                             requirements, coverage)
     # Candidates eliminated BEFORE the shortlist existed (a failed deterministic
     # constraint) belong in the same accounting: the record has to show the whole
     # retrieved pool being disposed of, not only the part the models were shown.
@@ -1174,15 +1170,18 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
         "eliminated": dict(sorted(eliminated.items())),
         "judgements": [j.as_record() for j in judgements],
         # issue #6 F9-R6 Phase 5: the COMPILED requirement matrix itself (axis,
-        # candidate, required/optional, expected terms, authority clause + offset,
-        # source identity) alongside the per-evaluator verdicts already carried in
-        # `judgements` above -- together they let an auditor independently reproduce
-        # `requirement.validated_requirement`'s clause-reproduction and span checks
-        # from this one durable record, rather than trusting the elimination prose
-        # in `eliminated` on its own say-so.
+        # candidate, required/optional, role, expected terms, authority clause +
+        # offset, source identity) alongside the per-evaluator verdicts already
+        # carried in `judgements` above -- together they let an auditor
+        # independently reproduce `requirement.validated_requirement`'s
+        # clause-reproduction and span checks from this one durable record,
+        # rather than trusting the elimination prose in `eliminated` on its own
+        # say-so.
         "requirements": [r.as_record() for r in requirements],
-        "document_fully_covered": document_fully_covered,
-        "searchable_text_available": bool(searchable_text),
+        # issue #6 F9-R6-R4/R5 re-review: a single, self-describing, typed
+        # coverage record (channel, content hash, page coverage) rather than
+        # two loose primitives -- binds WHAT was searched, not just whether.
+        "coverage": (coverage.as_record() if coverage is not None else None),
     }
     if len(remaining) == 1:
         return _entailed_line(fact, chosen, shortlist, why, corroboration,
@@ -1214,8 +1213,8 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
                          pool: list[CandidateCode], llm, corroborate=None,
                          dos: str | None = None,
                          reconciliation=None,
-                         document_fully_covered: bool = False,
-                         searchable_text: str = "") -> ResolvedLine:
+                         coverage: "_requirement.CoverageCorpus | None" = None
+                         ) -> ResolvedLine:
     """Recall as candidate GENERATOR, authoritative descriptor + entailment as TRUTH.
     Widen the pool with validated LLM proposals, select the candidate whose OFFICIAL
     descriptor the documentation entails, then (when a corroborator is supplied)
@@ -1339,7 +1338,7 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
             return _settle_uniqueness(fact, chosen, shortlist, judgements,
                                       {**constraint_eliminated, **tried}, why,
                                       corroboration, reconciliation, requirements,
-                                      document_fully_covered, searchable_text)
+                                      coverage)
         if missing:
             # The code is the right KIND of service but its descriptor requires an
             # element the note does not state. Re-selecting a code that omits the

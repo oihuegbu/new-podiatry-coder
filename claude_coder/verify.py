@@ -317,49 +317,63 @@ def _requirement_options(requirements: tuple[DescriptorRequirement, ...],
     return "\n".join(lines)
 
 
-def _evidence_options(fact: ClinicalFact) -> tuple[str, dict[str, str]]:
-    """Evidence rendered with a stable bracketed id per quote, and the id->real
-    span_id map used to validate a model's cited ids afterward. An unanchored span
-    (no span_id yet) still renders -- so the model can still read it -- but is never
-    a valid citation target (its id maps to "").
+def _citable_evidence(fact: ClinicalFact) -> list:
+    """Every span citable as evidence for this fact -- its own `fact.evidence`
+    plus `fact.attribute_evidence`'s spans passing the SAME usability filter
+    `graph_consensus._attribute_span_support` already applies (a `"local"`
+    entry is always usable; an `"inherited"` entry needs `scope_validated=True`
+    -- never a bare `scope_validated=True` filter alone, which would wrongly
+    suppress every local entry too, since those default `scope_validated=
+    False`), deduplicated by span_id. issue #6 F9-R6-R4: without the
+    attribute-evidence half, a correctly inherited, independently validated
+    attribute (e.g. a laterality/site value stated once on a parent fact) could
+    settle graph consensus but could never be cited by the requirement
+    verifier at all.
 
-    issue #6 F9-R6-R4: also renders `fact.attribute_evidence`'s spans -- without
-    this, a correctly inherited, independently validated attribute (e.g. a
-    laterality/site value stated once on a parent fact and inherited from there)
-    could settle graph consensus but could never be cited by the requirement
-    verifier at all, since it never appears in `fact.evidence`. Uses the SAME
-    usability filter `graph_consensus._attribute_span_support` already applies --
-    a `"local"` entry is always usable; an `"inherited"` entry needs
-    `scope_validated=True` (never a bare `scope_validated=True` filter on its
-    own, which would wrongly suppress every local entry too, since those default
-    `scope_validated=False`). A span already shown via `fact.evidence` is never
-    duplicated under a second tag.
+    THE single shared source both `_evidence_options` (prompt rendering) and
+    `evidence_text_by_span_id` (content validation, `requirement.
+    validated_requirement`'s per-span check) build from -- so the two can
+    never drift into two different definitions of "what could have been
+    cited", the same "two parallel definitions of proof" pitfall this
+    codebase already avoids elsewhere.
     """
-    lines = []
-    id_to_span: dict[str, str] = {}
-    seen_spans: set[str] = set()
-    n = 0
-    for s in fact.evidence:
-        n += 1
-        tag = f"e{n}"
-        lines.append(f"[{tag}] {s.text}")
-        sid = str(getattr(s, "span_id", "") or "")
-        id_to_span[tag] = sid
-        if sid:
-            seen_spans.add(sid)
-    for attr_name, entries in sorted((fact.attribute_evidence or {}).items()):
+    spans = list(fact.evidence)
+    seen = {str(getattr(s, "span_id", "") or "") for s in spans}
+    seen.discard("")
+    for entries in (fact.attribute_evidence or {}).values():
         for e in entries:
             if not (e.scope == "local" or e.scope_validated):
                 continue
             sid = str(getattr(e.span, "span_id", "") or "")
-            if not sid or sid in seen_spans:
+            if not sid or sid in seen:
                 continue
-            seen_spans.add(sid)
-            n += 1
-            tag = f"e{n}"
-            lines.append(f"[{tag}] {e.span.text}")
-            id_to_span[tag] = sid
+            seen.add(sid)
+            spans.append(e.span)
+    return spans
+
+
+def _evidence_options(fact: ClinicalFact) -> tuple[str, dict[str, str]]:
+    """Evidence rendered with a stable bracketed id per quote, and the id->real
+    span_id map used to validate a model's cited ids afterward. An unanchored span
+    (no span_id yet) still renders -- so the model can still read it -- but is never
+    a valid citation target (its id maps to "")."""
+    lines = []
+    id_to_span: dict[str, str] = {}
+    for i, s in enumerate(_citable_evidence(fact)):
+        tag = f"e{i + 1}"
+        lines.append(f"[{tag}] {s.text}")
+        id_to_span[tag] = str(getattr(s, "span_id", "") or "")
     return " | ".join(lines), id_to_span
+
+
+def evidence_text_by_span_id(fact: ClinicalFact) -> dict[str, str]:
+    """span_id -> its own text, for EXACTLY the spans a requirement verifier
+    could have cited (`_citable_evidence`) -- used by `requirement.
+    validated_requirement` to confirm a SUPPORTED citation's own content
+    actually supports what it claims, never a whole-document search standing
+    in for a specific citation (issue #6 F9-R6-R2, second re-review)."""
+    return {str(getattr(s, "span_id", "") or ""): s.text
+           for s in _citable_evidence(fact) if getattr(s, "span_id", "")}
 
 
 def _best_descriptor(source: CodeSource, cand: CandidateCode) -> str:
