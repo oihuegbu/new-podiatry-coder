@@ -433,20 +433,39 @@ def provider_query(fact, axes: tuple[AxisProbe, ...]) -> str:
             f"codes for {subject!r}. Please document: {'; '.join(named)}.")
 
 
-def _typed_laterality_support(fact, probe: AxisProbe) -> dict[str, tuple[str, ...]] | None:
+def _typed_laterality_support(fact, probe: AxisProbe, reconciliation
+                              ) -> dict[str, tuple[str, ...]] | None:
     """Laterality settled via the FACT's own typed `attributes["laterality"]`
-    value -- now safe to trust after `graph_consensus.resolve`'s matching negation-
-    aware fix (issue #6 F9-R6-R2, fourth re-review) -- never re-derived by lexical
-    matching against raw text, which cannot correctly resolve arbitrary-distance
-    negation scope (a fixed token window around a phrase match cannot tell "left
-    but not right" from "right but not left" once the negation cue falls outside
-    the window). Returns None when this probe is not the laterality axis, or the
-    fact carries no laterality value at all; the caller must NOT fall back to
-    lexical matching for this axis when None -- fail closed, never guess."""
+    value -- never re-derived by lexical matching against raw text, which cannot
+    correctly resolve arbitrary-distance negation scope (a fixed token window
+    around a phrase match cannot tell "left but not right" from "right but not
+    left" once the negation cue falls outside the window).
+
+    issue #6 F9-R6-R2, fifth re-review: round 4's "now safe to trust" claim was
+    wrong -- `graph_consensus.resolve()`'s matching fix ALSO used a token-window
+    heuristic (`tiebreak.asserted_status`) to decide what gets written into
+    `attributes["laterality"]`, so it had the identical blind spot one layer
+    earlier, AND a fact whose two readings simply AGREE on a wrong value never
+    even reaches `resolve()` (no disagreement to resolve), leaving this function
+    the last, and only, line of defense either way. It now independently
+    re-verifies the typed value against `fact`'s own extraction-time
+    `attribute_evidence` (`graph_consensus.asserted_attribute_support` --
+    genuinely ASSERTED, scope-validated, source-reconciled evidence, judged by the
+    model with the complete sentence in view, never re-derived from raw text)
+    EVERY time, regardless of whether a cross-reading disagreement ever ran
+    through `resolve()` at all.
+
+    Returns None when this probe is not the laterality axis, the fact carries no
+    laterality value at all, OR that value is not genuinely, provably asserted;
+    the caller must NOT fall back to lexical matching for this axis when None --
+    fail closed, never guess."""
     if probe.axis != AXIS_LATERALITY:
         return None
     value = str((getattr(fact, "attributes", None) or {}).get("laterality") or "").strip().lower()
     if not value:
+        return None
+    from . import graph_consensus as _gc
+    if not _gc.asserted_attribute_support(fact, "laterality", reconciliation):
         return None
     return {code: tuple(t for t in terms if t == value)
            for code, terms in probe.terms_by_code.items()}
@@ -533,7 +552,7 @@ def narrow(fact, candidates: list[CandidateCode],
         # lexical path. Every other axis kind is unaffected and keeps the
         # existing negation-aware lexical match ("not on the right, but the
         # left" must never count "right" as the document stating it).
-        typed = _typed_laterality_support(fact, probe)
+        typed = _typed_laterality_support(fact, probe, reconciliation)
         if typed is not None:
             hits = typed
         elif probe.axis == AXIS_LATERALITY:

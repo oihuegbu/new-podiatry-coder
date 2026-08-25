@@ -36,11 +36,30 @@ def _spans(*texts):
                          span_id=f"span-{i}") for i, t in enumerate(texts)]
 
 
-def _fact(description, *evidence, attributes=None, kind=FactKind.PROCEDURE):
+def _fact(description, *evidence, attributes=None, kind=FactKind.PROCEDURE,
+         attribute_evidence=None):
     return ClinicalFact(kind=kind, description=description,
                         attributes=dict(attributes or {}),
                         disposition=Disposition.PERFORMED, evidence=list(_spans(*evidence)),
-                        confidence=0.99, fact_id="F1")
+                        confidence=0.99, fact_id="F1",
+                        attribute_evidence=dict(attribute_evidence or {}))
+
+
+def _lat_evidence(text, *, span_id="lat-span", assertion_state=None):
+    """One `attribute_evidence["laterality"]` entry (issue #6 F9-R6-R2, fifth
+    re-review) -- defaults to ASSERTED, the genuine, extraction-time judgement
+    `_typed_laterality_support`/`graph_consensus.resolve` now require before
+    trusting a typed laterality value; pass `assertion_state=RelationState.NEGATED`
+    / `.UNCERTAIN` to prove the fail-closed refusal path instead. `span_id` must
+    match whatever `_agreed(...)`/`_disagreed(...)` reconciliation the test supplies,
+    since `graph_consensus.asserted_attribute_support` requires the span itself be
+    source-reconciled, not merely present."""
+    from claude_coder.models import AttributeEvidence, RelationState
+    if assertion_state is None:
+        assertion_state = RelationState.ASSERTED
+    span = EvidenceSpan(text=text, start=0, end=len(text), anchored=True, span_id=span_id)
+    return {"laterality": (AttributeEvidence(span=span, scope="local",
+                                             assertion_state=assertion_state),)}
 
 
 def _request(fact):
@@ -328,8 +347,11 @@ class NegatedAxisNarrowingTest(unittest.TestCase):
         outcome = tiebreak.narrow(
             _fact("assembly service",
                  "assembly service performed, not on the right, but the left",
-                 attributes={"laterality": "left"}),
-            [LAT_LEFT, LAT_RIGHT], _agreed("span-0"))
+                 attributes={"laterality": "left"},
+                 attribute_evidence=_lat_evidence(
+                     "assembly service performed, not on the right, but the left",
+                     span_id="lat-0")),
+            [LAT_LEFT, LAT_RIGHT], _agreed("span-0", "lat-0"))
         self.assertEqual(outcome.winner.code if outcome.winner else None, "CAND_LEFT")
 
 
@@ -350,11 +372,15 @@ class TypedLateralitySelectionTest(unittest.TestCase):
 
     def test_typed_value_wins_even_when_the_raw_text_does_not_literally_state_it(self):
         """Proves narrow() no longer consults raw text for laterality at all: the
-        typed attribute says "left", but the raw text mentions only "right"."""
+        typed attribute says "left", the ONLY evidence text asserting it also says
+        "left" (a genuine extraction-time claim), and the FACT's own separate raw
+        evidence text mentions only "right" -- narrow() must still trust the typed,
+        assertion-evidenced value, not the fact's raw text."""
         outcome = tiebreak.narrow(
             _fact("assembly service", "assembly service performed on the right",
-                 attributes={"laterality": "left"}),
-            [LAT_LEFT, LAT_RIGHT], _agreed("span-0"))
+                 attributes={"laterality": "left"},
+                 attribute_evidence=_lat_evidence("documented as left", span_id="lat-0")),
+            [LAT_LEFT, LAT_RIGHT], _agreed("span-0", "lat-0"))
         self.assertEqual(outcome.winner.code if outcome.winner else None, "CAND_LEFT")
 
     def test_no_typed_value_fails_closed_even_when_the_raw_text_is_unambiguous(self):
@@ -380,9 +406,42 @@ class TypedLateralitySelectionTest(unittest.TestCase):
         can never happen -- the raw text is not consulted for this axis."""
         outcome = tiebreak.narrow(
             _fact("assembly service", "left but not right",
-                 attributes={"laterality": "left"}),
-            [LAT_LEFT, LAT_RIGHT], _agreed("span-0"))
+                 attributes={"laterality": "left"},
+                 attribute_evidence=_lat_evidence("left but not right", span_id="lat-0")),
+            [LAT_LEFT, LAT_RIGHT], _agreed("span-0", "lat-0"))
         self.assertEqual(outcome.winner.code if outcome.winner else None, "CAND_LEFT")
+
+    def test_negated_assertion_state_fails_closed_even_with_a_typed_value_set(self):
+        """issue #6 F9-R6-R2, fifth re-review: the exact Codex reproduction, this
+        time with the per-attribute evidence carrying the assertion_state a
+        correctly-fixed extraction step would itself emit for "ruled out" at ANY
+        token distance -- proving the fix is genuinely distance-independent,
+        not merely "no evidence at all happens to fail closed"."""
+        from claude_coder.models import RelationState
+        outcome = tiebreak.narrow(
+            _fact("assembly service",
+                 "right involvement was considered but was ultimately ruled out",
+                 attributes={"laterality": "right"},
+                 attribute_evidence=_lat_evidence(
+                     "right involvement was considered but was ultimately ruled out",
+                     span_id="lat-0", assertion_state=RelationState.NEGATED)),
+            [LAT_LEFT, LAT_RIGHT], _agreed("span-0", "lat-0"))
+        self.assertIsNone(outcome.winner)
+        self.assertNotEqual(outcome.winner.code if outcome.winner else None, "CAND_RIGHT")
+
+    def test_both_readers_agreeing_on_a_wrong_value_still_fails_closed(self):
+        """Closes the adjacent gap Codex named: when both readings extract the SAME
+        wrong value, no AxisDisagreement exists, so graph_consensus.resolve() never
+        even runs -- narrow() is the ONLY remaining check, and it must not simply
+        trust the raw, unverified typed attribute just because nothing disagreed
+        with it. A typed value with NO corresponding attribute_evidence at all
+        (exactly what "both readers silently agreed, nothing ever verified it"
+        looks like) must fail closed."""
+        outcome = tiebreak.narrow(
+            _fact("assembly service", "assembly service performed",
+                 attributes={"laterality": "right"}),
+            [LAT_LEFT, LAT_RIGHT], _agreed("span-0"))
+        self.assertIsNone(outcome.winner)
 
     def test_ruled_out_side_is_never_selected_regardless_of_token_distance(self):
         """The DANGEROUS reproduction: "right involvement was considered but was
@@ -612,8 +671,10 @@ class IsolatedContrastPromotion(unittest.TestCase):
                         0.9)
         left = _cand("CAND_LEFT", "assembly service, left structure", 0.9)
         fact = _fact("assembly service", "assembly service performed on the right side",
-                     attributes={"laterality": "right"})
-        outcome = tiebreak.narrow(fact, [right_a, right_b, left], _agreed("span-0"))
+                     attributes={"laterality": "right"},
+                     attribute_evidence=_lat_evidence(
+                         "assembly service performed on the right side", span_id="lat-0"))
+        outcome = tiebreak.narrow(fact, [right_a, right_b, left], _agreed("span-0", "lat-0"))
         self.assertIsNone(outcome.winner)
         self.assertEqual(outcome.provider_question, "",
                          "laterality is already documented -- must never be re-asked")

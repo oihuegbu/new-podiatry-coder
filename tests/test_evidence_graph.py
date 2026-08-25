@@ -329,18 +329,27 @@ class PerAttributeSourceEvidence(unittest.TestCase):
     every code-changing axis, not laterality-specific (Codex's explicit correction)."""
 
     def _entry(self, text, *, span_id, scope="local", parent_fact_id="",
-              source_relation_id="", scope_validated=True):
-        from claude_coder.models import AttributeEvidence
+              source_relation_id="", scope_validated=True, assertion_state=None):
+        from claude_coder.models import AttributeEvidence, RelationState
         # These tests exercise `_attribute_span_support`'s CONSUMPTION of
         # attribute_evidence in isolation, not `provenance.validate_attribute_
         # evidence`'s own validation logic (covered separately in
         # `AttributeEvidenceValidation`) -- so an entry defaults to already-validated
         # unless a test explicitly passes `scope_validated=False` to prove the
         # unvalidated-inherited-entries-are-ignored behavior.
+        #
+        # issue #6 F9-R6-R2, fifth re-review: defaults to ASSERTED, not the
+        # dataclass's own fail-closed UNCERTAIN default -- almost every existing
+        # test in this class is proving a POSITIVE support path, which now
+        # requires genuine assertion; tests proving the NEGATIVE/refusal path
+        # pass assertion_state=NEGATED/UNCERTAIN explicitly.
+        if assertion_state is None:
+            assertion_state = RelationState.ASSERTED
         return AttributeEvidence(span=_span(text, span_id=span_id), scope=scope,
                                  parent_fact_id=parent_fact_id,
                                  source_relation_id=source_relation_id,
-                                 scope_validated=scope_validated)
+                                 scope_validated=scope_validated,
+                                 assertion_state=assertion_state)
 
     def test_a_value_proven_only_by_unrelated_evidence_text_no_longer_settles(self):
         """The exact gap Codex named: the fact's whole evidence pool happens to
@@ -501,6 +510,91 @@ class PerAttributeSourceEvidence(unittest.TestCase):
         laterality = next(r for r in resolutions if r.axis == "laterality")
         self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.RESOLVED_FROM_SOURCE)
         self.assertEqual(laterality.accepted_value, "left")
+
+    def test_an_assertion_state_negated_entry_never_lets_resolve_accept_the_value(self):
+        """issue #6 F9-R6-R2, fifth re-review, ROOT CAUSE: the FOURTH round's fix
+        still re-derived assertion from raw text with `asserted_status`'s bounded
+        token window -- proven unsound at arbitrary distance. The sound fix trusts
+        the model's OWN extraction-time assertion_state judgement instead, never
+        re-deriving it. Even with scope/reconciliation otherwise perfect, an entry
+        the model itself marked NEGATED must never let the value through -- and,
+        critically, this is a FIRM REFUSAL, not a fallback to the (unsound) whole-
+        fact-text lexical path."""
+        from claude_coder.models import RelationState
+        primary = [_fact(
+            "F1", FactKind.PROCEDURE, "procedure performed",
+            spans=[_span("right involvement was considered but was ultimately ruled out",
+                         span_id="p1")],
+            attributes={"laterality": "right"},
+            attribute_evidence={"laterality": (
+                self._entry("right involvement was considered but was ultimately "
+                            "ruled out", span_id="p1", assertion_state=RelationState.NEGATED),)})]
+        second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
+                        spans=[_span("performed procedure", span_id="s1")],
+                        attributes={})]
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "laterality")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED,
+                      "a token-window-invisible, far-distance negation the model "
+                      "itself correctly flagged must never be accepted")
+
+    def test_an_assertion_state_uncertain_entry_never_lets_resolve_accept_the_value(self):
+        from claude_coder.models import RelationState
+        primary = [_fact(
+            "F1", FactKind.PROCEDURE, "procedure performed",
+            spans=[_span("possibly on the left side", span_id="p1")],
+            attributes={"laterality": "left"},
+            attribute_evidence={"laterality": (
+                self._entry("possibly on the left side", span_id="p1",
+                            assertion_state=RelationState.UNCERTAIN),)})]
+        second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
+                        spans=[_span("performed procedure", span_id="s1")],
+                        attributes={})]
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "laterality")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
+
+    def test_a_confirmed_but_negated_quotation_is_a_documentation_state_not_a_source_integrity_problem(self):
+        """issue #6 F9-R6-R2, fifth re-review, post-fix review finding: `ok` (source
+        reconciliation) must stay SEPARATE from `says` (genuine assertion) -- a
+        quotation the model correctly marked NEGATED, but which the source itself
+        genuinely confirms, is real documentation (the note explicitly rules the
+        value out), never an unconfirmed SOURCE-INTEGRITY problem. Both readers here
+        genuinely quote (and correctly negate) DIFFERENT sides, proving the detail
+        message reflects "no reading states this value", never "neither reading
+        rests on quotations the source confirms" (which would be actively
+        misleading -- both quotations ARE confirmed)."""
+        from claude_coder.models import RelationState
+        primary = [_fact(
+            "F1", FactKind.PROCEDURE, "procedure performed",
+            spans=[_span("right involvement was considered but was ultimately ruled out",
+                         span_id="p1")],
+            attributes={"laterality": "right"},
+            attribute_evidence={"laterality": (
+                self._entry("right involvement was considered but was ultimately "
+                            "ruled out", span_id="p1", assertion_state=RelationState.NEGATED),)})]
+        second = [_fact(
+            "S1", FactKind.PROCEDURE, "procedure performed",
+            spans=[_span("left involvement was also considered and ultimately "
+                        "ruled out too", span_id="s1")],
+            attributes={"laterality": "left"},
+            attribute_evidence={"laterality": (
+                self._entry("left involvement was also considered and ultimately "
+                            "ruled out too", span_id="s1", assertion_state=RelationState.NEGATED),)})]
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "laterality")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
+        self.assertIn("states this value verbatim", laterality.detail)
+        self.assertNotIn("source-integrity problem", laterality.detail)
 
     def test_a_value_whose_only_textual_support_is_negated_is_never_accepted(self):
         """issue #6 F9-R6-R2, fourth re-review, ROOT CAUSE: this is what actually

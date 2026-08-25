@@ -45,10 +45,22 @@ For each fact return an object with:
         in encounter_context: performer_id, performer_function, organization_id, and
         billing_entity_id. Never invent an id or equate a person with an organization.
   - "attribute_evidence": for EVERY key you emit in "attributes", one or more
-        {"text": <verbatim quote>, "scope": "local"|"inherited", "parent_fact_id": <id>}
-        entries proving that specific value — the SAME per-endpoint quoting
-        discipline you already use for directional relations below, applied to
-        attributes instead. "scope" is "local" when the quote sits in this fact's
+        {"text": <verbatim quote>, "scope": "local"|"inherited", "parent_fact_id": <id>,
+        "assertion_state": "asserted"|"negated"|"uncertain"} entries proving that
+        specific value — the SAME per-endpoint quoting discipline you already use for
+        directional relations below, applied to attributes instead. "assertion_state"
+        is whether THIS quote itself asserts, negates, or leaves uncertain the value —
+        judge it from the FULL sentence you are quoting from, however far the negation
+        cue sits from the value word ("no left-sided involvement" and "left-sided
+        involvement was considered but ultimately ruled out" are BOTH "negated" for
+        "left", even though the second puts the negation many words later); this is
+        independent of the fact's own overall "disposition"/"certainty"/"negated" —
+        one specific attribute mention can be hedged or ruled out even when the fact
+        as a whole is confirmed, or vice versa for a value drawn from a different
+        sentence. Default "asserted" only when the quote plainly states the value with
+        no hedge or negation anywhere in its own sentence; use "uncertain" for hedged/
+        possible phrasing, "negated" for anything the sentence rules out or denies.
+        "scope" is "local" when the quote sits in this fact's
         own sentence; it is "inherited" only when the value is instead stated once
         in a heading or a linked parent event and this fact's own sentence does not
         repeat it — in that case "parent_fact_id" must name that parent fact, and you
@@ -379,12 +391,19 @@ def _evidence_span(value: Any) -> EvidenceSpan | None:
     return EvidenceSpan(text=value) if value.strip() else None
 
 
-def _attribute_evidence_entry(value: Any) -> tuple[str, str, str] | None:
-    """(text, scope, parent_fact_id) for one raw `attribute_evidence` entry, or None
-    when malformed (the caller raises -- same discipline as `_evidence_span`). Never
-    stringifies a non-quote into a pseudo-quote, matching `_evidence_span`; "local"
-    scope needs no parent, "inherited" scope requires one (resolved against the
-    relations graph by the caller, once relations are parsed -- issue #6 F9-R5)."""
+def _attribute_evidence_entry(value: Any) -> tuple[str, str, str, RelationState] | None:
+    """(text, scope, parent_fact_id, assertion_state) for one raw `attribute_evidence`
+    entry, or None when malformed (the caller raises -- same discipline as
+    `_evidence_span`). Never stringifies a non-quote into a pseudo-quote, matching
+    `_evidence_span`; "local" scope needs no parent, "inherited" scope requires one
+    (resolved against the relations graph by the caller, once relations are parsed --
+    issue #6 F9-R5).
+
+    "assertion_state" parses with the EXACT same fail-closed convention `_relation`
+    already uses for its own `state` field (issue #6 F9-R6-R2, fifth re-review): an
+    invalid value fails the whole entry (never silently coerced), a missing one
+    defaults to UNCERTAIN, never ASSERTED -- an omitted judgement must never be read
+    as a positive one."""
     if not isinstance(value, dict):
         return None
     raw_text = value.get("text", "")
@@ -396,7 +415,12 @@ def _attribute_evidence_entry(value: Any) -> tuple[str, str, str] | None:
     parent = str(value.get("parent_fact_id", "") or "").strip()
     if scope == "inherited" and not parent:
         return None
-    return raw_text, scope, parent
+    try:
+        assertion_state = RelationState(
+            str(value.get("assertion_state", "uncertain")).strip().lower())
+    except ValueError:
+        return None
+    return raw_text, scope, parent, assertion_state
 
 
 def _relation(value: Any, index: int) -> RelationAssertion | None:
@@ -565,10 +589,11 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
     if not isinstance(relations_in, list):
         raise ExtractionSchemaError("'relations' must be an array when present")
     facts: list[ClinicalFact] = []
-    # (fact_id, attr_name, text, parent_fact_id) for every "inherited"-scope
-    # attribute_evidence entry -- resolved against the relations graph in the second
-    # pass below, once every relation has been parsed (issue #6 F9-R5).
-    pending_inherited: list[tuple[str, str, str, str]] = []
+    # (fact_id, attr_name, text, parent_fact_id, assertion_state) for every
+    # "inherited"-scope attribute_evidence entry -- resolved against the relations
+    # graph in the second pass below, once every relation has been parsed (issue #6
+    # F9-R5; assertion_state added issue #6 F9-R6-R2, fifth re-review).
+    pending_inherited: list[tuple[str, str, str, str, RelationState]] = []
     for i, item in enumerate(facts_in):
         if not isinstance(item, dict):
             raise ExtractionSchemaError(f"fact #{i} is not a JSON object")
@@ -647,12 +672,14 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
                     raise ExtractionSchemaError(
                         f"fact #{i} attribute_evidence[{attr_name!r}] has an "
                         f"empty/malformed entry")
-                text, scope, parent = parsed
+                text, scope, parent, assertion_state = parsed
                 if scope == "local":
                     attribute_evidence.setdefault(str(attr_name), []).append(
-                        AttributeEvidence(span=EvidenceSpan(text=text), scope="local"))
+                        AttributeEvidence(span=EvidenceSpan(text=text), scope="local",
+                                         assertion_state=assertion_state))
                 else:
-                    pending_inherited.append((this_fid, str(attr_name), text, parent))
+                    pending_inherited.append(
+                        (this_fid, str(attr_name), text, parent, assertion_state))
         # R2: actor identity is resolved EXCLUSIVELY from the structured encounter context.
         # A model-supplied performer/organization id absent from the authoritative roster is
         # invented/unauthorized and is discarded (ownership then resolves to UNKNOWN and
@@ -726,7 +753,7 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
     # dropped entirely here, never silently kept as unproven provenance.
     if pending_inherited:
         by_fid = {f.fact_id: f for f in facts}
-        for fid, attr_name, text, parent in pending_inherited:
+        for fid, attr_name, text, parent, assertion_state in pending_inherited:
             fact = by_fid.get(fid)
             if fact is None or parent not in by_fid:
                 continue
@@ -738,7 +765,8 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
                 continue
             entry = AttributeEvidence(span=EvidenceSpan(text=text), scope="inherited",
                                       parent_fact_id=parent,
-                                      source_relation_id=match.relation_id)
+                                      source_relation_id=match.relation_id,
+                                      assertion_state=assertion_state)
             fact.attribute_evidence = {
                 **fact.attribute_evidence,
                 attr_name: fact.attribute_evidence.get(attr_name, ()) + (entry,),

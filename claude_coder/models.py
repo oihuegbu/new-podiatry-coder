@@ -85,6 +85,20 @@ class EvidenceSpan:
     reading_channel_id: str | None = None
 
 
+class RelationState(str, Enum):
+    """Whether the documentation ASSERTS, NEGATES, or leaves UNCERTAIN a claim --
+    originally per relation edge (`RelationAssertion.state`, below); reused verbatim,
+    unmodified, for `AttributeEvidence.assertion_state` one level finer (per
+    attribute-value quote) rather than inventing a second three-state vocabulary for
+    the identical concept. Moved ahead of `AttributeEvidence` in this file because a
+    dataclass field DEFAULT is evaluated eagerly at class-body execution time, not
+    lazily like a `from __future__ import annotations` type hint -- it must already
+    exist here, not merely be forward-referenceable."""
+    ASSERTED = "asserted"
+    NEGATED = "negated"
+    UNCERTAIN = "uncertain"
+
+
 @dataclass(frozen=True)
 class AttributeEvidence:
     """One verbatim source quote supporting a specific CODE-CHANGING ATTRIBUTE value
@@ -121,12 +135,29 @@ class AttributeEvidence:
     co-located). `graph_consensus._attribute_span_support` ignores any inherited entry
     that never reaches `scope_validated=True` -- an unvalidated claim is treated as if
     it were never made, falling back to whichever weaker signal already existed.
+
+    `assertion_state` (issue #6 F9-R6-R2, fifth re-review) is whether THIS SPECIFIC
+    QUOTE asserts, negates, or leaves uncertain the attribute value -- decided at
+    EXTRACTION TIME, where the model has the complete sentence in view, reusing the
+    exact `RelationState` vocabulary `RelationAssertion.state` already uses one level
+    coarser (per relation edge, not per attribute value). This exists because a
+    token-window heuristic re-scanning raw text AFTER extraction cannot correctly
+    resolve grammatical negation scope at arbitrary distance -- proven unsound, not
+    merely suspected: `graph_consensus.resolve()`'s prior fix used exactly such a
+    heuristic and still accepted a value the source text explicitly ruled out many
+    tokens away. Defaults to `UNCERTAIN`, never `ASSERTED` -- fail-closed, so an
+    older construction site that predates this field (or omits it) never silently
+    claims proof it never made. Only `ASSERTED`, on a `scope_validated`, source-
+    reconciled entry, may ever positively select a value; `NEGATED`/`UNCERTAIN`/
+    missing must never be treated as proof, exactly like an unvalidated
+    `scope_validated=False` entry above.
     """
     span: EvidenceSpan
     scope: str = "local"
     parent_fact_id: str = ""
     source_relation_id: str = ""
     scope_validated: bool = False
+    assertion_state: RelationState = RelationState.UNCERTAIN
 
 
 @dataclass
@@ -473,12 +504,6 @@ class RelationPredicate(str, Enum):
     GUIDES = "guides"
     REPAIRS = "repairs"
     REMOVES = "removes"
-
-
-class RelationState(str, Enum):
-    ASSERTED = "asserted"
-    NEGATED = "negated"
-    UNCERTAIN = "uncertain"
 
 
 @dataclass

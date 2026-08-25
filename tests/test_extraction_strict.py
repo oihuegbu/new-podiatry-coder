@@ -367,6 +367,49 @@ def test_a_local_scope_entry_needs_no_parent_and_is_kept():
     assert entries[0].source_relation_id == ""
 
 
+# --------------------------------------------- F9-R6-R2 (5th) assertion_state
+def test_assertion_state_asserted_parses_onto_the_entry():
+    from claude_coder.models import RelationState
+    result = extract_note("note", _stub({"facts": [_fact(
+        attributes={"laterality": "right"},
+        attribute_evidence={"laterality": [
+            {"text": "performed on the right side", "scope": "local",
+             "assertion_state": "asserted"}]})]}))
+    entry = result.facts[0].attribute_evidence["laterality"][0]
+    assert entry.assertion_state is RelationState.ASSERTED
+
+
+def test_assertion_state_negated_parses_onto_the_entry():
+    from claude_coder.models import RelationState
+    result = extract_note("note", _stub({"facts": [_fact(
+        attributes={"laterality": "right"},
+        attribute_evidence={"laterality": [
+            {"text": "right side was ultimately ruled out", "scope": "local",
+             "assertion_state": "negated"}]})]}))
+    entry = result.facts[0].attribute_evidence["laterality"][0]
+    assert entry.assertion_state is RelationState.NEGATED
+
+
+def test_missing_assertion_state_defaults_to_uncertain_never_asserted():
+    """Fail-closed: an omitted judgement must never be read as a positive one --
+    the same convention `_relation`'s own `state` field already uses."""
+    from claude_coder.models import RelationState
+    result = extract_note("note", _stub({"facts": [_fact(
+        attributes={"laterality": "right"},
+        attribute_evidence={"laterality": [
+            {"text": "performed on the right side", "scope": "local"}]})]}))
+    entry = result.facts[0].attribute_evidence["laterality"][0]
+    assert entry.assertion_state is RelationState.UNCERTAIN
+
+
+def test_invalid_assertion_state_raises_never_silently_coerced():
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [_fact(
+            attribute_evidence={"laterality": [
+                {"text": "performed on the right side", "scope": "local",
+                 "assertion_state": "maybe-ish"}]})]}))
+
+
 def test_an_inherited_entry_resolves_only_against_a_real_relation():
     """Codex F9-R5/F9-R5-A: an "inherited" claim is kept as a CANDIDATE only when a
     real, correctly-directed part_of relation actually connects this fact to the
@@ -394,6 +437,31 @@ def test_an_inherited_entry_resolves_only_against_a_real_relation():
     assert entries[0].span.text == "performed on the right side"
     rel = next(r for r in result.relations if r.subject_event_id == "F2")
     assert entries[0].source_relation_id == rel.relation_id
+
+
+def test_an_inherited_entrys_assertion_state_survives_the_second_pass():
+    """issue #6 F9-R6-R2, fifth re-review: assertion_state must thread through the
+    SAME second-pass relation-resolution rebuild an inherited entry's scope/
+    parent/source_relation_id already go through -- not silently reset to the
+    dataclass default when the entry is re-constructed there."""
+    from claude_coder.models import RelationState
+    payload = {
+        "facts": [
+            _fact(fact_id="F1", description="parent step",
+                 evidence=["The parent step was performed on the right side"]),
+            _fact(fact_id="F2", description="component step",
+                 attributes={"laterality": "right"},
+                 attribute_evidence={"laterality": [
+                     {"text": "performed on the right side", "scope": "inherited",
+                      "parent_fact_id": "F1", "assertion_state": "negated"}]}),
+        ],
+        "relations": [{"subject_event_id": "F2", "predicate": "part_of",
+                       "object_event_id": "F1", "state": "asserted"}],
+    }
+    result = extract_note("note", _stub(payload))
+    component = next(f for f in result.facts if f.fact_id == "F2")
+    entry = component.attribute_evidence["laterality"][0]
+    assert entry.assertion_state is RelationState.NEGATED
 
 
 def test_an_inherited_entry_with_no_matching_relation_is_dropped_not_kept_unproven():

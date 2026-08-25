@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from .models import Disposition
+from .models import Disposition, RelationState
 
 #: Identity of this comparison contract.
 CONSENSUS_SCHEMA_VERSION = "graph-consensus-v1"
@@ -479,6 +479,19 @@ def _attribute_span_support(fact, attr_name: str, reconciliation
     `provenance.validate_attribute_evidence` -- run after the relations graph is fully
     reconciled -- may promote it. An unvalidated inherited entry is treated as if it
     were never emitted, not as a weaker signal.
+
+    `ok` reflects SOURCE RECONCILIATION of the best-available usable quotation(s),
+    regardless of assertion state (issue #6 F9-R6-R2, fifth re-review) -- deliberately
+    NOT gated on whether the value is actually asserted, so a quotation the model
+    itself marked NEGATED but which the source genuinely confirms is reported as
+    CONFIRMED (a real documentation state -- the note explicitly rules the value
+    out), never as an unconfirmed SOURCE-INTEGRITY problem, which is a different,
+    more specific claim reserved for a quotation the source does not back at all.
+    Prefers ASSERTED entries' spans when any exist (the strongest, most directly
+    citable proof); falls back to every usable entry's spans otherwise, purely for
+    this reconciliation check -- never as a route to accepting the value itself.
+    `resolve()` gates ACCEPTANCE separately via `asserted_attribute_support` below,
+    which is the only function that may say a value is genuinely proven.
     """
     entries = (getattr(fact, "attribute_evidence", None) or {}).get(attr_name)
     if not entries:
@@ -486,7 +499,31 @@ def _attribute_span_support(fact, attr_name: str, reconciliation
     usable = [e for e in entries if e.scope == "local" or e.scope_validated]
     if not usable:
         return None
-    return _spans_support([e.span for e in usable], reconciliation)
+    asserted = [e for e in usable if e.assertion_state == RelationState.ASSERTED]
+    return _spans_support([e.span for e in (asserted or usable)], reconciliation)
+
+
+def asserted_attribute_support(fact, attr_name: str, reconciliation) -> bool:
+    """Whether `fact`'s OWN `attribute_evidence` for `attr_name` contains at least one
+    genuinely ASSERTED, scope-validated, source-RECONCILED entry -- the no-fallback,
+    VALUE-level (not just quotation-level) safety-critical check a MUST_SUPPORT-
+    governed axis (laterality) needs (issue #6 F9-R6-R2, fifth re-review). Unlike
+    `_attribute_span_support`, this never falls back to whole-fact-text lexical
+    matching when no per-attribute evidence exists for the axis -- fails closed
+    instead, since that lexical fallback is exactly the mechanism proven unsound
+    against arbitrary-distance negation. Also unlike `_attribute_span_support`, this
+    is gated STRICTLY on the ASSERTED subset's own reconciliation -- a confirmed but
+    NEGATED quotation must never satisfy this, even though `_attribute_span_support`
+    itself reports such a quotation as `ok=True` (confirmed, just not asserting)."""
+    entries = (getattr(fact, "attribute_evidence", None) or {}).get(attr_name)
+    if not entries:
+        return False
+    usable = [e for e in entries if e.scope == "local" or e.scope_validated]
+    asserted = [e for e in usable if e.assertion_state == RelationState.ASSERTED]
+    if not asserted:
+        return False
+    ok, _proof, _text, _spans = _spans_support([e.span for e in asserted], reconciliation)
+    return ok
 
 
 def source_support(fact, reconciliation) -> tuple[bool, str, str, tuple[str, ...]]:
@@ -545,39 +582,53 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
     """
     from . import tiebreak as _tiebreak
 
+    def _entailment(fact, axis, value) -> tuple[bool, str, str, tuple[str, ...], bool]:
+        """(ok, proof, text, spans, says) for one reading. VALUE-level entailment,
+        gated on the reading's own EVENT actually being source-confirmed (ok) --
+        applied uniformly, so no branch can accept a value its own confirmed
+        quotation never states, regardless of what the OTHER reading did or did not
+        confirm.
+
+        issue #6 F9-R6-R2, fifth re-review, ROOT CAUSE FIX: when `fact` carries
+        per-attribute evidence for `axis` at all, whether the value may be ACCEPTED
+        (`says`) is gated through `asserted_attribute_support` -- genuine,
+        extraction-time ASSERTED judgement, never re-derived by re-scanning raw
+        text with a token-window heuristic afterward (`tiebreak.asserted_status`),
+        which cannot correctly resolve negation scope at arbitrary distance
+        (proven: the FOURTH re-review's fix used exactly that heuristic here and
+        still accepted a value the source text explicitly ruled out many tokens
+        away). `ok` (whether this reading's EVENT is source-confirmed, for the
+        detail-message branching below) stays keyed to `_attribute_span_support`'s
+        OWN, separate reconciliation check -- deliberately NOT collapsed into
+        `says`, so a quotation the model correctly marked NEGATED but which the
+        source genuinely confirms is reported as a real documentation state (falls
+        to the "no reading's own confirmed quotation states this value verbatim"
+        branch), never mis-filed as an unconfirmed SOURCE-INTEGRITY problem, which
+        is a different, more specific claim. The lexical check is used ONLY as the
+        pre-existing, strictly-additive fallback when NO per-attribute evidence
+        exists for this axis at all -- unchanged from before, never the axis this
+        vulnerability was found on.
+        """
+        if fact is None:
+            return False, "", "", (), False
+        attr = _attribute_span_support(fact, axis, reconciliation)
+        if attr is not None:
+            ok, proof, text, spans = attr
+            says = bool(value) and asserted_attribute_support(fact, axis, reconciliation)
+            return ok, proof, text, spans, says
+        ok, proof, text, spans = _span_support(fact, reconciliation)
+        says = ok and bool(value) and _tiebreak.asserted_status(
+            (value,), text) == "supported"
+        return ok, proof, text, spans, says
+
     out: list[AxisResolution] = []
     for item in disagreements:
         primary = primary_by_id.get(item.node_id)
         second = second_by_node.get(item.node_id)
-        p_ok, p_proof, p_text, p_spans = (
-            (_attribute_span_support(primary, item.axis, reconciliation)
-             or _span_support(primary, reconciliation)) if primary is not None
-            else (False, "", "", ()))
-        s_ok, s_proof, s_text, s_spans = (
-            (_attribute_span_support(second, item.axis, reconciliation)
-             or _span_support(second, reconciliation)) if second is not None
-            else (False, "", "", ()))
-        # VALUE-level entailment, gated on the reading's own EVENT actually being
-        # source-confirmed (p_ok/s_ok) -- computed once, applied uniformly to
-        # every case below, so no branch can accept a value its own confirmed
-        # quotation never states, regardless of what the OTHER reading did or
-        # did not confirm.
-        #
-        # Uses `tiebreak.asserted_status`, not a bare token-subset test (issue #6
-        # F9-R6-R2, fourth re-review): the old `_value_tokens(...).issubset(...)`
-        # check is an unordered bag-of-tokens comparison with zero negation
-        # awareness, so "not left, but right" would let value_primary="left"
-        # pass as literally stated -- the same defect this round already fixed
-        # in `tiebreak.narrow`'s own lexical matching, present here first, since
-        # this is what actually populates `fact.attributes[axis]` on acceptance.
-        # `asserted_status` is a strictly STRONGER test than the old subset
-        # check (clause-scoped contiguous phrase match, not just co-occurring
-        # tokens), so this can only make acceptance more conservative, never
-        # accept something the old check would have refused.
-        p_says = p_ok and bool(item.value_primary) and _tiebreak.asserted_status(
-            (item.value_primary,), p_text) == "supported"
-        s_says = s_ok and bool(item.value_second) and _tiebreak.asserted_status(
-            (item.value_second,), s_text) == "supported"
+        p_ok, p_proof, p_text, p_spans, p_says = _entailment(
+            primary, item.axis, item.value_primary)
+        s_ok, s_proof, s_text, s_spans, s_says = _entailment(
+            second, item.axis, item.value_second)
 
         winner = ""
         proof = ""
