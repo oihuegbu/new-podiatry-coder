@@ -2404,6 +2404,43 @@ class IndependentDocumentRecall(unittest.TestCase):
         self.assertIs(gate.outcome, Outcome.UNKNOWN, gate.detail)
         self.assertTrue(gate.retryable)
 
+    def test_document_fully_covered_flag_reflects_the_real_coverage_signal(self):
+        """issue #6 F9-R6 Phase 3: the `document_fully_covered` flag that gates
+        NOT_DOCUMENTED elimination in `resolution._grounded_elimination` must come
+        from the SAME real, independently-computed page-coverage signal
+        `recall_uncovered_pages` already exposes (proven by the SAME failed-page-read
+        fixture as the test above, Codex F7-R3-A) -- never a model's self-report of
+        having read everything. Every resolved line's own `tie_record` carries the
+        flag `pipeline.code_encounter` actually computed and handed to `resolve`."""
+        from app.contracts.source_evidence import ChannelKind, ReadChannel
+        from app.ingestion.source_evidence import SECONDARY_VISION_CHANNEL_ID
+
+        class _FailingReader:
+            def channel(self):
+                return ReadChannel(channel_id=SECONDARY_VISION_CHANNEL_ID,
+                                   kind=ChannelKind.VISION, provider="openai")
+
+            def read_pages(self, page_numbers):
+                raise RuntimeError("provider unavailable")
+
+        document, tmp = _document(_RECALL_TRANSCRIPT, [])   # image-only page
+        self.addCleanup(tmp.cleanup)
+
+        result = _run_recall(
+            _multi_reading(_PRIMARY_ONE_SERVICE),
+            lambda s, u: _multi_reading(_SECOND_SAME_SERVICE),
+            note_text=document.primary_text(), source_evidence=document,
+            source_reader=_FailingReader())
+
+        self.assertEqual(result.consensus["recall_uncovered_pages"], [1])
+        covered_flags = [ln.tie_record.get("document_fully_covered")
+                         for ln in result.lines if ln.tie_record is not None]
+        self.assertTrue(covered_flags, "at least one resolved line must carry a "
+                                       "tie_record to check this against")
+        self.assertTrue(all(flag is False for flag in covered_flags),
+                        "an uncovered page must never let a resolved line's own "
+                        "record report full document coverage")
+
     def test_an_unreadable_independent_read_still_holds_the_claim(self):
         """Codex F7-R3-A, exact-SHA re-review, second pass: a `PageRead` record
         existing was being treated as proof of inspection, but the record's OWN

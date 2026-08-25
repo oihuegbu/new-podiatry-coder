@@ -674,7 +674,14 @@ def code_encounter(
                     line = resolution.resolve(
                         RetrievalRequest(_it, fact, intent_facts=_intent_facts), source,
                         llm=verify_llm, corroborate=corroborate_llm,
-                        dos=date_of_service, reconciliation=source_reconciliation)
+                        dos=date_of_service, reconciliation=source_reconciliation,
+                        # issue #6 F9-R6 Phase 3: real, non-model-self-report page
+                        # coverage -- `consensus` is None whenever there was no second
+                        # reading to measure coverage against, so absence of documentation
+                        # can only ground an elimination when an independent reading
+                        # actually swept every page.
+                        document_fully_covered=(consensus is not None
+                                                and not consensus.recall_uncovered_pages))
             except Exception as exc:
                 return _system_hold_result(encounter_id, date_of_service,
                                            f"retrieval_execution:{fact.fact_id}", exc, source)

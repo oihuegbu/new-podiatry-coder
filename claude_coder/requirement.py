@@ -170,11 +170,13 @@ def validated_requirement(req: DescriptorRequirement, judgement: RequirementJudg
     SAME bar `graph_consensus._spans_support` already holds fact-level evidence to.
     A NOT_DOCUMENTED verdict citing no span is permitted — absence has nothing to
     quote by definition — but validating it here is not, on its own, sufficient to
-    eliminate anything: `resolution._grounded_elimination` (issue #6 F9-R6 Phase 2)
-    never wires NOT_DOCUMENTED into elimination without a "complete page coverage"
-    signal this module deliberately does not invent (explicitly deferred to a
-    future round — trusting a model's self-reported coverage would repeat the exact
-    mistake issue #6 F8-R1 already found and closed for a different mechanism).
+    eliminate anything: `resolution._grounded_elimination` (issue #6 F9-R6 Phase 3)
+    additionally requires `document_fully_covered=True` before a validated,
+    unanimous NOT_DOCUMENTED verdict may eliminate — a fact this module deliberately
+    does not know and cannot supply, since trusting a model's self-reported coverage
+    would repeat the exact mistake issue #6 F8-R1 already found and closed for a
+    different mechanism. The caller alone (`pipeline.code_encounter`, from
+    `graph_consensus.ConsensusReport.recall_uncovered_pages`) may assert coverage.
     """
     if judgement.requirement_id != req.requirement_id:
         return False

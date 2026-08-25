@@ -70,6 +70,27 @@ _GRAMMAR = frozenset({
 })
 
 
+def _phrase_present(term: str, words: set[str]) -> bool:
+    """Whether every token of an axis term is present in the proven text's token set.
+
+    Every axis before issue #6 F9-R6 Phase 4 (laterality, measurement, descriptor
+    words) stated its terms as single tokens, so a bare `term in words` membership
+    test was equivalent to this. `requirement`-derived axes (currently ICD-10-CM
+    `inclusion_term`) state theirs as whole clinical PHRASES ("classic
+    presentation") that a single-token set can never contain as one member -- a
+    bare membership test would silently never match a real, multi-word inclusion
+    term, which would make Phase 4's whole narrowing mechanism inert for the exact
+    axis it was built to add, mirroring the identical class of bug F9-R4-R1 already
+    found and fixed for embedded action-phrase matching elsewhere in this codebase.
+    A bag-of-words check (ignoring adjacency, since `words` is already an unordered
+    set with no adjacency information to check against) is the correct, minimal
+    generalization: for a single-token term it reduces to exact membership,
+    unchanged from before this axis kind existed.
+    """
+    term_tokens = {t for t in re.split(r"[^a-z0-9]+", (term or "").lower()) if t}
+    return bool(term_tokens) and term_tokens <= words
+
+
 def _text_tokens(text: str) -> set[str]:
     """Every token of a PROVEN quotation, plus its singular form, so documented plural
     wording proves a singular descriptor term and vice versa. Short tokens are kept
@@ -187,6 +208,45 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
     return tuple(probes)
 
 
+def _axes_from_requirements(requirements: tuple, codes: set[str],
+                            existing_axes: frozenset) -> tuple[AxisProbe, ...]:
+    """New discriminating axes a compiled REQUIREMENT set states that `discriminating_axes`
+    itself never derives from the candidates alone -- currently the ICD-10-CM
+    `inclusion_term` axis (issue #6 F9-R6 Phase 4), compiled from the Tabular's own
+    governed `inclusionTerm` field via `requirement.compile_requirements`, never a
+    hardcoded term list. Duck-typed against `requirement.DescriptorRequirement` (`.axis`,
+    `.candidate_code`, `.expected`, `.selectable`, `.queryable`) instead of importing
+    that module, which already imports THIS one to build its requirements FROM these
+    same discriminating axes -- importing back here would be circular.
+
+    Grouped exactly the way `discriminating_axes` groups its own probes: an axis counts
+    as discriminating only when the tied candidates' terms actually differ, never when
+    every candidate states the same thing (which proves nothing about which one the
+    document means) or when only one candidate has any term on it at all (silence is
+    never proof, the same rule `AxisProbe` itself documents).
+    """
+    if not requirements:
+        return ()
+    by_axis: dict[str, dict[str, set[str]]] = {}
+    flags: dict[str, list[bool]] = {}
+    for req in requirements:
+        if req.axis in existing_axes or req.candidate_code not in codes:
+            continue
+        by_axis.setdefault(req.axis, {}).setdefault(
+            req.candidate_code, set()).update(req.expected)
+        sel, qry = flags.get(req.axis, (False, False))
+        flags[req.axis] = (sel or req.selectable, qry or req.queryable)
+    probes: list[AxisProbe] = []
+    for axis, terms_by_code in sorted(by_axis.items()):
+        full = {code: tuple(sorted(terms_by_code.get(code, ()))) for code in codes}
+        if len(set(full.values())) < 2:
+            continue        # every candidate silent or identical -- nothing to discriminate
+        selectable, queryable = flags[axis]
+        probes.append(AxisProbe(axis, full, provable=True,
+                                selectable=selectable, queryable=queryable))
+    return tuple(probes)
+
+
 @dataclass
 class TieOutcome:
     """The result of steps 3 and 4, and the material step 5 needs."""
@@ -268,7 +328,7 @@ def provider_query(fact, axes: tuple[AxisProbe, ...]) -> str:
 
 
 def narrow(fact, candidates: list[CandidateCode],
-           reconciliation=None) -> TieOutcome:
+           reconciliation=None, requirements: tuple = ()) -> TieOutcome:
     """Tie policy steps 3 and 4 — re-inspect ONLY the discriminating axes against the
     original document and return the candidate that becomes UNIQUELY ENTAILED.
 
@@ -277,6 +337,16 @@ def narrow(fact, candidates: list[CandidateCode],
     the proven text, and all of them settle to the SAME candidate. An axis nobody
     documented, an axis two candidates each partly claim, and an axis words cannot
     settle at all each leave the tie open — which is step 5, not a coder queue.
+
+    `requirements` (issue #6 F9-R6 Phase 4, optional): a caller that already compiled
+    `requirement.compile_requirements(candidates, source)` for elimination purposes may
+    pass it here too, so the SAME governed axes (currently: ICD-10-CM `inclusion_term`)
+    that can eliminate a candidate can also NARROW a genuine multi-candidate tie —
+    matching laterality's existing dual role instead of leaving it the only axis that
+    can both select and narrow. Merged with `discriminating_axes`' own axes via
+    `_axes_from_requirements`, which only ever adds an axis `discriminating_axes` does
+    not already derive on its own — never a duplicate, never a hardcoded name. Omitted
+    (the default), this behaves exactly as it always has.
 
     Fail-closed at every branch: no discriminating axis, no source-confirmed text,
     nothing documented, or more than one candidate documented all return no winner
@@ -289,6 +359,10 @@ def narrow(fact, candidates: list[CandidateCode],
         return TieOutcome(winner=(unique[0] if unique else None),
                           detail="no tie to narrow")
     axes = discriminating_axes(unique)
+    if requirements:
+        axes = axes + _axes_from_requirements(
+            requirements, {c.code for c in unique},
+            frozenset(a.axis for a in axes))
     if not axes:
         return TieOutcome(
             detail="the tied candidates' authoritative descriptors state no differing "
@@ -316,7 +390,7 @@ def narrow(fact, candidates: list[CandidateCode],
     for probe in axes:
         if not probe.provable:
             continue
-        hits = {code: tuple(t for t in terms if t in words)
+        hits = {code: tuple(t for t in terms if _phrase_present(t, words))
                 for code, terms in probe.terms_by_code.items()}
         documented = [code for code, found in hits.items() if found]
         if documented:
