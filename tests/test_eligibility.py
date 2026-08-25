@@ -380,3 +380,27 @@ def test_retrieval_request_rejects_confidence_and_assertion_mutation():
         mutate(fact)
         with pytest.raises(ValueError):
             RetrievalRequest(intent, fact)                           # release-relevant change -> reject
+
+
+def test_attribute_evidence_change_trips_the_same_mutation_boundary():
+    """Issue #6 F9-R5-B: `graph_consensus.resolve` can change an axis decision from
+    `attribute_evidence`, exactly like an attribute -- a change to it after
+    eligibility must trip the SAME digest mutation boundary a confidence/assertion
+    change does, not silently pass RetrievalRequest's re-check."""
+    import pytest
+    from claude_coder.eligibility import RetrievalRequest, fact_snapshot_digest
+    from claude_coder.models import AttributeEvidence
+
+    fact = _fact(attrs={"performer_id": "p1", "billing_entity_id": "p1",
+                        "laterality": "right"})
+    intent = _eligible_intent(fact)
+    RetrievalRequest(intent, fact)                                   # unchanged -> ok
+
+    before = fact_snapshot_digest(fact)
+    fact.attribute_evidence = {"laterality": (
+        AttributeEvidence(span=EvidenceSpan(text="performed on the right side"),
+                          scope="local", scope_validated=True),)}
+    after = fact_snapshot_digest(fact)
+    assert before != after, "attribute_evidence must change the digest"
+    with pytest.raises(ValueError):
+        RetrievalRequest(intent, fact)                               # changed -> reject

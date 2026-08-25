@@ -103,15 +103,30 @@ class AttributeEvidence:
     `scope` is `"local"` when the quote sits in THIS fact's own sentence, or
     `"inherited"` when the value is stated once in a linked parent/section and this
     fact inherits it. Inheritance is never assumed: it requires `source_relation_id`
-    to name an actual `RelationAssertion` (PART_OF/SAME_EPISODE_AS) connecting the two
-    facts, so an inherited value's provenance is exactly "which relation, and which
-    endpoint's quote" -- reusing `RelationAssertion`'s own span-anchored evidence
-    contract rather than inventing a second one, and nothing here globally propagates
-    a value across the encounter on its own.
+    to name an actual `RelationAssertion` connecting the two facts, so an inherited
+    value's provenance is exactly "which relation, and which endpoint's quote" --
+    reusing `RelationAssertion`'s own span-anchored evidence contract rather than
+    inventing a second one, and nothing here globally propagates a value across the
+    encounter on its own.
+
+    `parent_fact_id` and `source_relation_id` are set at extraction time (a CANDIDATE
+    relation the model also emitted), but only PROVISIONALLY -- `scope_validated`
+    stays False until `provenance.validate_attribute_evidence` (issue #6 F9-R5-A) has
+    independently re-checked, against the fully RECONCILED relations graph, that the
+    named relation actually exists, is `PART_OF` (never `SAME_EPISODE_AS` -- same
+    episode does not imply the same laterality/anatomy/product/count/approach or any
+    other code-changing attribute), is `ASSERTED` (never negated/uncertain), runs in
+    the exact required direction (this fact IS PART_OF the named parent, never the
+    reverse), and is grounded in the source document (not merely unreconciled or
+    co-located). `graph_consensus._attribute_span_support` ignores any inherited entry
+    that never reaches `scope_validated=True` -- an unvalidated claim is treated as if
+    it were never made, falling back to whichever weaker signal already existed.
     """
     span: EvidenceSpan
     scope: str = "local"
+    parent_fact_id: str = ""
     source_relation_id: str = ""
+    scope_validated: bool = False
 
 
 @dataclass

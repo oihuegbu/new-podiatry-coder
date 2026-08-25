@@ -773,5 +773,155 @@ class SelectionUniquenessTest(unittest.TestCase):
         self.assertIsNone(line.documentation_gap)
 
 
+LAT_LEFT = _cand("CAND_LEFT", "assembly service performed on the left", 0.90)
+LAT_RIGHT = _cand("CAND_RIGHT", "assembly service performed on the right", 0.90)
+
+# Issue #6 F9-R6: IDENTICAL descriptors on purpose -- `discriminating_axes` finds no
+# descriptor-level difference at all between these two, so the ONLY requirements
+# compiled for this pair come from the SEPARATE `instructional_terms` (ICD inclusion
+# term) path, proving that path independently of anything `tiebreak.narrow` already
+# handled. Laterality was already `selectable=True` before this phase existed
+# (`tiebreak.narrow` alone already grounds it) -- a laterality-differing fixture
+# would prove nothing NEW, which is why the positive-path test below uses this one.
+DX_ALPHA = CandidateCode("SYNDX1", "icd10", "condition alpha", score=0.9,
+                         source="retrieval")
+DX_BETA = CandidateCode("SYNDX2", "icd10", "condition alpha", score=0.9,
+                        source="retrieval")
+
+
+def _icd_source(*candidates, instructional_terms=None):
+    return MockSource(
+        records={(c.code, "icd10"): {"active": True, "long_description": c.descriptor}
+                for c in candidates},
+        retrieval={("*", "icd10"): list(candidates)},
+        instructional_terms=instructional_terms or {})
+
+
+class RequirementGroundedEliminationTest(unittest.TestCase):
+    """Issue #6 F9-R6, Phase 2: a candidate whose own authoritative record's
+    mandatory (selectable) requirement both independent evaluators validate as
+    CONTRADICTED by the reconciled documentation may now be eliminated intrinsically
+    -- without a raw descriptor-token comparison against a winner. The positive-path
+    test uses ICD `inclusion_term` requirements specifically because that is the
+    genuinely NEW grounding capability this phase adds (see `DX_ALPHA`/`DX_BETA`'s
+    comment) -- descriptor_term stays deliberately non-selectable, unchanged, per
+    this same engagement's earlier, hard-won finding that raw descriptor words are
+    never typed clinical evidence."""
+
+    ALPHA_DOCUMENTED = "condition alpha, classic presentation documented"
+
+    def _resolve(self, primary, second, reconciliation=None,
+                terms=None):
+        fact = _fact("condition alpha", self.ALPHA_DOCUMENTED, kind=FactKind.DIAGNOSIS)
+        source = _icd_source(DX_ALPHA, DX_BETA, instructional_terms=(
+            terms if terms is not None else
+            {"SYNDX1": {"classic presentation"}, "SYNDX2": {"modern presentation"}}))
+        return resolve(_request(fact), source,
+                       llm=_pinned(primary, "provider-a"),
+                       corroborate=_pinned(second, "provider-b"),
+                       reconciliation=(reconciliation
+                                       if reconciliation is not None
+                                       else _agreed("span-0")))
+
+    def test_a_unanimous_validated_contradiction_releases(self):
+        """Both evaluators name the standard elimination AND independently, validly
+        report the loser's own inclusion-term requirement as contradicted, citing
+        the real reconciled span -- Codex's core acceptance case, on the axis this
+        phase actually adds grounding for."""
+        # `pick=1` ALONE (no `entails=`): DX_ALPHA/DX_BETA share byte-identical
+        # descriptors, so an `entails(descriptor)` check cannot tell them apart --
+        # `pick`-only mode is `verdict()`'s way of saying "entailed: [1] only",
+        # which correctly puts option 2 in the STANDARD contract's "eliminated"
+        # list too, so `_uniqueness_view`'s pre-gate (every judge NAMED a reason)
+        # is satisfied and `_grounded_elimination` is actually reached.
+        judge = _sv.judge(pick=1,
+                          requirement_status={"inclusion_term:SYNDX2": "contradicted"})
+        line = self._resolve(judge, judge)
+        self.assertEqual(line.chosen.code if line.chosen else None, "SYNDX1",
+                         line.rationale)
+        self.assertIn("SYNDX2", line.tie_record["eliminated"])
+        self.assertIn("requirement", line.tie_record["eliminated"]["SYNDX2"])
+
+    def test_evaluators_disagreeing_on_the_requirement_still_holds(self):
+        """One evaluator reports contradicted, the other unresolved -- not unanimous,
+        so the candidate stays standing exactly as the fail-closed contract requires."""
+        primary = _sv.judge(pick=1,
+                            requirement_status={"inclusion_term:SYNDX2": "contradicted"})
+        second = _sv.judge(pick=1,
+                           requirement_status={"inclusion_term:SYNDX2": "unresolved"})
+        line = self._resolve(primary, second)
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
+
+    def test_only_one_evaluator_answering_the_requirement_still_holds(self):
+        """The second evaluator's response never mentions the requirement at all
+        (no "requirements" key) -- "not every evaluator answered" must hold, not
+        silently treat silence as agreement."""
+        primary = _sv.judge(pick=1,
+                            requirement_status={"inclusion_term:SYNDX2": "contradicted"})
+        second = _sv.judge(pick=1)
+        line = self._resolve(primary, second)
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
+
+    def test_a_disagreed_reconciliation_of_the_cited_span_still_holds(self):
+        """The evaluators cite the right span and unanimously say contradicted, but
+        the ORIGINAL PAGE disagrees with that quotation -- validation must refuse,
+        never ground an elimination the page itself contradicts."""
+        judge = _sv.judge(pick=1,
+                          requirement_status={"inclusion_term:SYNDX2": "contradicted"})
+        line = self._resolve(judge, judge, reconciliation=_disagreed("span-0"))
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
+
+    def test_supported_status_never_eliminates_anything(self):
+        """A requirement judged SUPPORTED (not CONTRADICTED) grounds nothing -- only
+        a unanimous, validated CONTRADICTED verdict may eliminate."""
+        judge = _sv.judge(pick=1,
+                          requirement_status={"inclusion_term:SYNDX2": "supported"})
+        line = self._resolve(judge, judge)
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
+
+    def test_not_documented_status_never_eliminates_anything_this_phase(self):
+        """NOT_DOCUMENTED is deliberately never wired into elimination in Phase 2 --
+        it needs a "complete page coverage" signal this codebase does not yet have
+        (explicitly deferred in the F9-R6 plan)."""
+        judge = _sv.judge(pick=1,
+                          requirement_status={"inclusion_term:SYNDX2": "not_documented"})
+        line = self._resolve(judge, judge)
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
+
+    def test_no_typed_requirements_falls_back_to_pre_existing_behavior_unchanged(self):
+        """The graceful-degradation confirmation: two candidates differing only on an
+        untyped descriptor word (no selectable requirement compiles at all, exactly
+        `SelectionUniquenessTest`'s SYN_A/SYN_B fixture) behave exactly as before
+        this phase existed -- a named elimination plus a raw word hit still cannot
+        release."""
+        only_one = lambda d: _ONE in d                          # noqa: E731
+        fact = _fact("assembly service",
+                     "assembly service performed, including component one")
+        line = resolve(_request(fact), _source(SYN_A, SYN_B),
+                       llm=_pinned(_judge(only_one), "provider-a"),
+                       corroborate=_pinned(_judge(only_one), "provider-b"),
+                       reconciliation=_agreed("span-0"))
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
+
+    def test_laterality_still_grounds_through_the_pre_existing_path_unchanged(self):
+        """Confirms this phase's new code does not disturb the ALREADY-selectable
+        laterality axis, which `tiebreak.narrow` alone already grounded before F9-R6
+        existed -- this is a regression check, not proof of new capability."""
+        fact = _fact("assembly service", "assembly service performed on the left")
+        judge = _sv.judge(entails=lambda d: "left" in d, prefer=lambda d: "left" in d)
+        line = resolve(_request(fact), _source(LAT_LEFT, LAT_RIGHT),
+                       llm=_pinned(judge, "provider-a"),
+                       corroborate=_pinned(judge, "provider-b"),
+                       reconciliation=_agreed("span-0"))
+        self.assertEqual(line.chosen.code if line.chosen else None, "CAND_LEFT",
+                         line.rationale)
+
+
 if __name__ == "__main__":
     unittest.main()

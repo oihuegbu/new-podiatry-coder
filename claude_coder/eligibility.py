@@ -82,7 +82,8 @@ class ClaimLineIntent:
     fact_digest: str = ""
 
 
-_SNAPSHOT_DIGEST_VERSION = "fsd-v3"   # v3: added governed_terms (issue #6 F7-R3-C4)
+_SNAPSHOT_DIGEST_VERSION = "fsd-v4"   # v3: added governed_terms (issue #6 F7-R3-C4)
+                                      # v4: added attribute_evidence (issue #6 F9-R5-B)
 
 
 def fact_snapshot_digest(fact) -> str:
@@ -91,9 +92,12 @@ def fact_snapshot_digest(fact) -> str:
     kind, clinical action, disposition, assertion certainty and experiencer, scalar and
     per-axis confidences (they set the post-retrieval autonomy floor), ALL attributes
     (measurements + actor ids live here), governed alternate wording (issue #6 F7-R3-C4:
-    it changes what retrieval actually queries for, exactly like an attribute would), and
-    ORDERED anchored evidence-span identity (order preserved so a reorder is detected).
-    (Codex F6-R7.)"""
+    it changes what retrieval actually queries for, exactly like an attribute would),
+    per-attribute source evidence (issue #6 F9-R5-B: v4 -- `graph_consensus.resolve`
+    can change an axis decision from this, exactly like an attribute would, so a change
+    to it after eligibility must trip this same mutation boundary), and ORDERED anchored
+    evidence-span identity (order preserved so a reorder is detected). (Codex F6-R7.)"""
+    from app.contracts.claim_bundle import attribute_evidence_records
     evidence = [
         (str(getattr(sp, "span_id", "") or ""),
          str(getattr(sp, "text_sha256", "") or
@@ -112,6 +116,7 @@ def fact_snapshot_digest(fact) -> str:
         "axis_confidence": dict(getattr(fact, "axis_confidence", None) or {}),
         "attributes": fact.attributes or {},
         "governed_terms": governed_terms,
+        "attribute_evidence": attribute_evidence_records(fact),
         "evidence": evidence,
     }
     return hashlib.sha256(

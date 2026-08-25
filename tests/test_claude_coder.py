@@ -649,6 +649,87 @@ class ConceptRelationIndexTest(unittest.TestCase):
         self.assertEqual(idx.relation("leaf structure", "no such term"), "unresolved")
         self.assertEqual(idx.relation("no such term", "leaf structure"), "unresolved")
 
+    # ---- match_longest / embedded=True (issue #6 F9-R4-R1) --------------------------
+    def test_match_longest_finds_a_governed_term_embedded_in_a_longer_sentence(self):
+        """Codex's exact reopened gap: `match` requires the WHOLE string to equal a
+        term, so a real action description ("performed leaf structure today") never
+        matched anything. `match_longest` scans for the phrase anywhere inside it."""
+        idx = self._index()
+        m = idx.match_longest("the surgeon performed leaf structure today without incident")
+        self.assertEqual(m.candidates, ("C3",))
+        self.assertTrue(m.method.startswith("token_scan"))
+
+    def test_match_longest_prefers_the_longest_matching_phrase(self):
+        """A longer, more specific governed phrase must win over a shorter one it
+        contains -- 'middle structure' must not be matched inside a sentence that
+        actually names the longer, more specific 'leaf structure' phrase elsewhere,
+        and a genuinely longer phrase in the table must be preferred when both could
+        match different windows of the same text."""
+        idx = self._index()
+        # Only "leaf structure" (2 tokens) is present; "structure" alone is not itself
+        # a governed term here, so the longest (and only) real hit is the 2-token one.
+        m = idx.match_longest("today we addressed the leaf structure fully")
+        self.assertEqual(m.candidates, ("C3",))
+
+    def test_match_longest_is_insensitive_to_surrounding_punctuation(self):
+        idx = self._index()
+        m = idx.match_longest("Procedure: leaf structure, performed today.")
+        self.assertEqual(m.candidates, ("C3",))
+
+    def test_match_longest_two_different_embedded_concepts_is_ambiguous(self):
+        """Codex's acceptance criterion: two different governed concepts both occurring
+        in one action description must stay ambiguous/unresolved, never arbitrarily
+        pick one."""
+        idx = self._index()
+        m = idx.match_longest("mentions both leaf structure and other structure today")
+        self.assertEqual(set(m.candidates), {"C3", "C9"})
+        self.assertFalse(m.unique)
+
+    def test_match_longest_falls_back_to_whole_string_match_first(self):
+        """When the WHOLE string already equals a governed term, `match_longest`
+        returns that match directly without falling through to the scan (same
+        candidates/method as plain `match`)."""
+        idx = self._index()
+        direct = idx.match("leaf structure")
+        via_longest = idx.match_longest("leaf structure")
+        self.assertEqual(via_longest.candidates, direct.candidates)
+        self.assertEqual(via_longest.method, direct.method)
+
+    def test_match_longest_no_embedded_phrase_is_none(self):
+        idx = self._index()
+        m = idx.match_longest("an entirely unrelated sentence about something else")
+        self.assertEqual(m.candidates, ())
+        self.assertEqual(m.method, "none")
+
+    def test_embedded_relation_detail_resolves_two_real_action_sentences(self):
+        """The end-to-end reproduction: two full action descriptions, worded
+        differently, each containing the SAME governed phrase, resolve SAME -- exactly
+        the summary-line-vs-narrative-sentence case F9-R4 exists for."""
+        idx = self._index()
+        detail = idx.relation_detail(
+            "the surgeon performed leaf structure today",
+            "leaf structure was addressed without complication",
+            embedded=True)
+        from claude_coder.terminology import CONCEPT_SAME
+        self.assertEqual(detail.verdict, CONCEPT_SAME)
+
+    def test_embedded_relation_detail_ancestor_descendant_never_promotes_to_same(self):
+        idx = self._index()
+        detail = idx.relation_detail(
+            "performed leaf structure today", "performed mid structure today",
+            embedded=True)
+        self.assertEqual(detail.verdict, "ancestor_descendant")
+
+    def test_non_embedded_relation_detail_is_unaffected_by_this_change(self):
+        """The default (embedded=False) path -- used by anatomy's `concept_relation_
+        detail` -- must behave exactly as before: a full sentence does NOT match a
+        bare governed term."""
+        idx = self._index()
+        detail = idx.relation_detail(
+            "the surgeon performed leaf structure today", "leaf structure")
+        from claude_coder.terminology import CONCEPT_UNRESOLVED
+        self.assertEqual(detail.verdict, CONCEPT_UNRESOLVED)
+
 
 def _line(code, kind, descriptor="d", attrs=None, system="cpt"):
     from claude_coder.models import (ClinicalFact, EvidenceSpan, ResolutionMethod,

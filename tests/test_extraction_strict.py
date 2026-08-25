@@ -368,9 +368,11 @@ def test_a_local_scope_entry_needs_no_parent_and_is_kept():
 
 
 def test_an_inherited_entry_resolves_only_against_a_real_relation():
-    """Codex F9-R5: an "inherited" claim is kept ONLY when a real part_of/
-    same_episode_as relation actually connects this fact to the named parent --
-    naming a parent alone is never enough."""
+    """Codex F9-R5/F9-R5-A: an "inherited" claim is kept as a CANDIDATE only when a
+    real, correctly-directed part_of relation actually connects this fact to the
+    named parent -- naming a parent alone is never enough. `scope_validated` is not
+    set here (extraction time, before reconciliation) -- see
+    `provenance.validate_attribute_evidence` for the authoritative check."""
     payload = {
         "facts": [
             _fact(fact_id="F1", description="parent step",
@@ -395,9 +397,9 @@ def test_an_inherited_entry_resolves_only_against_a_real_relation():
 
 
 def test_an_inherited_entry_with_no_matching_relation_is_dropped_not_kept_unproven():
-    """The claimed parent exists as a fact, but NO part_of/same_episode_as relation
-    was actually emitted connecting the two -- the entry must be dropped entirely,
-    never kept as an unproven inheritance claim."""
+    """The claimed parent exists as a fact, but NO part_of relation was actually
+    emitted connecting the two -- the entry must be dropped entirely, never kept as
+    an unproven inheritance claim."""
     payload = {
         "facts": [
             _fact(fact_id="F1", description="parent step"),
@@ -408,6 +410,48 @@ def test_an_inherited_entry_with_no_matching_relation_is_dropped_not_kept_unprov
                       "parent_fact_id": "F1"}]}),
         ],
         "relations": [],
+    }
+    result = extract_note("note", _stub(payload))
+    component = next(f for f in result.facts if f.fact_id == "F2")
+    assert component.attribute_evidence == {}
+
+
+def test_same_episode_as_is_never_a_candidate_relation_for_inheritance():
+    """Issue #6 F9-R5-A: same_episode_as does not imply the same laterality/anatomy/
+    product/count/approach -- only part_of may even become a CANDIDATE relation for
+    an inherited attribute, regardless of direction."""
+    payload = {
+        "facts": [
+            _fact(fact_id="F1", description="parent step"),
+            _fact(fact_id="F2", description="component step",
+                 attributes={"laterality": "right"},
+                 attribute_evidence={"laterality": [
+                     {"text": "performed on the right side", "scope": "inherited",
+                      "parent_fact_id": "F1"}]}),
+        ],
+        "relations": [{"subject_event_id": "F2", "predicate": "same_episode_as",
+                       "object_event_id": "F1", "state": "asserted"}],
+    }
+    result = extract_note("note", _stub(payload))
+    component = next(f for f in result.facts if f.fact_id == "F2")
+    assert component.attribute_evidence == {}
+
+
+def test_a_reversed_part_of_direction_is_never_a_candidate_relation():
+    """Issue #6 F9-R5-A: the relation exists, but runs the WRONG way (the named
+    parent is asserted part_of the component instead of the reverse) -- must never
+    even become a candidate, let alone validate later."""
+    payload = {
+        "facts": [
+            _fact(fact_id="F1", description="parent step"),
+            _fact(fact_id="F2", description="component step",
+                 attributes={"laterality": "right"},
+                 attribute_evidence={"laterality": [
+                     {"text": "performed on the right side", "scope": "inherited",
+                      "parent_fact_id": "F1"}]}),
+        ],
+        "relations": [{"subject_event_id": "F1", "predicate": "part_of",
+                       "object_event_id": "F2", "state": "asserted"}],
     }
     result = extract_note("note", _stub(payload))
     component = next(f for f in result.facts if f.fact_id == "F2")

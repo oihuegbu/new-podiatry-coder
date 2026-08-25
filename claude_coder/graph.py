@@ -105,6 +105,12 @@ class GraphNode:
     attributes: dict[str, Any] = field(default_factory=dict)
     axis_confidence: dict[str, float] = field(default_factory=dict)
     evidence_span_ids: tuple[str, ...] = ()
+    #: Per-attribute source evidence records (issue #6 F9-R5-B), projected through the
+    #: SAME `attribute_evidence_records` function the eligibility digest and release
+    #: certificate use -- so which scoped quote justified a code-changing attribute is
+    #: part of the clinical graph's own evidence lineage, not only inferable from a
+    #: separate, unlinked record.
+    attribute_evidence: tuple[dict[str, Any], ...] = ()
     anchored: bool = False
     #: Where in the ORIGINAL document the quotations behind this node sit, and what an
     #: independent reading of those pages said about them (directive section 1 machinery).
@@ -130,6 +136,7 @@ class GraphNode:
             "attributes": dict(self.attributes),
             "axis_confidence": dict(self.axis_confidence),
             "evidence_span_ids": list(self.evidence_span_ids),
+            "attribute_evidence": [dict(r) for r in self.attribute_evidence],
             "anchored": self.anchored,
             "source_pages": list(self.source_pages),
             "source_page_image_sha256": list(self.source_page_image_sha256),
@@ -437,6 +444,7 @@ class ClinicalGraph:
 # ------------------------------------------------------------------ construction
 def _node_from_fact(fact, intent: ClaimLineIntent | None, encounter_id: str,
                     date_of_service: str | None) -> GraphNode:
+    from app.contracts.claim_bundle import attribute_evidence_records as _attribute_evidence_records
     attributes = dict(getattr(fact, "attributes", None) or {})
     spans = list(getattr(fact, "evidence", None) or [])
     pages: list[int] = []
@@ -471,6 +479,7 @@ def _node_from_fact(fact, intent: ClaimLineIntent | None, encounter_id: str,
         axis_confidence=dict(getattr(fact, "axis_confidence", None) or {}),
         evidence_span_ids=tuple(_clean(getattr(s, "span_id", "")) for s in spans
                                 if _clean(getattr(s, "span_id", ""))),
+        attribute_evidence=tuple(_attribute_evidence_records(fact)),
         anchored=any(getattr(s, "anchored", False) for s in spans),
         source_pages=tuple(pages),
         source_page_image_sha256=tuple(images),

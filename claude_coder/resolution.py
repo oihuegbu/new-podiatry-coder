@@ -911,8 +911,28 @@ def _tie_escalation(fact: ClinicalFact, candidates: list[CandidateCode],
 
 
 def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: CandidateCode,
-                          reconciliation) -> tuple[bool, str]:
-    """Codex F8-R1 (round-9 re-review): a model's NAMED reason for ruling out `loser` is
+                          reconciliation, requirements: tuple = (),
+                          judgements: list = ()) -> tuple[bool, str]:
+    """issue #6 F9-R6: when `requirements` compiled a MANDATORY (`required=True`)
+    requirement for `loser`'s own descriptor, elimination is decided from that first
+    -- intrinsic to the loser, no comparison to `winner` needed -- rather than from
+    the pairwise tiebreak/word-overlap check below. Only reached when EVERY judging
+    model answered the SAME `requirement_id` and `requirement.validated_requirement`
+    independently confirms each answer (the cited clause actually reproduces from
+    the loser's own descriptor, every cited span is reconciled). A unanimous,
+    validated CONTRADICTED verdict grounds the elimination.
+
+    Anything short of that (no compiled requirement for this loser, not every
+    evaluator answered, an unvalidated citation, disagreement among evaluators, or
+    only SUPPORTED/NOT_DOCUMENTED/UNRESOLVED verdicts) falls through to the pairwise
+    check below UNCHANGED -- this is a STRUCTURAL fallback, not a flag: a candidate
+    this phase doesn't yet have a typed answer for is judged exactly as it always
+    was. NOT_DOCUMENTED unanimity is deliberately never wired into elimination here
+    -- it needs a "the evaluators read the complete page" signal this codebase does
+    not yet have, and trusting a model's self-reported coverage would repeat the
+    exact mistake the paragraph below already describes for a different mechanism.
+
+    Codex F8-R1 (round-9 re-review): a model's NAMED reason for ruling out `loser` is
     not, by itself, grounds to remove it from the standing set -- both judging models
     returning SOME non-empty reason string is exactly the "richer JSON shape" of model
     agreement Codex's reproduction showed converting a false elimination into a release.
@@ -953,6 +973,21 @@ def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: Cand
     an anchored-but-disagreed span and an unanchored, un-locatable span are both "the
     reconciliation channel that was supplied could not confirm this," and must both refuse.
     """
+    from . import requirement as _requirement
+    loser_reqs = [r for r in requirements
+                 if r.candidate_code == loser.code and r.required]
+    for req in loser_reqs:
+        outcomes = [rj for j in judgements for rj in j.requirement_judgements
+                   if rj.requirement_id == req.requirement_id]
+        if not outcomes or len(outcomes) < len(judgements):
+            continue        # not every evaluator answered this requirement -- standing
+        if not all(_requirement.validated_requirement(req, rj, reconciliation)
+                  for rj in outcomes):
+            continue        # an uncited or unreproduced clause -- standing
+        statuses = {rj.status for rj in outcomes}
+        if statuses == {_requirement.RequirementStatus.CONTRADICTED}:
+            return True, (f"requirement {req.requirement_id} ({req.axis}) contradicted "
+                          f"by the documentation, both evaluators agree, validated")
     tie = _tiebreak.narrow(fact, [winner, loser], reconciliation)
     if tie.winner is not None and tie.winner.code == winner.code:
         return True, tie.detail
@@ -983,6 +1018,7 @@ def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: Cand
 def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
                      chosen: CandidateCode, judgements: list,
                      eliminated_earlier: dict[str, str], reconciliation=None,
+                     requirements: tuple = (),
                      ) -> tuple[list[CandidateCode], dict[str, str]]:
     """Which shortlisted candidates are STILL ENTAILED once every judging model has
     answered about every one of them, and the NAMED reason each of the others is out.
@@ -1010,7 +1046,8 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
         named = [j.elimination_of(cand.code) for j in judgements]
         if named and all(named):
             grounded, ground_detail = _grounded_elimination(fact, cand, chosen,
-                                                            reconciliation)
+                                                            reconciliation,
+                                                            requirements, judgements)
             if grounded:
                 eliminated[cand.code] = (f"{'; '.join(dict.fromkeys(named))} "
                                          f"(document-confirmed: {ground_detail})")
@@ -1022,7 +1059,8 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
 def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
                        shortlist: list[CandidateCode], judgements: list,
                        eliminated_earlier: dict[str, str], why: str,
-                       corroboration: str, reconciliation) -> ResolvedLine:
+                       corroboration: str, reconciliation,
+                       requirements: tuple = ()) -> ResolvedLine:
     """Release ONLY when exactly one shortlisted candidate is still entailed; otherwise
     hand the survivors to the tie policy the deterministic path already uses.
 
@@ -1033,7 +1071,8 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
     picked this one" is allowed to stand in for uniqueness.
     """
     remaining, eliminated = _uniqueness_view(fact, shortlist, chosen, judgements,
-                                             eliminated_earlier, reconciliation)
+                                             eliminated_earlier, reconciliation,
+                                             requirements)
     # Candidates eliminated BEFORE the shortlist existed (a failed deterministic
     # constraint) belong in the same accounting: the record has to show the whole
     # retrieved pool being disposed of, not only the part the models were shown.
@@ -1118,6 +1157,14 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     shortlist = _active_only(order, source, dos)[:VERIFY_K]
     if not shortlist and unsupported:
         return _bounded_interval_hold(fact, unsupported)
+    # issue #6 F9-R6: compiled ONCE against the whole shortlist and passed
+    # identically to every verifier call below (both models judge the SAME
+    # requirement_ids -- structural, not coincidental) and into uniqueness
+    # settlement. A reselection round's narrower `cands` subset still renders
+    # correctly against this same list (`verify._requirement_options` only shows
+    # entries whose candidate is in the option list actually passed).
+    from . import requirement as _requirement
+    requirements = _requirement.compile_requirements(shortlist, source)
     # code -> the NAMED reason an earlier round's judgement ruled that candidate out.
     # Keyed by code (not a bare set) because a release now has to be able to say WHY every
     # alternative is gone, not merely that it was skipped.
@@ -1133,7 +1180,7 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
         cands = [c for c in shortlist if c.code not in tried]
         if not cands:
             break
-        primary = _verify.select_entailed(fact, cands, source, llm)
+        primary = _verify.select_entailed(fact, cands, source, llm, requirements)
         chosen, why = primary.chosen, primary.reason
         if chosen is None:
             # Tie policy step 5: nothing was entailed, so the useful output is WHICH
@@ -1170,7 +1217,7 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
             # is not told which candidate was picked -- a corroborator asked only "is THIS
             # one entailed?" cannot notice that another candidate is entailed too, which is
             # precisely how a non-unique code used to auto-release (Codex F8-R1).
-            second = _verify.corroborate(fact, cands, source, corroborate)
+            second = _verify.corroborate(fact, cands, source, corroborate, requirements)
             if not second.entails(chosen.code):
                 why2 = (second.elimination_of(chosen.code) or second.reason
                         or "the independent second judgement does not find this "
@@ -1191,7 +1238,7 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
             # against the original document through the same tie policy.
             return _settle_uniqueness(fact, chosen, shortlist, judgements,
                                       {**constraint_eliminated, **tried}, why,
-                                      corroboration, reconciliation)
+                                      corroboration, reconciliation, requirements)
         if missing:
             # The code is the right KIND of service but its descriptor requires an
             # element the note does not state. Re-selecting a code that omits the

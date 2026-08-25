@@ -328,10 +328,19 @@ class PerAttributeSourceEvidence(unittest.TestCase):
     anywhere in the fact's whole (undifferentiated) evidence text. Generic across
     every code-changing axis, not laterality-specific (Codex's explicit correction)."""
 
-    def _entry(self, text, *, span_id, scope="local", source_relation_id=""):
+    def _entry(self, text, *, span_id, scope="local", parent_fact_id="",
+              source_relation_id="", scope_validated=True):
         from claude_coder.models import AttributeEvidence
+        # These tests exercise `_attribute_span_support`'s CONSUMPTION of
+        # attribute_evidence in isolation, not `provenance.validate_attribute_
+        # evidence`'s own validation logic (covered separately in
+        # `AttributeEvidenceValidation`) -- so an entry defaults to already-validated
+        # unless a test explicitly passes `scope_validated=False` to prove the
+        # unvalidated-inherited-entries-are-ignored behavior.
         return AttributeEvidence(span=_span(text, span_id=span_id), scope=scope,
-                                 source_relation_id=source_relation_id)
+                                 parent_fact_id=parent_fact_id,
+                                 source_relation_id=source_relation_id,
+                                 scope_validated=scope_validated)
 
     def test_a_value_proven_only_by_unrelated_evidence_text_no_longer_settles(self):
         """The exact gap Codex named: the fact's whole evidence pool happens to
@@ -445,6 +454,35 @@ class PerAttributeSourceEvidence(unittest.TestCase):
         self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.RESOLVED_FROM_SOURCE)
         self.assertIn("parent-span", laterality.evidence_span_ids)
 
+    def test_an_unvalidated_inherited_entry_is_ignored_not_trusted(self):
+        """Issue #6 F9-R5-A: an inherited entry that has NOT been through
+        `provenance.validate_attribute_evidence` (scope_validated still False, the
+        extraction-time default) must be ignored entirely -- treated as if it were
+        never emitted, falling back to the whole-fact-text check -- never trusted
+        merely because it exists on the fact."""
+        primary = [_fact(
+            "F1", FactKind.PROCEDURE, "component step performed",
+            spans=[_span("The component step was performed without incident",
+                         span_id="p1")],
+            attributes={"laterality": "right"},
+            attribute_evidence={"laterality": (
+                self._entry("performed on the right heel", span_id="parent-span",
+                            scope="inherited", source_relation_id="rel-abc",
+                            scope_validated=False),)})]
+        second = [_fact("S1", FactKind.PROCEDURE, "component step performed",
+                        spans=[_span("component step performed", span_id="s1")],
+                        attributes={})]
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "laterality")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        # Falls back to the whole-fact text, which does NOT state "right" anywhere
+        # (only the inherited-but-unvalidated span does), so it correctly stays
+        # unresolved -- proving the unvalidated entry was truly ignored, not just
+        # deprioritized.
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
+
     def test_a_fact_with_no_attribute_evidence_at_all_is_unaffected(self):
         """Regression guard: a fact that never populates `attribute_evidence` (every
         fact extracted before this field existed, or of a kind that never emits it)
@@ -463,6 +501,52 @@ class PerAttributeSourceEvidence(unittest.TestCase):
         laterality = next(r for r in resolutions if r.axis == "laterality")
         self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.RESOLVED_FROM_SOURCE)
         self.assertEqual(laterality.accepted_value, "left")
+
+
+class AttributeEvidenceGraphAndCertificateLineage(unittest.TestCase):
+    """Issue #6 F9-R5-B: per-attribute evidence is part of the clinical graph's own
+    evidence lineage and the release certificate, projected through the SAME shared
+    function the eligibility digest uses -- never invisible to one consumer while
+    visible to another."""
+
+    def test_graph_node_carries_attribute_evidence_records(self):
+        from claude_coder.models import AttributeEvidence
+        entry = AttributeEvidence(
+            span=_span("performed on the right side", span_id="attr-1"),
+            scope="local", scope_validated=True)
+        fact = _fact("F1", FactKind.PROCEDURE, "procedure performed",
+                    spans=[_span("procedure performed today", span_id="p1")],
+                    attributes={"laterality": "right"},
+                    attribute_evidence={"laterality": (entry,)})
+        g = _graph([fact], [])
+        node = g.nodes["F1"]
+        self.assertEqual(len(node.attribute_evidence), 1)
+        record = node.attribute_evidence[0]
+        self.assertEqual(record["axis"], "laterality")
+        self.assertEqual(record["span_id"], "attr-1")
+        self.assertTrue(record["scope_validated"])
+        # Also present in the node's own as_record() serialization.
+        self.assertEqual(len(node.as_record()["attribute_evidence"]), 1)
+
+    def test_certificate_line_carries_attribute_evidence_records(self):
+        from claude_coder import certificate
+        from claude_coder.models import (AttributeEvidence, CandidateCode, CodingResult,
+                                         ResolutionMethod, ResolvedLine)
+        entry = AttributeEvidence(
+            span=_span("performed on the right side", span_id="attr-1"),
+            scope="local", scope_validated=True)
+        fact = _fact("F1", FactKind.PROCEDURE, "procedure performed",
+                    spans=[_span("procedure performed today", span_id="p1")],
+                    attributes={"laterality": "right"},
+                    attribute_evidence={"laterality": (entry,)})
+        line = ResolvedLine(fact=fact, chosen=CandidateCode("X1", "cpt", "descriptor", 0.9),
+                            method=ResolutionMethod.DETERMINISTIC, units=1)
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14", lines=[line])
+        cert = certificate.build_certificate(result, "procedure performed today")
+        billed = cert["lines"][0]
+        self.assertEqual(len(billed["attribute_evidence"]), 1)
+        self.assertEqual(billed["attribute_evidence"][0]["axis"], "laterality")
+        self.assertEqual(billed["attribute_evidence"][0]["span_id"], "attr-1")
 
 
 # ---------------------------------------------------------------------------

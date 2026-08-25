@@ -468,22 +468,25 @@ def _attribute_span_support(fact, attr_name: str, reconciliation
     to evidence anchored specifically to `attr_name` rather than the fact's whole
     evidence pool -- so a value stated once in a scoped heading/parent event can be
     proven without one of its tokens happening to also appear elsewhere in the fact's
-    unrelated evidence text. Returns `None` (not a tuple) when the fact has no
+    unrelated evidence text. Returns `None` (not a tuple) when the fact has no USABLE
     `attribute_evidence` for this attribute at all, so the caller falls back to
     `_span_support`'s whole-fact-text check -- a strictly ADDITIVE signal, never a
     narrowing of what already worked.
 
-    An "inherited" entry's span was anchored against a DIFFERENT reading position than
-    a local one would be -- correct, since the whole point is a value stated once on a
-    linked parent/section, not repeated in this fact's own sentence -- so it is judged
-    on its own span exactly like a local one; `source_relation_id` was already
-    validated at extraction time against a real, emitted PART_OF/SAME_EPISODE_AS
-    relation before this entry could ever exist (`extraction.extract_note`).
+    A "local" entry needs no further check -- its evidence is the fact's own sentence.
+    An "inherited" entry is IGNORED here unless `scope_validated` is True (issue #6
+    F9-R5-A): the extraction-time candidate relation match is provisional, and only
+    `provenance.validate_attribute_evidence` -- run after the relations graph is fully
+    reconciled -- may promote it. An unvalidated inherited entry is treated as if it
+    were never emitted, not as a weaker signal.
     """
     entries = (getattr(fact, "attribute_evidence", None) or {}).get(attr_name)
     if not entries:
         return None
-    return _spans_support([e.span for e in entries], reconciliation)
+    usable = [e for e in entries if e.scope == "local" or e.scope_validated]
+    if not usable:
+        return None
+    return _spans_support([e.span for e in usable], reconciliation)
 
 
 def source_support(fact, reconciliation) -> tuple[bool, str, str, tuple[str, ...]]:

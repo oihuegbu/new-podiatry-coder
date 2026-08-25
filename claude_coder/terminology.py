@@ -200,6 +200,13 @@ class ConceptRelationIndex:
         self._exact: dict[str, set[str]] = {}
         self._despaced: dict[str, set[str]] = {}
         self._byset: dict[frozenset[str], set[str]] = {}
+        #: {phrase length in tokens -> {token tuple -> concept ids}} (issue #6 F9-R4-R1):
+        #: the index `match_longest` scans, built from the SAME governed terms as every
+        #: other lookup here -- no separate vocabulary, just a different access pattern
+        #: (an exact multi-token PHRASE occurring anywhere in a longer string, not the
+        #: whole string matching a term).
+        self._phrases: dict[int, dict[tuple[str, ...], set[str]]] = {}
+        self._max_phrase_tokens = 0
         for cid, rec in (concepts or {}).items():
             for term in rec.get("terms") or []:
                 n = _norm(term)
@@ -210,6 +217,10 @@ class ConceptRelationIndex:
                 toks = frozenset(_sing(t) for t in n.split() if len(t) > 2)
                 if toks:
                     self._byset.setdefault(toks, set()).add(cid)
+                phrase = tuple(n.split())
+                if phrase:
+                    self._phrases.setdefault(len(phrase), {}).setdefault(phrase, set()).add(cid)
+                    self._max_phrase_tokens = max(self._max_phrase_tokens, len(phrase))
 
     def terms_for_concept(self, concept_id: str) -> tuple[str, ...]:
         """Every governed term that names `concept_id` -- the reverse lookup a
@@ -241,6 +252,33 @@ class ConceptRelationIndex:
         authoritative codes."""
         return set(self.match(term).candidates)
 
+    def match_longest(self, text: str) -> ConceptMatch:
+        """Like `match`, but for a full action DESCRIPTION rather than a bare term
+        (issue #6 F9-R4-R1): tries a whole-string `match` first (unchanged), and only
+        when that finds nothing, scans `text` for the LONGEST governed phrase occurring
+        anywhere inside it, longest window first so a longer, more specific phrase
+        always wins over a shorter one it contains. Deliberately NOT fuzzy/edit-
+        distance/phonetic -- only an EXACT token-boundary phrase from the governed term
+        table, found at any position. A window (or two different windows at the same
+        width) matching more than one concept leaves `candidates` with all of them,
+        which `ConceptMatch.unique` already turns into a non-unique, non-SAME-eligible
+        result -- no separate ambiguity handling needed here.
+        """
+        direct = self.match(text)
+        if direct.candidates:
+            return direct
+        tokens = tuple(_norm(text).split())
+        for width in range(min(len(tokens), self._max_phrase_tokens), 0, -1):
+            table = self._phrases.get(width)
+            if not table:
+                continue
+            hits: set[str] = set()
+            for start in range(0, len(tokens) - width + 1):
+                hits.update(table.get(tokens[start:start + width], ()))
+            if hits:
+                return ConceptMatch(text, tuple(sorted(hits)), f"token_scan:{width}")
+        return ConceptMatch(text, (), "none")
+
     def _ancestors(self, concept_id: str) -> set[str]:
         seen: set[str] = set()
         stack = [concept_id]
@@ -252,7 +290,8 @@ class ConceptRelationIndex:
                     stack.append(parent)
         return seen
 
-    def relation_detail(self, term_a: str, term_b: str) -> ConceptRelationDetail:
+    def relation_detail(self, term_a: str, term_b: str, *,
+                        embedded: bool = False) -> ConceptRelationDetail:
         """The full auditable basis (see `ConceptRelationDetail`) for one relation
         verdict between two clinical terms.
 
@@ -266,8 +305,17 @@ class ConceptRelationIndex:
         otherwise-unrelated, ambiguous resolutions is likewise RELATED, not SAME: real
         overlap, not a confirmed identity. Absence of any of the above is UNRESOLVED,
         never DISJOINT -- an IS_A hierarchy has no basis to assert opposition.
+
+        `embedded` (issue #6 F9-R4-R1) routes matching through `match_longest`
+        instead of `match` -- for a full action DESCRIPTION (a summary line or a
+        narrative sentence), which is very unlikely to be, in its entirety, exactly
+        one governed term, versus a single free-text VALUE (e.g. an anatomy string),
+        which usually is. Only the caller (`data_access.procedure_relation_detail`)
+        opts into this; every other governed axis keeps the stricter whole-string
+        match unchanged.
         """
-        ma, mb = self.match(term_a), self.match(term_b)
+        matcher = self.match_longest if embedded else self.match
+        ma, mb = matcher(term_a), matcher(term_b)
         a, b = set(ma.candidates), set(mb.candidates)
         if not a or not b:
             return ConceptRelationDetail(CONCEPT_UNRESOLVED, ma, mb, 0.0)

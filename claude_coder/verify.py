@@ -37,6 +37,7 @@ from typing import Callable
 
 from .data_access import CodeSource
 from .models import CandidateCode, ClinicalFact
+from .requirement import DescriptorRequirement, RequirementJudgement, RequirementStatus
 
 LLMFn = Callable[[str, str], str]
 
@@ -270,6 +271,66 @@ as entailed. Judge only the descriptor text; use no knowledge of what a code num
 """ + _SHORTLIST_CONTRACT
 
 
+# ---- per-requirement judging (issue #6 F9-R6) --------------------------------------
+# Additive to the shortlist contract above, never a replacement: when `compile_
+# requirements` finds nothing typed for a shortlist, none of this renders and the
+# prompt is byte-identical to before this existed. `requirement_id` is always ECHOED
+# from the compiled list the caller supplies, never invented by the model -- the same
+# discipline `_option_code` already applies to candidate numbers. `authority_offset`/
+# `source_identity` are validation-only and never shown to the model: exposing them
+# would let a model echo back a plausible-looking offset without truly having found
+# the clause, defeating the point of independently re-checking it.
+_REQUIREMENTS_CONTRACT = """
+
+Additionally, for EACH numbered REQUIREMENT listed below (each tagged with the
+option number it belongs to and its own requirement_id), judge it independently
+from the documentation:
+  - "supported": the documentation states this requirement's expected value.
+  - "contradicted": the documentation states something incompatible with it.
+  - "not_documented": the documentation is simply silent on it.
+  - "unresolved": you cannot tell from the documentation.
+Cite the EXACT bracketed evidence id(s) (e.g. "[e2]") whose text supports a
+supported/contradicted verdict; leave span ids empty for not_documented/unresolved.
+Never invent a requirement_id not listed below, and never cite an evidence id not
+shown above. Add to your JSON:
+"requirements": [{"requirement_id": "<id, copied exactly>",
+ "status": "supported"|"contradicted"|"not_documented"|"unresolved",
+ "span_ids": ["<id>", ...], "quote": "<verbatim quoted text, or empty>"}]"""
+
+
+def _requirement_options(requirements: tuple[DescriptorRequirement, ...],
+                         candidates: list[CandidateCode]) -> str:
+    """Per-option compiled requirements, rendered for the shortlist prompt -- axis
+    and expected value only (never `authority_offset`/`source_identity`, which are
+    validation-only)."""
+    if not requirements:
+        return ""
+    by_code = {c.code: i + 1 for i, c in enumerate(candidates)}
+    lines = []
+    for req in requirements:
+        opt = by_code.get(req.candidate_code)
+        if opt is None:
+            continue
+        tag = "required" if req.required else "optional"
+        lines.append(f"option {opt}, {req.requirement_id}: axis={req.axis!r} "
+                     f"expected={list(req.expected)!r} ({tag})")
+    return "\n".join(lines)
+
+
+def _evidence_options(fact: ClinicalFact) -> tuple[str, dict[str, str]]:
+    """Evidence rendered with a stable bracketed id per quote, and the id->real
+    span_id map used to validate a model's cited ids afterward. An unanchored span
+    (no span_id yet) still renders -- so the model can still read it -- but is never
+    a valid citation target (its id maps to "")."""
+    lines = []
+    id_to_span: dict[str, str] = {}
+    for i, s in enumerate(fact.evidence):
+        tag = f"e{i + 1}"
+        lines.append(f"[{tag}] {s.text}")
+        id_to_span[tag] = str(getattr(s, "span_id", "") or "")
+    return " | ".join(lines), id_to_span
+
+
 def _best_descriptor(source: CodeSource, cand: CandidateCode) -> str:
     try:
         tiers = source.descriptions(cand.code, cand.system)
@@ -300,6 +361,11 @@ class Judgement:
     missing_element: dict[str, bool] = field(default_factory=dict)
     declared: bool = False
     unaccounted: tuple[str, ...] = ()
+    #: This model's verdict on each compiled `DescriptorRequirement` (issue #6
+    #: F9-R6) -- empty for any shortlist `compile_requirements` found nothing typed
+    #: for, or for any judgement made before this field existed. Never trusted on
+    #: its own; see `requirement.validated_requirement`.
+    requirement_judgements: tuple[RequirementJudgement, ...] = ()
 
     def entails(self, code: str) -> bool:
         return code in self.entailed
@@ -320,7 +386,8 @@ class Judgement:
                 "eliminated": dict(sorted(self.eliminated.items())),
                 "missing_element": sorted(k for k, v in self.missing_element.items() if v),
                 "unaccounted": list(self.unaccounted),
-                "reason": self.reason}
+                "reason": self.reason,
+                "requirements": [rj.as_record() for rj in self.requirement_judgements]}
 
 
 def _option_code(raw, codes: list[str]) -> str:
@@ -337,7 +404,53 @@ def _option_code(raw, codes: list[str]) -> str:
     return codes[i - 1] if 1 <= i <= len(codes) else ""
 
 
-def _judgement(ans: dict, candidates: list[CandidateCode]) -> Judgement:
+def _requirement_judgements(ans: dict, requirements: tuple[DescriptorRequirement, ...],
+                            id_to_span: dict[str, str], evaluator_origin: dict
+                            ) -> tuple[RequirementJudgement, ...]:
+    """Parse the `"requirements"` field of a model answer, fail-closed exactly like
+    `_judgement`'s own candidate parsing: an unknown `requirement_id`, a malformed
+    status, or a cited evidence id this shortlist never showed the model are all
+    dropped rather than trusted. A cited id that WAS shown but is unanchored (maps
+    to "" in `id_to_span`) is dropped too -- an unanchored quote is not a real span
+    to validate against."""
+    if not requirements:
+        return ()
+    known_ids = {r.requirement_id for r in requirements}
+    valid_statuses = {s.value for s in RequirementStatus}
+    raw = ans.get("requirements")
+    if not isinstance(raw, list):
+        return ()
+    out: list[RequirementJudgement] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        rid = str(item.get("requirement_id") or "").strip()
+        if not rid or rid not in known_ids or rid in seen:
+            continue
+        status_raw = str(item.get("status") or "").strip().lower()
+        if status_raw not in valid_statuses:
+            continue
+        raw_spans = item.get("span_ids")
+        span_ids: list[str] = []
+        if isinstance(raw_spans, list):
+            for tag in raw_spans:
+                real = id_to_span.get(str(tag).strip())
+                if real and real not in span_ids:
+                    span_ids.append(real)
+        seen.add(rid)
+        out.append(RequirementJudgement(
+            requirement_id=rid, status=RequirementStatus(status_raw),
+            evidence_span_ids=tuple(span_ids),
+            quoted_text=str(item.get("quote") or "").strip(),
+            evaluator_origin=dict(evaluator_origin)))
+    return tuple(out)
+
+
+def _judgement(ans: dict, candidates: list[CandidateCode],
+               requirements: tuple[DescriptorRequirement, ...] = (),
+               id_to_span: dict[str, str] | None = None,
+               evaluator_origin: dict | None = None) -> Judgement:
     """Parse one model answer into a `Judgement`, fail-closed at every branch: an
     out-of-range option number, a non-list verdict, and an elimination with no stated
     reason are all read as saying NOTHING about that candidate."""
@@ -372,24 +485,42 @@ def _judgement(ans: dict, candidates: list[CandidateCode]) -> Judgement:
         reason=str(ans.get("reason") or "").strip(),
         entailed=tuple(entailed), eliminated=eliminated, missing_element=missing,
         declared=declared,
-        unaccounted=tuple(c for c in codes if c not in entailed and c not in eliminated))
+        unaccounted=tuple(c for c in codes if c not in entailed and c not in eliminated),
+        requirement_judgements=_requirement_judgements(
+            ans, requirements, id_to_span or {}, evaluator_origin or {}))
 
 
 def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
-                      source: CodeSource) -> str:
+                      source: CodeSource,
+                      requirements: tuple[DescriptorRequirement, ...] = ()
+                      ) -> tuple[str, dict[str, str]]:
+    """(prompt, id_to_span) -- the id_to_span map is needed by the caller to
+    validate a model's cited requirement evidence ids afterward.
+
+    When `requirements` is empty, renders BYTE-IDENTICAL to before this field
+    existed (plain-text evidence, no REQUIREMENTS section) -- zero format-
+    regression risk for the vast majority of shortlists this phase doesn't touch."""
     opts = "\n".join(f"{i + 1}. {_best_descriptor(source, c)}"
                      for i, c in enumerate(candidates))
-    ev = " | ".join(s.text for s in fact.evidence)
-    return (f"DOCUMENTED FACT: {fact.description}\n"
-            f"ATTRIBUTES: {json.dumps(fact.attributes)}\n"
-            f"EVIDENCE: {ev}\n\n"
-            f"CANDIDATE OFFICIAL DESCRIPTORS:\n{opts}\n\n"
-            f"Which options' descriptors does the documentation entail, which single "
-            f"option would you code (0 if none), and why is each other option out?")
+    if requirements:
+        ev, id_to_span = _evidence_options(fact)
+    else:
+        ev, id_to_span = " | ".join(s.text for s in fact.evidence), {}
+    req_block = _requirement_options(requirements, candidates)
+    req_section = f"\n\nREQUIREMENTS:\n{req_block}" if req_block else ""
+    prompt = (f"DOCUMENTED FACT: {fact.description}\n"
+             f"ATTRIBUTES: {json.dumps(fact.attributes)}\n"
+             f"EVIDENCE: {ev}\n\n"
+             f"CANDIDATE OFFICIAL DESCRIPTORS:\n{opts}"
+             f"{req_section}\n\n"
+             f"Which options' descriptors does the documentation entail, which single "
+             f"option would you code (0 if none), and why is each other option out?")
+    return prompt, id_to_span
 
 
 def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
-                    source: CodeSource, llm: LLMFn) -> Judgement:
+                    source: CodeSource, llm: LLMFn,
+                    requirements: tuple[DescriptorRequirement, ...] = ()) -> Judgement:
     """ONE call over the whole shortlist: which candidates' OFFICIAL descriptors the
     documentation entails, which single one this model would code, and the named reason
     every other candidate is out. Judged on the authoritative descriptor text — the
@@ -397,16 +528,25 @@ def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
 
     Returns the full verdict rather than only the pick, because the caller has to be able
     to ask whether anything ELSE is still entailed. It is still ONE call over the whole
-    shortlist, so the loop stays at two model calls per fact."""
+    shortlist, so the loop stays at two model calls per fact.
+
+    `requirements` (issue #6 F9-R6) is compiled ONCE by the caller and passed
+    identically to `select_entailed`/`corroborate`, so "both evaluators judged the
+    same requirement" is structural (identical `requirement_id`s), not coincidental.
+    When empty, the system/user prompt render byte-identical to before this field
+    existed."""
     if not candidates:
         return Judgement(reason="no candidates")
+    system = _SELECT_SYSTEM + (_REQUIREMENTS_CONTRACT if requirements else "")
+    prompt, id_to_span = _shortlist_prompt(fact, candidates, source, requirements)
     return _judgement(
-        _json(llm(_SELECT_SYSTEM, _shortlist_prompt(fact, candidates, source))),
-        candidates)
+        _json(llm(system, prompt)), candidates, requirements, id_to_span,
+        {"provider": VERIFY_PROVIDER})
 
 
 def corroborate(fact: ClinicalFact, candidates: list[CandidateCode],
-                source: CodeSource, llm: LLMFn) -> Judgement:
+                source: CodeSource, llm: LLMFn,
+                requirements: tuple[DescriptorRequirement, ...] = ()) -> Judgement:
     """The INDEPENDENT second judgement, over the SAME shortlist and the SAME contract.
 
     It is deliberately NOT told which candidate the first model picked: a corroborator that
@@ -416,6 +556,8 @@ def corroborate(fact: ClinicalFact, candidates: list[CandidateCode],
     shortlist survives."""
     if not candidates:
         return Judgement(reason="no candidates")
+    system = _CORROBORATE_SYSTEM + (_REQUIREMENTS_CONTRACT if requirements else "")
+    prompt, id_to_span = _shortlist_prompt(fact, candidates, source, requirements)
     return _judgement(
-        _json(llm(_CORROBORATE_SYSTEM, _shortlist_prompt(fact, candidates, source))),
-        candidates)
+        _json(llm(system, prompt)), candidates, requirements, id_to_span,
+        {"provider": CORROBORATE_PROVIDER})

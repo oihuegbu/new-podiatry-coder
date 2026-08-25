@@ -216,6 +216,8 @@ class CodeSource(Protocol):
 
     def component_relationships(self, code: str, system: str) -> dict[str, set[str]]: ...
 
+    def instructional_terms(self, code: str, system: str) -> tuple[str, ...]: ...
+
     def semantic_class(self, code: str, system: str) -> str | None: ...
 
     def assert_claim_assembly_data_readable(self) -> None: ...
@@ -505,12 +507,19 @@ class AuthoritativeSource:
         `coreference.action_relation_detail` already treats as UNDETERMINED -- the
         same conservative direction event identity already defaults to without
         concept data; see tools/build_snomed_procedure_terms.py.
+
+        Uses `embedded=True` (issue #6 F9-R4-R1): `term_a`/`term_b` here are full
+        action DESCRIPTIONS, not bare terms -- a summary line or a narrative sentence
+        that CONTAINS a governed procedure phrase, not one in its entirety. Without
+        this, `relation_detail`'s whole-string match requires the entire description
+        to equal a governed term verbatim, which real prose essentially never does,
+        leaving this method structurally present but inert against actual notes.
         """
         from . import terminology as _term
         index = self._ensure_procedure_relation_index()
         if not index:
             return {"verdict": _term.CONCEPT_UNRESOLVED, "source_identity": None}
-        detail = index.relation_detail(term_a, term_b)
+        detail = index.relation_detail(term_a, term_b, embedded=True)
         return {
             "verdict": detail.verdict,
             "confidence": detail.confidence,
@@ -1408,6 +1417,59 @@ class AuthoritativeSource:
                 out.setdefault(field, set()).update(refs)
         return out
 
+    def _inclusion_term_map(self) -> dict[str, set[str]]:
+        """{undotted category key -> set of normalized `inclusionTerm` phrases} from the
+        SAME ICD-10-CM Tabular instructional notes table `_excludes1_map`/
+        `_relationship_map` already read -- a closed set of literal phrases the Tabular
+        List states a code's terms specifically COVER (issue #6 F9-R6, requirement
+        compilation). Cached.
+
+        FAIL-CLOSED for the same reason `_excludes1_map` is: a table that parses but
+        declares no inclusion term at all is a schema/field drift, not a real Tabular
+        edition, and must not be read as "no code has inclusion terms".
+        """
+        cache = getattr(self, "_incl", None)
+        if cache is not None:
+            return cache
+        entries, identity = declared_table_snapshot("instructional_notes", "codes",
+                                                    InstructionalNotesUnavailable)
+        cache = {}
+        for key, rec in entries.items():
+            if not isinstance(rec, dict):
+                continue
+            terms = {str(t).strip().lower() for t in (rec.get("inclusionTerm") or [])
+                     if str(t).strip()}
+            if terms:
+                cache[str(key).replace(".", "").upper()] = terms
+        if not cache:
+            raise InstructionalNotesUnavailable(
+                f"authoritative instructional_notes at {_source_path('instructional_notes')} "
+                f"declares no inclusionTerm for any code")
+        self._bound_sources.bind(identity)
+        self._incl = cache
+        return cache
+
+    def instructional_terms(self, code: str, system: str) -> tuple[str, ...]:
+        """The `inclusionTerm` phrases that apply to a diagnosis -- gathered from the
+        code AND its ancestor categories exactly like `excludes1_refs` (a note at a
+        3-character category governs every child code under it). Unlike Excludes1/
+        Excludes2/etc., these name TERMS this code's own clinical concept covers, not
+        other codes -- exactly the shape a descriptor-style requirement needs (issue #6
+        F9-R6). ICD-10-CM only; empty for any other system.
+
+        Raises `InstructionalNotesUnavailable` when the Tabular notes cannot be read,
+        matching `excludes1_refs` -- an empty result must mean "this diagnosis carries
+        no inclusion term", never "nobody could tell us".
+        """
+        if system != "icd10":
+            return ()
+        table = self._inclusion_term_map()
+        undot = str(code).replace(".", "").upper()
+        out: set[str] = set()
+        for length in range(len(undot), 2, -1):        # code, then each ancestor category
+            out |= table.get(undot[:length], set())
+        return tuple(sorted(out))
+
     # -- semantic classification (issue #6, compiled-semantic-layer plan item 1) --
     def _coding_semantics(self) -> dict:
         """The `code_classes` classification config: {class name -> matching rule}.
@@ -1546,6 +1608,7 @@ class MockSource:
                  concept_lookup: dict[str, dict] | None = None,
                  procedure_concept_lookup: dict[str, dict] | None = None,
                  component_relationships: dict[str, dict[str, set]] | None = None,
+                 instructional_terms: dict[str, set] | None = None,
                  semantic_class: dict[str, str] | None = None) -> None:
         self._records = records or {}
         self._retrieval = retrieval or {}
@@ -1588,6 +1651,9 @@ class MockSource:
                 {rel: {str(r).replace(".", "").upper() for r in refs}
                  for rel, refs in (v or {}).items()}
             for k, v in (component_relationships or {}).items()}
+        self._inclusion_term_data = {str(k).replace(".", "").upper():
+                                     {str(t).strip().lower() for t in v}
+                                     for k, v in (instructional_terms or {}).items()}
         self._semantic_class_data = {str(k): str(v)
                                      for k, v in (semantic_class or {}).items()}
 
@@ -1834,6 +1900,15 @@ class MockSource:
             for rel, refs in self._component_rel_data.get(undot[:length], {}).items():
                 out.setdefault(rel, set()).update(refs)
         return out
+
+    def instructional_terms(self, code, system):
+        if system != "icd10" or not self._inclusion_term_data:
+            return ()
+        undot = str(code).replace(".", "").upper()
+        out = set()
+        for length in range(len(undot), 2, -1):
+            out |= self._inclusion_term_data.get(undot[:length], set())
+        return tuple(sorted(out))
 
     def semantic_class(self, code, system):
         return self._semantic_class_data.get(str(code))

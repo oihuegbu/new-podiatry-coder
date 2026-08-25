@@ -216,6 +216,30 @@ def evidence_records(spans: Any) -> list[dict[str, Any]]:
     return out
 
 
+def attribute_evidence_records(fact: Any) -> list[dict[str, Any]]:
+    """ONE canonical, ORDERED record shape for a fact's per-attribute evidence (issue
+    #6 F9-R5-B) -- the `attribute_evidence` analog of `evidence_records` above, used
+    identically by the eligibility mutation-boundary digest, the clinical graph, and
+    the release certificate, so this decisive evidence -- it can change an axis
+    decision, per `graph_consensus.resolve` -- can never be invisible to one consumer
+    while visible to another. Ordered by axis name then by entry position, never by
+    dict iteration order alone, so the digest is reproducible.
+    """
+    out: list[dict[str, Any]] = []
+    for axis in sorted((getattr(fact, "attribute_evidence", None) or {}).keys()):
+        for entry in fact.attribute_evidence[axis]:
+            record = evidence_records([getattr(entry, "span", None)])[0]
+            record.update({
+                "axis": axis,
+                "scope": str(getattr(entry, "scope", "") or ""),
+                "parent_fact_id": str(getattr(entry, "parent_fact_id", "") or ""),
+                "source_relation_id": str(getattr(entry, "source_relation_id", "") or ""),
+                "scope_validated": bool(getattr(entry, "scope_validated", False)),
+            })
+            out.append(record)
+    return out
+
+
 # --------------------------------------------------------------------------
 # enums
 # --------------------------------------------------------------------------

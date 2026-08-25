@@ -5,10 +5,12 @@ quotation, and the point of the relation kernel is that a re-asserted edge accum
 support (never duplicates) while any state disagreement collapses to UNCERTAIN.
 Agnostic — synthetic text and synthetic event ids, no medical code."""
 import json
+from dataclasses import replace
 
 from claude_coder import provenance as prov
-from claude_coder.models import (EvidenceSpan, RelationAssertion, RelationPredicate,
-                                 RelationState, ClinicalFact, FactKind)
+from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,
+                                 FactKind, RelationAssertion, RelationPredicate,
+                                 RelationState)
 
 
 # ------------------------------------------------------------------ anchoring
@@ -148,6 +150,143 @@ def test_distinct_edges_preserved():
             _rel("E1", RelationPredicate.USED_IN, "E2"),
             _rel("E3", RelationPredicate.PART_OF, "E2")]
     assert len(prov.merge_relations(rels)) == 3
+
+
+# ---------------------------------------------- attribute-evidence scope validation
+# Issue #6 F9-R5-A, Codex's exact reopened reproduction: `same_episode_as`, a reversed
+# `part_of`, and a negated `part_of` were all wrongly accepted as authorizing an
+# inherited code-changing attribute. `validate_attribute_evidence` is the sole
+# authority that may set `scope_validated=True`, and must reject every one of these.
+def _attr_evidence(text, *, scope="local", parent_fact_id="", source_relation_id=""):
+    return AttributeEvidence(span=EvidenceSpan(text=text), scope=scope,
+                             parent_fact_id=parent_fact_id,
+                             source_relation_id=source_relation_id)
+
+
+def _component_fact(fact_id, entry):
+    return ClinicalFact(FactKind.PROCEDURE, "component step",
+                        attributes={"laterality": "right"},
+                        attribute_evidence={"laterality": (entry,)}, fact_id=fact_id)
+
+
+def test_a_local_entry_is_always_validated_no_relation_needed():
+    entry = _attr_evidence("performed on the right side")
+    fact = _component_fact("F2", entry)
+    prov.validate_attribute_evidence([fact], [])
+    assert fact.attribute_evidence["laterality"][0].scope_validated is True
+
+
+def test_asserted_correctly_directed_part_of_grounded_in_the_source_succeeds():
+    rel = _rel("F2", RelationPredicate.PART_OF, "F1")
+    rel = replace(rel, reconciliation_status=prov.SOURCE_DIRECTIONAL)
+    entry = _attr_evidence("performed on the right heel", scope="inherited",
+                           parent_fact_id="F1", source_relation_id=rel.relation_id)
+    fact = _component_fact("F2", entry)
+    prov.validate_attribute_evidence([fact], [rel])
+    assert fact.attribute_evidence["laterality"][0].scope_validated is True
+
+
+def test_same_episode_as_never_authorizes_inheritance():
+    """Codex's exact reproduction: same_episode_as does not imply the same
+    laterality/anatomy/product/count/approach -- only part_of may authorize
+    inheritance, however strongly the episode relation is grounded."""
+    rel = _rel("F2", RelationPredicate.SAME_EPISODE_AS, "F1")
+    rel = replace(rel, reconciliation_status=prov.SOURCE_DIRECTIONAL)
+    entry = _attr_evidence("performed on the right heel", scope="inherited",
+                           parent_fact_id="F1", source_relation_id=rel.relation_id)
+    fact = _component_fact("F2", entry)
+    prov.validate_attribute_evidence([fact], [rel])
+    assert fact.attribute_evidence == {}
+
+
+def test_reversed_part_of_direction_never_authorizes_inheritance():
+    """The relation exists, is asserted, and is grounded -- but runs the WRONG way
+    (the named parent is asserted part_of the component, not the reverse)."""
+    rel = _rel("F1", RelationPredicate.PART_OF, "F2")   # reversed: F1 part_of F2
+    rel = replace(rel, reconciliation_status=prov.SOURCE_DIRECTIONAL)
+    entry = _attr_evidence("performed on the right heel", scope="inherited",
+                           parent_fact_id="F1", source_relation_id=rel.relation_id)
+    fact = _component_fact("F2", entry)
+    prov.validate_attribute_evidence([fact], [rel])
+    assert fact.attribute_evidence == {}
+
+
+def test_negated_part_of_never_authorizes_inheritance():
+    rel = _rel("F2", RelationPredicate.PART_OF, "F1", state=RelationState.NEGATED)
+    rel = replace(rel, reconciliation_status=prov.SOURCE_DIRECTIONAL)
+    entry = _attr_evidence("performed on the right heel", scope="inherited",
+                           parent_fact_id="F1", source_relation_id=rel.relation_id)
+    fact = _component_fact("F2", entry)
+    prov.validate_attribute_evidence([fact], [rel])
+    assert fact.attribute_evidence == {}
+
+
+def test_uncertain_part_of_never_authorizes_inheritance():
+    """Conflicting assertions collapse to UNCERTAIN (see merge_relations above) --
+    that collapsed state must not authorize inheritance either."""
+    rel = _rel("F2", RelationPredicate.PART_OF, "F1", state=RelationState.UNCERTAIN)
+    rel = replace(rel, reconciliation_status=prov.SOURCE_DIRECTIONAL)
+    entry = _attr_evidence("performed on the right heel", scope="inherited",
+                           parent_fact_id="F1", source_relation_id=rel.relation_id)
+    fact = _component_fact("F2", entry)
+    prov.validate_attribute_evidence([fact], [rel])
+    assert fact.attribute_evidence == {}
+
+
+def test_ungrounded_part_of_never_authorizes_inheritance():
+    """Correctly asserted and directed, but the source document itself never states
+    the relationship (UNRECONCILED) -- not grounded, so it cannot authorize."""
+    rel = _rel("F2", RelationPredicate.PART_OF, "F1")
+    # reconciliation_status left at its UNRECONCILED default.
+    entry = _attr_evidence("performed on the right heel", scope="inherited",
+                           parent_fact_id="F1", source_relation_id=rel.relation_id)
+    fact = _component_fact("F2", entry)
+    prov.validate_attribute_evidence([fact], [rel])
+    assert fact.attribute_evidence == {}
+
+
+def test_source_colocated_part_of_never_authorizes_inheritance():
+    """Both endpoints are documented in one passage but nothing states the
+    DIRECTIONAL claim -- observational only, not grounded, so it cannot authorize."""
+    rel = _rel("F2", RelationPredicate.PART_OF, "F1")
+    rel = replace(rel, reconciliation_status=prov.SOURCE_COLOCATED)
+    entry = _attr_evidence("performed on the right heel", scope="inherited",
+                           parent_fact_id="F1", source_relation_id=rel.relation_id)
+    fact = _component_fact("F2", entry)
+    prov.validate_attribute_evidence([fact], [rel])
+    assert fact.attribute_evidence == {}
+
+
+def test_a_dropped_relation_never_authorizes_inheritance():
+    """The named relation_id simply does not appear in the final relations list at
+    all (e.g. it was withdrawn) -- an inherited entry naming it is dropped, not kept
+    as an unproven claim."""
+    entry = _attr_evidence("performed on the right heel", scope="inherited",
+                           parent_fact_id="F1", source_relation_id="never-emitted")
+    fact = _component_fact("F2", entry)
+    prov.validate_attribute_evidence([fact], [])
+    assert fact.attribute_evidence == {}
+
+
+def test_unrelated_services_in_one_episode_retain_their_own_attributes():
+    """The full scenario Codex's acceptance list ends on: two services correctly
+    linked only by same_episode_as, with genuinely DIFFERENT lateralities, must each
+    keep their own -- same_episode_as must never let one's evidence answer for the
+    other's axis."""
+    rel = _rel("F2", RelationPredicate.SAME_EPISODE_AS, "F1")
+    rel = replace(rel, reconciliation_status=prov.SOURCE_DIRECTIONAL)
+    left_entry = _attr_evidence("performed on the right heel", scope="inherited",
+                                parent_fact_id="F1", source_relation_id=rel.relation_id)
+    f1 = ClinicalFact(FactKind.PROCEDURE, "parent step",
+                      attributes={"laterality": "right"}, fact_id="F1")
+    f2 = ClinicalFact(FactKind.PROCEDURE, "component step",
+                      attributes={"laterality": "left"},
+                      attribute_evidence={"laterality": (left_entry,)}, fact_id="F2")
+    prov.validate_attribute_evidence([f1, f2], [rel])
+    assert f2.attribute_evidence == {}, (
+        "F2's claimed inheritance from F1 via same_episode_as must not validate, "
+        "leaving F2's own locally-documented 'left' laterality untouched by any "
+        "cross-service evidence")
 
 
 def test_null_repository_is_noop():

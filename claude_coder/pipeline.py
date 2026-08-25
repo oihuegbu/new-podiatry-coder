@@ -311,6 +311,12 @@ def code_encounter(
         relations = _prov.bind_relation_evidence(
             list(extracted.relations) + structural_relations, facts)
         relations = _prov.validate_relations(relations, facts, note_text)
+        # Must run AFTER validate_relations/reconcile_relations: only a RECONCILED
+        # relation carries a trustworthy reconciliation_status and final state (issue
+        # #6 F9-R5-A). Downstream axis consensus trusts scope_validated without
+        # re-deriving it, so this is the one place primary facts' inherited attribute
+        # evidence becomes trustworthy.
+        _prov.validate_attribute_evidence(facts, relations)
         if audit_repository is None:
             from app.core.config import PROVENANCE_DB
             audit_repository = _prov.SqliteAuditRepository(PROVENANCE_DB, strict=True)
@@ -1222,6 +1228,21 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
     _prov.anchor_facts(recall_text, extracted_b.facts, document_version=document_version,
                        reading_channel_id=(recall.channel_id if recall is not None
                                            else None))
+    # Bind, validate, reconcile, and validate attribute evidence for the SECOND
+    # reading's own relations, against the SECOND reading's own text -- the identical
+    # sequence the primary reading goes through, and just as necessary: without it,
+    # `extracted_b.relations` would never be reconciled at all before axis consensus
+    # consumes `extracted_b.facts`' attribute_evidence below (issue #6 F9-R5-A). Must
+    # happen before `_gc.align`/`_gc.compare`, and before `_union.propose`/`admit` (a
+    # recovered event's copied fact carries whatever `scope_validated` state its
+    # source fact already had -- this is the one place that state is ever set for a
+    # second-reading fact).
+    _second_reading_id = recall.channel_id if recall is not None else ""
+    _second_relations = _prov.bind_relation_evidence(extracted_b.relations, extracted_b.facts)
+    _second_relations = _prov.validate_relations(
+        _second_relations, extracted_b.facts, recall_text,
+        readings=({_second_reading_id: recall_text} if _second_reading_id else None))
+    _prov.validate_attribute_evidence(extracted_b.facts, _second_relations)
     # ONE alignment, shared: an event the axis comparison counted as MATCHED must never
     # also be proposed to the union as a new event, and the only way to guarantee that is
     # for both to read the same correspondence rather than recompute it.

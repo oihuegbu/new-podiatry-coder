@@ -52,10 +52,13 @@ For each fact return an object with:
         own sentence; it is "inherited" only when the value is instead stated once
         in a heading or a linked parent event and this fact's own sentence does not
         repeat it — in that case "parent_fact_id" must name that parent fact, and you
-        must ALSO emit a part_of or same_episode_as relation connecting this fact to
-        that exact parent (omit "parent_fact_id" for "local" scope). Never mark a
-        value "inherited" without a real relation behind it, and never fabricate a
-        quote a value is not literally present in.
+        must ALSO emit a part_of relation with THIS fact as subject_event_id and the
+        parent as object_event_id (this fact IS part_of the parent — never the
+        reverse, and never same_episode_as, which does not establish that two events
+        share the same laterality/anatomy/product/count/approach or any other
+        code-changing attribute; omit "parent_fact_id" for "local" scope). Never mark
+        a value "inherited" without a real, correctly-directed part_of relation behind
+        it, and never fabricate a quote a value is not literally present in.
         For an evaluation_management fact, also give the medical-decision-making
         elements when documented: "problems", "data", "risk" each as one of
         straightforward | low | moderate | high, plus "new_patient" (true/false),
@@ -709,25 +712,32 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
                 f"relation #{j} is malformed and cannot be safely dropped: {x!r}")
         rel.assertion_origins = [origin.origin_id]
         relations.append(rel)
-    # Second pass (issue #6 F9-R5): resolve every "inherited"-scope attribute_evidence
-    # entry against the NOW-COMPLETE relations graph. A claimed parent only counts when
-    # a real PART_OF/SAME_EPISODE_AS relation connects this fact and that parent, in
-    # EITHER direction -- inheritance is never assumed from the model naming a parent
-    # alone. An entry whose claimed relation was never actually emitted is dropped
-    # entirely, never silently kept as unproven provenance.
+    # Second pass (issue #6 F9-R5, hardened per F9-R5-A): identify a CANDIDATE relation
+    # for every "inherited"-scope attribute_evidence entry against the NOW-COMPLETE
+    # (but not yet reconciled) relations graph. Only `PART_OF`, in the EXACT required
+    # direction (this fact IS PART_OF the named parent -- `SAME_EPISODE_AS` never
+    # qualifies: same episode does not imply the same laterality/anatomy/product/
+    # count/approach, and an unordered/reversed match would let a value flow the wrong
+    # way). This is a CANDIDATE only -- state, and whether the document actually
+    # grounds the relation, are not yet knowable here (relations have not been
+    # reconciled), so `scope_validated` stays False; `provenance.validate_attribute_
+    # evidence` is the sole authority that may set it True, after reconciliation.
+    # An entry whose claimed parent names no matching PART_OF relation at all is
+    # dropped entirely here, never silently kept as unproven provenance.
     if pending_inherited:
         by_fid = {f.fact_id: f for f in facts}
-        scope_predicates = (RelationPredicate.PART_OF, RelationPredicate.SAME_EPISODE_AS)
         for fid, attr_name, text, parent in pending_inherited:
             fact = by_fid.get(fid)
             if fact is None or parent not in by_fid:
                 continue
-            match = next((r for r in relations if r.predicate in scope_predicates
-                         and {r.subject_event_id, r.object_event_id} == {fid, parent}),
+            match = next((r for r in relations
+                         if r.predicate is RelationPredicate.PART_OF
+                         and r.subject_event_id == fid and r.object_event_id == parent),
                         None)
             if match is None:
                 continue
             entry = AttributeEvidence(span=EvidenceSpan(text=text), scope="inherited",
+                                      parent_fact_id=parent,
                                       source_relation_id=match.relation_id)
             fact.attribute_evidence = {
                 **fact.attribute_evidence,

@@ -25,7 +25,8 @@ from typing import Any
 # identical implementations in two files is the drift class this codebase keeps
 # finding; importing the shared one removes it by construction.
 from app.contracts.claim_bundle import canonical_json as _canonical
-from app.contracts.claim_bundle import content_digest, evidence_records
+from app.contracts.claim_bundle import (attribute_evidence_records, content_digest,
+                                        evidence_records)
 
 from .models import CodingResult
 
@@ -65,6 +66,11 @@ def build_certificate(result: CodingResult, note_text: str,
         # bundle's evidence are the same bytes and can be compared exactly
         # instead of approximately. (F7-R1.)
         "evidence": evidence_records(ln.fact.evidence),
+        # Which scoped quote justified each code-changing attribute (issue #6
+        # F9-R5-B), through the SAME shared projector the eligibility digest and the
+        # clinical graph use -- so a released line can directly show its own
+        # per-attribute justification, not just the fact's whole evidence pool.
+        "attribute_evidence": attribute_evidence_records(ln.fact),
         "authority": ln.chosen.authority,
     } for ln in result.billable_lines]
 

@@ -32,7 +32,8 @@ from typing import Any
 from .checkpoint import (ADOPT_ENV, REQUIRED_ENV, AnchorFormatError, Checkpoint,
                          CheckpointError, checkpoint_adoption_allowed, checkpoint_required,
                          resolve_checkpoint_anchor)
-from .models import EvidenceSpan, RelationAssertion, RelationState
+from .models import (EvidenceSpan, RelationAssertion, RelationPredicate,
+                     RelationState)
 
 
 def _sha(text: str) -> str:
@@ -719,6 +720,63 @@ def validate_relations(relations: list[RelationAssertion], facts: list,
     # one the extraction model supplied. (Codex F6-R3.)
     return reconcile_relations(merge_relations(normalized), facts, note_text,
                                readings=readings)
+
+
+def validate_attribute_evidence(facts: list, relations: list) -> list:
+    """Stamp `scope_validated=True` on every `attribute_evidence` entry that has
+    actually earned trust, IN PLACE (issue #6 F9-R5-A) -- must run AFTER
+    `validate_relations` (which also reconciles), on the SAME `relations` list it
+    returned, never on the raw pre-reconciliation list: only a RECONCILED relation
+    carries a trustworthy `reconciliation_status`, and a merge can also change a
+    relation's `state` (conflicting states collapse to UNCERTAIN).
+
+    A `"local"` entry needs no relation and is always validated -- its evidence is the
+    fact's own sentence. An `"inherited"` entry is validated only when ALL of:
+
+      * a relation with that exact `source_relation_id` exists in `relations`;
+      * its predicate is `PART_OF` -- never `SAME_EPISODE_AS`, which establishes only
+        that two events belong to one encounter, not that they share any specific
+        code-changing attribute (laterality, anatomy, product, count, approach, ...);
+      * its state is `ASSERTED` -- never negated, uncertain, or (after merge) collapsed
+        to uncertain by a conflicting assertion;
+      * its direction is EXACTLY `subject_event_id == fact.fact_id` and
+        `object_event_id == entry.parent_fact_id` -- this fact IS PART_OF the named
+        parent; the reverse direction never authorizes inheritance, matching PART_OF's
+        own directional semantics (a parent is not part of its own component);
+      * its `reconciliation_status` is a member of `GROUNDED_RECONCILIATION_STATUSES`
+        -- the source document itself states the relationship, not merely an
+        unreconciled assertion or bare co-location.
+
+    Anything short of that is DROPPED from the fact's `attribute_evidence` entirely,
+    never kept unvalidated -- an axis-consensus check that later sees an entry at all
+    may trust it was validated; nothing downstream re-derives this.
+    """
+    by_relation = {r.relation_id: r for r in (relations or [])}
+    for fact in facts:
+        raw = getattr(fact, "attribute_evidence", None) or {}
+        if not raw:
+            continue
+        cleaned: dict[str, tuple] = {}
+        for axis, entries in raw.items():
+            kept = []
+            for entry in entries:
+                if entry.scope == "local":
+                    kept.append(replace(entry, scope_validated=True))
+                    continue
+                rel = by_relation.get(entry.source_relation_id)
+                valid = bool(
+                    rel is not None
+                    and rel.state is RelationState.ASSERTED
+                    and rel.predicate is RelationPredicate.PART_OF
+                    and rel.subject_event_id == fact.fact_id
+                    and rel.object_event_id == entry.parent_fact_id
+                    and rel.reconciliation_status in GROUNDED_RECONCILIATION_STATUSES)
+                if valid:
+                    kept.append(replace(entry, scope_validated=True))
+            if kept:
+                cleaned[axis] = tuple(kept)
+        fact.attribute_evidence = cleaned
+    return facts
 
 
 # ---------------------------------------------------- append-only repository seam
