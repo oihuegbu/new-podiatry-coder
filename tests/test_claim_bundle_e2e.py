@@ -1486,6 +1486,172 @@ def test_an_unusable_unit_count_is_refused_not_quietly_billed_as_one():
 
 
 # --------------------------------------------------------------------------
+# issue #6 F9-R8-D/E, Codex's independent re-review of 5ab4a13: the product
+# owner's 3-category external contract, and binding candidate_lines into the
+# certified digest
+# --------------------------------------------------------------------------
+
+def test_every_internal_status_maps_to_the_correct_external_disposition():
+    """Acceptance criterion: exactly 3 external categories, each internal
+    `LineStatus` collapsing to the right one. Pure unit test of the mapping
+    function both `_CodedLine` and `CandidateLine` construction sites use, so
+    the 7-to-3 collapse can never be performed two different ways."""
+    from app.contracts.claim_bundle import ExternalDisposition, LineStatus, external_disposition_of
+
+    expected = {
+        LineStatus.RECOMMENDED: ExternalDisposition.BILLABLE_AND_DEFENSIBLE,
+        LineStatus.CANDIDATES_NEEDING_FACT: ExternalDisposition.CANDIDATE_REQUIRING_FACT,
+        LineStatus.HELD_POLICY_OR_DATA: ExternalDisposition.EXCLUDED,
+        LineStatus.CANDIDATES_UNRESOLVED: ExternalDisposition.EXCLUDED,
+        LineStatus.NO_SUPPORTED_CANDIDATE: ExternalDisposition.EXCLUDED,
+        LineStatus.NONPERFORMED: ExternalDisposition.EXCLUDED,
+        LineStatus.EXCLUDED_BY_RULE: ExternalDisposition.EXCLUDED,
+    }
+    assert set(expected) == set(LineStatus), "every LineStatus must be mapped"
+    for status, disposition in expected.items():
+        got, _stage, reason_code = external_disposition_of(status)
+        assert got is disposition, status
+        if status is LineStatus.RECOMMENDED:
+            assert reason_code == ""
+        else:
+            assert reason_code == status.value.lower()
+
+
+def test_a_nonperformed_fact_surfaces_as_excluded_not_silently_dropped():
+    """issue #6 F9-R8-D: a disposition fact (`fact.billable is False`) used to
+    `continue` out of `candidate_lines` entirely -- the exact silent-erasure
+    defect F9-R7 item 4 already closed for HELD/CANDIDATES_*. Reproduced
+    directly before the fix: this fact never appeared anywhere in the bundle."""
+    from app.contracts.claim_bundle import (
+        AuthorityBinding, ExternalDisposition, LineStatus, SourceDocument,
+        bundle_from_coding_result)
+    from app.contracts.encounter_context import EncounterContext
+    from claude_coder.models import (ClinicalFact, CodingResult, Disposition,
+                                     EvidenceSpan, FactKind, ResolvedLine)
+
+    fact = ClinicalFact(FactKind.PROCEDURE, "synthetic planned procedure",
+                        fact_id="F1", disposition=Disposition.PLANNED,
+                        evidence=[EvidenceSpan("synthetic planned procedure",
+                                               anchored=True, span_id="s1")],
+                        confidence=0.9)
+    assert fact.billable is False
+    line = ResolvedLine(fact, None)
+    result = CodingResult("enc", "2026-03-14", lines=[line])
+
+    bundle = bundle_from_coding_result(
+        result, source_document=SourceDocument(), context=EncounterContext(),
+        authority=AuthorityBinding())
+    assert len(bundle.candidate_lines) == 1, "the fact must not disappear"
+    cl = bundle.candidate_lines[0]
+    assert cl.status == LineStatus.NONPERFORMED
+    assert cl.external_disposition == ExternalDisposition.EXCLUDED
+    assert cl.blocking_stage == "eligibility"
+    assert cl.reason_code == "nonperformed"
+    assert cl.blocking_reason
+
+
+def test_a_rule_excluded_resolved_line_surfaces_with_its_code_still_visible():
+    """issue #6 F9-R8-D: a line that DID resolve but was then excluded by a
+    pipeline rule (`excluded_reason` set -- NCCI bundling, dedup, global-
+    package bundling) used to `continue` out of `candidate_lines` entirely,
+    the same silent-erasure defect as the nonperformed case above. The
+    resolved code must remain visible, and the exact producer-written reason
+    must be carried verbatim, never re-categorized from the free text."""
+    from app.contracts.claim_bundle import (
+        AuthorityBinding, ExternalDisposition, LineStatus, SourceDocument,
+        bundle_from_coding_result)
+    from app.contracts.encounter_context import EncounterContext
+    from claude_coder.models import (CandidateCode, ClinicalFact, CodingResult,
+                                     Disposition, EvidenceSpan, FactKind,
+                                     ResolutionMethod, ResolvedLine)
+
+    fact = ClinicalFact(FactKind.PROCEDURE, "synthetic bundled procedure",
+                        fact_id="F1", disposition=Disposition.PERFORMED,
+                        evidence=[EvidenceSpan("synthetic bundled procedure",
+                                               anchored=True, span_id="s1")],
+                        confidence=0.9)
+    chosen = CandidateCode("BUNDLED1", "cpt", "Synthetic bundled", 0.9, "retrieval")
+    line = ResolvedLine(fact, chosen, method=ResolutionMethod.DETERMINISTIC)
+    line.excluded_reason = "integral to SYNTH_PRIMARY -- always bundled per NCCI"
+    result = CodingResult("enc", "2026-03-14", lines=[line])
+
+    bundle = bundle_from_coding_result(
+        result, source_document=SourceDocument(), context=EncounterContext(),
+        authority=AuthorityBinding())
+    assert bundle.service_lines == ()
+    assert len(bundle.candidate_lines) == 1, "the line must not disappear"
+    cl = bundle.candidate_lines[0]
+    assert cl.status == LineStatus.EXCLUDED_BY_RULE
+    assert cl.external_disposition == ExternalDisposition.EXCLUDED
+    assert cl.blocking_stage == "pipeline"
+    assert cl.reason_code == "excluded_by_rule"
+    assert cl.blocking_reason == line.excluded_reason
+    assert [c.code for c in cl.candidates] == ["BUNDLED1"], (
+        "the resolved code must remain visible even though it is excluded")
+
+
+def test_candidate_line_disposition_reason_candidate_and_authority_are_each_bound_to_the_certified_digest():
+    """issue #6 F9-R8-E: `candidate_lines` was absent from both
+    `CERTIFIED_CLAIM_SECTIONS` and `certified_claim_content()` -- a candidate
+    line's status/reason/UMLS lineage could be edited after certification
+    with the certified digest unchanged. Reproduced directly before the fix:
+    changing a candidate line's status from CANDIDATES_NEEDING_FACT to
+    NO_SUPPORTED_CANDIDATE and replacing its reason left
+    `compute_certified_claim_digest()` byte-identical. Four independent
+    tamper cases, each must change the digest on its own."""
+    from app.contracts.claim_bundle import (
+        AuthorityBinding, ExternalDisposition, LineStatus, SourceDocument,
+        bundle_from_coding_result)
+    from app.contracts.encounter_context import EncounterContext
+    from claude_coder.models import (CandidateCode, ClinicalFact, CodingResult,
+                                     Disposition, EvidenceSpan, FactKind,
+                                     ResolvedLine)
+
+    alt = CandidateCode("ALT1", "cpt", "Alternative candidate", 0.5,
+                        "umls_recall", authority={"matches": [{"cui": "C1"}]})
+    fact = ClinicalFact(FactKind.PROCEDURE, "synthetic ambiguous service",
+                        fact_id="F1", disposition=Disposition.PERFORMED,
+                        evidence=[EvidenceSpan("synthetic ambiguous service",
+                                               anchored=True, span_id="s1")],
+                        confidence=0.9)
+    line = ResolvedLine(fact, None, alternatives=[alt])
+    line.documentation_gap = "please document the approach"
+    result = CodingResult("enc", "2026-03-14", lines=[line])
+
+    bundle = bundle_from_coding_result(
+        result, source_document=SourceDocument(), context=EncounterContext(),
+        authority=AuthorityBinding())
+    assert len(bundle.candidate_lines) == 1
+    baseline = bundle.compute_certified_claim_digest()
+
+    def _tampered(update):
+        c = bundle.candidate_lines[0].model_copy(update=update)
+        return bundle.model_copy(update={"candidate_lines": (c,)})
+
+    # 1. status / external disposition
+    tampered = _tampered({"status": LineStatus.NO_SUPPORTED_CANDIDATE,
+                          "external_disposition": ExternalDisposition.EXCLUDED,
+                          "reason_code": "no_supported_candidate"})
+    assert tampered.compute_certified_claim_digest() != baseline, "status/disposition"
+
+    # 2. reason text
+    tampered = _tampered({"blocking_reason": "a completely different reason"})
+    assert tampered.compute_certified_claim_digest() != baseline, "blocking_reason"
+
+    # 3. candidate code
+    c = bundle.candidate_lines[0]
+    tampered = _tampered(
+        {"candidates": (c.candidates[0].model_copy(update={"code": "ALT2"}),)})
+    assert tampered.compute_certified_claim_digest() != baseline, "candidate code"
+
+    # 4. UMLS authority lineage
+    tampered = _tampered({"candidates": (c.candidates[0].model_copy(
+        update={"authority": {"matches": [{"cui": "DIFFERENT"}]}}),)})
+    assert tampered.compute_certified_claim_digest() != baseline, "UMLS authority"
+
+
+
+# --------------------------------------------------------------------------
 # directive section 6 -- the claim binds the compiled database it queried, and a
 # database that cannot be certified stops the DEPLOYED entrypoint, not just a unit test
 # --------------------------------------------------------------------------

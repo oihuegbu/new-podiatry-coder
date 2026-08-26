@@ -1258,27 +1258,157 @@ class PerLineStatusClassification(unittest.TestCase):
         self.assertIn("corroborator disagreed", unresolved.blocking_reason)
 
     def test_an_uncertainty_on_one_line_never_blocks_an_unrelated_recommended_line(self):
-        """The tie (F3) and the unsupported concept (F4) must never appear in
-        `release_blockers()` -- only a HELD line (F2) and the usual structural
-        checks may. An uncertainty on one documented event must never erase or
-        block an independently defensible one elsewhere in the same claim."""
-        from app.contracts.claim_bundle import (
-            LineStatus, ReleaseDestination, ReleaseStatus)
+        """issue #6 F9-R8-A, Codex's independent re-review of 5ab4a13: this test
+        used to force `bundle.release` to `AUTO_READY` via `model_copy`,
+        bypassing the REAL autonomy controller entirely -- a fair catch, since
+        it proved only that `release_blockers()` doesn't inspect
+        `candidate_lines`, not that the actual release DECISION ever reaches
+        AUTO_READY with an unrelated uncertainty still open. Drives the real
+        `autonomy.decide()` instead: none of F3/F4/F5 carry any graph
+        relationship to F1 (no relations at all in this fixture), so they must
+        be ISOLATED, non-blocking ambiguities -- F1 still reaches AUTO_READY.
+        F2 (HELD) is a different, unchanged mechanism (`submission_held_lines`
+        is always blocking) and correctly still blocks."""
+        from claude_coder.autonomy import decide
         result = self._result()
+        result.gates = []
+        decide(result, source=None)
+        self.assertEqual(result.destination.value, "PROVIDER_QUERY",
+                         result.notes)
+        self.assertEqual([ln.chosen.code for ln in result.billable_lines], ["REC1"],
+                         "F1 must remain billable -- F3/F4/F5 have no documented "
+                         "relationship to it")
+        blocking_subjects = {r["subject"] for r in result.routing if r["blocking"]}
+        non_blocking_subjects = {r["subject"] for r in result.routing if not r["blocking"]}
+        self.assertIn(held.description if (held := result.lines[1].fact) else "",
+                      blocking_subjects)
+        for isolated_fact_id in ("F3", "F4", "F5"):
+            line = next(ln for ln in result.lines if ln.fact.fact_id == isolated_fact_id)
+            self.assertIn(line.fact.description, non_blocking_subjects,
+                         f"{isolated_fact_id} has no documented relationship to F1 and "
+                         f"must not block it")
         bundle = self._bundle(result)
-        # Force the release status the safety-net check inspects, isolating
-        # exactly what it does and does not fire on.
-        bundle = bundle.model_copy(update={
-            "release": ReleaseStatus(destination=ReleaseDestination.AUTO_READY,
-                                     producer_releasable=True)})
-        blockers = bundle.release_blockers()
-        self.assertTrue(any("HELD" in b for b in blockers), blockers)
-        self.assertFalse(any("F3" in b or "ALT1" in b or "gamma" in b
-                             for b in blockers), blockers)
-        self.assertFalse(any("F4" in b or "delta" in b or "no candidate" in b
-                             for b in blockers), blockers)
-        self.assertFalse(any("F5" in b or "epsilon" in b or "ALT3" in b
-                             for b in blockers), blockers)
+        self.assertEqual([ln.code for ln in bundle.service_lines], ["REC1"])
+
+
+# ---------------------------------------------------------------------------
+class DependencyScopedPartialRelease(unittest.TestCase):
+    """issue #6 F9-R8-A, Codex's independent re-review of 5ab4a13: an
+    unresolved/gate-held fact blocks ONLY the facts it can actually affect --
+    the same clinical episode (via the graph's own edges) or a procedure a
+    gate explicitly named -- never the whole encounter by default. The four
+    cases the reviewer's own acceptance criterion names, each driven through
+    the REAL `autonomy.decide()`."""
+
+    def test_a_shared_episode_entanglement_blocks_the_affected_set(self):
+        """F1 (resolved) is PART_OF F2 (unresolved) -- a real, documented
+        clinical relationship. Both must be excluded from this claim; neither
+        releases independently of the other."""
+        from claude_coder.models import (CandidateCode, CodingResult,
+                                         RelationAssertion, RelationPredicate,
+                                         RelationState, ResolutionMethod, ResolvedLine)
+        from claude_coder.autonomy import decide
+
+        f1 = _fact("F1", FactKind.PROCEDURE, "procedure alpha",
+                  spans=[_span("alpha performed", span_id="sp-F1")])
+        f2 = _fact("F2", FactKind.PROCEDURE, "procedure beta",
+                  spans=[_span("beta performed", span_id="sp-F2")])
+        facts = [f1, f2]
+        rel = RelationAssertion(subject_event_id="F2", predicate=RelationPredicate.PART_OF,
+                                object_event_id="F1", state=RelationState.ASSERTED,
+                                evidence_span_ids=["sp-F1", "sp-F2"])
+        intents = eligibility.evaluate(facts, [rel], "enc", "2026-03-14")
+        episodes, _ = eligibility.build_episodes(facts, [rel], "enc", "2026-03-14")
+        compiled = graph.build_graph(facts, [rel], intents, encounter_id="enc",
+                                     date_of_service="2026-03-14", episodes=episodes,
+                                     extraction_schema_version="v1",
+                                     relation_grammar_version="v1")
+        lines = [
+            ResolvedLine(fact=f1, chosen=CandidateCode("REC1", "cpt", "alpha"),
+                        method=ResolutionMethod.DETERMINISTIC),
+            ResolvedLine(fact=f2, chosen=None, method=ResolutionMethod.ABSTAINED,
+                        alternatives=[CandidateCode("ALT1", "cpt", "beta v1")],
+                        documentation_gap="which version of beta was performed?"),
+        ]
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14",
+                              lines=lines, gates=[], graph=compiled,
+                              claim_line_intents=list(intents), relations=[rel])
+        decide(result, source=None)
+        self.assertEqual(result.billable_lines, [],
+                         "F1 is entangled with the unresolved F2 via a documented "
+                         "PART_OF relationship and must not release alone")
+        self.assertIsNotNone(lines[0].excluded_reason)
+
+    def test_an_unresolved_qualifying_diagnosis_blocks_only_its_dependent_procedure(self):
+        """Procedure A has its OWN resolved, record-grounded diagnosis link and
+        stays independently billable. Procedure B's diagnosis is unresolved --
+        B alone is excluded, named by `medical_necessity_gate`'s own
+        `affected_fact_ids`, not the whole encounter. `diagnosis B` itself
+        stays a genuine open question (unresolved diagnoses keep their
+        existing, deliberately conservative blocking default -- see
+        `dx_non_material`), so the overall destination is PROVIDER_QUERY, not
+        AUTO_READY; the property under test is that PA/DXA1 are NOT entangled
+        into that hold."""
+        from claude_coder.models import (CandidateCode, CodingResult,
+                                         RelationAssertion, RelationPredicate,
+                                         RelationState, ResolutionMethod, ResolvedLine)
+        from claude_coder import gates as gates_mod
+        from claude_coder.autonomy import decide
+
+        proc_a = _fact("PA", FactKind.PROCEDURE, "procedure A",
+                      spans=[_span("procedure A performed", span_id="sp-PA")])
+        proc_b = _fact("PB", FactKind.PROCEDURE, "procedure B",
+                      spans=[_span("procedure B performed", span_id="sp-PB")])
+        dx_a = _fact("DXA", FactKind.DIAGNOSIS, "diagnosis A",
+                    spans=[_span("diagnosis A documented", span_id="sp-DXA")])
+        dx_b = _fact("DXB", FactKind.DIAGNOSIS, "diagnosis B",
+                    spans=[_span("diagnosis B documented", span_id="sp-DXB")])
+        rel = RelationAssertion(
+            subject_event_id="DXA", predicate=RelationPredicate.REASON_FOR,
+            object_event_id="PA", state=RelationState.ASSERTED,
+            evidence_span_ids=["sp-DXA", "sp-PA"], confidence=0.95,
+            reconciliation_status="source_directional", reconciliation_evidence=["sp-PA"])
+        lines = [
+            ResolvedLine(fact=proc_a, chosen=CandidateCode("CPT_A", "cpt", "procedure A"),
+                        method=ResolutionMethod.DETERMINISTIC),
+            ResolvedLine(fact=proc_b, chosen=CandidateCode("CPT_B", "cpt", "procedure B"),
+                        method=ResolutionMethod.DETERMINISTIC),
+            ResolvedLine(fact=dx_a, chosen=CandidateCode("DXA1", "icd10", "diagnosis A"),
+                        method=ResolutionMethod.DETERMINISTIC),
+            ResolvedLine(fact=dx_b, chosen=None, method=ResolutionMethod.ABSTAINED,
+                        alternatives=[CandidateCode("DXB1", "icd10", "diagnosis B v1")],
+                        documentation_gap="which diagnosis variant?"),
+        ]
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14",
+                              lines=lines, relations=[rel], graph=None)
+        result.gates = [gates_mod.medical_necessity_gate(result, source=None)]
+        decide(result, source=None)
+        self.assertEqual(result.destination.value, "PROVIDER_QUERY", result.notes)
+        self.assertEqual(sorted(ln.chosen.code for ln in result.billable_lines),
+                         ["CPT_A", "DXA1"],
+                         "procedure A has its own independent qualifying diagnosis "
+                         "and must release; procedure B, lacking one, must not")
+        self.assertIsNone(lines[0].excluded_reason)
+        self.assertIsNotNone(lines[1].excluded_reason)
+
+    def test_a_hard_gate_failure_still_blocks_the_whole_encounter(self):
+        """Encounter-wide integrity failures are UNCHANGED by this round: a hard
+        gate stop still dominates everything, regardless of any per-fact
+        dependency closure."""
+        from claude_coder.models import (CandidateCode, CodingResult, GateResult,
+                                         Outcome, ResolutionMethod, ResolvedLine)
+        from claude_coder.autonomy import decide
+
+        f1 = _fact("F1", FactKind.PROCEDURE, "procedure alpha",
+                  spans=[_span("alpha performed", span_id="sp-F1")])
+        lines = [ResolvedLine(fact=f1, chosen=CandidateCode("REC1", "cpt", "alpha"),
+                             method=ResolutionMethod.DETERMINISTIC)]
+        hard_gate = GateResult("ncci_ptp", Outcome.BLOCKED, "hard failure", "ncci")
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14",
+                              lines=lines, gates=[hard_gate])
+        decide(result, source=None)
+        self.assertEqual(result.destination.value, "BLOCKED")
+        self.assertEqual(result.verdict.value, "BLOCKED")
 
 
 # ---------------------------------------------------------------------------

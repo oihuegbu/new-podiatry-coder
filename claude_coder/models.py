@@ -372,6 +372,15 @@ class GateResult:
     # not loaded / a lookup error) — an OPERATIONAL problem a retry can fix, NOT a
     # coding decision. The router sends these to SYSTEM_HOLD, never to a coder.
     retryable: bool = False
+    # issue #6 F9-R8-A: which SPECIFIC clinical-event fact_ids this gate's non-PASS
+    # outcome is actually about, when the gate can name them -- e.g.
+    # `medical_necessity_gate` attributes its hold to the exact procedures lacking a
+    # resolved, qualifying diagnosis linkage, not to the whole encounter. Empty (the
+    # default, unchanged for every gate that doesn't set it) means the gate's outcome
+    # is encounter-wide by its own nature (a hard structural/authority failure) and
+    # `autonomy.decide` blocks everything, exactly as before this round -- this field
+    # only ever NARROWS a block to named facts, never widens one.
+    affected_fact_ids: tuple[str, ...] = ()
 
     @property
     def clears(self) -> bool:

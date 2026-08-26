@@ -132,14 +132,77 @@ def decide(result: CodingResult,
 
     # 2. Gates that could not be verified: an OPERATIONAL failure (authority
     #    unavailable) is a retry, not a coding problem; anything else is judgement.
+    #
+    #    issue #6 F9-R8-A: when a gate NAMES which fact_ids its hold is actually
+    #    about (`affected_fact_ids` -- e.g. `medical_necessity_gate` attributes a
+    #    hold to the exact procedures lacking a resolved, qualifying diagnosis
+    #    link, not the whole encounter), route it non-blocking here -- those
+    #    named facts are excluded from THIS claim individually below, so the
+    #    gate's own routing item must not ALSO hold every other, independently
+    #    justified line hostage. A gate that does not name fact_ids (every gate
+    #    before this round, and every encounter-wide authority/structural
+    #    failure) is unchanged: empty `affected_fact_ids` still blocks everything.
     for g in result.gates:
         if g.outcome is Outcome.UNKNOWN:
+            scoped = bool(g.affected_fact_ids)
             if g.retryable:
                 route(Destination.SYSTEM_HOLD, g.name,
-                      f"authority unavailable ({g.detail}) — retry, do not send to a coder")
+                      f"authority unavailable ({g.detail}) — retry, do not send to a coder",
+                      blocking=not scoped)
             else:
                 route(Destination.REVIEW, g.name,
-                      f"unverifiable, needs coding/clinical judgement ({g.detail})")
+                      f"unverifiable, needs coding/clinical judgement ({g.detail})",
+                      blocking=not scoped)
+
+    # issue #6 F9-R8-A: dependency-scoped partial release. An unresolved fact, or
+    # a gate-named procedure, blocks ONLY the facts it can actually affect -- the
+    # same clinical episode (via the graph's own edges, including REASON_FOR/
+    # PART_OF relations the graph already models -- no new graph) or a procedure
+    # a gate explicitly named -- never the whole encounter by default. Reuses
+    # `ClinicalGraph.binding_for` exactly as the release certificate's own graph
+    # binding already does.
+    def _entangled(fact_id: str) -> set[str]:
+        graph = getattr(result, "graph", None)
+        binding_for = getattr(graph, "binding_for", None)
+        if fact_id is None or not callable(binding_for):
+            return set()
+        return {e for e in binding_for([fact_id]).clinical_event_ids if e != fact_id}
+
+    blocked_fact_ids: set[str] = set()
+    for ln in result.lines:
+        if ln.fact.billable and not ln.resolved and not ln.excluded_reason:
+            blocked_fact_ids |= _entangled(ln.fact.fact_id)
+    for g in result.gates:
+        if g.outcome in (Outcome.UNKNOWN, Outcome.BLOCKED, Outcome.ERROR) and g.affected_fact_ids:
+            for fid in g.affected_fact_ids:
+                blocked_fact_ids.add(fid)
+                blocked_fact_ids |= _entangled(fid)
+
+    # A currently-resolved, billable line entangled with an unresolved or
+    # gate-held fact cannot be certified independently of it -- excluded from
+    # THIS claim, visibly (never silently dropped: `excluded_reason` is exactly
+    # the field `billable_lines`/the release certificate already key off).
+    if blocked_fact_ids:
+        for ln in result.lines:
+            if (ln.resolved and ln.fact.billable and not ln.excluded_reason
+                    and ln.fact.fact_id in blocked_fact_ids):
+                ln.excluded_reason = (
+                    f"excluded from this claim: entangled with an unresolved or "
+                    f"gate-held fact sharing this line's clinical episode or "
+                    f"necessity linkage, which could change this line's own "
+                    f"billing correctness")
+
+    # Computed AFTER the exclusion stamping above, not before: whether an
+    # unresolved fact's own `blocking` flag (section 3) should fire depends on
+    # whether its closure touches a fact that is STILL billable once every
+    # OTHER exclusion this round decided has already been applied -- a fact
+    # whose only entangled neighbor was itself JUST excluded (e.g. by a gate
+    # naming it directly) must not ALSO keep blocking on that neighbor's
+    # account; an isolated ambiguity with no real remaining impact must not
+    # block the rest of the encounter, exactly like the existing
+    # `dx_non_material` precedent this generalizes.
+    remaining_billable_ids = {ln.fact.fact_id for ln in result.billable_lines
+                              if ln.fact is not None}
 
     # 3. Every performed fact must be accounted for. MATERIALITY is decided from
     #    authoritative coverage, not a proxy: an unresolved DIAGNOSIS is non-material
@@ -160,12 +223,40 @@ def decide(result: CodingResult,
                       "necessity is already met by a resolved qualifying diagnosis per "
                       "authoritative coverage; clarify to add specificity",
                       blocking=False, fact_id=ln.fact.fact_id)
-            elif ln.documentation_gap:
-                route(Destination.PROVIDER_QUERY, ln.fact.description, ln.documentation_gap,
-                      fact_id=ln.fact.fact_id)
             else:
-                route(Destination.REVIEW, ln.fact.description, ln.rationale,
-                      fact_id=ln.fact.fact_id)
+                # issue #6 F9-R8-A: blocking only when this fact's own closure
+                # touches a line that WAS billable -- an isolated ambiguity with
+                # no documented relationship to anything else must not hold an
+                # unrelated, independently defensible line hostage.
+                #
+                # Two guards keep this from over-relaxing:
+                # - requires something ELSE billable to protect in the first
+                #   place: when NOTHING remains billable,
+                #   `remaining_billable_ids` is empty and this item IS the
+                #   whole encounter's material content -- it must stay
+                #   blocking, so the "nothing open" catch-all a few lines below
+                #   (`no defensible billable line was produced`) never fires in
+                #   its place with a vaguer, less specific reason.
+                # - an unresolved DIAGNOSIS's relationship to procedure
+                #   materiality is the DEDICATED `dx_non_material` branch
+                #   above's own job, not this generic one's: an unresolved
+                #   diagnosis that reaches here (`dx_non_material` is False --
+                #   necessity is NOT otherwise established, including the
+                #   fail-closed "no procedures at all" case) must stay blocking
+                #   regardless of graph entanglement, exactly as before this
+                #   round -- relaxing it here would silently readmit the exact
+                #   fail-open gap `_necessity_authoritatively_met` exists to
+                #   close.
+                _affects = (ln.fact.kind is FactKind.DIAGNOSIS
+                           or not remaining_billable_ids
+                           or bool(_entangled(ln.fact.fact_id) & remaining_billable_ids))
+                if ln.documentation_gap:
+                    route(Destination.PROVIDER_QUERY, ln.fact.description,
+                          ln.documentation_gap, blocking=_affects,
+                          fact_id=ln.fact.fact_id)
+                else:
+                    route(Destination.REVIEW, ln.fact.description, ln.rationale,
+                          blocking=_affects, fact_id=ln.fact.fact_id)
 
     # issue #6 item 7/F8-R3: a resolved code held for an unresolved (not
     # contradicted) administrative fact -- e.g. actor ownership -- is a real

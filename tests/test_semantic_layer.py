@@ -174,6 +174,64 @@ class UmlsCandidatesAccessor(unittest.TestCase):
             ["an entirely unrelated procedure"], "cpt", None)
         self.assertEqual(candidates, [])
 
+    def _cross_system_index(self) -> dict:
+        """A longer CPT-only term ("synthetic assembly service") and a shorter
+        HCPCS-only term ("synthetic assembly") that is a PREFIX of it -- the
+        exact shape issue #6 F9-R8-B reproduced: one shared scan index let the
+        longer, CPT-only match consume the span before the shorter, valid
+        HCPCS term was ever tried."""
+        return {
+            "release": "TEST2026", "mrconso_sha256": "deadbeef", "generated": "now",
+            "term_to_cuis": {
+                "synthetic assembly service": ["C_CPT_ONLY"],
+                "synthetic assembly": ["C_HCPCS_ONLY"],
+            },
+            "cui_to_atoms": {
+                "C_CPT_ONLY": [{"sab": "CPT", "code": "99999",
+                               "term": "Synthetic assembly service", "tty": "PT"}],
+                "C_HCPCS_ONLY": [{"sab": "HCPCS", "code": "A1234",
+                                 "term": "Synthetic assembly", "tty": "PT"}],
+            },
+        }
+
+    def test_a_cpt_only_term_never_masks_a_shorter_hcpcs_match(self):
+        """issue #6 F9-R8-B, Codex's independent re-review of 5ab4a13: querying
+        HCPCS for the full phrase must still find the HCPCS-only term, even
+        though a longer CPT-only term containing it as a prefix also matches."""
+        candidates = self._source(self._cross_system_index()).umls_candidates(
+            ["the synthetic assembly service was completed today"], "hcpcs", None)
+        self.assertEqual([c.code for c in candidates], ["A1234"])
+
+    def test_an_hcpcs_only_term_never_masks_a_longer_cpt_match(self):
+        """The mirror case: querying CPT for the same phrase must still find
+        the CPT-only term -- per-system scanning must not weaken the EXISTING
+        longest-match behavior within the system that actually owns it."""
+        candidates = self._source(self._cross_system_index()).umls_candidates(
+            ["the synthetic assembly service was completed today"], "cpt", None)
+        self.assertEqual([c.code for c in candidates], ["99999"])
+
+    def test_overlapping_terms_within_one_system_still_prefer_the_longest_match(self):
+        """Regression guard: per-system partitioning must not disturb the
+        EXISTING longest-match-wins behavior when both overlapping terms
+        belong to the SAME system."""
+        index = {
+            "release": "TEST2026", "mrconso_sha256": "deadbeef", "generated": "now",
+            "term_to_cuis": {
+                "synthetic assembly service": ["C1"],
+                "synthetic assembly": ["C2"],
+            },
+            "cui_to_atoms": {
+                "C1": [{"sab": "CPT", "code": "11111",
+                       "term": "Synthetic assembly service", "tty": "PT"}],
+                "C2": [{"sab": "CPT", "code": "22222",
+                       "term": "Synthetic assembly", "tty": "PT"}],
+            },
+        }
+        candidates = self._source(index).umls_candidates(
+            ["the synthetic assembly service was completed today"], "cpt", None)
+        self.assertEqual([c.code for c in candidates], ["11111"],
+                         "the longer term must win, not both/the shorter one")
+
     def test_lineage_is_carried_not_discarded(self):
         """issue #6 F9-R7-D: SAB/code/term/TTY/CUI/matched-phrase lineage, plus
         the bound artifact identity, must survive into `CandidateCode.authority`
@@ -242,6 +300,56 @@ class UmlsCandidatesAccessor(unittest.TestCase):
         self.assertIn("99999", [c.code for c in line.alternatives],
                       "a UMLS-matched candidate must reach verification even with "
                       "8 higher-scored rivals in the pool")
+
+    def test_cross_source_lineage_is_merged_not_replaced(self):
+        """issue #6 F9-R8-C, Codex's independent re-review of 5ab4a13:
+        `resolution.py`'s cross-source union (`best[c.code] = c` on a higher
+        score) REPLACED the loser's authority outright -- when a descriptor-
+        retrieval hit (0.9) and a UMLS hit (0.3) proposed the SAME code, the
+        winning candidate kept only its own lineage and the other source's
+        was discarded before it ever reached the bundle. Reproduced directly
+        before the fix: the merged candidate's `authority` held only
+        `{"index": "rag-hybrid", ...}`, never the UMLS `matches`."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CandidateCode, ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder import resolution
+        from claude_coder.eligibility import (ClaimComponent, ClaimLineIntent,
+                                              EligibilityState, RetrievalRequest,
+                                              fact_snapshot_digest)
+
+        rag_cand = CandidateCode("99999", "cpt", "Synthetic assembly service", 0.9,
+                                 "retrieval", authority={"index": "rag-hybrid", "system": "cpt"})
+        umls_cand = CandidateCode("99999", "cpt", "Synthetic assembly service", 0.3,
+                                  "umls_recall", authority={"matches": [{"cui": "C0000001"}]})
+
+        class DualSource(MockSource):
+            def retrieve(self, description, system, top_k=20):
+                return [rag_cand] if system == "cpt" else []
+
+            def umls_candidates(self, terms, system, dos):
+                return [umls_cand] if system == "cpt" else []
+
+        src = DualSource(records={("99999", "cpt"): {
+            "long_description": "Synthetic assembly service", "active": True}})
+        text = "the synthetic assembly service was performed today"
+        fact = ClinicalFact(FactKind.PROCEDURE, text,
+                            evidence=[EvidenceSpan(text, anchored=True, span_id="s1")],
+                            confidence=0.99, fact_id="f1")
+        intent = ClaimLineIntent(
+            intent_id="t-f1", encounter_id="t", component=ClaimComponent.SERVICE,
+            clinical_event_ids=["f1"], fact_kind=fact.kind.value,
+            clinical_action=fact.description, attributes=dict(fact.attributes),
+            date_of_service=None, billing_entity_id=None, source_span_ids=[],
+            state=EligibilityState.ELIGIBLE_FOR_RETRIEVAL, fact_digest=fact_snapshot_digest(fact))
+        line = resolution.resolve(RetrievalRequest(intent, fact), src,
+                                  llm=lambda system, user: '{"candidates": []}')
+        merged = next(c for c in line.alternatives if c.code == "99999")
+        self.assertEqual(merged.source, "retrieval")   # higher score still wins identity
+        self.assertEqual(set(merged.authority["sources"]), {"retrieval", "umls_recall"})
+        self.assertEqual(merged.authority["retrieval"],
+                         {"index": "rag-hybrid", "system": "cpt"})
+        self.assertEqual(merged.authority["umls_recall"]["matches"],
+                         [{"cui": "C0000001"}])
 
 
 class SemanticClassMatchingRules(unittest.TestCase):

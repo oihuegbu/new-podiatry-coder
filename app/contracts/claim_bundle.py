@@ -180,6 +180,14 @@ CERTIFIED_CLAIM_SECTIONS: dict[str, str] = {
     "encounter": "the encounter and source-document identity",
     "diagnoses": "the ordered diagnoses",
     "service_lines": "the service lines (units, modifiers, pointers, POS/NDC)",
+    # issue #6 F9-R8-E, Codex's independent re-review of 5ab4a13: absent from
+    # both this dict and `certified_claim_content()` -- a candidate line's
+    # status/reason/UMLS lineage could be edited after certification with the
+    # digest unchanged. Reproduced directly: changing a candidate line from
+    # CANDIDATES_NEEDING_FACT to NO_SUPPORTED_CANDIDATE and replacing its
+    # reason left `compute_certified_claim_digest()` byte-identical.
+    "candidate_lines": "documented lines that did not reach RECOMMENDED or "
+                       "HELD_POLICY_OR_DATA, and their candidate pool",
     "context_fingerprint": "the encounter context",
     "graph": "the clinical-graph binding",
     "authority": "the authoritative data snapshot",
@@ -415,6 +423,73 @@ class LineStatus(str, Enum):
     #: Retrieval ran and found no defensible candidate at all. Carried in
     #: `ClaimBundle.candidate_lines` with an empty `candidates` tuple.
     NO_SUPPORTED_CANDIDATE = "NO_SUPPORTED_CANDIDATE"
+    #: issue #6 F9-R8-D, Codex's independent re-review of 5ab4a13: `fact.
+    #: billable is False` (a disposition fact -- not performed during this
+    #: encounter) was previously just `continue`d out of `candidate_lines`
+    #: entirely, the exact silent-erasure defect F9-R7 item 4 closed for
+    #: HELD/CANDIDATES_* -- visible only in the untyped `audit.excluded_lines`
+    #: trace, if at all. Carried in `ClaimBundle.candidate_lines` now.
+    NONPERFORMED = "NONPERFORMED"
+    #: issue #6 F9-R8-D: a line that DID resolve (`line.chosen` set) but a
+    #: later pipeline rule (NCCI bundling, global-package bundling, duplicate-
+    #: mention dedup, pre-retrieval integrity hold) excluded it via `excluded_
+    #: reason` -- previously also just `continue`d out of `candidate_lines`
+    #: with the same silent-erasure defect as NONPERFORMED above. The resolved
+    #: code is carried as this line's sole `CandidateReference`, and the exact
+    #: producer-written `excluded_reason` text is carried verbatim as
+    #: `blocking_reason` -- never re-categorized by guessing which specific
+    #: rule fired from the free text alone.
+    EXCLUDED_BY_RULE = "EXCLUDED_BY_RULE"
+
+
+class ExternalDisposition(str, Enum):
+    """The product owner's external 3-category contract for a documented line
+    (issue #6 F9-R8-D, Codex's independent re-review of 5ab4a13) -- computed
+    FROM `LineStatus`, never replacing it. `LineStatus` stays the finer-
+    grained internal signal `release_blockers()` and every internal consumer
+    already keys off; this is the canonical, deliberately coarser value an
+    EXTERNAL consumer reads instead of having to know all 7 internal states.
+    """
+
+    #: LineStatus.RECOMMENDED.
+    BILLABLE_AND_DEFENSIBLE = "BILLABLE_AND_DEFENSIBLE"
+    #: LineStatus.CANDIDATES_NEEDING_FACT -- must name the provider-answerable
+    #: fact (`CandidateLine.blocking_reason`).
+    CANDIDATE_REQUIRING_FACT = "CANDIDATE_REQUIRING_FACT"
+    #: Every other LineStatus: HELD_POLICY_OR_DATA, CANDIDATES_UNRESOLVED,
+    #: NO_SUPPORTED_CANDIDATE, NONPERFORMED, EXCLUDED_BY_RULE. Each names its
+    #: own `blocking_stage`/`reason_code` plus the exact producer reason text
+    #: -- the finer internal subreason is carried, never discarded.
+    EXCLUDED = "EXCLUDED"
+
+
+#: `LineStatus` -> `(ExternalDisposition, blocking_stage, reason_code)`. The
+#: one place this mapping is defined; `reason_code` is always the literal
+#: lower-cased internal status name, so the mapping from external category
+#: back to internal detail is mechanically auditable, never a separately
+#: invented vocabulary that could drift from what actually happened.
+_EXTERNAL_DISPOSITION_BY_STATUS: dict[LineStatus, tuple[ExternalDisposition, str]] = {
+    LineStatus.RECOMMENDED: (ExternalDisposition.BILLABLE_AND_DEFENSIBLE, ""),
+    LineStatus.HELD_POLICY_OR_DATA: (ExternalDisposition.EXCLUDED, "submission"),
+    LineStatus.CANDIDATES_NEEDING_FACT: (ExternalDisposition.CANDIDATE_REQUIRING_FACT,
+                                         "retrieval"),
+    LineStatus.CANDIDATES_UNRESOLVED: (ExternalDisposition.EXCLUDED, "retrieval"),
+    LineStatus.NO_SUPPORTED_CANDIDATE: (ExternalDisposition.EXCLUDED, "retrieval"),
+    LineStatus.NONPERFORMED: (ExternalDisposition.EXCLUDED, "eligibility"),
+    LineStatus.EXCLUDED_BY_RULE: (ExternalDisposition.EXCLUDED, "pipeline"),
+}
+
+
+def external_disposition_of(status: LineStatus) -> tuple[ExternalDisposition, str, str]:
+    """`(external_disposition, blocking_stage, reason_code)` for one internal
+    `LineStatus` -- the single function both `_CodedLine`/`CandidateLine`
+    construction sites and any future consumer call, so the 7-to-3 collapse
+    can never be performed two different ways. `reason_code` is empty for
+    RECOMMENDED (nothing is blocking a billable line); every other status's
+    `reason_code` is its own literal lower-cased name."""
+    disposition, stage = _EXTERNAL_DISPOSITION_BY_STATUS[status]
+    reason_code = "" if status is LineStatus.RECOMMENDED else status.value.lower()
+    return disposition, stage, reason_code
 
 
 # --------------------------------------------------------------------------
@@ -551,6 +626,19 @@ class _CodedLine(_Strict):
     #: `_CodedLine` may carry; CANDIDATES_NEEDING_FACT/NO_SUPPORTED_CANDIDATE
     #: never appear here -- see `CandidateLine` below.
     status: LineStatus = LineStatus.RECOMMENDED
+    #: issue #6 F9-R8-D: the product owner's 3-category external contract,
+    #: computed from `status` via `external_disposition_of` -- never a second,
+    #: independently-decided field. RECOMMENDED -> BILLABLE_AND_DEFENSIBLE;
+    #: HELD_POLICY_OR_DATA -> EXCLUDED (the code stays visible above as
+    #: `code`/`descriptor` until the stated control clears).
+    external_disposition: ExternalDisposition = ExternalDisposition.BILLABLE_AND_DEFENSIBLE
+    #: Empty for BILLABLE_AND_DEFENSIBLE; the pipeline stage that produced the
+    #: hold otherwise (e.g. "submission").
+    blocking_stage: str = ""
+    #: Empty for BILLABLE_AND_DEFENSIBLE; the literal lower-cased `status`
+    #: value otherwise (e.g. "held_policy_or_data") -- always mechanically
+    #: derivable from `status`, never a separate guess.
+    reason_code: str = ""
 
 
 class DiagnosisLine(_CodedLine):
@@ -616,6 +704,11 @@ class CandidateLine(_Strict):
     #: note text beyond what an evidence quote already carries.
     subject: str = ""
     status: LineStatus
+    #: issue #6 F9-R8-D: see `_CodedLine.external_disposition` -- the same
+    #: `external_disposition_of(status)` function, never a second mapping.
+    external_disposition: ExternalDisposition = ExternalDisposition.EXCLUDED
+    blocking_stage: str = ""
+    reason_code: str = ""
     candidates: tuple[CandidateReference, ...] = ()
     #: The exact first stage/reason that prevented recommendation -- a
     #: provider-answerable question for CANDIDATES_NEEDING_FACT, or the
@@ -1380,9 +1473,36 @@ class ClaimBundle(_Strict):
                 # digest still reproducing, which is precisely the class of gap
                 # this method exists to close (see the docstring above).
                 "status": line.status.value,
+                # issue #6 F9-R8-D/E: claim-affecting exactly like `status`
+                # above -- `external_disposition` is what an EXTERNAL consumer
+                # actually acts on, so an edit to it (or the stage/reason_code
+                # it's justified by) after certification must change this
+                # digest, never reproduce silently.
+                "external_disposition": line.external_disposition.value,
+                "blocking_stage": line.blocking_stage,
+                "reason_code": line.reason_code,
                 "evidence_sha256": content_digest(evidence_records(line.evidence)),
                 "authority_sha256": content_digest(
                     line.authority.model_dump(mode="json")),
+            }
+
+        def _candidate_line(line: CandidateLine) -> dict[str, Any]:
+            return {
+                "clinical_event_id": line.clinical_event_id,
+                "kind": line.kind,
+                "subject": line.subject,
+                "status": line.status.value,
+                "external_disposition": line.external_disposition.value,
+                "blocking_stage": line.blocking_stage,
+                "reason_code": line.reason_code,
+                "blocking_reason": line.blocking_reason,
+                # ORDER IS CONTENT, same rule as diagnoses/service_lines above:
+                # candidates are carried in the producer's own ranked order.
+                "candidates_sha256": content_digest([
+                    {"system": c.system, "code": c.code, "descriptor": c.descriptor,
+                     "score": c.score, "source": c.source, "authority": c.authority}
+                    for c in line.candidates]),
+                "evidence_sha256": content_digest(evidence_records(line.evidence)),
             }
 
         return {
@@ -1406,6 +1526,7 @@ class ClaimBundle(_Strict):
                      kind=s.kind)
                 for s in self.service_lines
             ],
+            "candidate_lines": [_candidate_line(c) for c in self.candidate_lines],
             # RECOMPUTED, never the stored value: the stored fingerprint is
             # what a tamperer edits, and `EncounterContext.problems()` is a
             # separate check, not this one's dependency.
@@ -1945,6 +2066,7 @@ def bundle_from_coding_result(
         fact = line.fact
         sequence = len(diagnoses) + 1
         event_id = str(getattr(fact, "fact_id", "") or "")
+        disposition, stage, reason_code = external_disposition_of(status)
         diagnoses.append(DiagnosisLine(
             sequence=sequence,
             system=str(chosen.system),
@@ -1958,6 +2080,9 @@ def bundle_from_coding_result(
             selection_proof=selection_proof_record(line),
             primary=(sequence == 1),
             status=status,
+            external_disposition=disposition,
+            blocking_stage=stage,
+            reason_code=reason_code,
         ))
         if event_id:
             event_to_sequence[event_id] = sequence
@@ -2004,6 +2129,7 @@ def bundle_from_coding_result(
             sequence = event_to_sequence.get(diagnosis_event)
             if sequence and sequence not in pointers:
                 pointers.append(sequence)
+        disposition, stage, reason_code = external_disposition_of(status)
         service_lines.append(ServiceLine(
             sequence=len(service_lines) + 1,
             system=str(chosen.system),
@@ -2021,6 +2147,9 @@ def bundle_from_coding_result(
             place_of_service=context.place_of_service,
             kind=str(getattr(getattr(fact, "kind", None), "value", "") or ""),
             status=status,
+            external_disposition=disposition,
+            blocking_stage=stage,
+            reason_code=reason_code,
         ))
 
     for line in billable:
@@ -2040,46 +2169,70 @@ def bundle_from_coding_result(
     # IDENTITY, not by recomputing the same classification a second time, so
     # this can never drift from what was actually decided.
     coded_ids = {id(line) for line in billable} | {id(line) for line in held_lines}
+
+    def _candidate_ref(c) -> CandidateReference:
+        return CandidateReference(system=str(c.system), code=str(c.code),
+                                  descriptor=str(c.descriptor or ""),
+                                  score=float(getattr(c, "score", 0.0) or 0.0),
+                                  source=str(getattr(c, "source", "") or ""),
+                                  authority=dict(getattr(c, "authority", None) or {}))
+
     candidate_lines: list[CandidateLine] = []
     for line in (getattr(result, "lines", None) or []):
         if id(line) in coded_ids:
             continue
         fact = line.fact
-        if not getattr(fact, "billable", True):
-            continue          # not performed today -- a disposition fact, not a candidate
-        if getattr(line, "excluded_reason", None):
-            continue          # already resolved + explained (bundled/dedup/non-covered);
-                              # see audit.excluded_lines, not a coding uncertainty
+        chosen = getattr(line, "chosen", None)
         alternatives = list(getattr(line, "alternatives", None) or [])
-        # issue #6 F9-R7-E, Codex's independent re-review of 92f4596: every
-        # alternatives-having abstain used to be labeled CANDIDATES_NEEDING_FACT
-        # regardless of WHY it abstained, so a relevance/mapping/verification
-        # failure claimed a provider-answerable documentation gap that does not
-        # exist. Classify from the typed signal that actually names a gap
-        # (`documentation_gap`, or a tie's own `provider_question`) rather than
-        # from "alternatives is non-empty" alone.
-        tie_record = getattr(line, "tie_record", None) or {}
-        documentation_gap = (str(getattr(line, "documentation_gap", "") or "")
-                             or str(tie_record.get("provider_question") or ""))
-        if documentation_gap:
-            status = LineStatus.CANDIDATES_NEEDING_FACT
-        elif alternatives:
-            status = LineStatus.CANDIDATES_UNRESOLVED
+        # issue #6 F9-R8-D, Codex's independent re-review of 5ab4a13: a non-
+        # billable disposition fact and a resolved-but-pipeline-excluded line
+        # used to `continue` out of this loop entirely -- the same silent-
+        # erasure defect F9-R7 item 4 already closed for HELD/CANDIDATES_* --
+        # visible only in the untyped `audit.excluded_lines` trace, if at all.
+        # Each now gets its own named status instead of disappearing.
+        if not getattr(fact, "billable", True):
+            status = LineStatus.NONPERFORMED
+            blocking_reason = ("documented but not identified as a performed "
+                              "service or diagnosis for this encounter")
+            candidates = tuple(_candidate_ref(c) for c in ([chosen] if chosen else [])
+                               + alternatives)
+        elif getattr(line, "excluded_reason", None):
+            status = LineStatus.EXCLUDED_BY_RULE
+            blocking_reason = str(getattr(line, "excluded_reason", "") or "")
+            # the resolved code itself is the one candidate here -- a pipeline
+            # rule excluded it from submission, it was never ambiguous.
+            candidates = tuple(_candidate_ref(c) for c in ([chosen] if chosen else [])
+                               + alternatives)
         else:
-            status = LineStatus.NO_SUPPORTED_CANDIDATE
-        blocking_reason = documentation_gap or str(getattr(line, "rationale", "") or "")
+            # issue #6 F9-R7-E, Codex's independent re-review of 92f4596: every
+            # alternatives-having abstain used to be labeled
+            # CANDIDATES_NEEDING_FACT regardless of WHY it abstained, so a
+            # relevance/mapping/verification failure claimed a provider-
+            # answerable documentation gap that does not exist. Classify from
+            # the typed signal that actually names a gap (`documentation_gap`,
+            # or a tie's own `provider_question`) rather than from
+            # "alternatives is non-empty" alone.
+            tie_record = getattr(line, "tie_record", None) or {}
+            documentation_gap = (str(getattr(line, "documentation_gap", "") or "")
+                                 or str(tie_record.get("provider_question") or ""))
+            if documentation_gap:
+                status = LineStatus.CANDIDATES_NEEDING_FACT
+            elif alternatives:
+                status = LineStatus.CANDIDATES_UNRESOLVED
+            else:
+                status = LineStatus.NO_SUPPORTED_CANDIDATE
+            blocking_reason = documentation_gap or str(getattr(line, "rationale", "") or "")
+            candidates = tuple(_candidate_ref(c) for c in alternatives)
+        disposition, stage, reason_code = external_disposition_of(status)
         candidate_lines.append(CandidateLine(
             clinical_event_id=str(getattr(fact, "fact_id", "") or ""),
             kind=str(getattr(getattr(fact, "kind", None), "value", "") or ""),
             subject=str(getattr(fact, "description", "") or ""),
             status=status,
-            candidates=tuple(
-                CandidateReference(system=str(c.system), code=str(c.code),
-                                   descriptor=str(c.descriptor or ""),
-                                   score=float(getattr(c, "score", 0.0) or 0.0),
-                                   source=str(getattr(c, "source", "") or ""),
-                                   authority=dict(getattr(c, "authority", None) or {}))
-                for c in alternatives),
+            external_disposition=disposition,
+            blocking_stage=stage,
+            reason_code=reason_code,
+            candidates=candidates,
             blocking_reason=blocking_reason,
             evidence=_evidence_of(fact),
         ))

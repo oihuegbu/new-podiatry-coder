@@ -292,6 +292,28 @@ def _advisory_procedure_expansions(fact, source) -> list[dict]:
     return out
 
 
+def _merge_candidate(existing: CandidateCode, incoming: CandidateCode) -> CandidateCode:
+    """Two candidates for the SAME `(code, system)` from DIFFERENT recall
+    sources -- keep the higher-scored one's identity/descriptor/score (raw
+    score is still what orders the pool; this never changes WHICH candidate
+    ranks where), but fold BOTH sources' `authority` into one record,
+    namespaced by source, rather than discarding the loser's lineage entirely
+    (issue #6 F9-R8-C, Codex's independent re-review of 5ab4a13). A caller
+    that only ever reads `authority["matches"]`/whatever shape one specific
+    source wrote still finds it, under that source's own key."""
+    winner, loser = ((existing, incoming) if existing.score >= incoming.score
+                    else (incoming, existing))
+    if winner.source == loser.source:
+        return winner           # same source, e.g. two UMLS calls for one code -- no merge needed
+    sources = tuple(sorted({existing.source, incoming.source}))
+    merged_authority = {"sources": sources,
+                        existing.source: dict(existing.authority or {}),
+                        incoming.source: dict(incoming.authority or {})}
+    return CandidateCode(code=winner.code, system=winner.system,
+                         descriptor=winner.descriptor, score=winner.score,
+                         source=winner.source, authority=merged_authority)
+
+
 def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
             llm=None, corroborate=None, dos: str | None = None,
             reconciliation=None,
@@ -536,10 +558,24 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
     # uniqueness/DOS-activity/CMS-validation path below is completely unaware
     # this candidate came from a different source. `umls_candidates` itself
     # degrades to [] when the term index is absent or a term is unmatched.
+    #
+    # issue #6 F9-R8-C, Codex's independent re-review of 5ab4a13: the
+    # max-score-per-code rule above REPLACES, never merges -- when a code is
+    # already in `best` under a different source, the higher-scored one wins
+    # outright and the loser's lineage (UMLS's own `authority["matches"]`, in
+    # the common case where a RAG/descriptor hit outscores it) is discarded
+    # entirely before it ever reaches the bundle. Reproduced directly: a code
+    # proposed by both retrieval (0.9) and UMLS (0.3) survived with only
+    # `source="retrieval"` and its own authority -- the UMLS match was gone.
+    # `_merge_candidate` keeps the winner's identity/score but folds BOTH
+    # sources' authority into one namespaced record.
     for c in source.umls_candidates([q for q in queries if q.strip()],
                                     fact.system, dos):
-        if c.code not in best or c.score > best[c.code].score:
+        prior = best.get(c.code)
+        if prior is None:
             best[c.code] = c
+        else:
+            best[c.code] = _merge_candidate(prior, c)
     pool = sorted(best.values(), key=lambda c: c.score, reverse=True)
 
     # ---- Semantic eligibility-before-retrieval (issue #6 items 4/5, F8-R2) -------

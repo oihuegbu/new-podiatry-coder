@@ -578,16 +578,25 @@ class AuthoritativeSource:
         return dict(entry) if isinstance(entry, dict) else {}
 
     def _ensure_umls_scan_index(self):
-        """Lazy {word-tuple -> normalized term} index over `term_to_cuis`'s own
-        keys, built once and cached -- the SAME token-bounded longest-match
-        scan pattern `_ensure_procedure_scan_index`/`concept_scan` already use
-        (issue #6 F9-R7-C, Codex's independent re-review of 92f4596: `umls_
-        candidates` previously did whole-string equality only against
-        `resolution.py`'s full structured queries and full evidence sentences,
-        so a term index entry for "assembly service" never matched "assembly
-        service was completed today" -- reproduced directly). No new data, no
-        fuzzy matching: exactly the terms the term-index artifact already
-        carries, scanned by token boundary."""
+        """Lazy, PER-SYSTEM {word-tuple -> normalized term} indexes over
+        `term_to_cuis`'s own keys, built once and cached -- the SAME
+        token-bounded longest-match scan pattern `_ensure_procedure_scan_index`/
+        `concept_scan` already use (issue #6 F9-R7-C, Codex's independent
+        re-review of 92f4596: `umls_candidates` previously did whole-string
+        equality only against `resolution.py`'s full structured queries and
+        full evidence sentences, so a term index entry for "assembly service"
+        never matched "assembly service was completed today" -- reproduced
+        directly). No new data, no fuzzy matching: exactly the terms the
+        term-index artifact already carries, scanned by token boundary.
+
+        issue #6 F9-R8-B, Codex's independent re-review of 5ab4a13: ONE shared
+        index across both systems let a longer term valid ONLY in one system
+        (e.g. a CPT-only term) consume the token span before a shorter, valid
+        term for the OTHER system (e.g. an HCPCS-only term) was ever tried --
+        reproduced directly: an HCPCS query for a CPT-masked phrase returned
+        []. Each term now enters ONLY the system(s) its own CUIs actually have
+        a current atom in, so a CPT-only term can never shadow an HCPCS match
+        and vice versa -- scanning is now PER-SYSTEM, never global."""
         if getattr(self, "_umls_scan_index", None) is not None:
             return self._umls_scan_index
         if not self._umls_term_index:
@@ -595,29 +604,37 @@ class AuthoritativeSource:
             return False
         from . import ontology as _ontology
         term_to_cuis = self._umls_term_index.get("term_to_cuis") or {}
-        by_words: dict[tuple[str, ...], str] = {}
-        max_len = 0
-        for term in term_to_cuis:
+        cui_to_atoms = self._umls_term_index.get("cui_to_atoms") or {}
+        by_words: dict[str, dict[tuple[str, ...], str]] = {"cpt": {}, "hcpcs": {}}
+        max_len: dict[str, int] = {"cpt": 0, "hcpcs": 0}
+        for term, cuis in term_to_cuis.items():
             words = tuple(_ontology._tokens(term))
             if not words:
                 continue
-            by_words.setdefault(words, term)
-            max_len = max(max_len, len(words))
+            systems: set = set()
+            for cui in cuis or ():
+                for atom in cui_to_atoms.get(cui) or ():
+                    sab = str(atom.get("sab") or "")
+                    systems.add("cpt" if sab in ("CPT", "HCPT") else "hcpcs")
+            for system in systems:
+                by_words[system].setdefault(words, term)
+                max_len[system] = max(max_len[system], len(words))
         self._umls_scan_by_words = by_words
         self._umls_scan_max_len = max_len
         self._umls_scan_index = True
         return True
 
-    def _umls_scan(self, text: str) -> tuple[str, ...]:
-        """Every known term-index term that occurs as a token-bounded phrase
-        inside free-form `text` -- longest match wins at each position,
-        matches never overlap. See `_ensure_umls_scan_index`."""
+    def _umls_scan(self, text: str, system: str) -> tuple[str, ...]:
+        """Every known term-index term VALID IN `system` that occurs as a
+        token-bounded phrase inside free-form `text` -- longest match wins at
+        each position (within this system's own index only), matches never
+        overlap. See `_ensure_umls_scan_index`."""
         if not self._ensure_umls_scan_index():
             return ()
         from . import ontology as _ontology
         words = _ontology._tokens(text)
-        by_words = self._umls_scan_by_words
-        max_len = self._umls_scan_max_len
+        by_words = self._umls_scan_by_words.get(system) or {}
+        max_len = self._umls_scan_max_len.get(system) or 0
         found: list[str] = []
         seen: set[str] = set()
         i, n = 0, len(words)
@@ -686,7 +703,7 @@ class AuthoritativeSource:
         descriptors: dict[str, str] = {}
         matches_by_code: dict[str, list[dict]] = {}
         for raw_term in terms or []:
-            for matched_term in self._umls_scan(raw_term):
+            for matched_term in self._umls_scan(raw_term, system):
                 for cui in term_to_cuis.get(matched_term) or ():
                     for atom in cui_to_atoms.get(cui) or ():
                         sab = str(atom.get("sab") or "")

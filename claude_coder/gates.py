@@ -527,6 +527,11 @@ def medical_necessity_gate(result: CodingResult,
     # `icd_excludes_gate` already make for their own authorities.
     unavailable: list[str] = []
     bindings: list[dict] = []
+    # issue #6 F9-R8-A: which procedure fact_ids this gate's hold is actually
+    # about, so `autonomy.decide` can narrow the block to THOSE procedures (and
+    # whatever the graph says is entangled with them) instead of holding every
+    # OTHER, independently-justified procedure on the same encounter.
+    affected: list[str] = []
     for ln in procs:
         pid = ln.fact.fact_id if ln.fact is not None else None
         label = (ln.chosen.code if ln.chosen else None) or (
@@ -554,6 +559,14 @@ def medical_necessity_gate(result: CodingResult,
                 _h = (f"{label}: coverage-policy evaluation unavailable ({exc})")
                 holds.append(_h)
                 unavailable.append(_h)
+                # issue #6 F9-R8-A: deliberately NOT added to `affected` -- an
+                # authority being unreachable is an OPERATIONAL uncertainty about
+                # whether ANY procedure's necessity can be checked right now, not
+                # a documentation gap about THIS one. Narrowing the block to just
+                # this procedure would let every OTHER procedure release without
+                # ever having had its own necessity confirmed either -- the same
+                # fail-open risk the retry exists to prevent. Encounter-wide,
+                # unchanged from before this round.
                 continue
             if qualifying is not None:
                 want = {str(q).replace(".", "").upper() for q in qualifying}
@@ -577,6 +590,8 @@ def medical_necessity_gate(result: CodingResult,
                     holds.append(
                         f"{label}: the diagnosis linked in this encounter is not the one that "
                         f"qualifies under CMS coverage policy")
+                if pid:
+                    affected.append(pid)
                 continue
         else:
             # UNGOVERNED: no policy exists for this service, so the encounter linkage is the
@@ -584,6 +599,8 @@ def medical_necessity_gate(result: CodingResult,
             accepted = sorted(linked)
             if not accepted:
                 holds.append(no_link)
+                if pid:
+                    affected.append(pid)
                 continue
         bindings.append({
             "procedure_event_id": pid,
@@ -600,8 +617,18 @@ def medical_necessity_gate(result: CodingResult,
     if holds:
         # Retryable ONLY when every hold is an unanswered dependency. A mix means the
         # note itself is also short something, and a retry would not produce it.
+        #
+        # issue #6 F9-R8-A: `affected_fact_ids` is scoped to the named procedures
+        # ONLY when every hold is a genuine documentation gap -- if ANY hold is an
+        # unavailable authority (an OPERATIONAL uncertainty about whether necessity
+        # can be checked AT ALL), the whole gate stays UNSCOPED (empty), falling
+        # back to the pre-existing encounter-wide block: an authority that cannot
+        # answer for one procedure casts doubt on whether it could have answered
+        # for any of them, so letting the OTHERS release unchecked would be the
+        # same fail-open risk the retry exists to prevent.
         return GateResult("medical_necessity", Outcome.UNKNOWN, "; ".join(holds),
-                          authority, retryable=len(unavailable) == len(holds))
+                          authority, retryable=len(unavailable) == len(holds),
+                          affected_fact_ids=() if unavailable else tuple(affected))
     return GateResult("medical_necessity", Outcome.PASS,
                       f"{len(procs)} procedure(s) each justified by a record-grounded, "
                       f"anchored diagnosis link in this encounter, and by authoritative "
