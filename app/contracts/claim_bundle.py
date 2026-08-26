@@ -234,6 +234,17 @@ def attribute_evidence_records(fact: Any) -> list[dict[str, Any]]:
     decision, per `graph_consensus.resolve` -- can never be invisible to one consumer
     while visible to another. Ordered by axis name then by entry position, never by
     dict iteration order alone, so the digest is reproducible.
+
+    issue #6 F9-R7-B, Codex's independent re-review of 92f4596: `value` and
+    `assertion_state` were missing from this record even though, since F9-R6-R2's
+    sixth re-review, they are exactly what DECIDES whether an axis value is claim-
+    authorized (`graph_consensus.claim_authorized_value`/`asserted_attribute_
+    support`) -- an entry's value/state could be edited after certification with
+    every digest this record feeds (eligibility snapshot, graph hash, certified
+    claim content) still reproducing. Reproduced directly: flipping one entry's
+    `assertion_state` from NEGATED to ASSERTED, spans unchanged, changed
+    `claim_authorized_value` from `None` to a real value while leaving this record
+    -- and therefore every digest built from it -- byte-identical.
     """
     out: list[dict[str, Any]] = []
     for axis in sorted((getattr(fact, "attribute_evidence", None) or {}).keys()):
@@ -241,6 +252,9 @@ def attribute_evidence_records(fact: Any) -> list[dict[str, Any]]:
             record = evidence_records([getattr(entry, "span", None)])[0]
             record.update({
                 "axis": axis,
+                "value": str(getattr(entry, "value", "") or ""),
+                "assertion_state": str(getattr(getattr(entry, "assertion_state", None),
+                                               "value", "") or ""),
                 "scope": str(getattr(entry, "scope", "") or ""),
                 "parent_fact_id": str(getattr(entry, "parent_fact_id", "") or ""),
                 "source_relation_id": str(getattr(entry, "source_relation_id", "") or ""),
@@ -385,10 +399,19 @@ class LineStatus(str, Enum):
     #: here, in `diagnoses`/`service_lines`, exactly like a RECOMMENDED line --
     #: only `release_blockers()` treats it differently.
     HELD_POLICY_OR_DATA = "HELD_POLICY_OR_DATA"
-    #: Candidates exist but one named, provider-answerable fact prevents
-    #: uniqueness (a genuine tie, a measurement/documentation gap). Carried in
-    #: `ClaimBundle.candidate_lines`, never in `diagnoses`/`service_lines`.
+    #: Candidates exist and a NAMED, provider-answerable fact prevents
+    #: uniqueness (`documentation_gap`, or a tie's own `provider_question`).
+    #: Carried in `ClaimBundle.candidate_lines`, never in `diagnoses`/
+    #: `service_lines`.
     CANDIDATES_NEEDING_FACT = "CANDIDATES_NEEDING_FACT"
+    #: issue #6 F9-R7-E, Codex's independent re-review of 92f4596: candidates
+    #: exist and the line did not resolve, but NOT for a named documentation
+    #: gap -- a relevance/mapping/verification disagreement, or any other
+    #: reason that documenting more would not fix. Schema v4 was not yet
+    #: accepted/deployed when this was added, so it corrects the enum rather
+    #: than preserving CANDIDATES_NEEDING_FACT's misleading over-claim that
+    #: every such line is provider-answerable.
+    CANDIDATES_UNRESOLVED = "CANDIDATES_UNRESOLVED"
     #: Retrieval ran and found no defensible candidate at all. Carried in
     #: `ClaimBundle.candidate_lines` with an empty `candidates` tuple.
     NO_SUPPORTED_CANDIDATE = "NO_SUPPORTED_CANDIDATE"
@@ -567,6 +590,12 @@ class CandidateReference(_Strict):
     descriptor: str = ""
     score: float = 0.0
     source: str = ""
+    #: issue #6 F9-R7-D, Codex's independent re-review of 92f4596: `CandidateCode.
+    #: authority` (e.g. UMLS cui/release/matched-term lineage) was being dropped
+    #: between the producer's candidate pool and this audit surface -- carried
+    #: verbatim here now, the same way `_authority_of` already carries a CODED
+    #: line's authority into `CodeAuthority.detail`.
+    authority: dict[str, Any] = Field(default_factory=dict)
 
 
 class CandidateLine(_Strict):
@@ -2022,10 +2051,23 @@ def bundle_from_coding_result(
             continue          # already resolved + explained (bundled/dedup/non-covered);
                               # see audit.excluded_lines, not a coding uncertainty
         alternatives = list(getattr(line, "alternatives", None) or [])
-        status = (LineStatus.CANDIDATES_NEEDING_FACT if alternatives
-                 else LineStatus.NO_SUPPORTED_CANDIDATE)
-        blocking_reason = (str(getattr(line, "documentation_gap", "") or "")
-                          or str(getattr(line, "rationale", "") or ""))
+        # issue #6 F9-R7-E, Codex's independent re-review of 92f4596: every
+        # alternatives-having abstain used to be labeled CANDIDATES_NEEDING_FACT
+        # regardless of WHY it abstained, so a relevance/mapping/verification
+        # failure claimed a provider-answerable documentation gap that does not
+        # exist. Classify from the typed signal that actually names a gap
+        # (`documentation_gap`, or a tie's own `provider_question`) rather than
+        # from "alternatives is non-empty" alone.
+        tie_record = getattr(line, "tie_record", None) or {}
+        documentation_gap = (str(getattr(line, "documentation_gap", "") or "")
+                             or str(tie_record.get("provider_question") or ""))
+        if documentation_gap:
+            status = LineStatus.CANDIDATES_NEEDING_FACT
+        elif alternatives:
+            status = LineStatus.CANDIDATES_UNRESOLVED
+        else:
+            status = LineStatus.NO_SUPPORTED_CANDIDATE
+        blocking_reason = documentation_gap or str(getattr(line, "rationale", "") or "")
         candidate_lines.append(CandidateLine(
             clinical_event_id=str(getattr(fact, "fact_id", "") or ""),
             kind=str(getattr(getattr(fact, "kind", None), "value", "") or ""),
@@ -2035,7 +2077,8 @@ def bundle_from_coding_result(
                 CandidateReference(system=str(c.system), code=str(c.code),
                                    descriptor=str(c.descriptor or ""),
                                    score=float(getattr(c, "score", 0.0) or 0.0),
-                                   source=str(getattr(c, "source", "") or ""))
+                                   source=str(getattr(c, "source", "") or ""),
+                                   authority=dict(getattr(c, "authority", None) or {}))
                 for c in alternatives),
             blocking_reason=blocking_reason,
             evidence=_evidence_of(fact),

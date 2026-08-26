@@ -342,9 +342,10 @@ class NegatedAxisNarrowingTest(unittest.TestCase):
     the negated mention of RIGHT."""
 
     def test_a_negated_mention_of_one_side_never_grounds_that_side(self):
-        fact = _fact("assembly service",
-                     "assembly service performed, not on the right, but the left",
-                     attributes={"laterality": "left"})
+        text = "assembly service performed, not on the right, but the left"
+        fact = _fact("assembly service", text,
+                     attributes={"laterality": "left"},
+                     attribute_evidence=_lat_evidence(text, value="left", span_id="span-0"))
         line = resolve(_request(fact), _source(LAT_LEFT, LAT_RIGHT),
                        reconciliation=_agreed("span-0"))
         self.assertEqual(line.chosen.code if line.chosen else None, "CAND_LEFT",
@@ -738,8 +739,10 @@ class SimilarityMayOnlyWidenThePoolTest(unittest.TestCase):
         needed. That is a documented-axis decision, not a similarity one."""
         sided = _cand("CAND_RIGHT", "assembly service, right structure", 0.90)
         plain = _cand("CAND_PLAIN", "assembly service, unspecified structure", 0.90)
-        fact = _fact("assembly service", "assembly service on the right structure",
-                     attributes={"laterality": "right"})
+        text = "assembly service on the right structure"
+        fact = _fact("assembly service", text,
+                     attributes={"laterality": "right"},
+                     attribute_evidence=_lat_evidence(text, value="right", span_id="span-0"))
         line = resolve(_request(fact), _source(sided, plain),
                        reconciliation=_agreed("span-0"))
         self.assertTrue(line.resolved, line.rationale)
@@ -1387,8 +1390,10 @@ class MustSupportGroundedEliminationTest(unittest.TestCase):
         own typed `attributes["laterality"]`, never raw-text lexical matching --
         the typed value is set here so this keeps passing MEANINGFULLY, not by
         accident via a lexical path that no longer runs for this axis."""
-        fact = _fact("assembly service", "assembly service performed on the left",
-                     attributes={"laterality": "left"})
+        text = "assembly service performed on the left"
+        fact = _fact("assembly service", text,
+                     attributes={"laterality": "left"},
+                     attribute_evidence=_lat_evidence(text, value="left", span_id="span-0"))
         judge = _sv.judge(entails=lambda d: "left" in d, prefer=lambda d: "left" in d)
         line = resolve(_request(fact), _source(LAT_LEFT, LAT_RIGHT),
                        llm=_pinned(judge, "provider-a"),

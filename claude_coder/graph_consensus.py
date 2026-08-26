@@ -634,17 +634,30 @@ def claim_authorized_value(fact, axis: str, reconciliation) -> str | None:
     time -- every prior round's fix was real but scoped to the wrong (rarer)
     path.
 
-    Returns the value only when a scope-valid, source-RECONCILED
+    Returns the value ONLY when a scope-valid, source-RECONCILED
     `AttributeEvidence` entry exists whose own `.value` canonically matches it
     AND whose `assertion_state` is ASSERTED (`asserted_attribute_support`).
-    When no `attribute_evidence` exists for the axis at all, OR none of it is
-    value-bound to the current value, falls back to the SAME whole-fact-text
-    `_span_support` + `tiebreak.asserted_status` check `resolve()`'s own
-    fallback already uses -- no claim-affecting consumer this round is left
-    with WEAKER verification than `resolve()` itself already provides for the
-    "no per-attribute evidence yet" case, but none is left with NO verification
-    at all either, which is the state every site this function replaces was in
-    before this round.
+
+    issue #6 F9-R7-A, Codex's independent re-review of 92f4596: this function
+    used to fall back to the SAME whole-fact-text `_span_support` +
+    `tiebreak.asserted_status` lexical check `resolve()`'s own tie-break
+    fallback uses, whenever no value-bound entry existed. That fallback is
+    EXACTLY the token-window heuristic round 5 proved unsound for arbitrary-
+    distance negation (`_typed_laterality_support`'s own no-fallback design
+    was the fix) -- reintroducing it here as the DEFAULT path for every fact
+    lacking attribute_evidence undid that fix for every consumer this
+    function serves. Reproduced directly: `attributes={"laterality":
+    "right"}`, no attribute_evidence, evidence text "right involvement was
+    considered but was ultimately ruled out" -- the old fallback returned
+    "right".
+
+    There is now NO fallback. Missing or unbound attribute_evidence means
+    UNAUTHORIZED, full stop -- lexical text may still help EXTRACTION
+    populate a bound assertion in the first place (see extraction.py's
+    assertion_state/value prompt fields), or a caller may separately choose
+    to REJECT/hold on lexical negation, but lexical inspection alone may
+    never AUTHORIZE a code, modifier, unit, diagnosis-specificity, or
+    distinctness decision.
 
     Returns `None` (fail closed) when the value cannot be authorized -- the
     caller must treat that exactly as "not documented" for its own decision,
@@ -652,17 +665,7 @@ def claim_authorized_value(fact, axis: str, reconciliation) -> str | None:
     value = str((getattr(fact, "attributes", None) or {}).get(axis) or "").strip()
     if not value:
         return None
-    entries = (getattr(fact, "attribute_evidence", None) or {}).get(axis)
-    usable = [e for e in entries if e.scope == "local" or e.scope_validated] if entries else []
-    norm_value = _norm(value)
-    bound = [e for e in usable if _norm(e.value) == norm_value]
-    if bound:
-        return value if asserted_attribute_support(fact, axis, value, reconciliation) else None
-    from . import tiebreak as _tiebreak
-    ok, _proof, text, _spans = _span_support(fact, reconciliation)
-    if ok and _tiebreak.asserted_status((value,), text) == "supported":
-        return value
-    return None
+    return value if asserted_attribute_support(fact, axis, value, reconciliation) else None
 
 
 def source_support(fact, reconciliation) -> tuple[bool, str, str, tuple[str, ...]]:
@@ -710,16 +713,15 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
     regardless of how many readings had a confirmed event). Anything else is
     unresolved, which is a provider question, never a coder queue.
 
-    Proof is now PER-ATTRIBUTE first (issue #6 F9-R5): when a reading carries
-    `attribute_evidence` for this specific axis, that -- not the fact's whole,
-    undifferentiated evidence text -- is what the value is checked against, so a
-    value stated once in a scoped heading/parent event can be proven without one of
-    its tokens merely happening to co-occur elsewhere in the fact's evidence pool.
-    Falls back to `_span_support`'s whole-fact-text check when no per-attribute
-    evidence was recorded for this axis -- strictly additive, never a narrowing of
-    what already resolved before this field existed.
+    Proof is now PER-ATTRIBUTE ONLY (issue #6 F9-R5, tightened by F9-R7-A): a
+    reading's value is accepted only when its OWN `attribute_evidence` for this
+    axis is value-bound and genuinely ASSERTED -- never inferred from whether
+    the value's tokens happen to co-occur anywhere in the fact's whole,
+    undifferentiated evidence text. A reading with no per-attribute evidence for
+    this axis at all can never win here (see `_entailment` below); it is
+    UNRESOLVED, which is a provider question, exactly like a genuine
+    disagreement.
     """
-    from . import tiebreak as _tiebreak
 
     def _entailment(fact, axis, value) -> tuple[bool, str, str, tuple[str, ...], bool]:
         """(ok, proof, text, spans, says) for one reading. VALUE-level entailment,
@@ -743,10 +745,23 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
         source genuinely confirms is reported as a real documentation state (falls
         to the "no reading's own confirmed quotation states this value verbatim"
         branch), never mis-filed as an unconfirmed SOURCE-INTEGRITY problem, which
-        is a different, more specific claim. The lexical check is used ONLY as the
-        pre-existing, strictly-additive fallback when NO per-attribute evidence
-        exists for this axis at all -- unchanged from before, never the axis this
-        vulnerability was found on.
+        is a different, more specific claim.
+
+        issue #6 F9-R7-A follow-up (found during my own mandatory post-fix
+        review, not flagged by Codex's re-review of 92f4596 -- that review's
+        exact reproduction targeted `claim_authorized_value` specifically, but
+        the SAME root cause survived here too): `says` used to fall back to
+        `tiebreak.asserted_status` -- the identical unsound lexical heuristic --
+        whenever NO per-attribute evidence existed for the axis at all, which is
+        the common case. Reproduced directly: a primary reading claiming "right"
+        with evidence text "right involvement was considered but was ultimately
+        ruled out" and no attribute_evidence, against a second reading whose own
+        evidence says nothing about laterality, resolved `accepted_from="primary",
+        accepted_value="right"` -- the exact same false-positive class, just
+        reached through the tie-break entailment path instead of
+        `claim_authorized_value`. There is now no lexical fallback here either:
+        no per-attribute evidence for this axis means `says` is unconditionally
+        `False`, exactly like `claim_authorized_value`.
         """
         if fact is None:
             return False, "", "", (), False
@@ -756,8 +771,7 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
             says = bool(value) and asserted_attribute_support(fact, axis, value, reconciliation)
             return ok, proof, text, spans, says
         ok, proof, text, spans = _span_support(fact, reconciliation)
-        says = ok and bool(value) and _tiebreak.asserted_status(
-            (value,), text) == "supported"
+        says = False
         return ok, proof, text, spans, says
 
     out: list[AxisResolution] = []

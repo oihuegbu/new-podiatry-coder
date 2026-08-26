@@ -36,9 +36,13 @@ def test_laterality_flip():
         ("QQ02", "icd10"): {"long_description": "Widgetopathy of left gizmo"}},
         index={"widgetopathy of gizmo": {"QQ0"}})
     def code(side):
+        from claude_coder.models import AttributeEvidence, RelationState
+        span = EvidenceSpan(f"widgetopathy {side} gizmo", anchored=True, span_id=f"s-{side}")
         f = ClinicalFact(FactKind.DIAGNOSIS, "widgetopathy of gizmo", attributes={"laterality": side},
-                         evidence=[EvidenceSpan(f"widgetopathy {side} gizmo",
-                                                anchored=True, span_id=f"s-{side}")],
+                         evidence=[span],
+                         attribute_evidence={"laterality": (
+                             AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                               value=side),)},
                          disposition=Disposition.PERFORMED)
         return resolution.resolve(_request(f), src).chosen
     r, l = code("right"), code("left")
@@ -67,9 +71,13 @@ def test_specificity_upgrade():
     src = MockSource(records={
         ("RR10", "icd10"): {"long_description": "Widgetopathy, unspecified"},
         ("RR19", "icd10"): {"long_description": "Widgetopathy of right gizmo"}})
+    from claude_coder.models import AttributeEvidence, RelationState
+    span = EvidenceSpan("widgetopathy right gizmo", anchored=True, span_id="s1")
     f = ClinicalFact(FactKind.DIAGNOSIS, "widgetopathy right gizmo", attributes={"laterality": "right"},
-                     evidence=[EvidenceSpan("widgetopathy right gizmo",
-                                            anchored=True, span_id="s1")],
+                     evidence=[span],
+                     attribute_evidence={"laterality": (
+                         AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                           value="right"),)},
                      disposition=Disposition.PERFORMED)
     line = ResolvedLine(fact=f, chosen=CandidateCode("RR10", "icd10", "Widgetopathy, unspecified", 1.0),
                         method=ResolutionMethod.VERIFIED)

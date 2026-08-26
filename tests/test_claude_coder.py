@@ -294,21 +294,51 @@ class OntologyResolutionTest(unittest.TestCase):
 
     def test_laterality_contradiction_eliminated(self):
         from claude_coder.data_access import MockSource
-        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
-                                         ResolutionMethod)
+        from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,
+                                         FactKind, RelationState, ResolutionMethod)
         from claude_coder.resolution import resolve
 
         left = CandidateCode("DX_LEFT", "icd10", "some condition, left foot", 0.9)
         right = CandidateCode("DX_RIGHT", "icd10", "some condition, right foot", 0.9)
         src = MockSource(retrieval={("*", "icd10"): [left, right]})
+        span = EvidenceSpan("some condition, right side", anchored=True, span_id="s1")
         fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="some condition",
                             attributes={"laterality": "right"},
-                            evidence=[EvidenceSpan("some condition, right side",
-                                                   anchored=True, span_id="s1")],
+                            evidence=[span],
+                            attribute_evidence={"laterality": (
+                                AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                                  value="right"),)},
                             confidence=0.99)
         line = resolve(_request(fact), src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
         self.assertEqual(line.chosen.code, "DX_RIGHT", line.rationale)
+
+    def test_unbound_lexical_text_never_authorizes_a_deterministic_selection(self):
+        """issue #6 F9-R7-A, Codex's independent re-review of 92f4596: the exact
+        reported reproduction, through the ORDINARY deterministic path (not a
+        direct `claim_authorized_value` unit test) -- no `attribute_evidence` at
+        all, and evidence text whose far-distance negation a lexical heuristic
+        cannot correctly parse. Must never resolve deterministically to either
+        side; the claim is unauthorized, not merely ambiguous between two
+        equally-plausible readings."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder.resolution import resolve
+
+        left = CandidateCode("DX_LEFT", "icd10", "some condition, left foot", 0.9)
+        right = CandidateCode("DX_RIGHT", "icd10", "some condition, right foot", 0.9)
+        src = MockSource(retrieval={("*", "icd10"): [left, right]})
+        fact = ClinicalFact(
+            kind=FactKind.DIAGNOSIS, description="some condition",
+            attributes={"laterality": "right"},
+            evidence=[EvidenceSpan(
+                "right involvement was considered but was ultimately ruled out",
+                anchored=True, span_id="s1")],
+            confidence=0.99)
+        line = resolve(_request(fact), src)
+        self.assertNotEqual(line.chosen.code if line.chosen else None, "DX_RIGHT",
+                            "an unauthorized laterality claim must never select "
+                            "the very side its own confirmed text rules out")
 
 
 class BundlingExclusionTest(unittest.TestCase):
@@ -371,6 +401,23 @@ class ModifierTest(unittest.TestCase):
         # the agnostic rule behind the A4570-RT / C1713-RT error class: laterality
         # requires positive fee-schedule eligibility, never a default.
         self.assertEqual(eng.assign(self._fact("right"), "Anchor/screw for bone", bilat=None), [])
+
+    def test_unbound_lexical_text_never_authorizes_a_modifier(self):
+        """issue #6 F9-R7-A: the exact reported far-distance-negation
+        reproduction, through modifier assignment -- no `attribute_evidence`,
+        evidence text a lexical heuristic could misread as confirming
+        laterality. Must never fabricate RT/LT from an unauthorized claim."""
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder.modifiers import ModifierEngine
+        fact = ClinicalFact(
+            kind=FactKind.PROCEDURE, description="excision", attributes={"laterality": "right"},
+            evidence=[EvidenceSpan(
+                "right involvement was considered but was ultimately ruled out",
+                anchored=True, span_id="s1")])
+        defs = {"MR": {"description": "Right side of the body"},
+                "ML": {"description": "Left side of the body"}}
+        eng = ModifierEngine(defs=defs)
+        self.assertEqual(eng.assign(fact, "Excision, lesion, each", bilat="0"), [])
 
 
 class EMLevelingTest(unittest.TestCase):
@@ -1491,8 +1538,8 @@ class CorroborationIndependenceTest(unittest.TestCase):
         is the error the function exists to prevent), but without an independent origin the
         line is ARBITRATED and gets a coder."""
         from claude_coder.data_access import MockSource
-        from claude_coder.models import (CandidateCode, ClinicalFact, EvidenceSpan,
-                                         FactKind, ResolvedLine)
+        from claude_coder.models import (AttributeEvidence, CandidateCode, ClinicalFact,
+                                         EvidenceSpan, FactKind, RelationState, ResolvedLine)
         from claude_coder.resolution import refine_diagnosis_specificity
         broad = "Condition alpha, unspecified"
         specific = "Condition alpha of right structure"
@@ -1505,10 +1552,13 @@ class CorroborationIndependenceTest(unittest.TestCase):
                         reason="documented side")
 
         def line():
+            span = EvidenceSpan("condition alpha, right", anchored=True, span_id="s1")
             fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="condition alpha",
                                 attributes={"laterality": "right"},
-                                evidence=[EvidenceSpan("condition alpha, right",
-                                                       anchored=True, span_id="s1")],
+                                evidence=[span],
+                                attribute_evidence={"laterality": (
+                                    AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                                      value="right"),)},
                                 confidence=0.95)
             return ResolvedLine(fact=fact,
                                 chosen=CandidateCode("QQ000", "icd10", broad, 1.0),
@@ -1981,17 +2031,21 @@ class LateralityUpgradeTest(unittest.TestCase):
 
     def test_unspecified_upgraded_to_documented_side(self):
         from claude_coder.data_access import MockSource
-        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,
+                                         FactKind, RelationState)
         from claude_coder.resolution import resolve, upgrade_diagnosis_laterality
         recs = {("DX9", "icd10"): {"long_description": "some condition, unspecified site", "active": True},
                 ("DX1", "icd10"): {"long_description": "some condition, right site", "active": True},
                 ("DX2", "icd10"): {"long_description": "some condition, left site", "active": True}}
         src = MockSource(records=recs, retrieval={("*", "icd10"):
                          [CandidateCode("DX9", "icd10", "some condition, unspecified site", 1.0)]})
+        span = EvidenceSpan("some condition, right side", anchored=True, span_id="s1")
         fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="some condition",
                             attributes={"laterality": "right"},
-                            evidence=[EvidenceSpan("some condition, right side",
-                                                   anchored=True, span_id="s1")], confidence=0.98)
+                            evidence=[span],
+                            attribute_evidence={"laterality": (
+                                AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                                  value="right"),)}, confidence=0.98)
         line = resolve(_request(fact), src)
         self.assertEqual(line.chosen.code, "DX9")           # retrieval gives unspecified
         line = upgrade_diagnosis_laterality(line, src)
@@ -2007,6 +2061,28 @@ class LateralityUpgradeTest(unittest.TestCase):
         src = MockSource(records=recs)
         f = ClinicalFact(kind=FactKind.DIAGNOSIS, description="some condition",
                          evidence=[EvidenceSpan("x")])      # no laterality documented
+        ln = ResolvedLine(fact=f, chosen=CandidateCode("DX9", "icd10", "some condition, unspecified site", 1.0),
+                          method=ResolutionMethod.DETERMINISTIC)
+        self.assertEqual(upgrade_diagnosis_laterality(ln, src).chosen.code, "DX9")   # unchanged
+
+    def test_unbound_lexical_text_never_authorizes_a_specificity_upgrade(self):
+        """issue #6 F9-R7-A: the exact reported far-distance-negation
+        reproduction, through diagnosis-specificity upgrade -- no
+        `attribute_evidence`, evidence text a lexical heuristic could misread
+        as confirming laterality. Must never upgrade to the ruled-out side."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod, ResolvedLine)
+        from claude_coder.resolution import upgrade_diagnosis_laterality
+        recs = {("DX9", "icd10"): {"long_description": "some condition, unspecified site", "active": True},
+                ("DX1", "icd10"): {"long_description": "some condition, right site", "active": True}}
+        src = MockSource(records=recs)
+        f = ClinicalFact(
+            kind=FactKind.DIAGNOSIS, description="some condition",
+            attributes={"laterality": "right"},
+            evidence=[EvidenceSpan(
+                "right involvement was considered but was ultimately ruled out",
+                anchored=True, span_id="s1")])
         ln = ResolvedLine(fact=f, chosen=CandidateCode("DX9", "icd10", "some condition, unspecified site", 1.0),
                           method=ResolutionMethod.DETERMINISTIC)
         self.assertEqual(upgrade_diagnosis_laterality(ln, src).chosen.code, "DX9")   # unchanged

@@ -886,6 +886,14 @@ def _authoritative_pool(code: str, source: CodeSource) -> list[CandidateCode]:
 
 VERIFY_K = 8           # shortlist size sent to the entailment-selection call
 _MIN_RETRIEVED_SLOTS = 4   # Fix4: authoritative-retrieval slots reserved in the shortlist
+# issue #6 F9-R7-C, Codex's independent re-review of 92f4596: a UMLS-sourced
+# candidate's fixed recall score (0.3, `data_access.py`) is not commensurate
+# with a RAG cosine-similarity score, so it needs its OWN reserved shortlist
+# lane rather than competing on raw score -- otherwise 8+ higher-scored RAG
+# candidates crowd it out of VERIFY_K entirely before entailment verification
+# ever sees it, reproduced directly. Deliberately small: UMLS still only ever
+# PROPOSES a candidate for verification, never selects or releases one.
+_MIN_UMLS_SLOTS = 1
                            # so LLM memory proposals can never fully displace recall
 _LEARNED_DETERMINISTIC = False  # Fix5: learned index is recall-only until re-keyed with
                                 # full clinical context (system/anatomy/laterality/...)
@@ -1295,14 +1303,22 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
                    if m is not None and m.interval_unsupported]
     proposals = [m.candidate for m in proposed_matches
                  if m is not None and not m.interval_unsupported]
-    retrieved = [m.candidate for m in retrieved_matches if not m.interval_unsupported]
+    retrieved_all = [m.candidate for m in retrieved_matches if not m.interval_unsupported]
+    # issue #6 F9-R7-C: split off UMLS-sourced candidates for their OWN reserved
+    # lane (see `_MIN_UMLS_SLOTS`) -- they must not compete on raw score against
+    # embedding-similarity-ranked retrieval.
+    umls_seeds = [c for c in retrieved_all if getattr(c, "source", "") == "umls_recall"]
+    retrieved = [c for c in retrieved_all if getattr(c, "source", "") != "umls_recall"]
+    umls_cap = min(len(umls_seeds), _MIN_UMLS_SLOTS)
     # Fix4: reserve a floor of shortlist slots for authoritative RETRIEVAL so LLM
     # memory proposals cannot crowd it out. Keep up to (VERIFY_K - floor) proposals
-    # first, then retrieved, then any leftover proposals fill remaining room.
-    prop_cap = max(0, VERIFY_K - _MIN_RETRIEVED_SLOTS)
+    # first, then the reserved UMLS lane, then retrieved, then any leftover
+    # proposals and UMLS seeds fill remaining room.
+    prop_cap = max(0, VERIFY_K - _MIN_RETRIEVED_SLOTS - umls_cap)
     order: list[CandidateCode] = []
     seen: set[str] = set()
-    for c in proposals[:prop_cap] + retrieved + proposals[prop_cap:]:
+    for c in (proposals[:prop_cap] + umls_seeds[:umls_cap] + retrieved
+             + proposals[prop_cap:] + umls_seeds[umls_cap:]):
         if c.code not in seen:
             seen.add(c.code)
             order.append(c)

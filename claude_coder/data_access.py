@@ -274,6 +274,7 @@ class AuthoritativeSource:
         self._procedure_relation_identity = None
         self._umls_crosswalk = None
         self._umls_term_index = None
+        self._umls_scan_index = None
         self._cptidx = None
         self._learned = None
         self._drug = None
@@ -576,6 +577,65 @@ class AuthoritativeSource:
         entry = self._umls_crosswalk.get(str(code))
         return dict(entry) if isinstance(entry, dict) else {}
 
+    def _ensure_umls_scan_index(self):
+        """Lazy {word-tuple -> normalized term} index over `term_to_cuis`'s own
+        keys, built once and cached -- the SAME token-bounded longest-match
+        scan pattern `_ensure_procedure_scan_index`/`concept_scan` already use
+        (issue #6 F9-R7-C, Codex's independent re-review of 92f4596: `umls_
+        candidates` previously did whole-string equality only against
+        `resolution.py`'s full structured queries and full evidence sentences,
+        so a term index entry for "assembly service" never matched "assembly
+        service was completed today" -- reproduced directly). No new data, no
+        fuzzy matching: exactly the terms the term-index artifact already
+        carries, scanned by token boundary."""
+        if getattr(self, "_umls_scan_index", None) is not None:
+            return self._umls_scan_index
+        if not self._umls_term_index:
+            self._umls_scan_index = False
+            return False
+        from . import ontology as _ontology
+        term_to_cuis = self._umls_term_index.get("term_to_cuis") or {}
+        by_words: dict[tuple[str, ...], str] = {}
+        max_len = 0
+        for term in term_to_cuis:
+            words = tuple(_ontology._tokens(term))
+            if not words:
+                continue
+            by_words.setdefault(words, term)
+            max_len = max(max_len, len(words))
+        self._umls_scan_by_words = by_words
+        self._umls_scan_max_len = max_len
+        self._umls_scan_index = True
+        return True
+
+    def _umls_scan(self, text: str) -> tuple[str, ...]:
+        """Every known term-index term that occurs as a token-bounded phrase
+        inside free-form `text` -- longest match wins at each position,
+        matches never overlap. See `_ensure_umls_scan_index`."""
+        if not self._ensure_umls_scan_index():
+            return ()
+        from . import ontology as _ontology
+        words = _ontology._tokens(text)
+        by_words = self._umls_scan_by_words
+        max_len = self._umls_scan_max_len
+        found: list[str] = []
+        seen: set[str] = set()
+        i, n = 0, len(words)
+        while i < n:
+            matched = False
+            for length in range(min(max_len, n - i), 0, -1):
+                term = by_words.get(tuple(words[i:i + length]))
+                if term is not None:
+                    if term not in seen:
+                        seen.add(term)
+                        found.append(term)
+                    i += length
+                    matched = True
+                    break
+            if not matched:
+                i += 1
+        return tuple(found)
+
     def umls_candidates(self, terms: list[str], system: str,
                         date_of_service: str | None) -> list[CandidateCode]:
         """CPT/HCPCS candidates seeded from UMLS term/CUI/atom lineage (issue #6
@@ -593,7 +653,15 @@ class AuthoritativeSource:
         billing-code equivalence on its own). This one is authorized as a RECALL
         WIDENER specifically because it only ever proposes -- proof that the
         proposed code's own descriptor/facts genuinely fit still has to clear
-        every other gate a descriptor-grounded or RAG-sourced candidate clears."""
+        every other gate a descriptor-grounded or RAG-sourced candidate clears.
+
+        issue #6 F9-R7-C/D, Codex's independent re-review of 92f4596: scans
+        each input string for TOKEN-BOUNDED matched phrases (`_umls_scan`)
+        instead of requiring the whole string to equal a term-index key, and
+        accumulates every (input phrase, matched term, CUI, atom) that
+        supports a given code into that code's own `authority["matches"]`
+        instead of keeping only the first -- lineage a caller can audit, not
+        merely a code with no reasoning attached."""
         if system not in ("cpt", "hcpcs"):
             return []
         if self._umls_term_index is None:
@@ -609,36 +677,46 @@ class AuthoritativeSource:
                 self._umls_term_index = False
         if not self._umls_term_index:
             return []
-        from . import terminology as _term
         term_to_cuis = self._umls_term_index.get("term_to_cuis") or {}
         cui_to_atoms = self._umls_term_index.get("cui_to_atoms") or {}
         release = str(self._umls_term_index.get("release") or "")
-        seen_codes: set[str] = set()
-        out: list[CandidateCode] = []
+        snapshot = {"release": release,
+                   "mrconso_sha256": str(self._umls_term_index.get("mrconso_sha256") or ""),
+                   "generated": str(self._umls_term_index.get("generated") or "")}
+        descriptors: dict[str, str] = {}
+        matches_by_code: dict[str, list[dict]] = {}
         for raw_term in terms or []:
-            norm = _term.normalize_term(raw_term)
-            if not norm:
-                continue
-            for cui in term_to_cuis.get(norm) or ():
-                for atom in cui_to_atoms.get(cui) or ():
-                    sab = str(atom.get("sab") or "")
-                    atom_system = "cpt" if sab in ("CPT", "HCPT") else "hcpcs"
-                    if atom_system != system:
-                        continue
-                    code = str(atom.get("code") or "")
-                    if not code or code in seen_codes:
-                        continue
-                    rec = self.lookup(code, system) or {}
-                    descriptor = (rec.get("long_description") or rec.get("description")
-                                 or rec.get("short_description") or "")
-                    if not descriptor:
-                        continue      # never propose a code this deployment cannot describe
-                    seen_codes.add(code)
-                    out.append(CandidateCode(
-                        code=code, system=system, descriptor=str(descriptor),
-                        score=0.3, source="umls_recall",
-                        authority={"cui": cui, "release": release, "term": raw_term},
-                    ))
+            for matched_term in self._umls_scan(raw_term):
+                for cui in term_to_cuis.get(matched_term) or ():
+                    for atom in cui_to_atoms.get(cui) or ():
+                        sab = str(atom.get("sab") or "")
+                        atom_system = "cpt" if sab in ("CPT", "HCPT") else "hcpcs"
+                        if atom_system != system:
+                            continue
+                        code = str(atom.get("code") or "")
+                        if not code:
+                            continue
+                        if code not in descriptors:
+                            rec = self.lookup(code, system) or {}
+                            descriptor = (rec.get("long_description") or rec.get("description")
+                                         or rec.get("short_description") or "")
+                            if not descriptor:
+                                continue  # never propose a code this deployment cannot describe
+                            descriptors[code] = str(descriptor)
+                        matches_by_code.setdefault(code, []).append({
+                            "input_phrase": raw_term, "normalized_term": matched_term,
+                            "cui": cui,
+                            "atom": {"sab": sab, "code": code,
+                                    "term": str(atom.get("term") or ""),
+                                    "tty": str(atom.get("tty") or "")},
+                        })
+        out: list[CandidateCode] = []
+        for code, descriptor in descriptors.items():
+            out.append(CandidateCode(
+                code=code, system=system, descriptor=descriptor,
+                score=0.3, source="umls_recall",
+                authority={**snapshot, "matches": matches_by_code[code]},
+            ))
         return out
 
     #: Governed axes THIS source can route `concept_lookup` to a real concept graph

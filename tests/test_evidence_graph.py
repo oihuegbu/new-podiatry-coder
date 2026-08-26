@@ -93,13 +93,32 @@ class TwoReadingAxisConsensus(unittest.TestCase):
     """Directive §3: compare graph axes, settle from the source, query when it cannot."""
 
     def _readings(self, primary_laterality, second_laterality, *,
-                  primary_quote, second_quote):
+                  primary_quote, second_quote,
+                  primary_evidence_value=None, second_evidence_value=None):
+        """`primary_evidence_value`/`second_evidence_value` (issue #6 F9-R7-A
+        follow-up): when a test's own reading genuinely STATES its laterality
+        (not merely proving an unrelated UNRESOLVED/ungrounded shape), it now
+        needs real value-bound `attribute_evidence` to settle -- the whole-
+        fact-text lexical fallback `resolve()` used to fall back to for this
+        is gone, proven exploitable by the same far-distance-negation class
+        Codex's re-review of 92f4596 found for `claim_authorized_value`."""
+        from claude_coder.models import AttributeEvidence
+        p1 = _span(primary_quote, span_id="p1")
+        s1 = _span(second_quote, span_id="s1")
+        primary_attr_ev = ({"laterality": (
+                                AttributeEvidence(span=p1, assertion_state=RelationState.ASSERTED,
+                                                  value=primary_evidence_value),)}
+                           if primary_evidence_value else None)
+        second_attr_ev = ({"laterality": (
+                               AttributeEvidence(span=s1, assertion_state=RelationState.ASSERTED,
+                                                 value=second_evidence_value),)}
+                          if second_evidence_value else None)
         primary = [_fact("F1", FactKind.PROCEDURE, "procedure performed",
-                         spans=[_span(primary_quote, span_id="p1")],
-                         attributes={"laterality": primary_laterality})]
+                         spans=[p1], attributes={"laterality": primary_laterality},
+                         attribute_evidence=primary_attr_ev)]
         second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
-                        spans=[_span(second_quote, span_id="s1")],
-                        attributes={"laterality": second_laterality})]
+                        spans=[s1], attributes={"laterality": second_laterality},
+                        attribute_evidence=second_attr_ev)]
         return primary, second
 
     def test_differing_prose_on_agreeing_axes_is_not_a_disagreement(self):
@@ -121,7 +140,8 @@ class TwoReadingAxisConsensus(unittest.TestCase):
         primary, second = self._readings(
             "right", "left",
             primary_quote="Procedure performed today",          # says nothing about side
-            second_quote="performed today on the left side")    # states the axis
+            second_quote="performed today on the left side",    # states the axis
+            second_evidence_value="left")
         report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
         axes = {d.axis for d in report.disagreements}
         self.assertIn("laterality", axes)
@@ -145,9 +165,13 @@ class TwoReadingAxisConsensus(unittest.TestCase):
         is not a disagreement to arbitrate -- there is no competing claim -- so it
         settles from the recording reading (via the same verbatim-token check a
         two-sided case uses), never reaches a provider question."""
+        from claude_coder.models import AttributeEvidence
+        p1 = _span("An open incision was made", span_id="p1")
         primary = [_fact("F1", FactKind.PROCEDURE, "procedure performed",
-                         spans=[_span("An open incision was made", span_id="p1")],
-                         attributes={"approach": "open"})]
+                         spans=[p1], attributes={"approach": "open"},
+                         attribute_evidence={"approach": (
+                             AttributeEvidence(span=p1, assertion_state=RelationState.ASSERTED,
+                                               value="open"),)})]
         second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
                         spans=[_span("An open incision was made", span_id="s1")],
                         attributes={})]   # approach not recorded at all -- absent, not ""
@@ -233,10 +257,18 @@ class TwoReadingAxisConsensus(unittest.TestCase):
     def test_one_event_confirmed_and_its_value_is_stated_still_settles(self):
         """The mirror, positive case: the SAME one-event-confirmed shape, but this
         time the confirmed reading's own quotation genuinely states its value --
-        must still settle, exactly as before this fix."""
+        must still settle -- via its own value-bound `attribute_evidence` (issue
+        #6 F9-R7-A follow-up: the whole-fact-text lexical fallback this used to
+        rely on is gone -- proven, not merely suspected, exploitable by the same
+        far-distance-negation class Codex's re-review of 92f4596 found for
+        `claim_authorized_value`)."""
+        from claude_coder.models import AttributeEvidence
+        p1 = _span("an open incision was made", span_id="p1")
         primary = [_fact("F1", FactKind.PROCEDURE, "procedure performed",
-                         spans=[_span("an open incision was made", span_id="p1")],
-                         attributes={"approach": "open"})]
+                         spans=[p1], attributes={"approach": "open"},
+                         attribute_evidence={"approach": (
+                             AttributeEvidence(span=p1, assertion_state=RelationState.ASSERTED,
+                                               value="open"),)})]
         second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
                         spans=[_span("an open incision was made", span_id="s1")],
                         attributes={"approach": "closed"})]
@@ -362,9 +394,13 @@ class PerAttributeSourceEvidence(unittest.TestCase):
         `attribute_evidence` anchors it to this specific attribute -- must stay
         unresolved, not settle on incidental token co-occurrence.
 
-        This fixture only has this failure mode because it has NO attribute_evidence
-        at all -- proving the pre-existing whole-fact-text fallback still applies
-        when the field is absent (see the next test for the case WITH it)."""
+        issue #6 F9-R7-A follow-up: this test's own NAME was written aspirationally
+        before the fix that makes it true actually landed -- its body used to
+        assert the OPPOSITE (RESOLVED_FROM_SOURCE), documented at the time as "the
+        pre-existing whole-fact-text fallback still applies." That fallback is
+        proven exploitable (the same far-distance-negation class Codex's re-review
+        of 92f4596 found for `claim_authorized_value`) and is now gone entirely --
+        this test's body finally matches its own name."""
         primary = [_fact("F1", FactKind.PROCEDURE, "procedure performed",
                          spans=[_span("Procedure performed today on the left side, "
                                      "distinct from the separate right-side note",
@@ -378,10 +414,9 @@ class PerAttributeSourceEvidence(unittest.TestCase):
         resolutions = graph_consensus.resolve([disagreement], primary_by_id,
                                               second_by_node, None)
         approach = next(r for r in resolutions if r.axis == "approach")
-        # Whole-fact fallback: "left" DOES appear in p1's text, so this still settles
-        # today -- the point of the NEXT test is that per-attribute evidence, when
-        # present, is what should be consulted first for the actually scoped case.
-        self.assertIs(approach.verdict, graph_consensus.AxisVerdict.RESOLVED_FROM_SOURCE)
+        self.assertIs(approach.verdict, graph_consensus.AxisVerdict.UNRESOLVED,
+                      "incidental token co-occurrence in unrelated text must never "
+                      "settle a claim with no value-bound attribute_evidence")
 
     def test_per_attribute_evidence_is_consulted_before_the_whole_fact_blob(self):
         """The positive case: `attribute_evidence` anchors the value to its OWN
@@ -498,11 +533,16 @@ class PerAttributeSourceEvidence(unittest.TestCase):
         # deprioritized.
         self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
 
-    def test_a_fact_with_no_attribute_evidence_at_all_is_unaffected(self):
-        """Regression guard: a fact that never populates `attribute_evidence` (every
-        fact extracted before this field existed, or of a kind that never emits it)
-        must behave EXACTLY as before this fix -- proven here by reproducing an
-        existing whole-fact-text resolution unchanged."""
+    def test_a_fact_with_no_attribute_evidence_at_all_never_settles_via_lexical_text(self):
+        """issue #6 F9-R7-A follow-up: this test used to be named "...is_unaffected"
+        and proved that a fact predating `attribute_evidence` kept resolving via
+        the whole-fact-text lexical fallback "EXACTLY as before this fix" (F9-R5).
+        That fallback is now proven exploitable by the same far-distance-negation
+        class Codex's re-review of 92f4596 found for `claim_authorized_value` --
+        it no longer exists here either. A fact with no per-attribute evidence for
+        a disputed axis can never settle through `resolve()`, regardless of how
+        much its whole evidence text superficially agrees; it is UNRESOLVED, which
+        routes to a provider question, never a silent auto-accept."""
         primary = [_fact("F1", FactKind.PROCEDURE, "procedure performed",
                          spans=[_span("performed today on the left side", span_id="p1")],
                          attributes={"laterality": "right"})]
@@ -514,8 +554,9 @@ class PerAttributeSourceEvidence(unittest.TestCase):
         resolutions = graph_consensus.resolve([disagreement], primary_by_id,
                                               second_by_node, None)
         laterality = next(r for r in resolutions if r.axis == "laterality")
-        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.RESOLVED_FROM_SOURCE)
-        self.assertEqual(laterality.accepted_value, "left")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED,
+                      "no attribute_evidence for this axis means neither reading "
+                      "can settle it, no matter what its whole-fact text says")
 
     def test_an_assertion_state_negated_entry_never_lets_resolve_accept_the_value(self):
         """issue #6 F9-R6-R2, fifth re-review, ROOT CAUSE: the FOURTH round's fix
@@ -1028,6 +1069,65 @@ class GraphBinding(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+class AttributeEvidenceMutationIsBoundToEveryDigest(unittest.TestCase):
+    """issue #6 F9-R7-B, Codex's independent re-review of 92f4596:
+    `AttributeEvidence.value`/`.assertion_state` decide code selection (via
+    `graph_consensus.claim_authorized_value`) since F9-R6-R2's sixth
+    re-review, but `attribute_evidence_records()` -- the ONE canonical record
+    the eligibility snapshot digest, the clinical graph, and the release
+    certificate all serialize through -- omitted both fields. A mutation that
+    flips selection must change every digest built from it."""
+
+    def _fact(self, *, assertion_state, value):
+        from claude_coder.models import AttributeEvidence, RelationState
+        span = EvidenceSpan("condition, right side", anchored=True, span_id="s1")
+        return ClinicalFact(
+            FactKind.DIAGNOSIS, "a condition", attributes={"laterality": "right"},
+            evidence=[span], fact_id="F1",
+            attribute_evidence={"laterality": (
+                AttributeEvidence(span=span, assertion_state=assertion_state,
+                                  value=value),)})
+
+    def test_flipping_assertion_state_changes_claim_authorization(self):
+        from claude_coder import graph_consensus as gc
+        negated = self._fact(assertion_state=RelationState.NEGATED, value="right")
+        asserted = self._fact(assertion_state=RelationState.ASSERTED, value="right")
+        self.assertIsNone(gc.claim_authorized_value(negated, "laterality", None))
+        self.assertEqual(gc.claim_authorized_value(asserted, "laterality", None), "right")
+
+    def test_the_record_carries_value_and_assertion_state(self):
+        from app.contracts.claim_bundle import attribute_evidence_records
+        fact = self._fact(assertion_state=RelationState.ASSERTED, value="right")
+        records = attribute_evidence_records(fact)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["value"], "right")
+        self.assertEqual(records[0]["assertion_state"], "asserted")
+
+    def test_a_selection_changing_mutation_changes_every_digest_built_from_it(self):
+        from app.contracts.claim_bundle import attribute_evidence_records
+        from claude_coder.eligibility import fact_snapshot_digest
+
+        negated = self._fact(assertion_state=RelationState.NEGATED, value="right")
+        asserted = self._fact(assertion_state=RelationState.ASSERTED, value="right")
+
+        self.assertNotEqual(attribute_evidence_records(negated),
+                            attribute_evidence_records(asserted),
+                            "the canonical record must itself differ")
+        self.assertNotEqual(fact_snapshot_digest(negated), fact_snapshot_digest(asserted),
+                            "the eligibility mutation-boundary digest must change when "
+                            "the ONLY thing that changed is what decides code selection")
+
+    def test_a_selection_changing_mutation_changes_the_graph_hash(self):
+        facts = [self._fact(assertion_state=RelationState.NEGATED, value="right")]
+        negated_graph = _graph(facts, [])
+        facts2 = [self._fact(assertion_state=RelationState.ASSERTED, value="right")]
+        asserted_graph = _graph(facts2, [])
+        self.assertNotEqual(
+            negated_graph.reference_payload(["F1"])["graph_sha256"],
+            asserted_graph.reference_payload(["F1"])["graph_sha256"],
+            "the graph binding must change when a mutation flips code selection")
+
+
 class PerLineStatusClassification(unittest.TestCase):
     """issue #6 F9-R7 item 4: every documented service/diagnosis survives into
     the bundle with one explicit status, never erased into an untyped audit
@@ -1048,6 +1148,9 @@ class PerLineStatusClassification(unittest.TestCase):
                                       span_id="p3")])
         unsupported = _fact("F4", FactKind.PROCEDURE, "procedure delta performed",
                             spans=[_span("Procedure performed today", span_id="p1")])
+        unresolved = _fact("F5", FactKind.PROCEDURE, "procedure epsilon performed",
+                           spans=[_span("A second, separately documented procedure",
+                                       span_id="p3")])
 
         lines = [
             ResolvedLine(fact=recommended,
@@ -1076,6 +1179,18 @@ class PerLineStatusClassification(unittest.TestCase):
             ResolvedLine(fact=unsupported, chosen=None,
                          method=ResolutionMethod.ABSTAINED,
                          rationale="no candidate retrieved for the concept"),
+            # issue #6 F9-R7-E: alternatives exist but NO documentation_gap/
+            # provider_question names a provable, provider-answerable ask --
+            # a relevance/mapping/verification disagreement, never a
+            # documentation request.
+            ResolvedLine(fact=unresolved, chosen=None,
+                         method=ResolutionMethod.ABSTAINED,
+                         rationale="two candidates entailed but the second corroborator "
+                                   "disagreed on which one",
+                         alternatives=[
+                             CandidateCode(code="ALT3", system="cpt",
+                                          descriptor="procedure epsilon, method one",
+                                          score=0.5, source="retrieval")]),
         ]
         result = CodingResult(encounter_id="enc", date_of_service="2026-03-14",
                               lines=lines)
@@ -1129,6 +1244,19 @@ class PerLineStatusClassification(unittest.TestCase):
         self.assertEqual(empty.candidates, ())
         self.assertIn("no candidate retrieved", empty.blocking_reason)
 
+    def test_alternatives_with_no_named_gap_is_unresolved_not_needing_a_fact(self):
+        """issue #6 F9-R7-E: a relevance/mapping/verification disagreement is
+        NOT a documentation ask -- it must not claim
+        CANDIDATES_NEEDING_FACT's "one named, provider-answerable fact"
+        meaning when no such fact was ever named."""
+        from app.contracts.claim_bundle import LineStatus
+        bundle = self._bundle(self._result())
+        unresolved = next(cl for cl in bundle.candidate_lines
+                          if cl.clinical_event_id == "F5")
+        self.assertEqual(unresolved.status, LineStatus.CANDIDATES_UNRESOLVED)
+        self.assertEqual({c.code for c in unresolved.candidates}, {"ALT3"})
+        self.assertIn("corroborator disagreed", unresolved.blocking_reason)
+
     def test_an_uncertainty_on_one_line_never_blocks_an_unrelated_recommended_line(self):
         """The tie (F3) and the unsupported concept (F4) must never appear in
         `release_blockers()` -- only a HELD line (F2) and the usual structural
@@ -1148,6 +1276,8 @@ class PerLineStatusClassification(unittest.TestCase):
         self.assertFalse(any("F3" in b or "ALT1" in b or "gamma" in b
                              for b in blockers), blockers)
         self.assertFalse(any("F4" in b or "delta" in b or "no candidate" in b
+                             for b in blockers), blockers)
+        self.assertFalse(any("F5" in b or "epsilon" in b or "ALT3" in b
                              for b in blockers), blockers)
 
 
@@ -1208,14 +1338,27 @@ _BILLING = {"billing_entity_id": "actor-1",
                               "roles": ["performer"]}]}
 
 
-def _reading(description, laterality, quote):
+def _reading(description, laterality, quote, *, evidence_value=None):
+    """`evidence_value` (issue #6 F9-R7-A follow-up): pass the SAME value as
+    `laterality` when this reading's own `quote` genuinely states it, so it
+    parses a value-bound, ASSERTED `attribute_evidence` entry -- the whole-
+    fact-text lexical fallback `resolve()` used to settle this kind of case
+    through is gone, proven exploitable by the same far-distance-negation
+    class Codex's re-review of 92f4596 found for `claim_authorized_value`.
+    Omitted (the default, unchanged for every other caller) when a test's own
+    point is that the reading is UNSTATED/ungrounded/unresolved."""
     import json
-    return json.dumps({"facts": [{
+    fact = {
         "fact_id": "F1", "kind": "procedure", "description": description,
         "attributes": {"laterality": laterality, "performer_id": "actor-1",
                        "billing_entity_id": "actor-1"},
         "disposition": "performed_today", "negated": False,
-        "evidence": [quote], "confidence": 0.99}]})
+        "evidence": [quote], "confidence": 0.99}
+    if evidence_value is not None:
+        fact["attribute_evidence"] = {"laterality": [
+            {"text": quote, "scope": "local", "assertion_state": "asserted",
+             "value": evidence_value}]}
+    return json.dumps({"facts": [fact]})
 
 
 def _mock_source():
@@ -1256,7 +1399,7 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
             _reading("excision procedure alpha performed", "right",
                      "Procedure alpha performed today"),
             _reading("procedure alpha performed excision", "left",
-                     "performed today on the left side"))
+                     "performed today on the left side", evidence_value="left"))
         self.assertIsNotNone(result.consensus, "a second reading must be recorded")
         resolutions = result.consensus["resolutions"]
         laterality = next(r for r in resolutions if r["axis"] == "laterality")

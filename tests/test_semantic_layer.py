@@ -129,6 +129,121 @@ class UmlsCrosswalkAccessor(unittest.TestCase):
         self.assertEqual(result, {})
 
 
+class UmlsCandidatesAccessor(unittest.TestCase):
+    """`AuthoritativeSource.umls_candidates` (issue #6 F9-R7 item 2, and its
+    F9-R7-C/D remediation -- Codex's independent re-review of 92f4596). A REAL
+    (not mocked) source, with `_umls_term_index` set directly to a controlled
+    synthetic artifact -- the declared-source loading/binding machinery this
+    bypasses is already covered by `UmlsCrosswalkAccessor` above and by every
+    other `declared_document_snapshot` consumer; this class is only testing
+    `umls_candidates`'s own matching/reachability logic. Synthetic codes/CUIs,
+    per this suite's convention."""
+
+    def _source(self, index: dict) -> AuthoritativeSource:
+        source = AuthoritativeSource.__new__(AuthoritativeSource)
+        source._umls_term_index = index
+        source._umls_scan_index = None
+        source._db = None
+        source.lookup = lambda code, system: {"long_description": f"Synthetic {code} descriptor"}
+        return source
+
+    def _index(self) -> dict:
+        return {
+            "release": "TEST2026", "mrconso_sha256": "deadbeef", "generated": "now",
+            "term_to_cuis": {"synthetic assembly service": ["C0000001"]},
+            "cui_to_atoms": {"C0000001": [
+                {"sab": "CPT", "code": "99999", "term": "Synthetic assembly service",
+                 "tty": "PT"}]},
+        }
+
+    def test_whole_string_equality_still_matches(self):
+        candidates = self._source(self._index()).umls_candidates(
+            ["synthetic assembly service"], "cpt", None)
+        self.assertEqual([c.code for c in candidates], ["99999"])
+
+    def test_the_term_embedded_mid_sentence_also_matches(self):
+        """issue #6 F9-R7-C: the exact reported failure mode -- `resolution.py`
+        passes full structured queries and full evidence sentences, not bare
+        term-index keys. Reproduced directly before this fix: this returned []."""
+        candidates = self._source(self._index()).umls_candidates(
+            ["the synthetic assembly service was completed today"], "cpt", None)
+        self.assertEqual([c.code for c in candidates], ["99999"])
+
+    def test_an_unmatched_phrase_contributes_no_seed(self):
+        candidates = self._source(self._index()).umls_candidates(
+            ["an entirely unrelated procedure"], "cpt", None)
+        self.assertEqual(candidates, [])
+
+    def test_lineage_is_carried_not_discarded(self):
+        """issue #6 F9-R7-D: SAB/code/term/TTY/CUI/matched-phrase lineage, plus
+        the bound artifact identity, must survive into `CandidateCode.authority`
+        -- not just the first match, every one that supports the code."""
+        index = self._index()
+        index["term_to_cuis"]["a synonym phrase"] = ["C0000002"]
+        index["cui_to_atoms"]["C0000002"] = [
+            {"sab": "HCPT", "code": "99999", "term": "A synonym phrase", "tty": "SY"}]
+        candidates = self._source(index).umls_candidates(
+            ["synthetic assembly service", "a synonym phrase"], "cpt", None)
+        self.assertEqual(len(candidates), 1)
+        authority = candidates[0].authority
+        self.assertEqual(authority["release"], "TEST2026")
+        self.assertEqual(authority["mrconso_sha256"], "deadbeef")
+        cuis = {m["cui"] for m in authority["matches"]}
+        self.assertEqual(cuis, {"C0000001", "C0000002"})
+        sabs = {m["atom"]["sab"] for m in authority["matches"]}
+        self.assertEqual(sabs, {"CPT", "HCPT"})
+
+    def test_a_umls_seed_reaches_verification_despite_eight_higher_scored_rivals(self):
+        """issue #6 F9-R7-C: a fixed low UMLS score (0.3, `data_access.py`) must
+        not be crowded out of `resolution._propose_then_verify`'s VERIFY_K=8
+        shortlist by higher-scoring RAG candidates competing on raw score --
+        reproduced directly before the reserved-lane fix (`_MIN_UMLS_SLOTS`,
+        `resolution.py`): the UMLS candidate never appeared in `alternatives`
+        with 8 higher-scored rivals present."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CandidateCode, ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder import resolution
+        from claude_coder.eligibility import (ClaimComponent, ClaimLineIntent,
+                                              EligibilityState, RetrievalRequest,
+                                              fact_snapshot_digest)
+
+        rivals = [CandidateCode(f"RIVAL{i}", "cpt", f"unrelated service {i}", 0.9,
+                                "retrieval") for i in range(8)]
+        umls_cand = CandidateCode("99999", "cpt", "Synthetic assembly service", 0.3,
+                                  "umls_recall")
+
+        class ScanSource(MockSource):
+            def retrieve(self, description, system, top_k=20):
+                return rivals if system == "cpt" else []
+
+            def umls_candidates(self, terms, system, dos):
+                for t in terms:
+                    if "synthetic assembly service" in t.lower():
+                        return [umls_cand]
+                return []
+
+        records = {(c.code, "cpt"): {"long_description": c.descriptor, "active": True}
+                  for c in rivals}
+        records[("99999", "cpt")] = {"long_description": "Synthetic assembly service",
+                                     "active": True}
+        src = ScanSource(records=records)
+        text = "the synthetic assembly service was performed today"
+        fact = ClinicalFact(FactKind.PROCEDURE, text,
+                            evidence=[EvidenceSpan(text, anchored=True, span_id="s1")],
+                            confidence=0.99, fact_id="f1")
+        intent = ClaimLineIntent(
+            intent_id="t-f1", encounter_id="t", component=ClaimComponent.SERVICE,
+            clinical_event_ids=["f1"], fact_kind=fact.kind.value,
+            clinical_action=fact.description, attributes=dict(fact.attributes),
+            date_of_service=None, billing_entity_id=None, source_span_ids=[],
+            state=EligibilityState.ELIGIBLE_FOR_RETRIEVAL, fact_digest=fact_snapshot_digest(fact))
+        line = resolution.resolve(RetrievalRequest(intent, fact), src,
+                                  llm=lambda system, user: '{"candidates": []}')
+        self.assertIn("99999", [c.code for c in line.alternatives],
+                      "a UMLS-matched candidate must reach verification even with "
+                      "8 higher-scored rivals in the pool")
+
+
 class SemanticClassMatchingRules(unittest.TestCase):
     """`AuthoritativeSource.semantic_class`'s rule interpreter, isolated from real
     data by pre-populating its lazy caches directly (the same objects the real

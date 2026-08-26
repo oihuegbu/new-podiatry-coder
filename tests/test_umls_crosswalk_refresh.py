@@ -139,6 +139,50 @@ class UmlsCrosswalkRefreshRegression(unittest.TestCase):
         finally:
             sys.argv = old_argv
 
+    def test_the_term_index_is_actually_built_when_a_synthetic_code_is_current(self):
+        """issue #6 F9-R7-C, Codex's independent re-review of 92f4596: every
+        test above proves the CROSSWALK builds, but none of them ever patches
+        `_load_current_codes` -- so `_build_term_index`'s "is this code in the
+        CURRENT authoritative registry" check always says no for a synthetic
+        code, `useful_cuis` stays empty, and `umls_term_index.json` is silently
+        never written. This suite therefore never actually covered the term-
+        index build at all. Patch the current-registry check so 99999 IS
+        current, and prove the artifact is genuinely produced with the right
+        shape."""
+        import json
+        import tools.build_umls_crosswalk as builder
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            release_dir = tmp / "rrf_output"
+            _write_fixture(release_dir)
+            data_dir = tmp / "data"
+            (data_dir / "codes").mkdir(parents=True)
+
+            old_argv, old_data_dir, old_current = (
+                sys.argv, builder.DATA_DIR, builder._load_current_codes)
+            sys.argv = ["build_umls_crosswalk.py", "--release", str(release_dir)]
+            builder.DATA_DIR = data_dir
+            builder._load_current_codes = lambda: {"cpt": {"99999"}, "hcpcs": set()}
+            try:
+                self.assertEqual(builder.main(), 0)
+                out = data_dir / "codes" / "umls_term_index.json"
+                self.assertTrue(out.exists(), "umls_term_index.json was never written")
+                payload = json.loads(out.read_text())
+            finally:
+                (sys.argv, builder.DATA_DIR, builder._load_current_codes) = (
+                    old_argv, old_data_dir, old_current)
+
+        self.assertIn("synthetic assembly service", payload["term_to_cuis"])
+        self.assertEqual(payload["term_to_cuis"]["synthetic assembly service"], ["CSYN1"])
+        self.assertEqual(payload["cui_to_atoms"]["CSYN1"][0]["code"], "99999")
+        self.assertEqual(payload["code_to_cuis"]["cpt:99999"], ["CSYN1"])
+        # 88888 (HCPT) is current in NO registry per the patched current-codes
+        # set above, so it must NOT appear -- proves the current-registry
+        # restriction is actually enforced, not merely present in the code.
+        self.assertNotIn("cpt:88888", payload["code_to_cuis"])
+        self.assertNotIn("hcpcs:88888", payload["code_to_cuis"])
+
     def test_no_snomed_overlap_at_all_degrades_to_a_clean_no_op(self):
         import tools.build_umls_crosswalk as builder
 
