@@ -18,6 +18,7 @@ import logging
 import re
 
 from . import arbitration, certificate, em, extraction, gates, ontology, resolution
+from . import graph_consensus as _gc
 from . import requirement as _requirement
 from .arbitration import LLMFn
 from .autonomy import decide
@@ -793,8 +794,14 @@ def code_encounter(
                 # (descriptor-driven, so a "2-4 items" code bills as one unit).
                 line.modifiers = modifier_engine.assign(
                     line.fact, line.chosen.descriptor,
-                    bilat=source.bilat_indicator(line.chosen.code))
-                cnt = line.fact.attributes.get("count") or line.fact.attributes.get("quantity") or 1
+                    bilat=source.bilat_indicator(line.chosen.code),
+                    reconciliation=source_reconciliation)
+                # issue #6 F9-R6-R2, sixth re-review: claim-authorized, not the raw
+                # attribute directly -- an unauthorized count/quantity must fall back
+                # to the safe default (1 unit), never bill on an unverified number.
+                cnt = (_gc.claim_authorized_value(line.fact, "count", source_reconciliation)
+                      or _gc.claim_authorized_value(line.fact, "quantity", source_reconciliation)
+                      or 1)
                 try:
                     cnt = int(cnt)
                 except (TypeError, ValueError):
@@ -859,7 +866,7 @@ def code_encounter(
     apply_section_applicability(result)
     # Claim-level modifiers (E/M-25, distinct-service 59/X) once all lines exist —
     # this records which PTP pairs a justified modifier bypasses.
-    modifier_engine.assign_claim(result, source)
+    modifier_engine.assign_claim(result, source, source_reconciliation)
     # Mechanic 3 — resolve NCCI PTP conflicts by DEMOTING the bundled component
     # (not blocking the claim) whenever no distinct-service modifier is justified.
     apply_ncci_bundling(result, source)

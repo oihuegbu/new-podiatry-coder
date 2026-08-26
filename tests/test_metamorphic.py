@@ -37,7 +37,9 @@ def test_laterality_flip():
         index={"widgetopathy of gizmo": {"QQ0"}})
     def code(side):
         f = ClinicalFact(FactKind.DIAGNOSIS, "widgetopathy of gizmo", attributes={"laterality": side},
-                         evidence=[EvidenceSpan(f"widgetopathy {side} gizmo")], disposition=Disposition.PERFORMED)
+                         evidence=[EvidenceSpan(f"widgetopathy {side} gizmo",
+                                                anchored=True, span_id=f"s-{side}")],
+                         disposition=Disposition.PERFORMED)
         return resolution.resolve(_request(f), src).chosen
     r, l = code("right"), code("left")
     assert r and l and "right" in r.descriptor.lower() and "left" in l.descriptor.lower() and r.code != l.code
@@ -66,7 +68,9 @@ def test_specificity_upgrade():
         ("RR10", "icd10"): {"long_description": "Widgetopathy, unspecified"},
         ("RR19", "icd10"): {"long_description": "Widgetopathy of right gizmo"}})
     f = ClinicalFact(FactKind.DIAGNOSIS, "widgetopathy right gizmo", attributes={"laterality": "right"},
-                     evidence=[EvidenceSpan("widgetopathy right gizmo")], disposition=Disposition.PERFORMED)
+                     evidence=[EvidenceSpan("widgetopathy right gizmo",
+                                            anchored=True, span_id="s1")],
+                     disposition=Disposition.PERFORMED)
     line = ResolvedLine(fact=f, chosen=CandidateCode("RR10", "icd10", "Widgetopathy, unspecified", 1.0),
                         method=ResolutionMethod.VERIFIED)
     out = resolution.refine_diagnosis_specificity(

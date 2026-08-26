@@ -303,7 +303,8 @@ class OntologyResolutionTest(unittest.TestCase):
         src = MockSource(retrieval={("*", "icd10"): [left, right]})
         fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="some condition",
                             attributes={"laterality": "right"},
-                            evidence=[EvidenceSpan("some condition, right side")],
+                            evidence=[EvidenceSpan("some condition, right side",
+                                                   anchored=True, span_id="s1")],
                             confidence=0.99)
         line = resolve(_request(fact), src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
@@ -342,10 +343,15 @@ class ModifierTest(unittest.TestCase):
     documented laterality — no modifier literal in the engine."""
 
     def _fact(self, laterality):
-        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,
+                                         FactKind, RelationState)
+        span = EvidenceSpan("x", anchored=True, span_id="s1")
         return ClinicalFact(kind=FactKind.PROCEDURE, description="excision",
                             attributes={"laterality": laterality},
-                            evidence=[EvidenceSpan("x")])
+                            evidence=[span],
+                            attribute_evidence={"laterality": (
+                                AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                                  value=laterality),)})
 
     def test_laterality_and_bilateral_from_data(self):
         from claude_coder.modifiers import ModifierEngine
@@ -407,17 +413,22 @@ class UnitsTest(unittest.TestCase):
 class ClaimModifierTest(unittest.TestCase):
     def test_em25_and_distinct_service_from_data(self):
         from claude_coder.data_access import MockSource
-        from claude_coder.models import (ClinicalFact, CodingResult, EvidenceSpan,
-                                         FactKind, ResolutionMethod, ResolvedLine)
+        from claude_coder.models import (AttributeEvidence, ClinicalFact, CodingResult,
+                                         EvidenceSpan, FactKind, RelationState,
+                                         ResolutionMethod, ResolvedLine)
         from claude_coder.modifiers import ModifierEngine
         defs = {"M25": {"description": "significant, separately identifiable evaluation and management"},
                 "MXS": {"description": "Separate Structure"}}
         eng = ModifierEngine(defs=defs)
 
         def line(code, kind, lat=None):
+            span = EvidenceSpan("x", anchored=True, span_id=f"s-{code}")
+            attr_ev = ({"laterality": (AttributeEvidence(
+                            span=span, assertion_state=RelationState.ASSERTED, value=lat),)}
+                       if lat else {})
             f = ClinicalFact(kind=kind, description="x",
                              attributes=({"laterality": lat} if lat else {}),
-                             evidence=[EvidenceSpan("x")])
+                             evidence=[span], attribute_evidence=attr_ev)
             return ResolvedLine(fact=f, chosen=CandidateCode(code, "cpt", "d", 0.9),
                                 method=ResolutionMethod.DETERMINISTIC)
         p1 = line("P1", FactKind.PROCEDURE, "right")
@@ -473,9 +484,14 @@ class BilateralEligibilityTest(unittest.TestCase):
     per-nail code (indicator 9) gets no laterality modifier."""
 
     def _fact(self, lat):
-        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,
+                                         FactKind, RelationState)
+        span = EvidenceSpan("x", anchored=True, span_id="s1")
         return ClinicalFact(kind=FactKind.PROCEDURE, description="x",
-                            attributes={"laterality": lat}, evidence=[EvidenceSpan("x")])
+                            attributes={"laterality": lat}, evidence=[span],
+                            attribute_evidence={"laterality": (
+                                AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                                  value=lat),)})
 
     def test_indicator_gates_modifier(self):
         from claude_coder.modifiers import ModifierEngine
@@ -554,8 +570,8 @@ class TerminologyIndexTest(unittest.TestCase):
 
     def test_category_expands_to_leaf_by_laterality(self):
         from claude_coder.data_access import MockSource
-        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
-                                         ResolutionMethod)
+        from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,
+                                         FactKind, RelationState, ResolutionMethod)
         from claude_coder.resolution import resolve
         # Index returns the category DX4; documented laterality selects the leaf.
         # Synthetic codes/descriptors — the mechanic is category->leaf-by-laterality,
@@ -564,9 +580,14 @@ class TerminologyIndexTest(unittest.TestCase):
                 ("DX41", "icd10"): {"long_description": "some condition, right site", "active": True},
                 ("DX42", "icd10"): {"long_description": "some condition, left site", "active": True}}
         src = MockSource(records=recs, index={"a documented condition": {"DX4"}})
+        span = EvidenceSpan("a documented condition", anchored=True, span_id="s1")
         fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="a documented condition",
                             attributes={"laterality": "right"},
-                            evidence=[EvidenceSpan("a documented condition")], confidence=0.99)
+                            evidence=[span],
+                            attribute_evidence={"laterality": (
+                                AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                                  value="right"),)},
+                            confidence=0.99)
         line = resolve(_request(fact), src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
         self.assertEqual(line.chosen.code, "DX41")     # right-side leaf, not the category
@@ -1486,7 +1507,8 @@ class CorroborationIndependenceTest(unittest.TestCase):
         def line():
             fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="condition alpha",
                                 attributes={"laterality": "right"},
-                                evidence=[EvidenceSpan("condition alpha, right")],
+                                evidence=[EvidenceSpan("condition alpha, right",
+                                                       anchored=True, span_id="s1")],
                                 confidence=0.95)
             return ResolvedLine(fact=fact,
                                 chosen=CandidateCode("QQ000", "icd10", broad, 1.0),
@@ -1968,7 +1990,8 @@ class LateralityUpgradeTest(unittest.TestCase):
                          [CandidateCode("DX9", "icd10", "some condition, unspecified site", 1.0)]})
         fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="some condition",
                             attributes={"laterality": "right"},
-                            evidence=[EvidenceSpan("some condition, right side")], confidence=0.98)
+                            evidence=[EvidenceSpan("some condition, right side",
+                                                   anchored=True, span_id="s1")], confidence=0.98)
         line = resolve(_request(fact), src)
         self.assertEqual(line.chosen.code, "DX9")           # retrieval gives unspecified
         line = upgrade_diagnosis_laterality(line, src)

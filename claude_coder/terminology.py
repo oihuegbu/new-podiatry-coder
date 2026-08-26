@@ -23,6 +23,15 @@ def _norm(s: str) -> str:
                   str(s).lower().replace("'", ""))).strip()
 
 
+#: Public alias (issue #6 F9-R7 item 2): `tools/build_umls_crosswalk.py` and
+#: `data_access.AuthoritativeSource.umls_candidates` must normalize a term the
+#: SAME way this index does when it builds/reads `term_to_cuis` -- a mismatched
+#: normalization is a silent, undetectable recall gap, so both sides import
+#: this ONE function rather than each keeping its own private copy in sync by
+#: hand.
+normalize_term = _norm
+
+
 def _sing(tok: str) -> str:
     """Light singularization so plural note vocabulary matches Index terms
     ('words'->'word', 'boxes'->'box'). Conservative: only trims a

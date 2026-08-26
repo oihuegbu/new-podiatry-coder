@@ -328,7 +328,7 @@ class PerAttributeSourceEvidence(unittest.TestCase):
     anywhere in the fact's whole (undifferentiated) evidence text. Generic across
     every code-changing axis, not laterality-specific (Codex's explicit correction)."""
 
-    def _entry(self, text, *, span_id, scope="local", parent_fact_id="",
+    def _entry(self, text, *, span_id, value, scope="local", parent_fact_id="",
               source_relation_id="", scope_validated=True, assertion_state=None):
         from claude_coder.models import AttributeEvidence, RelationState
         # These tests exercise `_attribute_span_support`'s CONSUMPTION of
@@ -343,12 +343,17 @@ class PerAttributeSourceEvidence(unittest.TestCase):
         # test in this class is proving a POSITIVE support path, which now
         # requires genuine assertion; tests proving the NEGATIVE/refusal path
         # pass assertion_state=NEGATED/UNCERTAIN explicitly.
+        #
+        # issue #6 F9-R6-R2, sixth re-review: `value` is now REQUIRED -- an
+        # AttributeEvidence entry is VALUE-bound, not just axis-bound, so every
+        # fixture must be explicit about which value this evidence is about.
         if assertion_state is None:
             assertion_state = RelationState.ASSERTED
         return AttributeEvidence(span=_span(text, span_id=span_id), scope=scope,
                                  parent_fact_id=parent_fact_id,
                                  source_relation_id=source_relation_id,
                                  scope_validated=scope_validated,
+                                 value=value,
                                  assertion_state=assertion_state)
 
     def test_a_value_proven_only_by_unrelated_evidence_text_no_longer_settles(self):
@@ -388,7 +393,7 @@ class PerAttributeSourceEvidence(unittest.TestCase):
                          span_id="p1")],
             attributes={"approach": "open"},
             attribute_evidence={"approach": (
-                self._entry("An open incision was made", span_id="p-attr"),)})]
+                self._entry("An open incision was made", span_id="p-attr", value="open"),)})]
         second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
                         spans=[_span("performed procedure", span_id="s1")],
                         attributes={})]
@@ -414,7 +419,7 @@ class PerAttributeSourceEvidence(unittest.TestCase):
             attributes={"approach": "open"},
             attribute_evidence={"approach": (
                 # Anchored, but never proven by any page reconciliation below.
-                self._entry("something else entirely", span_id="p-attr"),)})]
+                self._entry("something else entirely", span_id="p-attr", value="open"),)})]
         second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
                         spans=[_span("performed procedure", span_id="s1")],
                         attributes={})]
@@ -451,7 +456,8 @@ class PerAttributeSourceEvidence(unittest.TestCase):
             attributes={"laterality": "right"},
             attribute_evidence={"laterality": (
                 self._entry("performed on the right heel", span_id="parent-span",
-                            scope="inherited", source_relation_id="rel-abc"),)})]
+                            scope="inherited", source_relation_id="rel-abc",
+                            value="right"),)})]
         second = [_fact("S1", FactKind.PROCEDURE, "component step performed",
                         spans=[_span("component step performed", span_id="s1")],
                         attributes={})]
@@ -477,7 +483,7 @@ class PerAttributeSourceEvidence(unittest.TestCase):
             attribute_evidence={"laterality": (
                 self._entry("performed on the right heel", span_id="parent-span",
                             scope="inherited", source_relation_id="rel-abc",
-                            scope_validated=False),)})]
+                            scope_validated=False, value="right"),)})]
         second = [_fact("S1", FactKind.PROCEDURE, "component step performed",
                         spans=[_span("component step performed", span_id="s1")],
                         attributes={})]
@@ -528,7 +534,8 @@ class PerAttributeSourceEvidence(unittest.TestCase):
             attributes={"laterality": "right"},
             attribute_evidence={"laterality": (
                 self._entry("right involvement was considered but was ultimately "
-                            "ruled out", span_id="p1", assertion_state=RelationState.NEGATED),)})]
+                            "ruled out", span_id="p1", assertion_state=RelationState.NEGATED,
+                            value="right"),)})]
         second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
                         spans=[_span("performed procedure", span_id="s1")],
                         attributes={})]
@@ -549,7 +556,7 @@ class PerAttributeSourceEvidence(unittest.TestCase):
             attributes={"laterality": "left"},
             attribute_evidence={"laterality": (
                 self._entry("possibly on the left side", span_id="p1",
-                            assertion_state=RelationState.UNCERTAIN),)})]
+                            assertion_state=RelationState.UNCERTAIN, value="left"),)})]
         second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
                         spans=[_span("performed procedure", span_id="s1")],
                         attributes={})]
@@ -578,7 +585,8 @@ class PerAttributeSourceEvidence(unittest.TestCase):
             attributes={"laterality": "right"},
             attribute_evidence={"laterality": (
                 self._entry("right involvement was considered but was ultimately "
-                            "ruled out", span_id="p1", assertion_state=RelationState.NEGATED),)})]
+                            "ruled out", span_id="p1", assertion_state=RelationState.NEGATED,
+                            value="right"),)})]
         second = [_fact(
             "S1", FactKind.PROCEDURE, "procedure performed",
             spans=[_span("left involvement was also considered and ultimately "
@@ -586,7 +594,8 @@ class PerAttributeSourceEvidence(unittest.TestCase):
             attributes={"laterality": "left"},
             attribute_evidence={"laterality": (
                 self._entry("left involvement was also considered and ultimately "
-                            "ruled out too", span_id="s1", assertion_state=RelationState.NEGATED),)})]
+                            "ruled out too", span_id="s1", assertion_state=RelationState.NEGATED,
+                            value="left"),)})]
         report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
         disagreement = next(d for d in report.disagreements if d.axis == "laterality")
         resolutions = graph_consensus.resolve([disagreement], primary_by_id,
@@ -595,6 +604,77 @@ class PerAttributeSourceEvidence(unittest.TestCase):
         self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
         self.assertIn("states this value verbatim", laterality.detail)
         self.assertNotIn("source-integrity problem", laterality.detail)
+
+    def test_asserted_evidence_for_a_different_value_never_authorizes_the_current_one(self):
+        """issue #6 F9-R6-R2, sixth re-review, ROOT CAUSE: `AttributeEvidence` was
+        axis-keyed but not VALUE-bound before this round -- `asserted_attribute_
+        support` could only ask "does SOME asserted entry exist for this axis,"
+        never "does THIS entry assert the CURRENT attributes[axis] value."
+        Reproduced and confirmed exploitable: a reconciled quote genuinely stating
+        "left", marked ASSERTED, was accepted as proof of an unrelated
+        attributes["laterality"]="right". Now: an entry bound to a DIFFERENT value
+        than the one being checked never counts, regardless of its own
+        assertion_state."""
+        from claude_coder.models import RelationState
+        primary = [_fact(
+            "F1", FactKind.PROCEDURE, "procedure performed",
+            spans=[_span("assembly service performed on the left side", span_id="p1")],
+            attributes={"laterality": "right"},
+            attribute_evidence={"laterality": (
+                self._entry("assembly service performed on the left side", span_id="p1",
+                            assertion_state=RelationState.ASSERTED, value="left"),)})]
+        second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
+                        spans=[_span("performed procedure", span_id="s1")],
+                        attributes={})]
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "laterality")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
+
+    def test_same_raw_value_but_disagreeing_assertion_states_is_a_real_disagreement(self):
+        """issue #6 F9-R6-R2, sixth re-review, case 3: `graph_consensus.compare_axes`
+        used to compare ONLY the raw attribute value -- "right"/ASSERTED (primary)
+        vs "right"/NEGATED (second) compared as EQUAL, so no `AxisDisagreement` was
+        ever raised and the disagreement-resolution machinery this whole effort
+        built never ran for exactly the case it exists for. Now: equal raw strings
+        whose OWN evidence disagrees on assertion are still flagged, and resolve()
+        correctly settles in favor of the genuinely asserted side, carrying that
+        evidence onto the winning fact (issue #6 F9-R6-R2, sixth re-review,
+        apply_resolutions fix) so a later claim_authorized_value check succeeds."""
+        from claude_coder.models import RelationState
+        primary = [_fact(
+            "F1", FactKind.PROCEDURE, "procedure performed",
+            spans=[_span("right side was addressed", span_id="p1")],
+            attributes={"laterality": "right"},
+            attribute_evidence={"laterality": (
+                self._entry("right side was addressed", span_id="p1",
+                            assertion_state=RelationState.NEGATED, value="right"),)})]
+        second = [_fact(
+            "S1", FactKind.PROCEDURE, "procedure performed",
+            spans=[_span("right was ultimately confirmed", span_id="s1")],
+            attributes={"laterality": "right"},
+            attribute_evidence={"laterality": (
+                self._entry("right was ultimately confirmed", span_id="s1",
+                            assertion_state=RelationState.ASSERTED, value="right"),)})]
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next((d for d in report.disagreements if d.axis == "laterality"), None)
+        self.assertIsNotNone(disagreement, "equal raw values with disagreeing "
+                            "assertion states must still raise a disagreement")
+        self.assertEqual(disagreement.value_primary, "right")
+        self.assertEqual(disagreement.value_second, "right")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.RESOLVED_FROM_SOURCE)
+        self.assertEqual(laterality.accepted_from, "second")
+        graph_consensus.apply_resolutions(primary_by_id, second_by_node, resolutions)
+        fact = primary_by_id["F1"]
+        self.assertEqual(
+            graph_consensus.claim_authorized_value(fact, "laterality", None), "right",
+            "the winning reading's evidence must be carried onto the fact so its "
+            "value is genuinely authorized afterward, not orphaned in fact.evidence")
 
     def test_a_value_whose_only_textual_support_is_negated_is_never_accepted(self):
         """issue #6 F9-R6-R2, fourth re-review, ROOT CAUSE: this is what actually
@@ -945,6 +1025,130 @@ class GraphBinding(unittest.TestCase):
         self.assertFalse(any("not bound to the clinical graph" in b
                              for b in bundle.release_blockers()),
                          bundle.release_blockers())
+
+
+# ---------------------------------------------------------------------------
+class PerLineStatusClassification(unittest.TestCase):
+    """issue #6 F9-R7 item 4: every documented service/diagnosis survives into
+    the bundle with one explicit status, never erased into an untyped audit
+    dict or an unnamed coder-review dependency. Synthetic facts/codes -- the
+    mechanic under test is the classification, not any specific condition."""
+
+    def _result(self):
+        from claude_coder.models import (CandidateCode, ClaimSubmissionStatus,
+                                         CodingResult, ResolutionMethod, ResolvedLine)
+
+        recommended = _fact("F1", FactKind.PROCEDURE, "procedure alpha performed",
+                            spans=[_span("Procedure performed today", span_id="p1")])
+        held = _fact("F2", FactKind.DIAGNOSIS, "condition beta",
+                     spans=[_span("The documented condition addressed today",
+                                 span_id="p2")])
+        ambiguous = _fact("F3", FactKind.PROCEDURE, "procedure gamma performed",
+                          spans=[_span("A second, separately documented procedure",
+                                      span_id="p3")])
+        unsupported = _fact("F4", FactKind.PROCEDURE, "procedure delta performed",
+                            spans=[_span("Procedure performed today", span_id="p1")])
+
+        lines = [
+            ResolvedLine(fact=recommended,
+                         chosen=CandidateCode(code="REC1", system="cpt",
+                                              descriptor="procedure alpha"),
+                         method=ResolutionMethod.DETERMINISTIC,
+                         rationale="unique authoritative descriptor match"),
+            ResolvedLine(fact=held,
+                         chosen=CandidateCode(code="HELD1", system="icd10",
+                                              descriptor="condition beta"),
+                         method=ResolutionMethod.DETERMINISTIC,
+                         rationale="unique authoritative descriptor match",
+                         claim_submission_status=ClaimSubmissionStatus.HELD),
+            ResolvedLine(fact=ambiguous, chosen=None,
+                         method=ResolutionMethod.ABSTAINED,
+                         rationale="two equally-supported candidates; documentation "
+                                   "does not distinguish them",
+                         alternatives=[
+                             CandidateCode(code="ALT1", system="cpt",
+                                          descriptor="procedure gamma, approach one",
+                                          score=0.6, source="retrieval"),
+                             CandidateCode(code="ALT2", system="cpt",
+                                          descriptor="procedure gamma, approach two",
+                                          score=0.6, source="retrieval")],
+                         documentation_gap="which approach (one or two) was used?"),
+            ResolvedLine(fact=unsupported, chosen=None,
+                         method=ResolutionMethod.ABSTAINED,
+                         rationale="no candidate retrieved for the concept"),
+        ]
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14",
+                              lines=lines)
+        return result
+
+    def _bundle(self, result):
+        from app.contracts.claim_bundle import (
+            AuthorityBinding, EncounterContext, SourceDocument,
+            bundle_from_coding_result)
+        return bundle_from_coding_result(
+            result, source_document=SourceDocument(filename="n"),
+            context=EncounterContext(), authority=AuthorityBinding())
+
+    def test_a_recommended_line_lands_in_service_lines_as_recommended(self):
+        from app.contracts.claim_bundle import LineStatus
+        bundle = self._bundle(self._result())
+        rec = next(ln for ln in bundle.service_lines if ln.code == "REC1")
+        self.assertEqual(rec.status, LineStatus.RECOMMENDED)
+
+    def test_a_held_diagnosis_is_never_erased_and_carries_the_held_status(self):
+        from app.contracts.claim_bundle import LineStatus
+        bundle = self._bundle(self._result())
+        self.assertFalse(bundle.service_lines and
+                         any(ln.code == "HELD1" for ln in bundle.service_lines))
+        held = next(ln for ln in bundle.diagnoses if ln.code == "HELD1")
+        self.assertEqual(held.status, LineStatus.HELD_POLICY_OR_DATA,
+                         "a held diagnosis's own recommended code must survive "
+                         "into the bundle, not disappear")
+        self.assertFalse(any(cl.clinical_event_id == "F2"
+                             for cl in bundle.candidate_lines),
+                         "a held line is coded, never a bare candidate")
+
+    def test_a_genuine_tie_is_a_named_candidates_needing_fact_line(self):
+        from app.contracts.claim_bundle import LineStatus
+        bundle = self._bundle(self._result())
+        tied = next(cl for cl in bundle.candidate_lines
+                   if cl.clinical_event_id == "F3")
+        self.assertEqual(tied.status, LineStatus.CANDIDATES_NEEDING_FACT)
+        self.assertEqual({c.code for c in tied.candidates}, {"ALT1", "ALT2"})
+        self.assertIn("approach", tied.blocking_reason)
+        self.assertFalse(any(ln.clinical_event_id == "F3"
+                             for ln in (*bundle.diagnoses, *bundle.service_lines)),
+                         "an unsettled tie must never appear as a coded line")
+
+    def test_no_candidate_at_all_is_a_named_no_supported_candidate_line(self):
+        from app.contracts.claim_bundle import LineStatus
+        bundle = self._bundle(self._result())
+        empty = next(cl for cl in bundle.candidate_lines
+                    if cl.clinical_event_id == "F4")
+        self.assertEqual(empty.status, LineStatus.NO_SUPPORTED_CANDIDATE)
+        self.assertEqual(empty.candidates, ())
+        self.assertIn("no candidate retrieved", empty.blocking_reason)
+
+    def test_an_uncertainty_on_one_line_never_blocks_an_unrelated_recommended_line(self):
+        """The tie (F3) and the unsupported concept (F4) must never appear in
+        `release_blockers()` -- only a HELD line (F2) and the usual structural
+        checks may. An uncertainty on one documented event must never erase or
+        block an independently defensible one elsewhere in the same claim."""
+        from app.contracts.claim_bundle import (
+            LineStatus, ReleaseDestination, ReleaseStatus)
+        result = self._result()
+        bundle = self._bundle(result)
+        # Force the release status the safety-net check inspects, isolating
+        # exactly what it does and does not fire on.
+        bundle = bundle.model_copy(update={
+            "release": ReleaseStatus(destination=ReleaseDestination.AUTO_READY,
+                                     producer_releasable=True)})
+        blockers = bundle.release_blockers()
+        self.assertTrue(any("HELD" in b for b in blockers), blockers)
+        self.assertFalse(any("F3" in b or "ALT1" in b or "gamma" in b
+                             for b in blockers), blockers)
+        self.assertFalse(any("F4" in b or "delta" in b or "no candidate" in b
+                             for b in blockers), blockers)
 
 
 # ---------------------------------------------------------------------------
@@ -3855,6 +4059,9 @@ class OccurrenceCardinality(unittest.TestCase):
                             "billing_entity_id": "actor-1"},
              "disposition": "performed_today", "negated": False,
              "evidence": ["Procedure alpha performed twice today on the left side"],
+             "attribute_evidence": {"count": [
+                 {"text": "Procedure alpha performed twice today on the left side",
+                  "scope": "local", "assertion_state": "asserted", "value": "2"}]},
              "confidence": 0.99}]})
 
         result = _run_union(reading, reading, note_text=note)
@@ -3934,6 +4141,9 @@ class OccurrenceCardinality(unittest.TestCase):
                             "billing_entity_id": "actor-1"},
              "disposition": "performed_today", "negated": False,
              "evidence": ["Alpha procedure completed twice on the left side"],
+             "attribute_evidence": {"count": [
+                 {"text": "Alpha procedure completed twice on the left side",
+                  "scope": "local", "assertion_state": "asserted", "value": "2"}]},
              "confidence": 0.99}]})
 
         result = _run_union(primary, primary, note_text=note)

@@ -111,11 +111,53 @@ def _kind(fact) -> str:
     return str(getattr(getattr(fact, "kind", None), "value", "") or "")
 
 
+def _axis_value_signature(fact, axis: str, value: Any) -> str:
+    """The axis value AS CLAIMED BY THIS READING, for cross-reader comparison
+    (issue #6 F9-R6-R2, sixth re-review) -- downgraded to "" when this reading's
+    OWN attribute_evidence, value-bound to this exact value, is entirely
+    NEGATED/UNCERTAIN (never ASSERTED). Without this, two readings writing the
+    identical raw string but disagreeing on whether their OWN evidence actually
+    asserts it ("right"/ASSERTED vs "right"/NEGATED) compared as EQUAL, so no
+    `AxisDisagreement` was ever raised and the disagreement-resolution machinery
+    this whole effort built never ran for exactly the case it exists for.
+
+    Deliberately does NOT check source reconciliation -- unavailable this early
+    (before relations/spans are reconciled against the original document), and
+    a stronger, LATER check (`claim_authorized_value`) every real consumer goes
+    through regardless of whether a disagreement was ever raised here. This is
+    only a reading's own INTERNAL consistency between what it claims and what
+    its own evidence says about that claim.
+
+    Used ONLY to decide whether two readings' surface-identical raw values
+    should still count as a genuine disagreement (`compare_axes` below) -- NEVER
+    used as the value stored on `AxisDisagreement` itself, which must stay the
+    real raw value for `resolve()`'s own per-reading assertion check to
+    evaluate. Conflating the two was tried and reverted during this same round:
+    it left `resolve()` receiving `""` instead of the real claimed value for a
+    self-negated reading, which broke its own value-acceptance logic instead of
+    feeding it a genuine, evaluable disagreement."""
+    norm_value = _norm(value)
+    if not norm_value:
+        return ""
+    entries = (getattr(fact, "attribute_evidence", None) or {}).get(axis)
+    if not entries:
+        return norm_value
+    bound = [e for e in entries if _norm(e.value) == norm_value]
+    if not bound:
+        return norm_value
+    if any(e.assertion_state == RelationState.ASSERTED for e in bound):
+        return norm_value
+    return ""
+
+
 def _axis_values(fact) -> dict[str, str]:
     """Every comparable axis of one reading of one event, as normalized strings.
 
     Derived from the fact itself, never from a list of axis names - an axis extraction
-    starts emitting tomorrow is compared tomorrow.
+    starts emitting tomorrow is compared tomorrow. The RAW value, unmodified by
+    assertion state -- see `_axis_value_signature` for the separate, signature-
+    aware check `compare_axes` additionally applies before treating two equal
+    raw values as a genuine agreement.
     """
     out: dict[str, str] = {
         "occurrence_status": _norm(getattr(getattr(fact, "disposition", None), "value", "")),
@@ -395,6 +437,30 @@ def compare_axes(pairs: list[tuple[Any, Any]],
             b = right_axes.get(axis, "")
             compared += 1
             if a == b:
+                # issue #6 F9-R6-R2, sixth re-review: equal RAW strings are not
+                # automatically an agreement -- "right"/ASSERTED and "right"/
+                # NEGATED must not silently pass as the same claim, or the
+                # disagreement-resolution machinery this whole effort built
+                # never runs for exactly the case it exists for. `a`/`b`
+                # themselves stay the real raw values below regardless (never
+                # replaced by the signature), so `resolve()` still evaluates
+                # the genuine claimed value, not a placeholder.
+                if _axis_value_signature(left, axis, a) == _axis_value_signature(right, axis, b):
+                    continue
+                # Equal raw strings, but the two readings' OWN evidence disagrees on
+                # whether the value is actually asserted -- raised directly, NEVER
+                # routed through `axis_relation_detail` below: that function exists
+                # to ask "are two DIFFERENT-LOOKING strings the same concept", and
+                # for an enumerated axis with IDENTICAL canonical values it always
+                # answers SAME_EVENT trivially (line ~307 above), which would
+                # silently swallow this exact case into `governed` and never reach
+                # `resolve()` at all -- exactly the gap this check exists to close.
+                out.append(AxisDisagreement(
+                    node_id=str(getattr(left, "fact_id", "") or ""), axis=axis,
+                    value_primary=a, value_second=b,
+                    basis=("the two readings recorded the same value but disagree "
+                          "on whether their own evidence actually asserts it"),
+                    action=str(getattr(left, "description", "") or "")))
                 continue
             # ONE atomic call for both the claim decision and the audit detail (Codex
             # F7-R3-C4, exact-SHA re-review, eighth pass): the verdict this promotes on
@@ -462,7 +528,7 @@ def _span_support(fact, reconciliation) -> tuple[bool, str, str, tuple[str, ...]
     return _spans_support(getattr(fact, "evidence", None) or [], reconciliation)
 
 
-def _attribute_span_support(fact, attr_name: str, reconciliation
+def _attribute_span_support(fact, attr_name: str, value: str, reconciliation
                             ) -> tuple[bool, str, str, tuple[str, ...]] | None:
     """Per-attribute proof (issue #6 F9-R5): the SAME shape as `_span_support`, scoped
     to evidence anchored specifically to `attr_name` rather than the fact's whole
@@ -480,6 +546,14 @@ def _attribute_span_support(fact, attr_name: str, reconciliation
     reconciled -- may promote it. An unvalidated inherited entry is treated as if it
     were never emitted, not as a weaker signal.
 
+    issue #6 F9-R6-R2, sixth re-review: `value` scopes this to entries VALUE-BOUND
+    to it (an entry whose own `.value` canonically matches `value`) when any exist,
+    so the reconciliation check below can never be satisfied by evidence that
+    proves an entirely different, unrelated value -- falls back to every usable
+    entry regardless of value only when NONE of them are value-bound to `value` at
+    all (an axis with no entries even talking about this value, which is the same
+    "no proof either way" shape as no evidence at all, not a narrowing).
+
     `ok` reflects SOURCE RECONCILIATION of the best-available usable quotation(s),
     regardless of assertion state (issue #6 F9-R6-R2, fifth re-review) -- deliberately
     NOT gated on whether the value is actually asserted, so a quotation the model
@@ -488,10 +562,11 @@ def _attribute_span_support(fact, attr_name: str, reconciliation
     out), never as an unconfirmed SOURCE-INTEGRITY problem, which is a different,
     more specific claim reserved for a quotation the source does not back at all.
     Prefers ASSERTED entries' spans when any exist (the strongest, most directly
-    citable proof); falls back to every usable entry's spans otherwise, purely for
-    this reconciliation check -- never as a route to accepting the value itself.
-    `resolve()` gates ACCEPTANCE separately via `asserted_attribute_support` below,
-    which is the only function that may say a value is genuinely proven.
+    citable proof); falls back to every usable (value-bound-if-any) entry's spans
+    otherwise, purely for this reconciliation check -- never as a route to accepting
+    the value itself. `resolve()` gates ACCEPTANCE separately via
+    `asserted_attribute_support` below, which is the only function that may say a
+    value is genuinely proven.
     """
     entries = (getattr(fact, "attribute_evidence", None) or {}).get(attr_name)
     if not entries:
@@ -499,31 +574,95 @@ def _attribute_span_support(fact, attr_name: str, reconciliation
     usable = [e for e in entries if e.scope == "local" or e.scope_validated]
     if not usable:
         return None
-    asserted = [e for e in usable if e.assertion_state == RelationState.ASSERTED]
-    return _spans_support([e.span for e in (asserted or usable)], reconciliation)
+    norm_value = _norm(value)
+    bound = [e for e in usable if _norm(e.value) == norm_value] if norm_value else []
+    pool = bound or usable
+    asserted = [e for e in pool if e.assertion_state == RelationState.ASSERTED]
+    return _spans_support([e.span for e in (asserted or pool)], reconciliation)
 
 
-def asserted_attribute_support(fact, attr_name: str, reconciliation) -> bool:
+def asserted_attribute_support(fact, attr_name: str, value: str, reconciliation) -> bool:
     """Whether `fact`'s OWN `attribute_evidence` for `attr_name` contains at least one
-    genuinely ASSERTED, scope-validated, source-RECONCILED entry -- the no-fallback,
-    VALUE-level (not just quotation-level) safety-critical check a MUST_SUPPORT-
-    governed axis (laterality) needs (issue #6 F9-R6-R2, fifth re-review). Unlike
-    `_attribute_span_support`, this never falls back to whole-fact-text lexical
-    matching when no per-attribute evidence exists for the axis -- fails closed
-    instead, since that lexical fallback is exactly the mechanism proven unsound
-    against arbitrary-distance negation. Also unlike `_attribute_span_support`, this
-    is gated STRICTLY on the ASSERTED subset's own reconciliation -- a confirmed but
-    NEGATED quotation must never satisfy this, even though `_attribute_span_support`
-    itself reports such a quotation as `ok=True` (confirmed, just not asserting)."""
+    genuinely ASSERTED, scope-validated, source-RECONCILED entry BOUND TO `value` --
+    the no-fallback, VALUE-level (not just axis-level) safety-critical check a
+    MUST_SUPPORT-governed axis (laterality) needs (issue #6 F9-R6-R2, fifth AND
+    sixth re-review).
+
+    issue #6 F9-R6-R2, sixth re-review: `value` is now REQUIRED, not merely
+    axis-level -- proven exploitable without it: a reconciled quote genuinely
+    stating "left", marked ASSERTED, was accepted as proof of an unrelated
+    `attributes["laterality"]="right"`, since the old axis-only check only asked
+    "does SOME asserted entry exist for this axis," never "does THIS entry
+    assert the value actually being checked." An entry whose own `.value` does
+    not canonically match `value` (including an older/unbound entry whose
+    `.value` is still `""`) never counts, regardless of its assertion_state.
+
+    Unlike `_attribute_span_support`, this never falls back to whole-fact-text
+    lexical matching when no per-attribute evidence exists for the axis --
+    fails closed instead, since that lexical fallback is exactly the mechanism
+    proven unsound against arbitrary-distance negation. Also unlike
+    `_attribute_span_support`, this is gated STRICTLY on the value-bound
+    ASSERTED subset's own reconciliation -- a confirmed but NEGATED quotation
+    must never satisfy this, even though `_attribute_span_support` itself
+    reports such a quotation as `ok=True` (confirmed, just not asserting)."""
+    norm_value = _norm(value)
+    if not norm_value:
+        return False           # nothing to assert -- never matches an unbound ("") entry
     entries = (getattr(fact, "attribute_evidence", None) or {}).get(attr_name)
     if not entries:
         return False
     usable = [e for e in entries if e.scope == "local" or e.scope_validated]
-    asserted = [e for e in usable if e.assertion_state == RelationState.ASSERTED]
+    bound = [e for e in usable if _norm(e.value) == norm_value]
+    asserted = [e for e in bound if e.assertion_state == RelationState.ASSERTED]
     if not asserted:
         return False
     ok, _proof, _text, _spans = _spans_support([e.span for e in asserted], reconciliation)
     return ok
+
+
+def claim_authorized_value(fact, axis: str, reconciliation) -> str | None:
+    """THE one accessor every claim-affecting consumer -- candidate elimination/
+    specificity scoring, diagnosis specificity upgrades, modifier assignment,
+    distinct-service determination, billing units, anatomy eligibility exclusion
+    -- must use instead of reading `fact.attributes[axis]` directly (issue #6
+    F9-R6-R2, sixth re-review). Round 3 through 5 protected `tiebreak.narrow`'s
+    tie-break path; the review that prompted this function proved the actual,
+    ordinary release path never went through it at all: `resolution._evaluate`'s
+    deterministic elimination/specificity scoring reads `fact.attributes
+    ["laterality"]` raw, so a fact with a source-confirmed NEGATED attribute
+    value still resolved deterministically to the wrong-side candidate every
+    time -- every prior round's fix was real but scoped to the wrong (rarer)
+    path.
+
+    Returns the value only when a scope-valid, source-RECONCILED
+    `AttributeEvidence` entry exists whose own `.value` canonically matches it
+    AND whose `assertion_state` is ASSERTED (`asserted_attribute_support`).
+    When no `attribute_evidence` exists for the axis at all, OR none of it is
+    value-bound to the current value, falls back to the SAME whole-fact-text
+    `_span_support` + `tiebreak.asserted_status` check `resolve()`'s own
+    fallback already uses -- no claim-affecting consumer this round is left
+    with WEAKER verification than `resolve()` itself already provides for the
+    "no per-attribute evidence yet" case, but none is left with NO verification
+    at all either, which is the state every site this function replaces was in
+    before this round.
+
+    Returns `None` (fail closed) when the value cannot be authorized -- the
+    caller must treat that exactly as "not documented" for its own decision,
+    never as "documented, use the raw value anyway"."""
+    value = str((getattr(fact, "attributes", None) or {}).get(axis) or "").strip()
+    if not value:
+        return None
+    entries = (getattr(fact, "attribute_evidence", None) or {}).get(axis)
+    usable = [e for e in entries if e.scope == "local" or e.scope_validated] if entries else []
+    norm_value = _norm(value)
+    bound = [e for e in usable if _norm(e.value) == norm_value]
+    if bound:
+        return value if asserted_attribute_support(fact, axis, value, reconciliation) else None
+    from . import tiebreak as _tiebreak
+    ok, _proof, text, _spans = _span_support(fact, reconciliation)
+    if ok and _tiebreak.asserted_status((value,), text) == "supported":
+        return value
+    return None
 
 
 def source_support(fact, reconciliation) -> tuple[bool, str, str, tuple[str, ...]]:
@@ -611,10 +750,10 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
         """
         if fact is None:
             return False, "", "", (), False
-        attr = _attribute_span_support(fact, axis, reconciliation)
+        attr = _attribute_span_support(fact, axis, value, reconciliation)
         if attr is not None:
             ok, proof, text, spans = attr
-            says = bool(value) and asserted_attribute_support(fact, axis, reconciliation)
+            says = bool(value) and asserted_attribute_support(fact, axis, value, reconciliation)
             return ok, proof, text, spans, says
         ok, proof, text, spans = _span_support(fact, reconciliation)
         says = ok and bool(value) and _tiebreak.asserted_status(
@@ -720,6 +859,7 @@ def apply_resolutions(primary_by_id: dict, second_by_node: dict,
         source_fact = second_by_node.get(resolution.node_id)
         if source_fact is not None:
             _carry_evidence(fact, source_fact, resolution.evidence_span_ids)
+            _carry_attribute_evidence(fact, source_fact, resolution.axis)
 
 
 def _write_axis(fact, axis: str, value: str) -> None:
@@ -759,6 +899,41 @@ def _carry_evidence(fact, source_fact, span_ids: tuple[str, ...]) -> None:
         if span_id and span_id in wanted and span_id not in have:
             fact.evidence.append(span)
             have.add(span_id)
+
+
+def _carry_attribute_evidence(fact, source_fact, axis: str) -> None:
+    """When the SECOND reading's value wins an axis, carry ITS `attribute_evidence`
+    for that axis onto the winning fact too (issue #6 F9-R6-R2, sixth re-review) --
+    `_write_axis` already writes the winning raw string, and `_carry_evidence`
+    already copies the whole-fact evidence spans, but neither ever touched
+    `attribute_evidence`. Without this, the winning fact's `attribute_evidence[axis]`
+    stayed exactly what the LOSING primary reading originally populated (describing
+    a value that is no longer what `attributes[axis]` holds, or empty if the primary
+    never emitted any) -- `claim_authorized_value`/`asserted_attribute_support`
+    would then find no value-bound evidence for the value that just won, and
+    wrongly fail closed on a resolution that should have succeeded.
+
+    Appends (never replaces) -- the losing primary's own entries stay for audit,
+    and the value-binding filter in `claim_authorized_value` already ignores any
+    entry whose `.value` does not match the CURRENT `attributes[axis]`, so a stale
+    primary-reading entry for the old value can never be mistaken for proof of the
+    new one. Deduplicated by span_id, matching `_carry_evidence`'s own discipline.
+    """
+    source_entries = (getattr(source_fact, "attribute_evidence", None) or {}).get(axis)
+    if not source_entries:
+        return
+    existing = (getattr(fact, "attribute_evidence", None) or {}).get(axis) or ()
+    have = {str(getattr(e.span, "span_id", "") or "") for e in existing}
+    merged = list(existing)
+    for entry in source_entries:
+        span_id = str(getattr(entry.span, "span_id", "") or "")
+        if span_id and span_id not in have:
+            merged.append(entry)
+            have.add(span_id)
+    fact.attribute_evidence = {
+        **(getattr(fact, "attribute_evidence", None) or {}),
+        axis: tuple(merged),
+    }
 
 
 def _event_record(fact) -> dict[str, Any]:

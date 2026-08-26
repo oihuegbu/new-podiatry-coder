@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 
 from .data_access import CodeSource
 from .models import CandidateCode, ClinicalFact, FactKind, Outcome, ResolutionMethod, ResolvedLine
+from . import graph_consensus as _gc
 from . import tiebreak as _tiebreak
 from .ontology import (DescriptorFeatures, measurement_of, parse_descriptor,
                        support_score)
@@ -89,13 +90,20 @@ def _residual_without_grounding(fact: ClinicalFact, chosen: CandidateCode) -> bo
     return not (_distinctive_tokens(fact.description) & _distinctive_tokens(desc))
 
 
-def _needs_verification(fact: ClinicalFact, cand: CandidateCode) -> bool:
+def _needs_verification(fact: ClinicalFact, cand: CandidateCode, reconciliation=None) -> bool:
     """Does this authoritative hit carry a distinguishing qualifier the documentation
     may not support — so it must be entailment-CONFIRMED rather than closed
     deterministically? True when the descriptor states a bundled-component clause
     ('with'/'without …'), a status qualifier (secondary/revision/…), a measurement it
     needs but the note lacks, or a count it needs but the note lacks. A plain concept
-    match with none of these closes deterministically (recovers autonomy + cost)."""
+    match with none of these closes deterministically (recovers autonomy + cost).
+
+    issue #6 F9-R6-R2, sixth re-review: the count/quantity check now reads through
+    `graph_consensus.claim_authorized_value` -- a raw, unauthorized count merely
+    BEING PRESENT must not skip forcing verification the way a genuinely documented
+    one does; the fail-safe direction here is "missing forces MORE verification,"
+    so treating an unauthorized value as absent only ever makes this MORE
+    conservative, never less."""
     d = cand.descriptor.lower()
     if re.search(r"\bwith(?:out)?\b", d):
         return True
@@ -104,14 +112,23 @@ def _needs_verification(fact: ClinicalFact, cand: CandidateCode) -> bool:
     feats = parse_descriptor(cand.descriptor)
     if _interval_unsupported(fact, feats):
         return True
-    if feats.cardinality and not (fact.attributes.get("count")
-                                  or fact.attributes.get("quantity")):
+    if feats.cardinality and not (
+            _gc.claim_authorized_value(fact, "count", reconciliation)
+            or _gc.claim_authorized_value(fact, "quantity", reconciliation)):
         return True
     return False
 
 
-def _fact_laterality(fact: ClinicalFact) -> str:
-    lat = str(fact.attributes.get("laterality", "")).lower().strip()
+def _fact_laterality(fact: ClinicalFact, reconciliation=None) -> str:
+    """The CLAIM-AUTHORIZED laterality value (issue #6 F9-R6-R2, sixth re-review) --
+    NEVER the raw `fact.attributes["laterality"]` directly. Proven exploitable: a
+    fact with a source-confirmed NEGATED laterality still eliminated/scored
+    candidates deterministically via the raw value, completely bypassing every
+    negation-awareness this codebase had already built into `tiebreak.narrow`/
+    `graph_consensus.resolve` -- those only ever protected the genuine-TIE path;
+    this is the ORDINARY elimination/specificity path every candidate goes through
+    first, and it was never touched by any prior round's fix."""
+    lat = str(_gc.claim_authorized_value(fact, "laterality", reconciliation) or "").lower().strip()
     return lat if lat in _LATERALITY else ""
 
 
@@ -166,7 +183,7 @@ def _fact_text(fact: ClinicalFact) -> str:
 
 
 def _evaluate(fact: ClinicalFact, cand: CandidateCode,
-              source: CodeSource | None = None) -> _Match | None:
+              source: CodeSource | None = None, reconciliation=None) -> _Match | None:
     """Apply the agnostic elimination rules and score specificity. Return None if
     the candidate CONTRADICTS the documented facts, else a scored match. Concept
     relevance is not judged here — retrieval already guaranteed it."""
@@ -174,7 +191,7 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
     reasons: list[str] = []
 
     # ELIMINATION — laterality contradiction.
-    fl = _fact_laterality(fact)
+    fl = _fact_laterality(fact, reconciliation)
     if fl and fl != "bilateral" and feats.laterality and fl not in feats.laterality:
         return None
 
@@ -355,7 +372,7 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
         # never sees an unexplained None for a line that resolved this way.
         from . import semantic_eligibility as _semelig
         line.candidate_eligibility = _semelig.eligibility_report(
-            elig_facts, cands, source, dos)
+            elig_facts, cands, source, dos, reconciliation)
         return line
 
     # AUTHORITATIVE FIRST: for a diagnosis, resolve through the ICD-10-CM
@@ -510,6 +527,19 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
         for c in source.retrieve(q, fact.system, top_k=top_k):
             if c.code not in best or c.score > best[c.code].score:
                 best[c.code] = c
+    # UMLS RECALL SEED (issue #6 F9-R7 item 2): the SAME normalized-phrase set
+    # already assembled above (structured query + verbatim evidence + governed
+    # alternates + advisory synonyms), unioned by the SAME max-score-per-code
+    # rule. Additive only -- a code this source proposes competes for pool
+    # membership on equal footing but can never outrank a descriptor-grounded
+    # hit for the same code, and the descriptor-entailment/typed-facet-
+    # uniqueness/DOS-activity/CMS-validation path below is completely unaware
+    # this candidate came from a different source. `umls_candidates` itself
+    # degrades to [] when the term index is absent or a term is unmatched.
+    for c in source.umls_candidates([q for q in queries if q.strip()],
+                                    fact.system, dos):
+        if c.code not in best or c.score > best[c.code].score:
+            best[c.code] = c
     pool = sorted(best.values(), key=lambda c: c.score, reverse=True)
 
     # ---- Semantic eligibility-before-retrieval (issue #6 items 4/5, F8-R2) -------
@@ -540,7 +570,7 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
     _all_candidates = list(seeds) + [c for c in pool if c.code not in
                                      {s.code for s in seeds}]
     _candidate_eligibility = _semelig.eligibility_report(elig_facts, _all_candidates,
-                                                          source, dos)
+                                                          source, dos, reconciliation)
     _eligible_ids = {(r["code"], r["system"]) for r in _candidate_eligibility
                      if r["eligible"]}
     pool = [c for c in pool if (c.code, c.system) in _eligible_ids]
@@ -640,17 +670,24 @@ def _strip_laterality(text: str) -> str:
                          str(text).lower())).strip(" ,;")
 
 
-def upgrade_diagnosis_laterality(line: ResolvedLine, source: CodeSource) -> ResolvedLine:
+def upgrade_diagnosis_laterality(line: ResolvedLine, source: CodeSource,
+                                 reconciliation=None) -> ResolvedLine:
     """ICD-10-CM specificity: when a diagnosis resolved to an UNSPECIFIED-laterality
     code but the note documents a side AND a laterality-specific SIBLING exists in
     the authoritative data, upgrade to it. Agnostic — it uses descriptor grammar
     ('unspecified' vs 'right'/'left') and the code's OWN sibling family (validated by
     descriptor: a sibling must be the same concept with only laterality changed),
-    never a hardcoded code or family."""
+    never a hardcoded code or family.
+
+    issue #6 F9-R6-R2, sixth re-review: previously read `fact.attributes["laterality"]`
+    raw, with NO verification of any kind -- the cheapest, least-checked path in the
+    whole pipeline for an upgrade that changes the billed code. Now requires
+    `graph_consensus.claim_authorized_value`; an unauthorized (e.g. source-negated)
+    value declines the upgrade instead of applying it."""
     fact = line.fact
     if not (line.resolved and fact.kind is FactKind.DIAGNOSIS and line.chosen):
         return line
-    lat = str(fact.attributes.get("laterality", "")).lower().strip()
+    lat = str(_gc.claim_authorized_value(fact, "laterality", reconciliation) or "").lower().strip()
     if lat not in ("right", "left"):
         return line
     desc = line.chosen.descriptor.lower()
@@ -722,13 +759,16 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
     invariant the primary code-selection path enforces, and a model-named elimination
     here would fall back to unverified evidence text even when a reconciliation existed
     and had already rejected it."""
-    line = upgrade_diagnosis_laterality(line, source)          # step 1 (cheap)
+    line = upgrade_diagnosis_laterality(line, source, reconciliation)   # step 1 (cheap)
     fact = line.fact
     if not (line.resolved and fact.kind is FactKind.DIAGNOSIS and line.chosen):
         return line
     if llm is None:
         return line
-    lat = str(fact.attributes.get("laterality", "")).lower().strip()
+    # issue #6 F9-R6-R2, sixth re-review: claim-authorized, not the raw attribute --
+    # this gates which relatives even get OFFERED to the verifier below (step 2), so
+    # an unauthorized value must never narrow candidacy toward the wrong side either.
+    lat = str(_gc.claim_authorized_value(fact, "laterality", reconciliation) or "").lower().strip()
     if lat not in ("right", "left"):
         return line                                # no documented side to sharpen to
     desc = line.chosen.descriptor.lower()
@@ -754,7 +794,7 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
         cand = CandidateCode(code=_dot(su), system="icd10", descriptor=sdesc, score=1.0,
                              source="specificity-relative",
                              authority={"source": "ICD-10-CM specificity"})
-        if _evaluate(fact, cand, source) is not None:   # contradicts no documented attribute
+        if _evaluate(fact, cand, source, reconciliation) is not None:   # contradicts no documented attribute
             relatives.append(cand)
     if not relatives:
         return line                                # no more-specific code exists -> keep it
@@ -872,13 +912,14 @@ MAX_RESELECT = 2       # re-selection attempts after a WRONG-CODE (not documenta
 
 
 def _ranked(fact: ClinicalFact, pool: list[CandidateCode],
-            source: CodeSource | None) -> list[_Match]:
+            source: CodeSource | None, reconciliation=None) -> list[_Match]:
     """Survivors (candidates that contradict no documented attribute), ORDERED by
     recall, then (specificity, support). This is an ordering, not a decision: it fixes
     the shortlist offered to entailment verification and the `alternatives` an audit
     record shows. `_decide` selects only on a documented axis or on the original
     document, so no candidate is ever billed because it sorted first."""
-    survivors = [m for m in (_evaluate(fact, c, source) for c in pool) if m is not None]
+    survivors = [m for m in (_evaluate(fact, c, source, reconciliation) for c in pool)
+                if m is not None]
     survivors.sort(key=lambda m: (m.recall, m.specificity, m.support), reverse=True)
     return survivors
 
@@ -1205,7 +1246,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
     tie = _tiebreak.narrow(fact, remaining, reconciliation, requirements)
     winner = tie.winner
     if (winner is not None and all(j.entails(winner.code) for j in judgements)
-            and _evaluate(fact, winner) is not None
+            and _evaluate(fact, winner, reconciliation=reconciliation) is not None
             and not _interval_unsupported(fact, parse_descriptor(winner.descriptor))):
         note = (f"{len(remaining)} candidates remained entailed, and the tie was narrowed "
                 f"against the original document ({tie.proof}): {tie.detail}")
@@ -1247,9 +1288,9 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     # confirmation below (and it must be computed even when `corroborate` is None, since
     # "no second opinion" is itself one of the non-independent origins).
     corroboration = _verify.corroboration_origin(llm, corroborate)
-    proposed_matches = [_evaluate(fact, c, source)
+    proposed_matches = [_evaluate(fact, c, source, reconciliation)
                         for c in _verify.propose_codes(fact, source, llm)]
-    retrieved_matches = _ranked(fact, pool, source)
+    retrieved_matches = _ranked(fact, pool, source, reconciliation)
     unsupported = [m.candidate for m in [*proposed_matches, *retrieved_matches]
                    if m is not None and m.interval_unsupported]
     proposals = [m.candidate for m in proposed_matches
@@ -1302,7 +1343,7 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
                 fact, shortlist, reconciliation,
                 "no candidate's authoritative descriptor is fully entailed by the "
                 "documentation (verified)", requirements=requirements)
-        chosen_match = _evaluate(fact, chosen, source)
+        chosen_match = _evaluate(fact, chosen, source, reconciliation)
         if chosen_match is None:
             return ResolvedLine(
                 fact=fact, chosen=None, alternatives=shortlist,
@@ -1478,7 +1519,7 @@ def _decide(fact: ClinicalFact, pool: list[CandidateCode],
                 method=ResolutionMethod.ABSTAINED,
                 rationale="every candidate is inactive/terminated on the date of service")
         pool = active
-    survivors = _ranked(fact, pool, source)
+    survivors = _ranked(fact, pool, source, reconciliation)
     if not survivors:
         return ResolvedLine(
             fact=fact, chosen=None, alternatives=pool[:5],

@@ -291,8 +291,13 @@ class AnatomyDominance(unittest.TestCase):
                               "active": True},
             ("RIGHT", "cpt"): {"long_description": "Excision, right great toe",
                                "active": True}})
+        from claude_coder.models import AttributeEvidence, EvidenceSpan, RelationState
+        span = EvidenceSpan("a procedure on the left", anchored=True, span_id="s1")
         fact = ClinicalFact(FactKind.PROCEDURE, "a procedure",
-                            attributes={"laterality": "left"})
+                            attributes={"laterality": "left"}, evidence=[span],
+                            attribute_evidence={"laterality": (
+                                AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                                  value="left"),)})
         result = semelig.eligible_partition(
             [fact], [_candidate("LEFT"), _candidate("RIGHT")], source, None)
         self.assertEqual([c.code for c in result], ["LEFT"])

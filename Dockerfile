@@ -3,11 +3,16 @@ FROM python:3.11-slim AS app
 # System dependencies: poppler for pdf2image, curl for healthchecks, a headless JRE
 # for NLM's MetamorphoSys (the only supported way to unpack a UMLS Metathesaurus
 # release's proprietary .nlm knowledge-source files into standard RRF tables --
-# see tools/install_umls_release.sh). Added here, not hand-installed on the host:
-# the coding pipeline and every build/refresh tool run inside this image, and the
-# EC2 host's own user_data only runs once at first boot (frozen via
-# `lifecycle { ignore_changes = [user_data, ami] }` in terraform/ec2.tf), so a
-# host-level install would never reach an already-running instance.
+# see tools/install_umls_release.sh), and unzip for that same script's extraction
+# of the release archive and mmsys.zip -- issue #6 F9-R7 item 5 wired the
+# extraction step into tools/build_umls_crosswalk.py's own refresh run, which
+# runs inside this image, not on the host shell (which happened to have unzip
+# already, masking this gap during manual, host-side install runs). Added here,
+# not hand-installed on the host: the coding pipeline and every build/refresh
+# tool run inside this image, and the EC2 host's own user_data only runs once at
+# first boot (frozen via `lifecycle { ignore_changes = [user_data, ami] }` in
+# terraform/ec2.tf), so a host-level install would never reach an
+# already-running instance.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         poppler-utils \
@@ -15,6 +20,7 @@ RUN apt-get update && \
         libgl1 \
         libglib2.0-0 \
         default-jre-headless \
+        unzip \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

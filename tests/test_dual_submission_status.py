@@ -174,17 +174,27 @@ class HeldSubmissionIsEnforcedNotOnlyStamped(unittest.TestCase):
         self.assertTrue(any(item["destination"] == Destination.PROVIDER_QUERY.value
                             and item["blocking"] for item in r.routing))
 
-    def test_bundle_excludes_held_line_from_service_lines_but_preserves_it_in_audit(self):
+    def test_bundle_carries_the_held_line_as_held_not_erased_but_enforcement_still_blocks(self):
+        """issue #6 F9-R7 item 4 supersedes this test's ORIGINAL assertion (that a
+        HELD line was excluded from `service_lines` entirely, visible only as an
+        untyped audit dict): that shape was itself the erasure bug the product-
+        priority reset named -- a discovered, recommended code disappearing from
+        the artifact instead of being carried with an explicit status. The
+        ENFORCEMENT this test exists to prove (HELD blocks autonomous release, not
+        merely a stamp) is unchanged and still checked below, via
+        `release_blockers()`, not via absence from `service_lines`."""
         from app.contracts.claim_bundle import (AuthorityBinding, EncounterContext,
-                                                 SourceDocument, bundle_from_coding_result)
+                                                 LineStatus, SourceDocument,
+                                                 bundle_from_coding_result)
         r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
                            extract_llm=lambda s, u: _FACTS_UNRESOLVED, verify_llm=_sel,
                            corroborate_llm=_sel, audit_repository=NullAuditRepository())
         bundle = bundle_from_coding_result(
             r, source_document=SourceDocument(), context=EncounterContext(),
             authority=AuthorityBinding())
-        self.assertFalse(any(sl.code == "PROC_X" for sl in bundle.service_lines),
-                         "a HELD line must never reach the submitted claim lines")
+        held = [sl for sl in bundle.service_lines if sl.code == "PROC_X"]
+        self.assertTrue(held, "the coded line must survive into the bundle, not disappear")
+        self.assertEqual(held[0].status, LineStatus.HELD_POLICY_OR_DATA)
         held_audit = [e for e in bundle.audit.excluded_lines
                      if e.get("code") == "PROC_X"]
         self.assertTrue(held_audit, "the coded line must still be visible in the audit trail")

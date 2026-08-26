@@ -84,6 +84,7 @@ from __future__ import annotations
 
 import re
 
+from . import graph_consensus as _gc
 from . import ontology as _ontology
 from . import semantics as _semantics
 from .models import ClinicalFact, FactKind, Outcome
@@ -168,12 +169,15 @@ _UNKNOWN = "UNKNOWN"
 _CONTRADICTED_EXPLICIT = "CONTRADICTED_EXPLICIT"
 
 
-def _fact_attribute_value(facts: list[ClinicalFact], key: str) -> str:
-    """The first non-empty `key` attribute across `facts` -- the same field
-    `graph_consensus`/`coreference` already read as that axis's documented value.
-    Empty when nothing states one."""
+def _fact_attribute_value(facts: list[ClinicalFact], key: str, reconciliation=None) -> str:
+    """The first CLAIM-AUTHORIZED `key` attribute across `facts` (issue #6
+    F9-R6-R2, sixth re-review) -- NEVER the raw attribute directly. Proven
+    exploitable: a `NEGATED` laterality still eliminated candidates here via the
+    raw value, before `resolution._evaluate` even runs. Empty when nothing
+    states one, OR when the only value present is not genuinely, provably
+    asserted."""
     for f in facts:
-        val = str((f.attributes or {}).get(key) or "").strip()
+        val = str(_gc.claim_authorized_value(f, key, reconciliation) or "").strip()
         if val:
             return val
     return ""
@@ -256,7 +260,8 @@ def _candidate_anatomy_targets(feats) -> tuple[str, ...]:
     return parts or (truncated,)
 
 
-def _anatomy_compatibility(candidate, facts: list[ClinicalFact], source) -> str:
+def _anatomy_compatibility(candidate, facts: list[ClinicalFact], source,
+                           reconciliation=None) -> str:
     """How this ONE candidate's anatomy relates to what `facts` document -- never a
     comparison between candidates; that comparative step is
     `_anatomy_dominance_exclusions`, below.
@@ -274,7 +279,7 @@ def _anatomy_compatibility(candidate, facts: list[ClinicalFact], source) -> str:
     UNKNOWN, never a guess in either direction."""
     feats = _candidate_descriptor_features(candidate, source)
 
-    fact_laterality = _fact_attribute_value(facts, "laterality").lower()
+    fact_laterality = _fact_attribute_value(facts, "laterality", reconciliation).lower()
     if fact_laterality and feats.laterality and fact_laterality not in feats.laterality:
         return _CONTRADICTED_EXPLICIT
 
@@ -301,7 +306,7 @@ def _anatomy_compatibility(candidate, facts: list[ClinicalFact], source) -> str:
 
 
 def _anatomy_dominance_exclusions(facts: list[ClinicalFact], candidates: list,
-                                  source) -> dict[tuple[str, str], str]:
+                                  source, reconciliation=None) -> dict[tuple[str, str], str]:
     """`{(code, system) -> reason}` for candidates the anatomy-dominance rule removes
     from THIS pool (issue #6 F9-R2, second pass): an explicit laterality
     contradiction always excludes; separately, a candidate whose anatomy
@@ -315,7 +320,7 @@ def _anatomy_dominance_exclusions(facts: list[ClinicalFact], candidates: list,
     compare, so nothing is excluded."""
     if len(candidates) < 2:
         return {}
-    verdicts = {(c.code, c.system): _anatomy_compatibility(c, facts, source)
+    verdicts = {(c.code, c.system): _anatomy_compatibility(c, facts, source, reconciliation)
                for c in candidates}
     out: dict[tuple[str, str], str] = {}
     for c in candidates:
@@ -385,7 +390,7 @@ def eligible(candidate, facts: list[ClinicalFact], source,
 
 
 def eligible_partition(facts: list[ClinicalFact], candidates: list, source,
-                       date_of_service: str | None) -> list:
+                       date_of_service: str | None, reconciliation=None) -> list:
     """`candidates`, narrowed to the ones `eligible()` accepts for `facts`, then
     narrowed once more by `_anatomy_dominance_exclusions` (issue #6 F9-R2, second
     pass) -- a GROUP-level pass over the survivors, run here because this is the one
@@ -406,12 +411,12 @@ def eligible_partition(facts: list[ClinicalFact], candidates: list, source,
     an empty pool as an honest abstention; that is the correct outcome here
     too, not a reason to disable the filter."""
     pool = [c for c in candidates if eligible(c, facts, source, date_of_service)]
-    excluded = _anatomy_dominance_exclusions(facts, pool, source)
+    excluded = _anatomy_dominance_exclusions(facts, pool, source, reconciliation)
     return [c for c in pool if (c.code, c.system) not in excluded]
 
 
 def eligibility_report(facts: list[ClinicalFact], candidates: list, source,
-                       date_of_service: str | None) -> list[dict]:
+                       date_of_service: str | None, reconciliation=None) -> list[dict]:
     """A full per-candidate audit record over `candidates` -- which `eligible_partition`
     would keep or exclude, and why -- preserved for the audit trail EVEN on a
     held/blocked outcome (issue #6 item 8), never only for a released line. Computed
@@ -420,7 +425,7 @@ def eligibility_report(facts: list[ClinicalFact], candidates: list, source,
     so this record can never claim a different reason than the one that actually
     decided it."""
     pool = [c for c in candidates if eligible(c, facts, source, date_of_service)]
-    dominance = _anatomy_dominance_exclusions(facts, pool, source)
+    dominance = _anatomy_dominance_exclusions(facts, pool, source, reconciliation)
     report = []
     for c in candidates:
         reason = _ineligibility_reason(c, facts, source, date_of_service)

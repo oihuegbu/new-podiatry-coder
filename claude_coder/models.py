@@ -151,6 +151,19 @@ class AttributeEvidence:
     reconciled entry, may ever positively select a value; `NEGATED`/`UNCERTAIN`/
     missing must never be treated as proof, exactly like an unvalidated
     `scope_validated=False` entry above.
+
+    `value` (issue #6 F9-R6-R2, sixth re-review) is the SPECIFIC value (matching
+    one of `attributes[axis]`'s own values) THIS quote proves -- an axis is
+    axis-keyed but was never value-bound before this field existed:
+    `graph_consensus.asserted_attribute_support` could only ask "does SOME
+    ASSERTED entry exist for this axis," never "does THIS entry assert the
+    CURRENT `attributes[axis]` value" -- proven exploitable: a reconciled quote
+    genuinely stating "left", marked ASSERTED, was accepted as proof of an
+    unrelated `attributes["laterality"]="right"`. Defaults to `""` (unbound) --
+    fail-closed, so an older construction site that predates this field is
+    never treated as proof of any particular value; `graph_consensus.
+    claim_authorized_value` requires an entry's `value` to canonically match
+    the value being checked before its `assertion_state` counts for anything.
     """
     span: EvidenceSpan
     scope: str = "local"
@@ -158,6 +171,7 @@ class AttributeEvidence:
     source_relation_id: str = ""
     scope_validated: bool = False
     assertion_state: RelationState = RelationState.UNCERTAIN
+    value: str = ""
 
 
 @dataclass

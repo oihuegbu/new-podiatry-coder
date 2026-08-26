@@ -104,10 +104,20 @@ SCHEMA_ID = "claim_bundle"
 #: units, modifiers, pointers, context, evidence, authority and graph included.
 #: A reader that could not tell those apart would read an unbound certificate
 #: as a bound one, which is precisely the finding.
-SCHEMA_VERSION = 3
+#: 4 adds an explicit per-line outcome (`_CodedLine.status`) and a new
+#: `ClaimBundle.candidate_lines` section (issue #6 F9-R7 item 4, product-
+#: priority reset). A version bump for the same reason 2 and 3 were: the
+#: ABSENCE of `candidate_lines` means two different things. In a v3 artifact a
+#: documented event with no recommended code simply had no representation at
+#: all -- indistinguishable from "nothing was ever documented here." In a v4
+#: artifact its absence from `candidate_lines` means every documented event
+#: DID reach RECOMMENDED or HELD_POLICY_OR_DATA. A reader that could not tell
+#: those apart would read a v3 artifact's silence as a clean claim rather than
+#: as an unrecorded uncertainty.
+SCHEMA_VERSION = 4
 #: Every version this build can read. Adding a version means adding a reader,
 #: never silently accepting a shape whose semantics are unknown.
-SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3})
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4})
 
 
 class ClaimBundleError(Exception):
@@ -354,6 +364,36 @@ class LineMethod(str, Enum):
     UNKNOWN = "unknown"
 
 
+class LineStatus(str, Enum):
+    """One documented service/diagnosis's outcome, explicit rather than
+    implicit-by-presence (issue #6 F9-R7 item 4, product-priority reset).
+
+    Before this field, a `DiagnosisLine`/`ServiceLine` existed ONLY for a
+    resolved, submission-ready line -- any other outcome (a genuine tie, no
+    candidate at all, a resolved-but-administratively-held code) simply had NO
+    entry in `ClaimBundle.diagnoses`/`.service_lines`, visible only as an
+    untyped dict in `AuditSurface.excluded_lines` if at all. An uncertainty on
+    ONE documented event must never erase it from the artifact, and must never
+    erase an unrelated, independently defensible line either.
+    """
+
+    #: One code is supported and survives validation -- today's only prior state.
+    RECOMMENDED = "RECOMMENDED"
+    #: A candidate is recommended, but submission is blocked by a missing
+    #: reporting/policy/data control (e.g. `ClaimSubmissionStatus.HELD`'s
+    #: unresolved actor-ownership case). The code is NOT erased: it is carried
+    #: here, in `diagnoses`/`service_lines`, exactly like a RECOMMENDED line --
+    #: only `release_blockers()` treats it differently.
+    HELD_POLICY_OR_DATA = "HELD_POLICY_OR_DATA"
+    #: Candidates exist but one named, provider-answerable fact prevents
+    #: uniqueness (a genuine tie, a measurement/documentation gap). Carried in
+    #: `ClaimBundle.candidate_lines`, never in `diagnoses`/`service_lines`.
+    CANDIDATES_NEEDING_FACT = "CANDIDATES_NEEDING_FACT"
+    #: Retrieval ran and found no defensible candidate at all. Carried in
+    #: `ClaimBundle.candidate_lines` with an empty `candidates` tuple.
+    NO_SUPPORTED_CANDIDATE = "NO_SUPPORTED_CANDIDATE"
+
+
 # --------------------------------------------------------------------------
 # leaf models
 # --------------------------------------------------------------------------
@@ -481,6 +521,13 @@ class _CodedLine(_Strict):
     #: decision actually rested on, not only an opaque audit-repository hash.
     #: `{}` for a line that never reached a tie (a unique deterministic pick).
     selection_proof: dict[str, Any] = Field(default_factory=dict)
+    #: issue #6 F9-R7 item 4: defaults to RECOMMENDED -- every v1-v3 coded line
+    #: existed BY CONSTRUCTION only for a resolved, submission-ready pick, so a
+    #: stored older payload re-read under this version is correctly labeled
+    #: without guessing. A HELD_POLICY_OR_DATA line is the one other value a
+    #: `_CodedLine` may carry; CANDIDATES_NEEDING_FACT/NO_SUPPORTED_CANDIDATE
+    #: never appear here -- see `CandidateLine` below.
+    status: LineStatus = LineStatus.RECOMMENDED
 
 
 class DiagnosisLine(_CodedLine):
@@ -507,6 +554,47 @@ class ServiceLine(_CodedLine):
     #: Fact category the line came from (procedure / imaging / supply / drug /
     #: E-M). Opaque string: a category vocabulary, never a code family.
     kind: str = ""
+
+
+class CandidateReference(_Strict):
+    """One retrieval candidate a `CandidateLine` considered but did not (yet)
+    select -- opaque provenance, never itself a coding decision. `source`
+    names which recall mechanism proposed it (retrieval / an authoritative
+    index / umls_recall / ...), carried verbatim for audit."""
+
+    system: str = ""
+    code: str = ""
+    descriptor: str = ""
+    score: float = 0.0
+    source: str = ""
+
+
+class CandidateLine(_Strict):
+    """One documented service/diagnosis that did NOT reach RECOMMENDED or
+    HELD_POLICY_OR_DATA (issue #6 F9-R7 item 4) -- retrieval ran, but a genuine
+    tie, a documentation gap, or a wholly unsupported concept prevented a
+    single code from being selected. Carried here so the fact and its
+    candidate pool remain visible, with ONE precise named reason, instead of
+    being erased into an unnamed coder-review dependency or a generic empty
+    result. Never counted by `release_blockers()`: an uncertainty on this
+    documented event must never block an unrelated, independently defensible
+    line elsewhere in the same claim."""
+
+    clinical_event_id: str = ""
+    #: Fact category (procedure / imaging / diagnosis / supply / drug / E-M).
+    kind: str = ""
+    #: The fact's own normalized clinical-language description -- never raw
+    #: note text beyond what an evidence quote already carries.
+    subject: str = ""
+    status: LineStatus
+    candidates: tuple[CandidateReference, ...] = ()
+    #: The exact first stage/reason that prevented recommendation -- a
+    #: provider-answerable question for CANDIDATES_NEEDING_FACT, or the
+    #: retrieval/eligibility stage's own stated reason for
+    #: NO_SUPPORTED_CANDIDATE. Never empty: every producer site that abstains
+    #: already states one (`documentation_gap`, `tie_record`, or `rationale`).
+    blocking_reason: str = ""
+    evidence: tuple[EvidenceReference, ...] = ()
 
 
 class PatientIdentity(_Strict):
@@ -1157,6 +1245,10 @@ class ClaimBundle(_Strict):
     graph: GraphReference = Field(default_factory=GraphReference)
     diagnoses: tuple[DiagnosisLine, ...] = ()
     service_lines: tuple[ServiceLine, ...] = ()
+    #: issue #6 F9-R7 item 4: every documented service/diagnosis that did NOT
+    #: reach RECOMMENDED or HELD_POLICY_OR_DATA -- see `CandidateLine`. Never
+    #: consulted by `release_blockers()`.
+    candidate_lines: tuple[CandidateLine, ...] = ()
     context: EncounterContext = Field(default_factory=EncounterContext)
     outcomes: tuple[DecisionOutcome, ...] = ()
     authority: AuthorityBinding = Field(default_factory=AuthorityBinding)
@@ -1251,6 +1343,14 @@ class ClaimBundle(_Strict):
                 "descriptor": line.descriptor,
                 "clinical_event_id": line.clinical_event_id,
                 "method": line.method.value,
+                # issue #6 F9-R7 item 4: a line's status (RECOMMENDED vs
+                # HELD_POLICY_OR_DATA) is claim-affecting -- `release_blockers()`
+                # decides differently on it -- so it must be bound into what the
+                # certificate attests, exactly like every other field here. An
+                # unbound status could be flipped after certification with the
+                # digest still reproducing, which is precisely the class of gap
+                # this method exists to close (see the docstring above).
+                "status": line.status.value,
                 "evidence_sha256": content_digest(evidence_records(line.evidence)),
                 "authority_sha256": content_digest(
                     line.authority.model_dump(mode="json")),
@@ -1507,18 +1607,31 @@ class ClaimBundle(_Strict):
             out.append("producer did not assert an autonomous release "
                        "(no AUTO_READY verdict with a certificate)")
         out.extend(self.release.holds)
-        # issue #6 item 7/F8-R3: re-derived from the bundle's OWN stored content
-        # (`audit.excluded_lines`), never from trusting `self.release.destination`
-        # alone -- a coded line held for an unresolved administrative fact must
-        # block release even if some producer defect claimed AUTO_READY anyway.
-        # A no-op in the correctly-working case (that destination check above
-        # already caught it); a genuine safety net if it did not.
+        # issue #6 item 7/F8-R3, updated by F9-R7 item 4: re-derived from the
+        # bundle's OWN stored content, never from trusting
+        # `self.release.destination` alone -- a coded line held for an
+        # unresolved administrative/policy/data fact must block release even
+        # if some producer defect claimed AUTO_READY anyway. A no-op in the
+        # correctly-working case (that destination check above already caught
+        # it); a genuine safety net if it did not.
+        #
+        # Before schema v4, a HELD line was never in `diagnoses`/
+        # `service_lines` at all -- only in `audit.excluded_lines` -- so this
+        # checked that instead. v4 moved it INTO `diagnoses`/`service_lines`
+        # (status=HELD_POLICY_OR_DATA) so the discovered code stays visible;
+        # this check follows it there rather than continuing to look in the
+        # place the code no longer disappears to. `candidate_lines` is
+        # deliberately NOT checked here: a CANDIDATES_NEEDING_FACT/
+        # NO_SUPPORTED_CANDIDATE line is an uncertainty on ONE documented
+        # event, never a reason to block an unrelated, independently
+        # defensible line elsewhere in the same claim.
         if self.release.destination is ReleaseDestination.AUTO_READY and any(
-                (rec or {}).get("claim_submission_status") == "held"
-                for rec in self.audit.excluded_lines):
+                line.status is LineStatus.HELD_POLICY_OR_DATA
+                for line in (*self.diagnoses, *self.service_lines)):
             out.append("a coded line's submission is HELD (unresolved "
-                       "administrative fact) but the release destination claims "
-                       "AUTO_READY -- producer/consumer disagreement, never released")
+                       "administrative/policy/data fact) but the release "
+                       "destination claims AUTO_READY -- producer/consumer "
+                       "disagreement, never released")
         if self.certificate is None:
             out.append("no release certificate")
         out.extend(self.context.problems())
@@ -1797,7 +1910,8 @@ def bundle_from_coding_result(
     """
     diagnoses: list[DiagnosisLine] = []
     event_to_sequence: dict[str, int] = {}
-    for line in getattr(result, "diagnosis_lines", None) or []:
+
+    def _append_diagnosis(line, status: LineStatus) -> None:
         chosen = line.chosen
         fact = line.fact
         sequence = len(diagnoses) + 1
@@ -1814,9 +1928,21 @@ def bundle_from_coding_result(
             authority=_authority_of(chosen),
             selection_proof=selection_proof_record(line),
             primary=(sequence == 1),
+            status=status,
         ))
         if event_id:
             event_to_sequence[event_id] = sequence
+
+    for line in getattr(result, "diagnosis_lines", None) or []:
+        _append_diagnosis(line, LineStatus.RECOMMENDED)
+    # issue #6 F9-R7 item 4: a HELD diagnosis was previously erased from the
+    # bundle entirely (excluded from `billable_lines`/`diagnosis_lines`, with
+    # only an untyped `audit.excluded_lines` trace) -- carried here instead, so
+    # the discovered code survives and any procedure it supports still gets a
+    # real diagnosis pointer (see `necessity` below).
+    for line in (getattr(result, "submission_held_lines", None) or []):
+        if str(getattr(getattr(line.fact, "kind", None), "value", "")) == "diagnosis":
+            _append_diagnosis(line, LineStatus.HELD_POLICY_OR_DATA)
 
     # procedure_event_id -> the diagnosis events the necessity gate accepted
     necessity: dict[str, list[str]] = {}
@@ -1834,10 +1960,13 @@ def bundle_from_coding_result(
     billable = list(getattr(result, "billable_lines", None) or [])
     diagnosis_ids = {id(line) for line in
                      (getattr(result, "diagnosis_lines", None) or [])}
+    held_lines = list(getattr(result, "submission_held_lines", None) or [])
+    held_diagnosis_ids = {id(line) for line in held_lines
+                          if str(getattr(getattr(line.fact, "kind", None), "value", ""))
+                          == "diagnosis"}
     service_lines: list[ServiceLine] = []
-    for line in billable:
-        if id(line) in diagnosis_ids:
-            continue
+
+    def _append_service(line, status: LineStatus) -> None:
         chosen = line.chosen
         fact = line.fact
         event_id = str(getattr(fact, "fact_id", "") or "")
@@ -1862,6 +1991,54 @@ def bundle_from_coding_result(
             diagnosis_pointers=tuple(sorted(pointers)),
             place_of_service=context.place_of_service,
             kind=str(getattr(getattr(fact, "kind", None), "value", "") or ""),
+            status=status,
+        ))
+
+    for line in billable:
+        if id(line) in diagnosis_ids:
+            continue
+        _append_service(line, LineStatus.RECOMMENDED)
+    # issue #6 F9-R7 item 4: same erasure fix as the diagnosis loop above, for
+    # a HELD procedure/imaging/supply/drug/E-M line.
+    for line in held_lines:
+        if id(line) in held_diagnosis_ids:
+            continue
+        _append_service(line, LineStatus.HELD_POLICY_OR_DATA)
+
+    # issue #6 F9-R7 item 4: every OTHER documented event -- one that never
+    # reached RECOMMENDED or HELD_POLICY_OR_DATA -- carried here instead of
+    # being erased. `coded_ids` is every line already placed above by
+    # IDENTITY, not by recomputing the same classification a second time, so
+    # this can never drift from what was actually decided.
+    coded_ids = {id(line) for line in billable} | {id(line) for line in held_lines}
+    candidate_lines: list[CandidateLine] = []
+    for line in (getattr(result, "lines", None) or []):
+        if id(line) in coded_ids:
+            continue
+        fact = line.fact
+        if not getattr(fact, "billable", True):
+            continue          # not performed today -- a disposition fact, not a candidate
+        if getattr(line, "excluded_reason", None):
+            continue          # already resolved + explained (bundled/dedup/non-covered);
+                              # see audit.excluded_lines, not a coding uncertainty
+        alternatives = list(getattr(line, "alternatives", None) or [])
+        status = (LineStatus.CANDIDATES_NEEDING_FACT if alternatives
+                 else LineStatus.NO_SUPPORTED_CANDIDATE)
+        blocking_reason = (str(getattr(line, "documentation_gap", "") or "")
+                          or str(getattr(line, "rationale", "") or ""))
+        candidate_lines.append(CandidateLine(
+            clinical_event_id=str(getattr(fact, "fact_id", "") or ""),
+            kind=str(getattr(getattr(fact, "kind", None), "value", "") or ""),
+            subject=str(getattr(fact, "description", "") or ""),
+            status=status,
+            candidates=tuple(
+                CandidateReference(system=str(c.system), code=str(c.code),
+                                   descriptor=str(c.descriptor or ""),
+                                   score=float(getattr(c, "score", 0.0) or 0.0),
+                                   source=str(getattr(c, "source", "") or ""))
+                for c in alternatives),
+            blocking_reason=blocking_reason,
+            evidence=_evidence_of(fact),
         ))
 
     gates = list(getattr(result, "gates", None) or [])
@@ -1974,6 +2151,7 @@ def bundle_from_coding_result(
         graph=graph,
         diagnoses=tuple(diagnoses),
         service_lines=tuple(service_lines),
+        candidate_lines=tuple(candidate_lines),
         context=context,
         outcomes=outcomes + tuple(eligibility_outcomes),
         authority=authority,

@@ -227,6 +227,15 @@ SOURCES: dict[str, dict] = {
         "cadence": "biannual",
         "prepare": lambda tmp, args: [PY, "tools/build_umls_crosswalk.py"],
     },
+    "umls_term_index": {
+        # SAME builder, SAME release run as umls_crosswalk above (issue #6 F9-R7
+        # item 2) -- one MetamorphoSys/MRCONSO.RRF pass produces both artifacts.
+        # A separate SOURCES entry so `run_source`'s own staging/verification and
+        # cadence tracking cover this output independently of the crosswalk's.
+        "output": "umls_term_index.json",
+        "cadence": "biannual",
+        "prepare": lambda tmp, args: [PY, "tools/build_umls_crosswalk.py"],
+    },
     "icd10cm_index": {
         "output": "icd10cm_index_terms.json",
         "cadence": "annual",     # NCHS ICD-10-CM: FY effective Oct 1
@@ -276,7 +285,7 @@ SOURCES: dict[str, dict] = {
 #: truthful build as an empty-output failure. New keyed-map outputs must add their
 #: container field here, or `_verify` cannot count them. "crosswalk" added for
 #: umls_cpt_snomed_crosswalk.json (code -> {cuis, matched_snomed_concept_ids}).
-_KEYED_MAP_CONTAINERS = ("terms", "codes", "concepts", "crosswalk")
+_KEYED_MAP_CONTAINERS = ("terms", "codes", "concepts", "crosswalk", "term_to_cuis")
 
 
 def _verify(output: str, base: Path | None = None) -> dict:

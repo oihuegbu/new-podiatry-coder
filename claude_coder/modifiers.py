@@ -13,6 +13,7 @@ NCCI signals and the E/M-with-procedure relationship — and are noted, not fake
 """
 from __future__ import annotations
 
+from . import graph_consensus as _gc
 from .models import ClinicalFact
 
 
@@ -65,13 +66,17 @@ class ModifierEngine:
         self._em_separate = _discover(self._defs, "separately identifiable evaluation")
 
     def assign(self, fact: ClinicalFact, descriptor: str,
-               bilat: str | None = None) -> list[str]:
+               bilat: str | None = None, reconciliation=None) -> list[str]:
         """Per-line modifiers from documented facts (laterality/bilateral), gated
         by the code's CMS bilateral indicator: '9' means the laterality concept
         does not apply to this code (e.g. a per-nail debridement) — no modifier;
         modifier 50 is applied only when the indicator is '1' (bilateral eligible).
-        Empty, too, when the descriptor already encodes the side."""
-        lat = str(fact.attributes.get("laterality", "")).lower().strip()
+        Empty, too, when the descriptor already encodes the side.
+
+        issue #6 F9-R6-R2, sixth re-review: `lat` is now CLAIM-AUTHORIZED, never
+        the raw attribute directly -- an unauthorized (e.g. source-negated)
+        laterality must never earn a fabricated RT/LT/50 modifier."""
+        lat = str(_gc.claim_authorized_value(fact, "laterality", reconciliation) or "").lower().strip()
         desc = descriptor.lower()
         # Assert a side/bilateral modifier ONLY for a code whose authoritative
         # fee-schedule record carries a bilateral-surgery indicator. A MISSING
@@ -91,27 +96,34 @@ class ModifierEngine:
             return [self._left]
         return []
 
-    def _distinct_modifier(self, a, b) -> str | None:
+    def _distinct_modifier(self, a, b, reconciliation=None) -> str | None:
         """Which distinct-service modifier a pair earns — X preferred over 59,
         chosen by WHY the documentation makes the services distinct: a different
         structure/site → XS, a separate encounter → XE. Returns None when the note
         establishes NO basis for distinctness — a bypass modifier is never appended
         just to clear an NCCI edit (that is unbundling); without a documented basis
-        the edit stands and the component is bundled downstream (mechanic 3)."""
-        fa, fb = a.fact.attributes, b.fact.attributes
-        diff_site = (fa.get("laterality") and fb.get("laterality")
-                     and fa.get("laterality") != fb.get("laterality")) or \
-                    (fa.get("anatomy") and fb.get("anatomy")
-                     and fa.get("anatomy") != fb.get("anatomy"))
+        the edit stands and the component is bundled downstream (mechanic 3).
+
+        issue #6 F9-R6-R2, sixth re-review: laterality/anatomy are now CLAIM-
+        AUTHORIZED, never the raw attribute directly -- an unauthorized value
+        difference must never manufacture an NCCI-bypassing modifier from two
+        services that are not actually provably distinct."""
+        lat_a = _gc.claim_authorized_value(a.fact, "laterality", reconciliation)
+        lat_b = _gc.claim_authorized_value(b.fact, "laterality", reconciliation)
+        anat_a = _gc.claim_authorized_value(a.fact, "anatomy", reconciliation)
+        anat_b = _gc.claim_authorized_value(b.fact, "anatomy", reconciliation)
+        diff_site = (lat_a and lat_b and lat_a != lat_b) or \
+                    (anat_a and anat_b and anat_a != anat_b)
         if diff_site and self._x_structure:
             return self._x_structure
+        fa, fb = a.fact.attributes, b.fact.attributes
         diff_enc = (fa.get("encounter") and fb.get("encounter")
                     and fa.get("encounter") != fb.get("encounter"))
         if diff_enc and self._x_encounter:
             return self._x_encounter
         return None
 
-    def assign_claim(self, result, source) -> None:
+    def assign_claim(self, result, source, reconciliation=None) -> None:
         """Claim-level modifiers that depend on relationships between lines:
           • E/M-25 when a significant, separately identifiable E/M is billed with
             a procedure on the same day;
@@ -140,7 +152,7 @@ class ModifierEngine:
                 ind = source.ncci_indicator(procs[i].chosen.code,
                                             procs[j].chosen.code, result.date_of_service)
                 if ind == "1":
-                    mod = self._distinct_modifier(procs[i], procs[j])
+                    mod = self._distinct_modifier(procs[i], procs[j], reconciliation)
                     if not mod:
                         continue        # no documented basis -> do NOT bypass the edit
                     if mod not in procs[j].modifiers:

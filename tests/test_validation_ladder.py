@@ -48,6 +48,7 @@ from claude_coder import gates, resolution
 from claude_coder.autonomy import SHAKY_EXTRACTION, decide
 from claude_coder.data_access import MockSource
 from claude_coder.models import (
+    AttributeEvidence,
     CandidateCode,
     ClinicalFact,
     CodingResult,
@@ -57,6 +58,7 @@ from claude_coder.models import (
     FactKind,
     GateResult,
     Outcome,
+    RelationState,
     ResolutionMethod,
     ResolvedLine,
     Verdict,
@@ -76,6 +78,24 @@ def _fact(kind=FactKind.PROCEDURE, *, description="a service",
                         evidence=[EvidenceSpan("evidence")], disposition=disposition,
                         confidence=confidence, fact_id=fact_id,
                         axis_confidence=dict(axis_confidence or {}), **kw)
+
+
+def _lateral_fact(kind, *, description, laterality, fact_id):
+    """A fact whose laterality is CLAIM-AUTHORIZED, not merely a raw attribute --
+    issue #6 F9-R6-R2, sixth re-review routed `resolution._evaluate` through
+    `graph_consensus.claim_authorized_value`, so a laterality claim needs a real,
+    anchored, ASSERTED, value-bound piece of evidence to be actionable at all
+    (unlike `_fact()`'s generic placeholder "evidence" text/no attribute_evidence,
+    which is deliberately unauthorized for every other test in this file that
+    does not care about laterality specifically)."""
+    span = EvidenceSpan(f"documented on the {laterality} side",
+                        anchored=True, span_id=f"{fact_id}-lat")
+    return ClinicalFact(kind, description, attributes={"laterality": laterality},
+                        evidence=[span], disposition=Disposition.PERFORMED,
+                        confidence=0.99, fact_id=fact_id,
+                        attribute_evidence={"laterality": (
+                            AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                              value=laterality),)})
 
 
 def _request(fact):
@@ -593,14 +613,14 @@ def test_rung3_a_plausible_alternative_is_rejected_on_the_CONTRADICTED_axis():
             continue
         candidate = CandidateCode(code, "icd10", descriptor, 0.9)
 
-        contradicted = _fact(FactKind.DIAGNOSIS, description=descriptor,
-                             attributes={"laterality": other}, fact_id="r3a")
+        contradicted = _lateral_fact(FactKind.DIAGNOSIS, description=descriptor,
+                                    laterality=other, fact_id="r3a")
         assert resolution._evaluate(contradicted, candidate) is None, (
             f"{code}: a descriptor stating {side!r} survived documentation of "
             f"{other!r}")
 
-        agreeing = _fact(FactKind.DIAGNOSIS, description=descriptor,
-                         attributes={"laterality": side}, fact_id="r3b")
+        agreeing = _lateral_fact(FactKind.DIAGNOSIS, description=descriptor,
+                                 laterality=side, fact_id="r3b")
         match = resolution._evaluate(agreeing, candidate)
         assert match is not None, f"{code}: the agreeing side was eliminated"
         assert any("laterality" in reason for reason in match.rationale), (

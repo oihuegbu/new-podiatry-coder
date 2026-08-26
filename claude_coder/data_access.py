@@ -202,6 +202,9 @@ class CodeSource(Protocol):
 
     def procedure_index_codes(self, description: str, system: str) -> set[str]: ...
 
+    def umls_candidates(self, terms: list[str], system: str,
+                        date_of_service: str | None) -> list[CandidateCode]: ...
+
     def leaf_codes(self, stem: str, system: str) -> set[str]: ...
 
     def ncci_indicator(self, col1: str, col2: str, dos: str | None) -> str | None: ...
@@ -270,6 +273,7 @@ class AuthoritativeSource:
         self._procedure_relation_index = None
         self._procedure_relation_identity = None
         self._umls_crosswalk = None
+        self._umls_term_index = None
         self._cptidx = None
         self._learned = None
         self._drug = None
@@ -571,6 +575,71 @@ class AuthoritativeSource:
             return {}
         entry = self._umls_crosswalk.get(str(code))
         return dict(entry) if isinstance(entry, dict) else {}
+
+    def umls_candidates(self, terms: list[str], system: str,
+                        date_of_service: str | None) -> list[CandidateCode]:
+        """CPT/HCPCS candidates seeded from UMLS term/CUI/atom lineage (issue #6
+        F9-R7 item 2) -- a RECALL SEED, never a selecting authority: this is the
+        SAME kind of contribution `retrieve`'s RAG hit or an advisory synonym
+        expansion already makes to the candidate pool. It does not decide, rank
+        above, or eliminate anything -- the existing descriptor-entailment/
+        typed-facet-uniqueness/DOS-activity/CMS-validation path downstream is
+        unchanged and remains the sole selecting authority. An unmatched or
+        ambiguous term simply contributes no seed; this method never raises for
+        that reason.
+
+        A different boundary from `umls_crosswalk_entry` above: that method is
+        audit-only by design (a shared UMLS concept never establishes CPT
+        billing-code equivalence on its own). This one is authorized as a RECALL
+        WIDENER specifically because it only ever proposes -- proof that the
+        proposed code's own descriptor/facts genuinely fit still has to clear
+        every other gate a descriptor-grounded or RAG-sourced candidate clears."""
+        if system not in ("cpt", "hcpcs"):
+            return []
+        if self._umls_term_index is None:
+            try:
+                document, identity = declared_document_snapshot(
+                    "umls_term_index", AuthoritativeDataUnavailable)
+                self._umls_term_index = document or {}
+                self._bound_sources.bind(identity)
+            except Exception:
+                # REVIEWED-OPTIONAL, same degrade-not-hold posture as
+                # umls_crosswalk_entry: absence removes one recall source, never
+                # a decision input, so nothing is bound in that case.
+                self._umls_term_index = False
+        if not self._umls_term_index:
+            return []
+        from . import terminology as _term
+        term_to_cuis = self._umls_term_index.get("term_to_cuis") or {}
+        cui_to_atoms = self._umls_term_index.get("cui_to_atoms") or {}
+        release = str(self._umls_term_index.get("release") or "")
+        seen_codes: set[str] = set()
+        out: list[CandidateCode] = []
+        for raw_term in terms or []:
+            norm = _term.normalize_term(raw_term)
+            if not norm:
+                continue
+            for cui in term_to_cuis.get(norm) or ():
+                for atom in cui_to_atoms.get(cui) or ():
+                    sab = str(atom.get("sab") or "")
+                    atom_system = "cpt" if sab in ("CPT", "HCPT") else "hcpcs"
+                    if atom_system != system:
+                        continue
+                    code = str(atom.get("code") or "")
+                    if not code or code in seen_codes:
+                        continue
+                    rec = self.lookup(code, system) or {}
+                    descriptor = (rec.get("long_description") or rec.get("description")
+                                 or rec.get("short_description") or "")
+                    if not descriptor:
+                        continue      # never propose a code this deployment cannot describe
+                    seen_codes.add(code)
+                    out.append(CandidateCode(
+                        code=code, system=system, descriptor=str(descriptor),
+                        score=0.3, source="umls_recall",
+                        authority={"cui": cui, "release": release, "term": raw_term},
+                    ))
+        return out
 
     #: Governed axes THIS source can route `concept_lookup` to a real concept graph
     #: for. Only "anatomy" has one today (the SNOMED CT Body Structure hierarchy) --
@@ -1689,7 +1758,9 @@ class MockSource:
                  instructional_terms: dict[str, set] | None = None,
                  semantic_class: dict[str, str] | None = None,
                  snapshot: dict[str, Any] | None = None,
-                 umls_crosswalk: dict[str, dict] | None = None) -> None:
+                 umls_crosswalk: dict[str, dict] | None = None,
+                 umls_candidates: dict[tuple[str, str], list[CandidateCode]] | None = None
+                 ) -> None:
         self._records = records or {}
         self._retrieval = retrieval or {}
         self._ncci = ncci or {}
@@ -1744,6 +1815,7 @@ class MockSource:
         # exercising the real fail-closed degrade path.
         self._snapshot_data = dict(snapshot or {})
         self._umls_crosswalk_data = {str(k): dict(v) for k, v in (umls_crosswalk or {}).items()}
+        self._umls_candidates_data = umls_candidates or {}
 
     def global_period(self, code):
         return self._gp.get(code)
@@ -2011,3 +2083,12 @@ class MockSource:
         if system not in ("cpt", "hcpcs"):
             return {}
         return dict(self._umls_crosswalk_data.get(str(code), {}))
+
+    def umls_candidates(self, terms, system, date_of_service):
+        if system not in ("cpt", "hcpcs"):
+            return []
+        out: list[CandidateCode] = []
+        for term in terms or []:
+            out.extend(self._umls_candidates_data.get((term, system))
+                      or self._umls_candidates_data.get(("*", system)) or [])
+        return out

@@ -32,8 +32,20 @@ data/codes/snomed_icd10_map.json
 data/codes/snomed_concept_terms.json
 data/codes/snomed_procedure_terms.json
 data/codes/umls_cpt_snomed_crosswalk.json
+data/codes/umls_term_index.json
 data/codes/learned_observations.jsonl
 data/codes/learned_cpt_index.json
+
+# Raw/extracted UMLS Metathesaurus release material (issue #6 F9-R7 item 5):
+# an owner-supplied full release archive staged for tools/build_umls_crosswalk.py
+# (_ensure_installed) at data/sources/umls-release.zip, and/or its
+# MetamorphoSys-extracted RRF subset at data/sources/umls/. Licensed NLM UMLS
+# content, tens of GB — never committed; tools/install_umls_release.sh +
+# tools/build_umls_crosswalk.py regenerate data/codes/umls_*.json from it.
+# Scoped, not a blanket data/sources/ ignore: data/sources/ncci_ptp.lock.json
+# is a real tracked file.
+data/sources/umls/
+data/sources/umls-release.zip
 # NCCI PTP edits — a ~300MB build product rebuilt from the current CMS quarter by
 # tools/build_ncci_ptp.py (via tools/refresh_authoritative_data.py ncci_ptp). Not
 # committed: it used to be a git-LFS blob that silently degraded to a 134B pointer

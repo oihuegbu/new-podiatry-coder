@@ -238,6 +238,18 @@ _OPTIONAL_SOURCES: dict[str, dict] = {
             "it -- same boundary as snomed_procedure_terms above, for the same reason: "
             "a shared UMLS concept does not establish CPT billing-code equivalence.",
     },
+    "umls_term_index": {
+        "path": config.CODES_DIR / "umls_term_index.json",
+        "role": "UMLS term/CUI/atom RECALL SEED index for CPT/HCPCS candidate generation",
+        "absence_justification":
+            "UMLS-licensed term->CUI->atom index (issue #6 F9-R7); consulted by "
+            "AuthoritativeSource.umls_candidates to WIDEN retrieval recall only -- "
+            "absence simply means one fewer candidate-recall source contributes "
+            "seeds to the pool. The existing descriptor-entailment/typed-facet-"
+            "uniqueness/DOS-activity/CMS-validation path remains the sole selecting "
+            "authority regardless of whether this index is present, so its absence "
+            "changes no coding decision, only recall breadth.",
+    },
     "learned_cpt_index": {
         "path": config.CODES_DIR / "learned_cpt_index.json",
         "role": "learned resolution index",

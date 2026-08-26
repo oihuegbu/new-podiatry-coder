@@ -465,7 +465,7 @@ def _typed_laterality_support(fact, probe: AxisProbe, reconciliation
     if not value:
         return None
     from . import graph_consensus as _gc
-    if not _gc.asserted_attribute_support(fact, "laterality", reconciliation):
+    if not _gc.asserted_attribute_support(fact, "laterality", value, reconciliation):
         return None
     return {code: tuple(t for t in terms if t == value)
            for code, terms in probe.terms_by_code.items()}

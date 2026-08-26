@@ -464,6 +464,81 @@ def test_an_inherited_entrys_assertion_state_survives_the_second_pass():
     assert entry.assertion_state is RelationState.NEGATED
 
 
+# --------------------------------------------- F9-R6-R2 (6th) value binding
+def test_value_parses_onto_the_entry():
+    result = extract_note("note", _stub({"facts": [_fact(
+        attributes={"laterality": "right"},
+        attribute_evidence={"laterality": [
+            {"text": "performed on the right side", "scope": "local",
+             "assertion_state": "asserted", "value": "right"}]})]}))
+    entry = result.facts[0].attribute_evidence["laterality"][0]
+    assert entry.value == "right"
+
+
+def test_missing_value_defaults_to_empty_string_never_the_axis_value():
+    """Fail-closed: an entry that never names which value it proves must not be
+    silently bound to whatever attributes[axis] happens to hold -- that is
+    exactly the un-bound state graph_consensus.claim_authorized_value treats as
+    proof of nothing."""
+    result = extract_note("note", _stub({"facts": [_fact(
+        attributes={"laterality": "right"},
+        attribute_evidence={"laterality": [
+            {"text": "performed on the right side", "scope": "local",
+             "assertion_state": "asserted"}]})]}))
+    entry = result.facts[0].attribute_evidence["laterality"][0]
+    assert entry.value == ""
+
+
+def test_a_boolean_value_raises_never_silently_coerced():
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [_fact(
+            attribute_evidence={"laterality": [
+                {"text": "performed on the right side", "scope": "local",
+                 "value": True}]})]}))
+
+
+def test_a_negated_entrys_value_is_the_value_it_negates():
+    """A quote proving the note RULES OUT a value still names that ruled-out
+    value in "value", paired with assertion_state=negated -- the negated
+    entry's value is what it negates, not whatever the fact ultimately settled
+    on for that axis."""
+    from claude_coder.models import RelationState
+    result = extract_note("note", _stub({"facts": [_fact(
+        attributes={"laterality": "left"},
+        attribute_evidence={"laterality": [
+            {"text": "right involvement was ultimately ruled out", "scope": "local",
+             "assertion_state": "negated", "value": "right"},
+            {"text": "left side was addressed", "scope": "local",
+             "assertion_state": "asserted", "value": "left"},
+        ]})]}))
+    entries = result.facts[0].attribute_evidence["laterality"]
+    negated = next(e for e in entries if e.assertion_state is RelationState.NEGATED)
+    asserted = next(e for e in entries if e.assertion_state is RelationState.ASSERTED)
+    assert negated.value == "right"
+    assert asserted.value == "left"
+
+
+def test_an_inherited_entrys_value_survives_the_second_pass():
+    payload = {
+        "facts": [
+            _fact(fact_id="F1", description="parent step",
+                 evidence=["The parent step was performed on the right side"]),
+            _fact(fact_id="F2", description="component step",
+                 attributes={"laterality": "right"},
+                 attribute_evidence={"laterality": [
+                     {"text": "performed on the right side", "scope": "inherited",
+                      "parent_fact_id": "F1", "assertion_state": "asserted",
+                      "value": "right"}]}),
+        ],
+        "relations": [{"subject_event_id": "F2", "predicate": "part_of",
+                       "object_event_id": "F1", "state": "asserted"}],
+    }
+    result = extract_note("note", _stub(payload))
+    component = next(f for f in result.facts if f.fact_id == "F2")
+    entry = component.attribute_evidence["laterality"][0]
+    assert entry.value == "right"
+
+
 def test_an_inherited_entry_with_no_matching_relation_is_dropped_not_kept_unproven():
     """The claimed parent exists as a fact, but NO part_of relation was actually
     emitted connecting the two -- the entry must be dropped entirely, never kept as

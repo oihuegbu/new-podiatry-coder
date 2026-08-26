@@ -45,21 +45,28 @@ def _fact(description, *evidence, attributes=None, kind=FactKind.PROCEDURE,
                         attribute_evidence=dict(attribute_evidence or {}))
 
 
-def _lat_evidence(text, *, span_id="lat-span", assertion_state=None):
-    """One `attribute_evidence["laterality"]` entry (issue #6 F9-R6-R2, fifth
-    re-review) -- defaults to ASSERTED, the genuine, extraction-time judgement
-    `_typed_laterality_support`/`graph_consensus.resolve` now require before
-    trusting a typed laterality value; pass `assertion_state=RelationState.NEGATED`
-    / `.UNCERTAIN` to prove the fail-closed refusal path instead. `span_id` must
-    match whatever `_agreed(...)`/`_disagreed(...)` reconciliation the test supplies,
-    since `graph_consensus.asserted_attribute_support` requires the span itself be
-    source-reconciled, not merely present."""
+def _lat_evidence(text, *, value, span_id="lat-span", assertion_state=None):
+    """One `attribute_evidence["laterality"]` entry (issue #6 F9-R6-R2, fifth AND
+    sixth re-review) -- defaults to ASSERTED, the genuine, extraction-time
+    judgement `_typed_laterality_support`/`graph_consensus.resolve` now require
+    before trusting a typed laterality value; pass `assertion_state=RelationState.
+    NEGATED`/`.UNCERTAIN` to prove the fail-closed refusal path instead. `value`
+    is REQUIRED (issue #6 F9-R6-R2, sixth re-review: `AttributeEvidence` is now
+    VALUE-bound, not just axis-bound -- an entry that never names which value it
+    proves can never authorize any value, so every fixture must be explicit about
+    which value this evidence is about, matching whatever the fact's own
+    `attributes["laterality"]` holds unless the test is specifically proving a
+    value MISMATCH). `span_id` must match whatever `_agreed(...)`/`_disagreed(...)`
+    reconciliation the test supplies, since `graph_consensus.
+    asserted_attribute_support` requires the span itself be source-reconciled, not
+    merely present."""
     from claude_coder.models import AttributeEvidence, RelationState
     if assertion_state is None:
         assertion_state = RelationState.ASSERTED
     span = EvidenceSpan(text=text, start=0, end=len(text), anchored=True, span_id=span_id)
     return {"laterality": (AttributeEvidence(span=span, scope="local",
-                                             assertion_state=assertion_state),)}
+                                             assertion_state=assertion_state,
+                                             value=value),)}
 
 
 def _request(fact):
@@ -350,7 +357,7 @@ class NegatedAxisNarrowingTest(unittest.TestCase):
                  attributes={"laterality": "left"},
                  attribute_evidence=_lat_evidence(
                      "assembly service performed, not on the right, but the left",
-                     span_id="lat-0")),
+                     value="left", span_id="lat-0")),
             [LAT_LEFT, LAT_RIGHT], _agreed("span-0", "lat-0"))
         self.assertEqual(outcome.winner.code if outcome.winner else None, "CAND_LEFT")
 
@@ -379,7 +386,8 @@ class TypedLateralitySelectionTest(unittest.TestCase):
         outcome = tiebreak.narrow(
             _fact("assembly service", "assembly service performed on the right",
                  attributes={"laterality": "left"},
-                 attribute_evidence=_lat_evidence("documented as left", span_id="lat-0")),
+                 attribute_evidence=_lat_evidence("documented as left", value="left",
+                                                 span_id="lat-0")),
             [LAT_LEFT, LAT_RIGHT], _agreed("span-0", "lat-0"))
         self.assertEqual(outcome.winner.code if outcome.winner else None, "CAND_LEFT")
 
@@ -407,7 +415,8 @@ class TypedLateralitySelectionTest(unittest.TestCase):
         outcome = tiebreak.narrow(
             _fact("assembly service", "left but not right",
                  attributes={"laterality": "left"},
-                 attribute_evidence=_lat_evidence("left but not right", span_id="lat-0")),
+                 attribute_evidence=_lat_evidence("left but not right", value="left",
+                                                 span_id="lat-0")),
             [LAT_LEFT, LAT_RIGHT], _agreed("span-0", "lat-0"))
         self.assertEqual(outcome.winner.code if outcome.winner else None, "CAND_LEFT")
 
@@ -424,7 +433,7 @@ class TypedLateralitySelectionTest(unittest.TestCase):
                  attributes={"laterality": "right"},
                  attribute_evidence=_lat_evidence(
                      "right involvement was considered but was ultimately ruled out",
-                     span_id="lat-0", assertion_state=RelationState.NEGATED)),
+                     value="right", span_id="lat-0", assertion_state=RelationState.NEGATED)),
             [LAT_LEFT, LAT_RIGHT], _agreed("span-0", "lat-0"))
         self.assertIsNone(outcome.winner)
         self.assertNotEqual(outcome.winner.code if outcome.winner else None, "CAND_RIGHT")
@@ -673,7 +682,8 @@ class IsolatedContrastPromotion(unittest.TestCase):
         fact = _fact("assembly service", "assembly service performed on the right side",
                      attributes={"laterality": "right"},
                      attribute_evidence=_lat_evidence(
-                         "assembly service performed on the right side", span_id="lat-0"))
+                         "assembly service performed on the right side", value="right",
+                         span_id="lat-0"))
         outcome = tiebreak.narrow(fact, [right_a, right_b, left], _agreed("span-0", "lat-0"))
         self.assertIsNone(outcome.winner)
         self.assertEqual(outcome.provider_question, "",

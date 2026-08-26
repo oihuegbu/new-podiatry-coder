@@ -46,10 +46,21 @@ For each fact return an object with:
         billing_entity_id. Never invent an id or equate a person with an organization.
   - "attribute_evidence": for EVERY key you emit in "attributes", one or more
         {"text": <verbatim quote>, "scope": "local"|"inherited", "parent_fact_id": <id>,
-        "assertion_state": "asserted"|"negated"|"uncertain"} entries proving that
-        specific value — the SAME per-endpoint quoting discipline you already use for
-        directional relations below, applied to attributes instead. "assertion_state"
-        is whether THIS quote itself asserts, negates, or leaves uncertain the value —
+        "assertion_state": "asserted"|"negated"|"uncertain", "value": <the exact
+        value this quote is about>} entries proving that specific value — the SAME
+        per-endpoint quoting discipline you already use for directional relations
+        below, applied to attributes instead. "value" MUST equal, verbatim, one of
+        the values you wrote for this key in "attributes" (e.g. if "attributes"
+        says "laterality": "right", an entry proving that says "value": "right") —
+        never a description of the quote, never a different value than the one it
+        is cited for; if you also have evidence bearing on a DIFFERENT candidate
+        value for the same key (for example the note first says "left" then
+        corrects to "right"), that is a SEPARATE entry with its own "value". A
+        quote proving a value the note ultimately RULES OUT still names that
+        ruled-out value in "value", paired with "assertion_state": "negated" — a
+        negated entry's "value" is what it negates, not the value you finally
+        settled on. "assertion_state" is whether THIS quote itself asserts,
+        negates, or leaves uncertain the "value" it names —
         judge it from the FULL sentence you are quoting from, however far the negation
         cue sits from the value word ("no left-sided involvement" and "left-sided
         involvement was considered but ultimately ruled out" are BOTH "negated" for
@@ -391,36 +402,50 @@ def _evidence_span(value: Any) -> EvidenceSpan | None:
     return EvidenceSpan(text=value) if value.strip() else None
 
 
-def _attribute_evidence_entry(value: Any) -> tuple[str, str, str, RelationState] | None:
-    """(text, scope, parent_fact_id, assertion_state) for one raw `attribute_evidence`
-    entry, or None when malformed (the caller raises -- same discipline as
-    `_evidence_span`). Never stringifies a non-quote into a pseudo-quote, matching
-    `_evidence_span`; "local" scope needs no parent, "inherited" scope requires one
-    (resolved against the relations graph by the caller, once relations are parsed --
-    issue #6 F9-R5).
+def _attribute_evidence_entry(raw: Any) -> tuple[str, str, str, RelationState, str] | None:
+    """(text, scope, parent_fact_id, assertion_state, value) for one raw
+    `attribute_evidence` entry, or None when malformed (the caller raises -- same
+    discipline as `_evidence_span`). Never stringifies a non-quote into a
+    pseudo-quote, matching `_evidence_span`; "local" scope needs no parent,
+    "inherited" scope requires one (resolved against the relations graph by the
+    caller, once relations are parsed -- issue #6 F9-R5).
 
     "assertion_state" parses with the EXACT same fail-closed convention `_relation`
     already uses for its own `state` field (issue #6 F9-R6-R2, fifth re-review): an
     invalid value fails the whole entry (never silently coerced), a missing one
     defaults to UNCERTAIN, never ASSERTED -- an omitted judgement must never be read
-    as a positive one."""
-    if not isinstance(value, dict):
+    as a positive one.
+
+    "value" (issue #6 F9-R6-R2, sixth re-review) binds this entry to the SPECIFIC
+    attribute value it proves -- a malformed (non-string/boolean) value fails the
+    whole entry, same discipline as "text", but a genuinely OMITTED value defaults
+    to "" (unbound) rather than failing the entry: an older-style extraction that
+    hasn't caught up to this field still gets a real, if unbound, evidence record
+    (`graph_consensus.claim_authorized_value` treats unbound evidence as if it
+    never named a value, falling back to its own weaker whole-fact-text check --
+    never silently treated as proof of whatever `attributes[axis]` happens to
+    hold)."""
+    if not isinstance(raw, dict):
         return None
-    raw_text = value.get("text", "")
+    raw_text = raw.get("text", "")
     if isinstance(raw_text, bool) or not isinstance(raw_text, str) or not raw_text.strip():
         return None
-    scope = str(value.get("scope", "local") or "local").strip().lower()
+    scope = str(raw.get("scope", "local") or "local").strip().lower()
     if scope not in ("local", "inherited"):
         return None
-    parent = str(value.get("parent_fact_id", "") or "").strip()
+    parent = str(raw.get("parent_fact_id", "") or "").strip()
     if scope == "inherited" and not parent:
         return None
     try:
         assertion_state = RelationState(
-            str(value.get("assertion_state", "uncertain")).strip().lower())
+            str(raw.get("assertion_state", "uncertain")).strip().lower())
     except ValueError:
         return None
-    return raw_text, scope, parent, assertion_state
+    raw_value = raw.get("value", "")
+    if isinstance(raw_value, bool) or not isinstance(raw_value, str):
+        return None
+    bound_value = raw_value.strip()
+    return raw_text, scope, parent, assertion_state, bound_value
 
 
 def _relation(value: Any, index: int) -> RelationAssertion | None:
@@ -593,7 +618,7 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
     # "inherited"-scope attribute_evidence entry -- resolved against the relations
     # graph in the second pass below, once every relation has been parsed (issue #6
     # F9-R5; assertion_state added issue #6 F9-R6-R2, fifth re-review).
-    pending_inherited: list[tuple[str, str, str, str, RelationState]] = []
+    pending_inherited: list[tuple[str, str, str, str, RelationState, str]] = []
     for i, item in enumerate(facts_in):
         if not isinstance(item, dict):
             raise ExtractionSchemaError(f"fact #{i} is not a JSON object")
@@ -672,14 +697,15 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
                     raise ExtractionSchemaError(
                         f"fact #{i} attribute_evidence[{attr_name!r}] has an "
                         f"empty/malformed entry")
-                text, scope, parent, assertion_state = parsed
+                text, scope, parent, assertion_state, bound_value = parsed
                 if scope == "local":
                     attribute_evidence.setdefault(str(attr_name), []).append(
                         AttributeEvidence(span=EvidenceSpan(text=text), scope="local",
-                                         assertion_state=assertion_state))
+                                         assertion_state=assertion_state,
+                                         value=bound_value))
                 else:
                     pending_inherited.append(
-                        (this_fid, str(attr_name), text, parent, assertion_state))
+                        (this_fid, str(attr_name), text, parent, assertion_state, bound_value))
         # R2: actor identity is resolved EXCLUSIVELY from the structured encounter context.
         # A model-supplied performer/organization id absent from the authoritative roster is
         # invented/unauthorized and is discarded (ownership then resolves to UNKNOWN and
@@ -753,7 +779,7 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
     # dropped entirely here, never silently kept as unproven provenance.
     if pending_inherited:
         by_fid = {f.fact_id: f for f in facts}
-        for fid, attr_name, text, parent, assertion_state in pending_inherited:
+        for fid, attr_name, text, parent, assertion_state, bound_value in pending_inherited:
             fact = by_fid.get(fid)
             if fact is None or parent not in by_fid:
                 continue
@@ -766,7 +792,8 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
             entry = AttributeEvidence(span=EvidenceSpan(text=text), scope="inherited",
                                       parent_fact_id=parent,
                                       source_relation_id=match.relation_id,
-                                      assertion_state=assertion_state)
+                                      assertion_state=assertion_state,
+                                      value=bound_value)
             fact.attribute_evidence = {
                 **fact.attribute_evidence,
                 attr_name: fact.attribute_evidence.get(attr_name, ()) + (entry,),
