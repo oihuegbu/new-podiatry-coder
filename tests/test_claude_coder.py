@@ -490,6 +490,189 @@ class ClaimModifierTest(unittest.TestCase):
         self.assertTrue("MXS" in p1.modifiers or "MXS" in p2.modifiers)  # distinct structure
         self.assertTrue(r.bypassed_ncci)                          # bypass recorded for the gate
 
+    def test_assign_claim_is_idempotent_it_clears_its_own_prior_output(self):
+        """issue #6 F9-R9-B, Codex's independent re-review of 6ff2761:
+        `assign_claim` must be safely re-runnable after the claim set changes
+        -- it used to only ever APPEND, so a second call on a narrower
+        surviving set left a stale distinct-service modifier and a stale
+        `bypassed_ncci` entry for a partner that is no longer even on the
+        claim. It must now clear its own prior output (the exact modifier
+        VALUES it owns, and `bypassed_ncci` entirely) before recomputing."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (AttributeEvidence, ClinicalFact, CodingResult,
+                                         EvidenceSpan, FactKind, RelationState,
+                                         ResolutionMethod, ResolvedLine)
+        from claude_coder.modifiers import ModifierEngine
+        defs = {"MXS": {"description": "Separate Structure"}}
+        eng = ModifierEngine(defs=defs)
+
+        def line(code, lat):
+            span = EvidenceSpan("x", anchored=True, span_id=f"s-{code}")
+            attr_ev = {"laterality": (AttributeEvidence(
+                span=span, assertion_state=RelationState.ASSERTED, value=lat),)}
+            f = ClinicalFact(kind=FactKind.PROCEDURE, description="x",
+                             attributes={"laterality": lat},
+                             evidence=[span], attribute_evidence=attr_ev, fact_id=code)
+            return ResolvedLine(fact=f, chosen=CandidateCode(code, "cpt", "d", 0.9),
+                                method=ResolutionMethod.DETERMINISTIC)
+        p1 = line("P1", "right")
+        p2 = line("P2", "left")
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14", lines=[p1, p2])
+        src = MockSource(ncci={("P1", "P2"): "1", ("P2", "P1"): "1"})
+        eng.assign_claim(r, src)
+        self.assertIn("MXS", p2.modifiers)
+        self.assertTrue(r.bypassed_ncci)
+
+        # P1 is no longer on the claim (simulating exclusion by autonomy.decide's
+        # entanglement pruning, which runs AFTER this method the first time).
+        p1.excluded_reason = "excluded for an unrelated reason"
+        eng.assign_claim(r, src)
+        self.assertNotIn("MXS", p2.modifiers, "the stale modifier must be cleared, "
+                         "not left over from a partner that is no longer billed")
+        self.assertEqual(r.bypassed_ncci, [], "a bypass for a code no longer on "
+                         "the claim must not still be recorded")
+
+
+class ClaimAfterPruningReconciliationTest(unittest.TestCase):
+    """issue #6 F9-R9-B, Codex's independent re-review of 6ff2761:
+    `pipeline._reconcile_claim_after_pruning` re-derives modifiers/NCCI/
+    integral/global-package/gates from the surviving line set, repeating
+    until `autonomy.decide`'s graph/necessity pruning stops changing it.
+    Reproduced directly before the fix: two procedures earned a distinct-
+    service modifier from their NCCI pair; a third, unresolved fact PART_OF
+    the first procedure caused `decide` to exclude it -- the SECOND
+    procedure kept its now-unjustified modifier and `bypassed_ncci` still
+    named a code that was no longer even on the claim."""
+
+    def test_a_stale_distinct_service_modifier_is_removed_after_pruning(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (AttributeEvidence, ClinicalFact, CodingResult,
+                                         EvidenceSpan, FactKind, RelationAssertion,
+                                         RelationPredicate, RelationState,
+                                         ResolutionMethod, ResolvedLine)
+        from claude_coder.modifiers import ModifierEngine
+        from claude_coder import eligibility, graph as graph_mod
+        from claude_coder.pipeline import _reconcile_claim_after_pruning
+
+        defs = {"MXS": {"description": "Separate Structure"}}
+        eng = ModifierEngine(defs=defs)
+
+        def line(fid, code, kind, text, lat=None, resolved=True):
+            span = EvidenceSpan(text, anchored=True, span_id=f"s-{fid}")
+            attr_ev = ({"laterality": (AttributeEvidence(
+                            span=span, assertion_state=RelationState.ASSERTED, value=lat),)}
+                       if lat else {})
+            base_attrs = {"laterality": lat} if lat else {}
+            if kind is not FactKind.DIAGNOSIS:
+                base_attrs.update({"performer_id": "person-1",
+                                  "billing_entity_id": "person-1"})
+            f = ClinicalFact(kind=kind, description=text, attributes=base_attrs,
+                             evidence=[span], attribute_evidence=attr_ev, fact_id=fid)
+            system = "icd10" if kind is FactKind.DIAGNOSIS else "cpt"
+            if resolved:
+                return ResolvedLine(fact=f, chosen=CandidateCode(code, system, "d", 0.9),
+                                    method=ResolutionMethod.DETERMINISTIC)
+            return ResolvedLine(fact=f, chosen=None, method=ResolutionMethod.ABSTAINED,
+                                alternatives=[CandidateCode("ALT1", "cpt", "alt", 0.5)],
+                                documentation_gap="which variant?")
+
+        p1 = line("P1", "P1CODE", FactKind.PROCEDURE, "procedure one right", "right")
+        p2 = line("P2", "P2CODE", FactKind.PROCEDURE, "procedure two left", "left")
+        dx = line("DX", "DXCODE", FactKind.DIAGNOSIS, "diagnosis for both")
+        f3 = line("F3", None, FactKind.PROCEDURE,
+                 "ancillary component of procedure one", resolved=False)
+
+        rel_part = RelationAssertion(
+            subject_event_id="F3", predicate=RelationPredicate.PART_OF,
+            object_event_id="P1", state=RelationState.ASSERTED,
+            evidence_span_ids=["s-P1", "s-F3"])
+        rel_dx1 = RelationAssertion(
+            subject_event_id="DX", predicate=RelationPredicate.REASON_FOR,
+            object_event_id="P1", state=RelationState.ASSERTED,
+            evidence_span_ids=["s-DX", "s-P1"], confidence=0.95,
+            reconciliation_status="source_directional", reconciliation_evidence=["s-P1"])
+        rel_dx2 = RelationAssertion(
+            subject_event_id="DX", predicate=RelationPredicate.REASON_FOR,
+            object_event_id="P2", state=RelationState.ASSERTED,
+            evidence_span_ids=["s-DX", "s-P2"], confidence=0.95,
+            reconciliation_status="source_directional", reconciliation_evidence=["s-P2"])
+        relations = [rel_part, rel_dx1, rel_dx2]
+        facts = [p1.fact, p2.fact, dx.fact, f3.fact]
+        intents = eligibility.evaluate(facts, relations, "e", "2026-03-14")
+        episodes, _ = eligibility.build_episodes(facts, relations, "e", "2026-03-14")
+        compiled = graph_mod.build_graph(
+            facts, relations, intents, encounter_id="e", date_of_service="2026-03-14",
+            episodes=episodes, extraction_schema_version="v1", relation_grammar_version="v1")
+
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14",
+                         lines=[p1, p2, dx, f3], relations=relations, graph=compiled,
+                         claim_line_intents=list(intents))
+        src = MockSource(
+            records={("P1CODE", "cpt"): {"active": True}, ("P2CODE", "cpt"): {"active": True},
+                    ("DXCODE", "icd10"): {"active": True}},
+            ncci={("P1CODE", "P2CODE"): "1", ("P2CODE", "P1CODE"): "1"})
+        note_text = ("procedure one right procedure two left diagnosis for both "
+                    "ancillary component of procedure one")
+
+        eng.assign_claim(r, src)
+        self.assertIn("MXS", p2.modifiers, "sanity: the pair earns the modifier "
+                      "before any pruning")
+
+        _reconcile_claim_after_pruning(r, src, note_text, eng, None, [], None)
+
+        self.assertIsNotNone(p1.excluded_reason,
+                             "P1 must be excluded -- entangled with unresolved F3")
+        self.assertIsNone(p2.excluded_reason,
+                          "P2 has its own independent diagnosis link and must survive")
+        self.assertNotIn("MXS", p2.modifiers,
+                         "the modifier justified only by the now-excluded P1 must "
+                         "not survive the recompute")
+        self.assertEqual(r.bypassed_ncci, [],
+                         "no NCCI pair remains -- P1 is gone -- so nothing should "
+                         "still be recorded as bypassed")
+        self.assertEqual(sorted(ln.chosen.code for ln in r.billable_lines),
+                         ["DXCODE", "P2CODE"])
+        ncci_gate = next(g for g in r.gates if g.name == "ncci_ptp")
+        self.assertIn(ncci_gate.outcome.value, ("NOT_APPLICABLE", "PASS"),
+                     "with only one surviving procedure there is no PTP pair left "
+                     "to leave unresolved")
+
+    def test_non_convergence_fails_loud_instead_of_returning_a_moving_claim(self):
+        """The monotonic-shrinkage invariant the loop's termination proof
+        depends on -- the billable set can only shrink, never grow, round
+        over round -- is enforced defensively: if it is ever violated (a
+        line un-excluded after being excluded, which should be impossible
+        given every mechanic this loop calls), the loop must fail LOUD
+        rather than silently return a claim that might still be changing."""
+        from unittest.mock import patch
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (CandidateCode, ClinicalFact, CodingResult,
+                                         EvidenceSpan, FactKind, ResolutionMethod,
+                                         ResolvedLine)
+        from claude_coder.modifiers import ModifierEngine
+        from claude_coder.pipeline import _reconcile_claim_after_pruning
+
+        fact = ClinicalFact(FactKind.PROCEDURE, "x",
+                            evidence=[EvidenceSpan("x", anchored=True, span_id="s1")],
+                            confidence=0.9, fact_id="F1")
+        line = ResolvedLine(fact=fact, chosen=CandidateCode("C1", "cpt", "d", 0.9),
+                            method=ResolutionMethod.DETERMINISTIC)
+        result = CodingResult(encounter_id="e", date_of_service="2026-03-14", lines=[line])
+        eng = ModifierEngine(defs={})
+        src = MockSource(records={("C1", "cpt"): {"active": True}})
+
+        # A fake `decide` that OSCILLATES the line's exclusion every call --
+        # deliberately violating the invariant no real mechanic in this
+        # loop would ever violate, to prove the safety net actually fires.
+        calls = {"n": 0}
+        def oscillating_decide(res, source=None):
+            calls["n"] += 1
+            line.excluded_reason = "x" if calls["n"] % 2 else None
+
+        with patch("claude_coder.pipeline.decide", side_effect=oscillating_decide):
+            with self.assertRaises(RuntimeError):
+                _reconcile_claim_after_pruning(result, src, "x", eng, None, [], None)
+
 
 class GlobalPackageTest(unittest.TestCase):
     """A same-day E/M is bundled into a procedure's CMS global package unless the

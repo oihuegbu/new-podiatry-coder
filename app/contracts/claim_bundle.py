@@ -447,6 +447,16 @@ class LineStatus(str, Enum):
     NON_PATIENT_CONDITION = "NON_PATIENT_CONDITION"
     HISTORICAL_CONDITION = "HISTORICAL_CONDITION"
     NOT_PERFORMED = "NOT_PERFORMED"
+    #: issue #6 F9-R10-C, Codex's independent re-review of 9038a83:
+    #: `not fact.certain` and `experiencer != "patient"` apply to EVERY fact
+    #: kind in `ClinicalFact.billable`, not only DIAGNOSIS -- a synthetic
+    #: uncertain PROCEDURE was being labeled `UNCERTAIN_DIAGNOSIS` with the
+    #: ICD-10-CM outpatient-diagnosis message, a false external reason for a
+    #: service event. `UNCERTAIN_DIAGNOSIS`/`NON_PATIENT_CONDITION` are used
+    #: only when the fact's kind actually IS a diagnosis; every other kind
+    #: gets these generic siblings instead, naming the real kind honestly.
+    UNCERTAIN_EVENT = "UNCERTAIN_EVENT"
+    NON_PATIENT_EVENT = "NON_PATIENT_EVENT"
     #: issue #6 F9-R8-D: a line that DID resolve (`line.chosen` set) but a
     #: later pipeline rule (NCCI bundling, global-package bundling, duplicate-
     #: mention dedup, pre-retrieval integrity hold) excluded it via `excluded_
@@ -457,6 +467,22 @@ class LineStatus(str, Enum):
     #: `blocking_reason` -- never re-categorized by guessing which specific
     #: rule fired from the free text alone.
     EXCLUDED_BY_RULE = "EXCLUDED_BY_RULE"
+
+
+#: issue #6 F9-R10-B, Codex's independent re-review of 9038a83: `_CodedLine`
+#: (`diagnoses`/`service_lines` -- what a consumer actually submits) and
+#: `CandidateLine` (`candidate_lines` -- what did NOT reach a coded, billable
+#: decision) must carry DISJOINT status domains. Before this, the F9-R9-E
+#: consistency validator only checked that a line's OWN `external_
+#: disposition`/`blocking_stage`/`reason_code` agreed with its OWN `status` --
+#: it never checked that `status` belonged in the container carrying it, so
+#: `CandidateLine(status=RECOMMENDED, ...)` and `ServiceLine(status=
+#: CANDIDATES_NEEDING_FACT, ...)` both constructed successfully. `frozenset
+#: (LineStatus) - CODED_LINE_STATUSES` (not a hand-maintained list) so a
+#: future new `LineStatus` member is classified once, here, and can never be
+#: silently omitted from either domain.
+CODED_LINE_STATUSES = frozenset({LineStatus.RECOMMENDED, LineStatus.HELD_POLICY_OR_DATA})
+CANDIDATE_LINE_STATUSES = frozenset(LineStatus) - CODED_LINE_STATUSES
 
 
 class ExternalDisposition(str, Enum):
@@ -497,6 +523,8 @@ _EXTERNAL_DISPOSITION_BY_STATUS: dict[LineStatus, tuple[ExternalDisposition, str
     LineStatus.NON_PATIENT_CONDITION: (ExternalDisposition.EXCLUDED, "eligibility"),
     LineStatus.HISTORICAL_CONDITION: (ExternalDisposition.EXCLUDED, "eligibility"),
     LineStatus.NOT_PERFORMED: (ExternalDisposition.EXCLUDED, "eligibility"),
+    LineStatus.UNCERTAIN_EVENT: (ExternalDisposition.EXCLUDED, "eligibility"),
+    LineStatus.NON_PATIENT_EVENT: (ExternalDisposition.EXCLUDED, "eligibility"),
     LineStatus.EXCLUDED_BY_RULE: (ExternalDisposition.EXCLUDED, "pipeline"),
 }
 
@@ -506,13 +534,21 @@ def _nonbillable_status(fact: Any) -> LineStatus:
     this fact -- in the EXACT SAME precedence `billable` itself checks (issue
     #6 F9-R9-D, Codex's independent re-review of 6ff2761), so this can never
     name a reason the property did not actually find. Only called for a fact
-    already known to be non-billable; never re-derives `billable` itself."""
-    if not getattr(fact, "certain", True):
-        return LineStatus.UNCERTAIN_DIAGNOSIS
-    if str(getattr(fact, "experiencer", "patient") or "patient") != "patient":
-        return LineStatus.NON_PATIENT_CONDITION
+    already known to be non-billable; never re-derives `billable` itself.
+
+    issue #6 F9-R10-C, Codex's independent re-review of 9038a83: `certain`/
+    `experiencer` gate EVERY fact kind in `billable`, not only DIAGNOSIS --
+    the diagnosis-specific status names are used only when the fact's OWN
+    kind actually is a diagnosis, so a non-diagnosis fact never gets a false
+    diagnosis-specific reason."""
     kind = getattr(fact, "kind", None)
-    if str(getattr(kind, "value", "")) == "diagnosis":
+    is_diagnosis = str(getattr(kind, "value", "")) == "diagnosis"
+    if not getattr(fact, "certain", True):
+        return LineStatus.UNCERTAIN_DIAGNOSIS if is_diagnosis else LineStatus.UNCERTAIN_EVENT
+    if str(getattr(fact, "experiencer", "patient") or "patient") != "patient":
+        return (LineStatus.NON_PATIENT_CONDITION if is_diagnosis
+               else LineStatus.NON_PATIENT_EVENT)
+    if is_diagnosis:
         return LineStatus.HISTORICAL_CONDITION
     return LineStatus.NOT_PERFORMED
 
@@ -737,6 +773,13 @@ class _CodedLine(_Strict):
     @model_validator(mode="after")
     def _disposition_matches_status(self) -> "_CodedLine":
         _check_external_disposition_consistent(self)
+        # issue #6 F9-R10-B: `diagnoses`/`service_lines` are what a consumer
+        # actually submits -- only a status this container was DESIGNED to
+        # carry may appear here, never one of the candidate-only statuses.
+        if self.status not in CODED_LINE_STATUSES:
+            raise ValueError(
+                f"status {self.status!r} cannot appear in a coded claim line "
+                f"(diagnoses/service_lines) -- it belongs in candidate_lines")
         return self
 
 
@@ -825,6 +868,14 @@ class CandidateLine(_Strict):
     @model_validator(mode="after")
     def _disposition_matches_status(self) -> "CandidateLine":
         _check_external_disposition_consistent(self)
+        # issue #6 F9-R10-B: the mirror check -- a coded-line-only status
+        # (RECOMMENDED/HELD_POLICY_OR_DATA) must never appear in
+        # candidate_lines, which exists precisely for what did NOT reach one
+        # of those two.
+        if self.status not in CANDIDATE_LINE_STATUSES:
+            raise ValueError(
+                f"status {self.status!r} cannot appear in candidate_lines -- "
+                f"it belongs in diagnoses/service_lines")
         # A `CandidateLine`'s `status` is never RECOMMENDED (that lives on
         # `_CodedLine`), so every instance is, by construction, an exclusion
         # or an open question -- `blocking_reason` stating NOTHING would be
@@ -1890,8 +1941,17 @@ class ClaimBundle(_Strict):
         # NO_SUPPORTED_CANDIDATE line is an uncertainty on ONE documented
         # event, never a reason to block an unrelated, independently
         # defensible line elsewhere in the same claim.
+        #
+        # issue #6 F9-R10-B, Codex's independent re-review of 9038a83:
+        # `status is not RECOMMENDED`, not `status is HELD_POLICY_OR_DATA`
+        # specifically -- the model_validator on `_CodedLine` now guarantees
+        # only those two values can ever appear here, so this is currently
+        # equivalent, but stating the real invariant (a coded, submitted
+        # line's status must be RECOMMENDED) is the defense-in-depth the
+        # reviewer asked for: it stays correct even if a future value is
+        # added to `CODED_LINE_STATUSES` without this line being updated too.
         if self.release.destination is ReleaseDestination.AUTO_READY and any(
-                line.status is LineStatus.HELD_POLICY_OR_DATA
+                line.status is not LineStatus.RECOMMENDED
                 for line in (*self.diagnoses, *self.service_lines)):
             out.append("a coded line's submission is HELD (unresolved "
                        "administrative/policy/data fact) but the release "
@@ -2329,6 +2389,13 @@ def bundle_from_coding_result(
                 LineStatus.NOT_PERFORMED:
                     f"documented as {getattr(getattr(fact, 'disposition', None), 'value', '') or 'not performed'}, "
                     f"not actually performed/dispensed during this encounter",
+                LineStatus.UNCERTAIN_EVENT:
+                    f"documented as suspected/probable/uncertain, not a confirmed "
+                    f"{getattr(getattr(fact, 'kind', None), 'value', '') or 'event'}",
+                LineStatus.NON_PATIENT_EVENT:
+                    f"documented about {getattr(fact, 'experiencer', '') or 'someone'} "
+                    f"other than the patient -- not a codeable event of the "
+                    f"patient's own encounter",
             }
             blocking_reason = _billable_reasons[status]
             candidates = tuple(_candidate_ref(c) for c in ([chosen] if chosen else [])

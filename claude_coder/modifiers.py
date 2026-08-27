@@ -130,8 +130,22 @@ class ModifierEngine:
           • a distinct-service modifier on the column-2 code of an NCCI pair that
             is bypassable-with-a-modifier (indicator '1'), which also records the
             bypass so the NCCI gate can clear it.
+
+        Idempotent by construction (issue #6 F9-R9-B, Codex's independent
+        re-review of 6ff2761): clears every modifier value THIS method owns
+        (`_em_separate`/`_x_structure`/`_x_encounter`) and `result.bypassed_
+        ncci` before recomputing, so a caller can re-run it after the claim
+        set changes (e.g. `autonomy.decide` excluding a line via graph/
+        necessity entanglement AFTER the first assignment) and get the
+        modifiers/bypasses the CURRENT surviving set actually justifies --
+        never a stale one left over from a line that is no longer billed.
         """
         from .models import FactKind
+        owned = {m for m in (self._em_separate, self._x_structure, self._x_encounter) if m}
+        if owned:
+            for ln in result.lines:
+                ln.modifiers[:] = [m for m in ln.modifiers if m not in owned]
+        result.bypassed_ncci = []
         billable = result.billable_lines
         procs = [ln for ln in billable if ln.fact.kind is not FactKind.EM
                  and ln.chosen.system in ("cpt", "hcpcs")]

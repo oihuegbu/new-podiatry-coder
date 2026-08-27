@@ -1508,6 +1508,8 @@ def test_every_internal_status_maps_to_the_correct_external_disposition():
         LineStatus.NON_PATIENT_CONDITION: ExternalDisposition.EXCLUDED,
         LineStatus.HISTORICAL_CONDITION: ExternalDisposition.EXCLUDED,
         LineStatus.NOT_PERFORMED: ExternalDisposition.EXCLUDED,
+        LineStatus.UNCERTAIN_EVENT: ExternalDisposition.EXCLUDED,
+        LineStatus.NON_PATIENT_EVENT: ExternalDisposition.EXCLUDED,
         LineStatus.EXCLUDED_BY_RULE: ExternalDisposition.EXCLUDED,
     }
     assert set(expected) == set(LineStatus), "every LineStatus must be mapped"
@@ -1668,6 +1670,101 @@ def test_a_pre_f9r8d_stored_payload_still_loads_with_disposition_backfilled():
     assert sl.external_disposition == ExternalDisposition.EXCLUDED
     assert sl.blocking_stage == "submission"
     assert sl.reason_code == "held_policy_or_data"
+
+
+import pytest as _pytest
+from app.contracts.claim_bundle import (CANDIDATE_LINE_STATUSES, CODED_LINE_STATUSES,
+                                        LineStatus as _LineStatus)
+
+
+@_pytest.mark.parametrize("status", sorted(CANDIDATE_LINE_STATUSES, key=lambda s: s.value))
+def test_a_candidate_only_status_is_refused_inside_a_coded_line(status):
+    """issue #6 F9-R10-B, Codex's independent re-review of 9038a83:
+    `diagnoses`/`service_lines` are what a consumer actually submits --
+    ANY status outside `CODED_LINE_STATUSES` (RECOMMENDED/HELD_POLICY_OR_
+    DATA) must be refused there, parameterized over every candidate-only
+    member so a future new `LineStatus` value is covered automatically."""
+    from pydantic import ValidationError
+    from app.contracts.claim_bundle import ServiceLine, external_disposition_of
+    disposition, stage, reason_code = external_disposition_of(status)
+    with _pytest.raises(ValidationError):
+        ServiceLine(sequence=1, system="cpt", code="X", units=1, status=status,
+                   external_disposition=disposition, blocking_stage=stage,
+                   reason_code=reason_code)
+
+
+@_pytest.mark.parametrize("status", sorted(CODED_LINE_STATUSES, key=lambda s: s.value))
+def test_a_coded_only_status_is_refused_inside_a_candidate_line(status):
+    """The mirror check: `candidate_lines` exists precisely for what did NOT
+    reach RECOMMENDED/HELD_POLICY_OR_DATA, so neither of those two may
+    appear there."""
+    from pydantic import ValidationError
+    from app.contracts.claim_bundle import CandidateLine, external_disposition_of
+    disposition, stage, reason_code = external_disposition_of(status)
+    with _pytest.raises(ValidationError):
+        CandidateLine(status=status, external_disposition=disposition,
+                     blocking_stage=stage, reason_code=reason_code,
+                     blocking_reason="x")
+
+
+@_pytest.mark.parametrize("status", sorted(CODED_LINE_STATUSES, key=lambda s: s.value))
+def test_every_coded_status_round_trips_through_a_coded_line(status):
+    """Positive counterpart: every status this domain DOES allow must still
+    construct and round-trip cleanly (serialize/deserialize) -- the domain
+    check must reject what's wrong without also rejecting what's right."""
+    from app.contracts.claim_bundle import ServiceLine
+    sl = ServiceLine(sequence=1, system="cpt", code="X", units=1, status=status)
+    again = ServiceLine.model_validate(sl.model_dump(mode="json"))
+    assert again.status == status
+
+
+@_pytest.mark.parametrize("status", sorted(CANDIDATE_LINE_STATUSES, key=lambda s: s.value))
+def test_every_candidate_status_round_trips_through_a_candidate_line(status):
+    from app.contracts.claim_bundle import CandidateLine
+    cl = CandidateLine(status=status, blocking_reason="x")
+    again = CandidateLine.model_validate(cl.model_dump(mode="json"))
+    assert again.status == status
+
+
+@_pytest.mark.parametrize("kind_name,disposition_value", [
+    ("procedure", "planned"), ("imaging", "planned"), ("supply", "planned"),
+    ("drug", "planned"), ("evaluation_management", "planned"),
+])
+def test_an_uncertain_non_diagnosis_fact_gets_the_generic_event_status(
+        kind_name, disposition_value):
+    """issue #6 F9-R10-C, Codex's independent re-review of 9038a83:
+    `certain`/`experiencer` gate EVERY `ClinicalFact.billable` kind, not only
+    DIAGNOSIS -- a synthetic uncertain PROCEDURE was labeled
+    `UNCERTAIN_DIAGNOSIS` with the ICD-10-CM outpatient-diagnosis message, a
+    false external reason for a service event. Parameterized across every
+    non-diagnosis `FactKind` `billable` applies `certain` to."""
+    from app.contracts.claim_bundle import LineStatus
+    from claude_coder.models import ClinicalFact, Disposition, EvidenceSpan, FactKind
+    kind = FactKind(kind_name)
+    fact = ClinicalFact(kind, "synthetic uncertain event", fact_id="F1",
+                        disposition=Disposition(disposition_value), certain=False,
+                        evidence=[EvidenceSpan("synthetic uncertain event",
+                                               anchored=True, span_id="s1")],
+                        confidence=0.9)
+    cl = _nonbillable_bundle(fact).candidate_lines[0]
+    assert cl.status == LineStatus.UNCERTAIN_EVENT
+    assert cl.reason_code == "uncertain_event"
+    assert kind_name in cl.blocking_reason or "uncertain" in cl.blocking_reason
+
+
+@_pytest.mark.parametrize("kind_name", ["procedure", "imaging", "supply", "drug", "evaluation_management"])
+def test_a_non_patient_non_diagnosis_fact_gets_the_generic_event_status(kind_name):
+    from app.contracts.claim_bundle import LineStatus
+    from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+    fact = ClinicalFact(FactKind(kind_name), "synthetic event about someone else",
+                        fact_id="F1", experiencer="family",
+                        evidence=[EvidenceSpan("synthetic event about someone else",
+                                               anchored=True, span_id="s1")],
+                        confidence=0.9)
+    cl = _nonbillable_bundle(fact).candidate_lines[0]
+    assert cl.status == LineStatus.NON_PATIENT_EVENT
+    assert cl.reason_code == "non_patient_event"
+    assert "family" in cl.blocking_reason
 
 
 def test_a_rule_excluded_resolved_line_surfaces_with_its_code_still_visible():

@@ -927,9 +927,12 @@ def code_encounter(
                             encounter_id, date_of_service,
                             "source_evidence_audit_persistence", exc, source)
     result.source_reconciliation = source_reconciliation
-    result.gates = pre_retrieval_gates + gates.run_gates(result, note_text, source,
-                                                        readings=readings)
-    decide(result, source=source)
+    # issue #6 F9-R9-B: re-derives modifiers/NCCI/integral/global-package/gates
+    # from the CURRENT surviving line set, repeating until `decide`'s graph/
+    # necessity pruning stops changing it -- see the function's own docstring.
+    _reconcile_claim_after_pruning(result, source, note_text, modifier_engine,
+                                   source_reconciliation, pre_retrieval_gates,
+                                   readings)
     # Actionable documentation guidance for whatever could not be coded confidently.
     from . import recommendations as _recs
     result.recommendations = _recs.build_recommendations(result)
@@ -1819,6 +1822,77 @@ def apply_global_package(result: CodingResult, source: CodeSource) -> None:
                 and not ln.fact.attributes.get("separately_identifiable")):
             ln.excluded_reason = ("bundled into the global surgical package "
                                   "(no separately-identifiable E/M documented)")
+
+
+def _reconcile_claim_after_pruning(
+        result: CodingResult, source: CodeSource, note_text: str,
+        modifier_engine: "ModifierEngine", source_reconciliation,
+        pre_retrieval_gates: list, readings: dict[str, str] | None) -> None:
+    """issue #6 F9-R9-B, Codex's independent re-review of 6ff2761: claim-set-
+    dependent modifier/NCCI/integral/global-package processing ran ONCE,
+    BEFORE `autonomy.decide`'s graph/necessity entanglement pruning (issue #6
+    F9-R8-A/F9-R9-A) -- so a line excluded by that pruning could leave its
+    former NCCI-pair partner holding a now-superfluous distinct-service
+    modifier. Simply STRIPPING the stale modifier without redoing the
+    bundling decision it protects would be worse than the original gap: an
+    NCCI pair left unbundled with no modifier justifying the bypass is an
+    actual incorrect claim, not a cosmetic one.
+
+    The only sound fix is a full re-derivation of every claim-set-dependent
+    MODIFIER/BUNDLING stage from the SURVIVING lines, repeated until the
+    billable set stops changing. Every stage this loop calls is idempotent/
+    monotonic by construction: `assign_claim` clears its own prior output
+    before reassigning (see its own docstring); `apply_ncci_bundling`/
+    `apply_integral_bundling`/`apply_global_package` only ever act on a line
+    that is not already resolved-and-excluded, so re-running them can only
+    ADD exclusions, never undo one `decide` already made. The billable set is
+    therefore monotonically non-increasing round over round, which is what
+    GUARANTEES this terminates -- in at most `len(result.lines)` rounds,
+    since each non-converged round must strictly shrink it by at least one
+    fact. `max_rounds` is set to exactly that mathematical bound plus a
+    margin, not an arbitrary constant, so a busy encounter with many lines
+    cannot spuriously exceed it.
+
+    Gates are computed exactly ONCE, before this loop -- NOT re-run each
+    round. A gate like `medical_necessity` legitimately reports differently
+    once its named procedure is gone ("no procedures to justify" instead of
+    the actual reason that procedure was excluded), and re-deriving gates
+    every round would silently overwrite the diagnosable ORIGINAL message
+    with that vaguer, later one -- a real information loss caught directly
+    (two existing end-to-end tests asserting on the specific gate message).
+    `decide` itself is safe to re-call repeatedly against the SAME gates:
+    its own routing/exclusion-stamping is idempotent (a line that already
+    carries `excluded_reason` is skipped), so replaying the same gate
+    outcomes against a narrower line set on each round costs nothing and
+    loses nothing.
+    """
+    result.gates = pre_retrieval_gates + gates.run_gates(
+        result, note_text, source, readings=readings)
+    max_rounds = len(result.lines) + 2
+    for _ in range(max_rounds):
+        before = {ln.fact.fact_id for ln in result.billable_lines
+                 if ln.fact is not None}
+        modifier_engine.assign_claim(result, source, source_reconciliation)
+        apply_ncci_bundling(result, source)
+        apply_integral_bundling(result, source)
+        apply_global_package(result, source)
+        decide(result, source=source)
+        after = {ln.fact.fact_id for ln in result.billable_lines
+                if ln.fact is not None}
+        if after == before:
+            return
+    # Mathematically unreachable given the monotonic-shrinkage invariant above
+    # -- reaching this means the billable set GREW during recomputation,
+    # which should be impossible. Fail loud rather than silently return a
+    # claim that might still be changing.
+    raise RuntimeError(
+        f"claim-set reconciliation after pruning did not converge within "
+        f"{max_rounds} rounds for encounter {result.encounter_id!r}; the "
+        f"billable set grew during recomputation, which the monotonic-"
+        f"shrinkage invariant this loop depends on says cannot happen -- "
+        f"investigate assign_claim/apply_ncci_bundling/apply_integral_"
+        f"bundling/apply_global_package/decide for a regression that "
+        f"un-excludes or re-includes a line")
 
 
 def render(result: CodingResult) -> str:
