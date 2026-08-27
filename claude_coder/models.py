@@ -414,6 +414,16 @@ class CodingResult:
     verdict: Verdict = Verdict.REVIEW_REQUIRED
     notes: list[str] = field(default_factory=list)
     certificate: dict[str, Any] | None = None   # tamper-evident evidence packet
+    # issue #6 F9-R11-A/B, Codex's independent re-review of aff9da6: which
+    # fact_ids `autonomy.decide`'s OWN dependency closure (graph entanglement
+    # with an unresolved fact, or a gate's own `affected_fact_ids`) identified
+    # THIS call -- set fresh by `decide()` every call, never accumulated by it.
+    # The one real, typed signal `pipeline._reconcile_claim_after_pruning`
+    # accumulates round over round to decide convergence and to reapply
+    # already-known dependency exclusions before claim-set mechanics
+    # re-derive -- never by matching `excluded_reason`'s free text, which
+    # cannot distinguish a dependency exclusion from a claim-set-mechanic one.
+    dependency_excluded_fact_ids: frozenset = field(default_factory=frozenset)
     bypassed_ncci: list = field(default_factory=list)   # code pairs cleared by a modifier
     # NCCI PTP component codes DEMOTED during reconciliation (bundled into a payable
     # comprehensive code). Recorded as (component, payable) so the NCCI gate can report

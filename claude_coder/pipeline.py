@@ -864,6 +864,12 @@ def code_encounter(
     # Mechanic 1 — code-type/section applicability (e.g. an anesthesia-section code
     # is not separately reportable by the operating provider).
     apply_section_applicability(result)
+    # issue #6 F9-R11-B: captured HERE -- immediately after dedup/section-
+    # applicability, before ANY claim-set-dependent mechanic below has ever
+    # run -- so `_reconcile_claim_after_pruning`'s own restore-per-round loop
+    # gets a genuinely pristine baseline, not one that already reflects this
+    # function's own one-time pre-escalation pass a few lines down.
+    _pre_claim_set_baseline = _snapshot_pre_claim_set_state(result)
     # Claim-level modifiers (E/M-25, distinct-service 59/X) once all lines exist —
     # this records which PTP pairs a justified modifier bypasses.
     modifier_engine.assign_claim(result, source, source_reconciliation)
@@ -932,7 +938,7 @@ def code_encounter(
     # necessity pruning stops changing it -- see the function's own docstring.
     _reconcile_claim_after_pruning(result, source, note_text, modifier_engine,
                                    source_reconciliation, pre_retrieval_gates,
-                                   readings)
+                                   readings, baseline=_pre_claim_set_baseline)
     # Actionable documentation guidance for whatever could not be coded confidently.
     from . import recommendations as _recs
     result.recommendations = _recs.build_recommendations(result)
@@ -1824,75 +1830,138 @@ def apply_global_package(result: CodingResult, source: CodeSource) -> None:
                                   "(no separately-identifiable E/M documented)")
 
 
+def _snapshot_pre_claim_set_state(result: CodingResult) -> dict:
+    """Every field a claim-set-dependent mechanic (`assign_claim`/
+    `apply_ncci_bundling`/`apply_integral_bundling`/`apply_global_package`)
+    can mutate on a line, captured before any of them have EVER run for this
+    encounter -- what a round restores to before re-deriving fresh (issue #6
+    F9-R11-B, Codex's independent re-review of aff9da6). Keyed by `id(ln)`:
+    the SAME `ResolvedLine` objects persist for the life of one `decide`
+    loop, never recreated, so identity is a safe, real key here."""
+    return {id(ln): (ln.excluded_reason, ln.chosen, ln.method) for ln in result.lines}
+
+
+def _restore_pre_claim_set_state(result: CodingResult, baseline: dict) -> None:
+    for ln in result.lines:
+        excluded_reason, chosen, method = baseline[id(ln)]
+        ln.excluded_reason = excluded_reason
+        ln.chosen = chosen
+        ln.method = method
+    # Both accumulate ACROSS calls by construction (append-only) and are
+    # entirely DERIVED by claim-set mechanics -- their baseline value is
+    # always empty, since nothing populates either before those mechanics
+    # first run.
+    result.bypassed_ncci = []
+    result.ncci_suppressed = []
+
+
+def _apply_dependency_exclusions(result: CodingResult, dependency_excluded_ids: set) -> None:
+    """Re-stamp the fact_ids a PRIOR round's `decide()` call already
+    identified as dependency-excluded (issue #6 F9-R11-A/B) -- BEFORE this
+    round's claim-set mechanics run, so they see the dependency-pruned
+    substrate fresh rather than re-deriving a bundling decision (e.g. an
+    NCCI demotion) whose basis no longer exists. Never the source of truth
+    for WHICH ids to apply -- `result.dependency_excluded_fact_ids`, set by
+    `autonomy.decide` itself, is; this only replays it."""
+    if not dependency_excluded_ids:
+        return
+    for ln in result.lines:
+        if (ln.resolved and ln.fact.billable and not ln.excluded_reason
+                and ln.fact.fact_id in dependency_excluded_ids):
+            ln.excluded_reason = (
+                f"excluded from this claim: entangled with an unresolved or "
+                f"gate-held fact sharing this line's clinical episode or "
+                f"necessity linkage, which could change this line's own "
+                f"billing correctness")
+
+
 def _reconcile_claim_after_pruning(
         result: CodingResult, source: CodeSource, note_text: str,
         modifier_engine: "ModifierEngine", source_reconciliation,
-        pre_retrieval_gates: list, readings: dict[str, str] | None) -> None:
-    """issue #6 F9-R9-B, Codex's independent re-review of 6ff2761: claim-set-
-    dependent modifier/NCCI/integral/global-package processing ran ONCE,
-    BEFORE `autonomy.decide`'s graph/necessity entanglement pruning (issue #6
-    F9-R8-A/F9-R9-A) -- so a line excluded by that pruning could leave its
-    former NCCI-pair partner holding a now-superfluous distinct-service
-    modifier. Simply STRIPPING the stale modifier without redoing the
-    bundling decision it protects would be worse than the original gap: an
-    NCCI pair left unbundled with no modifier justifying the bypass is an
-    actual incorrect claim, not a cosmetic one.
+        pre_retrieval_gates: list, readings: dict[str, str] | None,
+        baseline: dict | None = None) -> None:
+    """issue #6 F9-R9-B/F9-R10-A/F9-R11-A/F9-R11-B, Codex's independent
+    re-reviews of 6ff2761/9038a83/aff9da6: claim-set-dependent modifier/NCCI/
+    integral/global-package processing and gate evaluation must describe the
+    EXACT final surviving claim, not an earlier round's.
 
-    The only sound fix is a full re-derivation of every claim-set-dependent
-    MODIFIER/BUNDLING stage from the SURVIVING lines, repeated until the
-    billable set stops changing. Every stage this loop calls is idempotent/
-    monotonic by construction: `assign_claim` clears its own prior output
-    before reassigning (see its own docstring); `apply_ncci_bundling`/
-    `apply_integral_bundling`/`apply_global_package` only ever act on a line
-    that is not already resolved-and-excluded, so re-running them can only
-    ADD exclusions, never undo one `decide` already made. The billable set is
-    therefore monotonically non-increasing round over round, which is what
-    GUARANTEES this terminates -- in at most `len(result.lines)` rounds,
-    since each non-converged round must strictly shrink it by at least one
-    fact. `max_rounds` is set to exactly that mathematical bound plus a
-    margin, not an arbitrary constant, so a busy encounter with many lines
-    cannot spuriously exceed it.
+    Two real, typed signals drive this, never free-text matching:
+      - `dependency_excluded_ids` -- the ACCUMULATED set of fact_ids
+        `autonomy.decide` has EVER identified as dependency-excluded (graph
+        entanglement with an unresolved fact, or a gate's own `affected_
+        fact_ids`), read from `result.dependency_excluded_fact_ids` (set
+        fresh by `decide` every call). This is the ONE quantity that is
+        truly monotonic round over round -- the document graph and a fact's
+        own resolution status never change mid-loop -- so it is what
+        convergence is checked against, and what bounds `max_rounds`
+        (at most `len(result.lines)` distinct fact_ids can ever join it).
+      - The CLAIM-SET-MECHANIC-derived state (everything `_snapshot_pre_
+        claim_set_state` captures) is explicitly NOT assumed monotonic: an
+        NCCI component demoted because of a primary that a LATER round
+        dependency-excludes must be able to return (F9-R11-B) -- so every
+        round restores to the PRISTINE pre-mechanic baseline, reapplies only
+        the already-known dependency exclusions, and re-derives modifiers/
+        bundling/gates completely fresh from that substrate. A mechanic that
+        only ever acted on a line gated `not ln.excluded_reason` could not,
+        by itself, tell a dependency exclusion from its own prior output;
+        the explicit restore-then-reapply step is what makes that
+        distinction real instead of inferred from prose.
 
-    Gates are computed exactly ONCE, before this loop -- NOT re-run each
-    round. A gate like `medical_necessity` legitimately reports differently
-    once its named procedure is gone ("no procedures to justify" instead of
-    the actual reason that procedure was excluded), and re-deriving gates
-    every round would silently overwrite the diagnosable ORIGINAL message
-    with that vaguer, later one -- a real information loss caught directly
-    (two existing end-to-end tests asserting on the specific gate message).
-    `decide` itself is safe to re-call repeatedly against the SAME gates:
-    its own routing/exclusion-stamping is idempotent (a line that already
-    carries `excluded_reason` is skipped), so replaying the same gate
-    outcomes against a narrower line set on each round costs nothing and
-    loses nothing.
+    Gates ARE recomputed every round (unlike an earlier version of this fix,
+    which computed them once): `medical_necessity`'s own PASS, and the
+    `necessity_support` binding it writes, must not survive as a stale
+    record of a diagnosis link that a later round's dependency pruning
+    removed (F9-R11-A) -- reusing a frozen gate would let an unsupported
+    service reach AUTO_READY. The accepted cost is that a gate's message can
+    become less specific once its own subject is excluded (e.g.
+    "no procedures to justify" instead of the original, narrower reason) --
+    correctness of the FINAL state outranks narrative specificity of an
+    intermediate one; callers that need the exact original wording should
+    read `result.notes`/`routing` from the round that first found it, not
+    assume `result.gates` is a history.
     """
-    result.gates = pre_retrieval_gates + gates.run_gates(
-        result, note_text, source, readings=readings)
+    # issue #6 F9-R11-B: `code_encounter` runs modifier/NCCI/integral/global-
+    # package processing ONCE, upstream of this function, purely to know
+    # which lines are billable BEFORE the optional second-document-read
+    # escalation (so it targets exactly the pages a billed line rests on,
+    # never more). That means by the time this function is entered, the
+    # lines are NOT pristine -- taking the baseline HERE would capture an
+    # already-bundled state (e.g. B already demoted into A), and every round
+    # would restore to THAT, never letting B return once A is later
+    # dependency-pruned. The caller therefore snapshots BEFORE its own
+    # upstream pass and passes it in; a caller with no such upstream pass
+    # (a direct unit test) gets a safe default taken right here instead.
+    if baseline is None:
+        baseline = _snapshot_pre_claim_set_state(result)
+    dependency_excluded_ids: set = set()
     max_rounds = len(result.lines) + 2
     for _ in range(max_rounds):
-        before = {ln.fact.fact_id for ln in result.billable_lines
-                 if ln.fact is not None}
+        _restore_pre_claim_set_state(result, baseline)
+        _apply_dependency_exclusions(result, dependency_excluded_ids)
         modifier_engine.assign_claim(result, source, source_reconciliation)
         apply_ncci_bundling(result, source)
         apply_integral_bundling(result, source)
         apply_global_package(result, source)
+        result.gates = pre_retrieval_gates + gates.run_gates(
+            result, note_text, source, readings=readings)
         decide(result, source=source)
-        after = {ln.fact.fact_id for ln in result.billable_lines
-                if ln.fact is not None}
-        if after == before:
+        new_ids = set(result.dependency_excluded_fact_ids)
+        if new_ids <= dependency_excluded_ids:
             return
-    # Mathematically unreachable given the monotonic-shrinkage invariant above
-    # -- reaching this means the billable set GREW during recomputation,
-    # which should be impossible. Fail loud rather than silently return a
-    # claim that might still be changing.
+        dependency_excluded_ids |= new_ids
+    # Mathematically unreachable given the monotonic-growth invariant above
+    # -- reaching this means `decide` found a dependency exclusion outside
+    # the accumulated set MORE times than there are distinct facts, which
+    # should be impossible. Fail loud rather than silently return a claim
+    # that might still be changing.
     raise RuntimeError(
         f"claim-set reconciliation after pruning did not converge within "
-        f"{max_rounds} rounds for encounter {result.encounter_id!r}; the "
-        f"billable set grew during recomputation, which the monotonic-"
-        f"shrinkage invariant this loop depends on says cannot happen -- "
-        f"investigate assign_claim/apply_ncci_bundling/apply_integral_"
-        f"bundling/apply_global_package/decide for a regression that "
-        f"un-excludes or re-includes a line")
+        f"{max_rounds} rounds for encounter {result.encounter_id!r}; "
+        f"`decide` kept finding dependency exclusions beyond what "
+        f"len(result.lines) distinct facts can account for, which the "
+        f"monotonic-growth invariant this loop depends on says cannot "
+        f"happen -- investigate autonomy.decide's dependency_excluded_"
+        f"fact_ids computation for a regression")
 
 
 def render(result: CodingResult) -> str:

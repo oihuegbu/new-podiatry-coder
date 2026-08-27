@@ -178,6 +178,13 @@ def decide(result: CodingResult,
                 blocked_fact_ids.add(fid)
                 blocked_fact_ids |= _entangled(fid)
 
+    # issue #6 F9-R11-A/B: the one real, typed signal a caller (`pipeline.
+    # _reconcile_claim_after_pruning`) needs to tell a DEPENDENCY exclusion
+    # (this fact id) apart from a claim-set-mechanic-derived one (everything
+    # else `excluded_reason` might name) -- set fresh every call, never
+    # accumulated here; the caller is the one with a reason to accumulate.
+    result.dependency_excluded_fact_ids = frozenset(blocked_fact_ids)
+
     # A currently-resolved, billable line entangled with an unresolved or
     # gate-held fact cannot be certified independently of it -- excluded from
     # THIS claim, visibly (never silently dropped: `excluded_reason` is exactly

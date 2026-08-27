@@ -176,8 +176,22 @@ class AutonomousCoderTest(unittest.TestCase):
                            audit_repository=NullAuditRepository(),
                            billing_context={"billing_entity_id": "actor-1", "participants": [
                                {"id": "actor-1", "type": "person", "roles": ["performer"]}]})
+        # issue #6 F9-R11-A, Codex's independent re-review of aff9da6: `r.
+        # gates` now reflects the FINAL, post-reconciliation claim, not the
+        # round that first discovered the ungrounded link -- once the
+        # procedure is excluded, a FRESH `medical_necessity` gate correctly
+        # reports NOT_APPLICABLE ("no procedures to justify") rather than
+        # the original UNKNOWN ("no record-grounded link"), because by then
+        # there genuinely are no procedures left to check. Re-running gates
+        # every round (required so a gate can never certify a service whose
+        # support was removed by a LATER round) means this exact wording is
+        # no longer stable; what must hold is the real invariant -- the
+        # necessity gate never PASSES for an ungrounded link, and the
+        # procedure itself is never billable.
         nec = next(g for g in r.gates if g.name == "medical_necessity")
-        self.assertEqual(nec.outcome, Outcome.UNKNOWN, nec.detail)
+        self.assertNotEqual(nec.outcome, Outcome.PASS, nec.detail)
+        self.assertFalse(any(ln.chosen and ln.chosen.code == "PROC_ALPHA_EXC"
+                             for ln in r.billable_lines))
         self.assertNotEqual(r.verdict, Verdict.AUTO_READY)
 
     def test_agreeing_origins_cannot_certify_an_ungrounded_link_end_to_end(self):
@@ -212,10 +226,13 @@ class AutonomousCoderTest(unittest.TestCase):
             self.assertEqual(rel.corroboration_status, provenance.MULTIPLY_ASSERTED)
             self.assertEqual(rel.reconciliation_status, provenance.UNRECONCILED)
             self.assertEqual(rel.reconciliation_evidence, [])
+        # issue #6 F9-R11-A: see the sibling test above -- `r.gates` is the
+        # FINAL, post-reconciliation state, so the exact wording is no
+        # longer stable once the procedure itself is excluded.
         nec = next(g for g in r.gates if g.name == "medical_necessity")
-        self.assertEqual(nec.outcome, Outcome.UNKNOWN, nec.detail)
+        self.assertNotEqual(nec.outcome, Outcome.PASS, nec.detail)
         self.assertFalse(r.necessity_support)
-        self.assertEqual(r.verdict, Verdict.REVIEW_REQUIRED)
+        self.assertNotEqual(r.verdict, Verdict.AUTO_READY)
         # the certificate of the held encounter binds NO necessity support and shows both
         # axes, so the audit record says exactly what was and was not established
         self.assertEqual(r.certificate["necessity_support"], [])
@@ -638,12 +655,14 @@ class ClaimAfterPruningReconciliationTest(unittest.TestCase):
                      "to leave unresolved")
 
     def test_non_convergence_fails_loud_instead_of_returning_a_moving_claim(self):
-        """The monotonic-shrinkage invariant the loop's termination proof
-        depends on -- the billable set can only shrink, never grow, round
-        over round -- is enforced defensively: if it is ever violated (a
-        line un-excluded after being excluded, which should be impossible
-        given every mechanic this loop calls), the loop must fail LOUD
-        rather than silently return a claim that might still be changing."""
+        """The monotonic-GROWTH invariant the loop's termination proof
+        depends on -- `decide`'s own `dependency_excluded_fact_ids` can only
+        ever name a fact already in the accumulated set, once truly
+        converged -- is enforced defensively: if it is ever violated (decide
+        keeps finding a fact outside the accumulated set, which should be
+        impossible given there are only finitely many facts), the loop must
+        fail LOUD rather than silently return a claim that might still be
+        changing."""
         from unittest.mock import patch
         from claude_coder.data_access import MockSource
         from claude_coder.models import (CandidateCode, ClinicalFact, CodingResult,
@@ -661,17 +680,199 @@ class ClaimAfterPruningReconciliationTest(unittest.TestCase):
         eng = ModifierEngine(defs={})
         src = MockSource(records={("C1", "cpt"): {"active": True}})
 
-        # A fake `decide` that OSCILLATES the line's exclusion every call --
-        # deliberately violating the invariant no real mechanic in this
-        # loop would ever violate, to prove the safety net actually fires.
+        # A fake `decide` that reports a BRAND-NEW fact_id every single call
+        # -- deliberately violating the invariant no real `decide` call
+        # could (there are only finitely many facts, so it must eventually
+        # report only ids already accumulated), to prove the safety net
+        # actually fires.
         calls = {"n": 0}
-        def oscillating_decide(res, source=None):
+        def never_converging_decide(res, source=None):
             calls["n"] += 1
-            line.excluded_reason = "x" if calls["n"] % 2 else None
+            res.dependency_excluded_fact_ids = frozenset({f"NEVER_SEEN_{calls['n']}"})
 
-        with patch("claude_coder.pipeline.decide", side_effect=oscillating_decide):
+        with patch("claude_coder.pipeline.decide", side_effect=never_converging_decide):
             with self.assertRaises(RuntimeError):
                 _reconcile_claim_after_pruning(result, src, "x", eng, None, [], None)
+
+    def test_a_stale_gate_does_not_survive_removal_of_its_own_support(self):
+        """issue #6 F9-R11-A, Codex's independent re-review of aff9da6: an
+        earlier version of this fix computed gates exactly ONCE, before the
+        loop -- so `medical_necessity`'s own PASS (and the `necessity_
+        support` binding it writes) survived as a stale record even after a
+        LATER round's dependency pruning removed the diagnosis that earned
+        it. Reproduced directly before this fix: a resolved procedure P with
+        its own resolved, grounded diagnosis DX; DX is itself `PART_OF` an
+        unresolved diagnosis U (same episode) -- pruning excludes DX, but
+        the gate computed before that pruning still said PASS, and P stayed
+        billable with no real support. Gates must be recomputed every round
+        so the FINAL state is what's attested, never a frozen earlier one."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, CodingResult, Destination,
+                                         EvidenceSpan, FactKind, RelationAssertion,
+                                         RelationPredicate, RelationState,
+                                         ResolutionMethod, ResolvedLine, CandidateCode)
+        from claude_coder import eligibility, graph as graph_mod
+        from claude_coder.pipeline import _reconcile_claim_after_pruning
+        from claude_coder.modifiers import ModifierEngine
+
+        def line(fid, code, kind, text, resolved=True):
+            span = EvidenceSpan(text, anchored=True, span_id=f"s-{fid}")
+            f = ClinicalFact(kind=kind, description=text, evidence=[span], fact_id=fid)
+            if resolved:
+                system = "icd10" if kind is FactKind.DIAGNOSIS else "cpt"
+                return ResolvedLine(fact=f, chosen=CandidateCode(code, system, "d", 0.9),
+                                    method=ResolutionMethod.DETERMINISTIC)
+            return ResolvedLine(fact=f, chosen=None, method=ResolutionMethod.ABSTAINED,
+                                alternatives=[CandidateCode("ALT1", "icd10", "alt", 0.5)],
+                                documentation_gap="which variant?")
+
+        p = line("P", "P_CODE", FactKind.PROCEDURE, "procedure performed")
+        dx = line("DX", "DX_CODE", FactKind.DIAGNOSIS, "diagnosis documented")
+        u = line("U", None, FactKind.DIAGNOSIS, "unresolved related diagnosis",
+                resolved=False)
+        rel_necessity = RelationAssertion(
+            subject_event_id="DX", predicate=RelationPredicate.REASON_FOR,
+            object_event_id="P", state=RelationState.ASSERTED,
+            evidence_span_ids=["s-DX", "s-P"], confidence=0.95,
+            reconciliation_status="source_directional", reconciliation_evidence=["s-P"])
+        rel_episode = RelationAssertion(
+            subject_event_id="U", predicate=RelationPredicate.PART_OF,
+            object_event_id="DX", state=RelationState.ASSERTED,
+            evidence_span_ids=["s-U", "s-DX"])
+        relations = [rel_necessity, rel_episode]
+        facts = [p.fact, dx.fact, u.fact]
+        intents = eligibility.evaluate(facts, relations, "e", "2026-03-14")
+        episodes, _ = eligibility.build_episodes(facts, relations, "e", "2026-03-14")
+        compiled = graph_mod.build_graph(
+            facts, relations, intents, encounter_id="e", date_of_service="2026-03-14",
+            episodes=episodes, extraction_schema_version="v1", relation_grammar_version="v1")
+
+        result = CodingResult(encounter_id="e", date_of_service="2026-03-14",
+                              lines=[p, dx, u], relations=relations, graph=compiled,
+                              claim_line_intents=list(intents))
+        src = MockSource(records={("P_CODE", "cpt"): {"active": True},
+                                  ("DX_CODE", "icd10"): {"active": True}})
+        eng = ModifierEngine(defs={})
+        note_text = "procedure performed diagnosis documented unresolved related diagnosis"
+
+        _reconcile_claim_after_pruning(result, src, note_text, eng, None, [], None)
+
+        self.assertIsNotNone(dx.excluded_reason,
+                             "DX must be excluded -- entangled with unresolved U")
+        # `billable_lines` alone (resolved + not excluded) does not decide
+        # submission -- the necessity gate going hard-BLOCKED (no documented
+        # diagnosis remains for P) is what must, and does, force the WHOLE
+        # encounter's destination/verdict away from anything that could ever
+        # reach AUTO_READY, regardless of what else `billable_lines` lists.
+        nec = next(g for g in result.gates if g.name == "medical_necessity")
+        self.assertNotEqual(nec.outcome, Outcome.PASS,
+                            "the FINAL gate must reflect P's support having been "
+                            "removed, never a frozen earlier PASS")
+        self.assertFalse(result.necessity_support,
+                         "no binding should remain for a procedure with no support")
+        self.assertNotEqual(result.verdict, Verdict.AUTO_READY)
+        self.assertNotEqual(result.destination, Destination.AUTO_READY)
+
+    def test_an_ncci_component_returns_when_its_primary_is_pruned(self):
+        """issue #6 F9-R11-B, Codex's independent re-review of aff9da6: a
+        line excluded by a claim-set mechanic (here, NCCI bundling) was
+        treated as PERMANENTLY excluded, even after the ONLY reason for that
+        exclusion (its primary/payable partner) was later removed by
+        dependency pruning. Reproduced directly before this fix: A and B
+        have an unresolved (indicator '0') NCCI conflict, so B is demoted
+        into A; an unresolved fact U is `PART_OF` A, so dependency pruning
+        excludes A -- but B stayed excluded forever, even though no
+        conflicting pair remained. The claim-set-mechanic state must be
+        restored to a pristine baseline and re-derived fresh every round,
+        not assumed monotonic."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, CodingResult, EvidenceSpan,
+                                         FactKind, RelationAssertion, RelationPredicate,
+                                         RelationState, ResolutionMethod, ResolvedLine,
+                                         CandidateCode)
+        from claude_coder import eligibility, graph as graph_mod
+        from claude_coder.pipeline import (_reconcile_claim_after_pruning,
+                                           _snapshot_pre_claim_set_state,
+                                           apply_ncci_bundling, apply_integral_bundling,
+                                           apply_global_package)
+        from claude_coder.modifiers import ModifierEngine
+
+        def line(fid, code, kind, text, attrs=None, resolved=True):
+            span = EvidenceSpan(text, anchored=True, span_id=f"s-{fid}")
+            f = ClinicalFact(kind=kind, description=text, evidence=[span], fact_id=fid,
+                             attributes=(attrs or {}))
+            if resolved:
+                system = "icd10" if kind is FactKind.DIAGNOSIS else "cpt"
+                return ResolvedLine(fact=f, chosen=CandidateCode(code, system, "d", 0.9),
+                                    method=ResolutionMethod.DETERMINISTIC)
+            return ResolvedLine(fact=f, chosen=None, method=ResolutionMethod.ABSTAINED,
+                                alternatives=[CandidateCode("ALT1", "cpt", "alt", 0.5)],
+                                documentation_gap="which variant?")
+
+        a = line("A", "A_CODE", FactKind.PROCEDURE, "procedure A performed",
+                {"anatomy": "site-a", "performer_id": "p1", "billing_entity_id": "p1"})
+        b = line("B", "B_CODE", FactKind.PROCEDURE, "procedure B performed",
+                {"anatomy": "site-b", "performer_id": "p1", "billing_entity_id": "p1"})
+        dxa = line("DXA", "DXA_CODE", FactKind.DIAGNOSIS, "diagnosis for A")
+        dxb = line("DXB", "DXB_CODE", FactKind.DIAGNOSIS, "diagnosis for B")
+        u = line("U", None, FactKind.PROCEDURE, "ancillary component of procedure A",
+                resolved=False)
+
+        rel_part = RelationAssertion(
+            subject_event_id="U", predicate=RelationPredicate.PART_OF,
+            object_event_id="A", state=RelationState.ASSERTED,
+            evidence_span_ids=["s-U", "s-A"])
+        rel_dxa = RelationAssertion(
+            subject_event_id="DXA", predicate=RelationPredicate.REASON_FOR,
+            object_event_id="A", state=RelationState.ASSERTED,
+            evidence_span_ids=["s-DXA", "s-A"], confidence=0.95,
+            reconciliation_status="source_directional", reconciliation_evidence=["s-A"])
+        rel_dxb = RelationAssertion(
+            subject_event_id="DXB", predicate=RelationPredicate.REASON_FOR,
+            object_event_id="B", state=RelationState.ASSERTED,
+            evidence_span_ids=["s-DXB", "s-B"], confidence=0.95,
+            reconciliation_status="source_directional", reconciliation_evidence=["s-B"])
+        relations = [rel_part, rel_dxa, rel_dxb]
+        facts = [a.fact, b.fact, dxa.fact, dxb.fact, u.fact]
+        intents = eligibility.evaluate(facts, relations, "e", "2026-03-14")
+        episodes, _ = eligibility.build_episodes(facts, relations, "e", "2026-03-14")
+        compiled = graph_mod.build_graph(
+            facts, relations, intents, encounter_id="e", date_of_service="2026-03-14",
+            episodes=episodes, extraction_schema_version="v1", relation_grammar_version="v1")
+
+        result = CodingResult(encounter_id="e", date_of_service="2026-03-14",
+                              lines=[a, b, dxa, dxb, u], relations=relations,
+                              graph=compiled, claim_line_intents=list(intents))
+        src = MockSource(
+            records={("A_CODE", "cpt"): {"active": True}, ("B_CODE", "cpt"): {"active": True},
+                    ("DXA_CODE", "icd10"): {"active": True},
+                    ("DXB_CODE", "icd10"): {"active": True}},
+            ncci={("A_CODE", "B_CODE"): "0"})
+        eng = ModifierEngine(defs={})
+        note_text = ("procedure A performed procedure B performed diagnosis for A "
+                    "diagnosis for B ancillary component of procedure A")
+
+        # Baseline MUST be taken before the mechanics' one-time pre-escalation
+        # pass (issue #6 F9-R11-B) -- exactly as `code_encounter` now does --
+        # or it would capture B already demoted and never let it return.
+        baseline = _snapshot_pre_claim_set_state(result)
+        eng.assign_claim(result, src)
+        apply_ncci_bundling(result, src)
+        apply_integral_bundling(result, src)
+        apply_global_package(result, src)
+        self.assertIsNotNone(b.excluded_reason,
+                             "sanity: B is demoted by the unresolved NCCI conflict "
+                             "before any pruning")
+
+        _reconcile_claim_after_pruning(result, src, note_text, eng, None, [], None,
+                                       baseline=baseline)
+
+        self.assertIsNotNone(a.excluded_reason,
+                             "A must be excluded -- entangled with unresolved U")
+        self.assertIsNone(b.excluded_reason,
+                          "B's only NCCI partner is gone -- it must return")
+        self.assertEqual(sorted(ln.chosen.code for ln in result.billable_lines),
+                         ["B_CODE", "DXA_CODE", "DXB_CODE"])
 
 
 class GlobalPackageTest(unittest.TestCase):
