@@ -203,6 +203,22 @@ def decide(result: CodingResult,
     # `dx_non_material` precedent this generalizes.
     remaining_billable_ids = {ln.fact.fact_id for ln in result.billable_lines
                               if ln.fact is not None}
+    # A diagnosis-only billable set is not itself a submittable claim --
+    # `claim_submitter.py` refuses a claim with no service lines -- so it must
+    # not count as "something independently defensible to protect" for the
+    # purpose of relaxing an UNRELATED diagnosis below (kills the exact mutant
+    # `test_materiality_no_procedure_blocks` guards: no procedure anywhere ->
+    # necessity can never be confirmed -> fail closed).
+    has_remaining_procedure = any(ln.fact.kind is not FactKind.DIAGNOSIS
+                                  for ln in result.billable_lines
+                                  if ln.fact is not None)
+    # Whether necessity was actually ASSESSED at all, for anything -- distinct
+    # from `dx_non_material` (which asks whether it was assessed and CONFIRMED
+    # for every procedure). When no `medical_necessity` gate ever ran (no
+    # source was available to construct one), there is no signal at all about
+    # which diagnoses matter, so a diagnosis cannot be safely treated as
+    # unrelated merely because it has no graph edge to draw on.
+    necessity_gate_ran = any(g.name == "medical_necessity" for g in result.gates)
 
     # 3. Every performed fact must be accounted for. MATERIALITY is decided from
     #    authoritative coverage, not a proxy: an unresolved DIAGNOSIS is non-material
@@ -224,32 +240,47 @@ def decide(result: CodingResult,
                       "authoritative coverage; clarify to add specificity",
                       blocking=False, fact_id=ln.fact.fact_id)
             else:
-                # issue #6 F9-R8-A: blocking only when this fact's own closure
-                # touches a line that WAS billable -- an isolated ambiguity with
-                # no documented relationship to anything else must not hold an
-                # unrelated, independently defensible line hostage.
+                # issue #6 F9-R8-A, corrected by F9-R9-A (Codex's independent
+                # re-review of 6ff2761): blocking only when this fact's own
+                # closure touches a line that WAS billable -- an isolated
+                # ambiguity with no documented relationship to anything else
+                # must not hold an unrelated, independently defensible line
+                # hostage. This now applies uniformly to EVERY fact kind,
+                # diagnoses included: the unconditional `ln.fact.kind is
+                # FactKind.DIAGNOSIS` clause this round removed is exactly
+                # what F9-R9-A reproduced -- a diagnosis with NO relation to
+                # anything (no REASON_FOR, no shared episode) still forced the
+                # whole encounter away from AUTO_READY, even though its own
+                # dependent procedure (if any) was already excluded via the
+                # necessity gate's `affected_fact_ids` mechanism above, or it
+                # had no dependent procedure at all. Dropping a code's
+                # necessity justification is unaffected by this change --
+                # `medical_necessity_gate` still requires the encounter-
+                # specific REASON_FOR link (+ policy qualification where
+                # governed) before a procedure ever reaches `billable_lines`/
+                # `remaining_billable_ids` in the first place; this clause
+                # only decides whether an UNRELATED open question is allowed
+                # to block an otherwise-independent release.
                 #
-                # Two guards keep this from over-relaxing:
+                # Three guards keep this from over-relaxing:
                 # - requires something ELSE billable to protect in the first
-                #   place: when NOTHING remains billable,
-                #   `remaining_billable_ids` is empty and this item IS the
-                #   whole encounter's material content -- it must stay
-                #   blocking, so the "nothing open" catch-all a few lines below
-                #   (`no defensible billable line was produced`) never fires in
-                #   its place with a vaguer, less specific reason.
-                # - an unresolved DIAGNOSIS's relationship to procedure
-                #   materiality is the DEDICATED `dx_non_material` branch
-                #   above's own job, not this generic one's: an unresolved
-                #   diagnosis that reaches here (`dx_non_material` is False --
-                #   necessity is NOT otherwise established, including the
-                #   fail-closed "no procedures at all" case) must stay blocking
-                #   regardless of graph entanglement, exactly as before this
-                #   round -- relaxing it here would silently readmit the exact
-                #   fail-open gap `_necessity_authoritatively_met` exists to
-                #   close.
-                _affects = (ln.fact.kind is FactKind.DIAGNOSIS
-                           or not remaining_billable_ids
-                           or bool(_entangled(ln.fact.fact_id) & remaining_billable_ids))
+                #   place. When NOTHING remains billable, `remaining_billable_
+                #   ids` is empty and this item IS the whole encounter's
+                #   material content -- it must stay blocking, so the "nothing
+                #   open" catch-all a few lines below ("no defensible billable
+                #   line was produced") never fires in its place with a
+                #   vaguer, less specific reason.
+                # - for a DIAGNOSIS specifically (never a procedure -- that
+                #   question is its OWN entanglement check above, unaffected):
+                #   a diagnosis-only billable set cannot submit on its own, so
+                #   `has_remaining_procedure` must hold too, and necessity
+                #   must have actually been ASSESSED (`necessity_gate_ran`) --
+                #   no signal at all about which diagnoses matter is not
+                #   license to assume this one is unrelated.
+                _affects = (not remaining_billable_ids
+                           or bool(_entangled(ln.fact.fact_id) & remaining_billable_ids)
+                           or (ln.fact.kind is FactKind.DIAGNOSIS
+                               and (not necessity_gate_ran or not has_remaining_procedure)))
                 if ln.documentation_gap:
                     route(Destination.PROVIDER_QUERY, ln.fact.description,
                           ln.documentation_gap, blocking=_affects,

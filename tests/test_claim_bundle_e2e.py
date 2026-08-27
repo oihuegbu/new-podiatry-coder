@@ -1504,7 +1504,10 @@ def test_every_internal_status_maps_to_the_correct_external_disposition():
         LineStatus.HELD_POLICY_OR_DATA: ExternalDisposition.EXCLUDED,
         LineStatus.CANDIDATES_UNRESOLVED: ExternalDisposition.EXCLUDED,
         LineStatus.NO_SUPPORTED_CANDIDATE: ExternalDisposition.EXCLUDED,
-        LineStatus.NONPERFORMED: ExternalDisposition.EXCLUDED,
+        LineStatus.UNCERTAIN_DIAGNOSIS: ExternalDisposition.EXCLUDED,
+        LineStatus.NON_PATIENT_CONDITION: ExternalDisposition.EXCLUDED,
+        LineStatus.HISTORICAL_CONDITION: ExternalDisposition.EXCLUDED,
+        LineStatus.NOT_PERFORMED: ExternalDisposition.EXCLUDED,
         LineStatus.EXCLUDED_BY_RULE: ExternalDisposition.EXCLUDED,
     }
     assert set(expected) == set(LineStatus), "every LineStatus must be mapped"
@@ -1517,37 +1520,154 @@ def test_every_internal_status_maps_to_the_correct_external_disposition():
             assert reason_code == status.value.lower()
 
 
+def _nonbillable_bundle(fact):
+    from app.contracts.claim_bundle import (AuthorityBinding, SourceDocument,
+                                             bundle_from_coding_result)
+    from app.contracts.encounter_context import EncounterContext
+    from claude_coder.models import CodingResult, ResolvedLine
+    assert fact.billable is False
+    result = CodingResult("enc", "2026-03-14", lines=[ResolvedLine(fact, None)])
+    return bundle_from_coding_result(
+        result, source_document=SourceDocument(), context=EncounterContext(),
+        authority=AuthorityBinding())
+
+
 def test_a_nonperformed_fact_surfaces_as_excluded_not_silently_dropped():
     """issue #6 F9-R8-D: a disposition fact (`fact.billable is False`) used to
     `continue` out of `candidate_lines` entirely -- the exact silent-erasure
     defect F9-R7 item 4 already closed for HELD/CANDIDATES_*. Reproduced
-    directly before the fix: this fact never appeared anywhere in the bundle."""
-    from app.contracts.claim_bundle import (
-        AuthorityBinding, ExternalDisposition, LineStatus, SourceDocument,
-        bundle_from_coding_result)
-    from app.contracts.encounter_context import EncounterContext
-    from claude_coder.models import (ClinicalFact, CodingResult, Disposition,
-                                     EvidenceSpan, FactKind, ResolvedLine)
+    directly before the fix: this fact never appeared anywhere in the bundle.
+
+    issue #6 F9-R9-D, Codex's independent re-review of 6ff2761: `fact.
+    billable` collapses FOUR clinically distinct reasons into one boolean --
+    a single generic `NONPERFORMED` status/reason misrepresented three of
+    them. This test and its three siblings below each drive ONE of the four
+    real reasons through the real property, asserting the typed status and
+    a truthful reason text, not a guessed one."""
+    from app.contracts.claim_bundle import ExternalDisposition, LineStatus
+    from claude_coder.models import ClinicalFact, Disposition, EvidenceSpan, FactKind
 
     fact = ClinicalFact(FactKind.PROCEDURE, "synthetic planned procedure",
                         fact_id="F1", disposition=Disposition.PLANNED,
                         evidence=[EvidenceSpan("synthetic planned procedure",
                                                anchored=True, span_id="s1")],
                         confidence=0.9)
-    assert fact.billable is False
-    line = ResolvedLine(fact, None)
-    result = CodingResult("enc", "2026-03-14", lines=[line])
-
-    bundle = bundle_from_coding_result(
-        result, source_document=SourceDocument(), context=EncounterContext(),
-        authority=AuthorityBinding())
-    assert len(bundle.candidate_lines) == 1, "the fact must not disappear"
-    cl = bundle.candidate_lines[0]
-    assert cl.status == LineStatus.NONPERFORMED
+    cl = _nonbillable_bundle(fact).candidate_lines[0]
+    assert cl.status == LineStatus.NOT_PERFORMED
     assert cl.external_disposition == ExternalDisposition.EXCLUDED
     assert cl.blocking_stage == "eligibility"
-    assert cl.reason_code == "nonperformed"
-    assert cl.blocking_reason
+    assert cl.reason_code == "not_performed"
+    assert "planned" in cl.blocking_reason
+
+
+def test_an_uncertain_diagnosis_surfaces_with_its_own_truthful_reason():
+    """issue #6 F9-R9-D: an uncertain/suspected/rule-out diagnosis is not "not
+    performed" -- it was never claimed to have happened at all; ICD-10-CM
+    simply forbids coding it as confirmed."""
+    from app.contracts.claim_bundle import ExternalDisposition, LineStatus
+    from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+
+    fact = ClinicalFact(FactKind.DIAGNOSIS, "suspected synthetic condition",
+                        fact_id="F1", certain=False,
+                        evidence=[EvidenceSpan("suspected synthetic condition",
+                                               anchored=True, span_id="s1")],
+                        confidence=0.9)
+    cl = _nonbillable_bundle(fact).candidate_lines[0]
+    assert cl.status == LineStatus.UNCERTAIN_DIAGNOSIS
+    assert cl.external_disposition == ExternalDisposition.EXCLUDED
+    assert cl.reason_code == "uncertain_diagnosis"
+    assert "uncertain" in cl.blocking_reason
+
+
+def test_a_non_patient_condition_surfaces_with_its_own_truthful_reason():
+    """issue #6 F9-R9-D: a family-history/other-person condition is not "not
+    performed" either -- it was never the patient's own condition to code."""
+    from app.contracts.claim_bundle import ExternalDisposition, LineStatus
+    from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+
+    fact = ClinicalFact(FactKind.DIAGNOSIS, "synthetic condition in mother",
+                        fact_id="F1", experiencer="family",
+                        evidence=[EvidenceSpan("synthetic condition in mother",
+                                               anchored=True, span_id="s1")],
+                        confidence=0.9)
+    cl = _nonbillable_bundle(fact).candidate_lines[0]
+    assert cl.status == LineStatus.NON_PATIENT_CONDITION
+    assert cl.external_disposition == ExternalDisposition.EXCLUDED
+    assert cl.reason_code == "non_patient_condition"
+    assert "family" in cl.blocking_reason
+
+
+def test_a_historical_diagnosis_surfaces_with_its_own_truthful_reason():
+    """issue #6 F9-R9-D: a purely historical diagnosis -- certain, the
+    patient's own, but not addressed in THIS encounter -- is a third, still
+    distinct reason from "not performed"."""
+    from app.contracts.claim_bundle import ExternalDisposition, LineStatus
+    from claude_coder.models import (ClinicalFact, Disposition, EvidenceSpan,
+                                     FactKind)
+
+    fact = ClinicalFact(FactKind.DIAGNOSIS, "history of synthetic condition",
+                        fact_id="F1", disposition=Disposition.HISTORICAL,
+                        evidence=[EvidenceSpan("history of synthetic condition",
+                                               anchored=True, span_id="s1")],
+                        confidence=0.9)
+    cl = _nonbillable_bundle(fact).candidate_lines[0]
+    assert cl.status == LineStatus.HISTORICAL_CONDITION
+    assert cl.external_disposition == ExternalDisposition.EXCLUDED
+    assert cl.reason_code == "historical_condition"
+    assert "historical" in cl.blocking_reason
+
+
+def test_a_contradictory_external_disposition_is_refused_not_silently_accepted():
+    """issue #6 F9-R9-E, Codex's independent re-review of 6ff2761:
+    `external_disposition`/`blocking_stage`/`reason_code` were described as
+    computed from `status` but were independently writable fields with
+    defaults -- a `CandidateLine` with `status=CANDIDATES_NEEDING_FACT` and
+    `external_disposition=EXCLUDED` constructed successfully before this fix.
+    A `model_validator` now enforces the tuple must equal
+    `external_disposition_of(status)` exactly, on both `_CodedLine` and
+    `CandidateLine`."""
+    import pytest
+    from pydantic import ValidationError
+    from app.contracts.claim_bundle import (CandidateLine, ExternalDisposition,
+                                             LineStatus, ServiceLine)
+
+    with pytest.raises(ValidationError):
+        CandidateLine(status=LineStatus.CANDIDATES_NEEDING_FACT,
+                     external_disposition=ExternalDisposition.EXCLUDED,
+                     reason_code="candidates_needing_fact", blocking_reason="x")
+    with pytest.raises(ValidationError):
+        ServiceLine(sequence=1, system="cpt", code="X", units=1,
+                   status=LineStatus.HELD_POLICY_OR_DATA,
+                   external_disposition=ExternalDisposition.BILLABLE_AND_DEFENSIBLE)
+    with pytest.raises(ValidationError):
+        # blocking_reason may never be empty -- a CandidateLine's status is
+        # never RECOMMENDED, so every instance is an exclusion or an open
+        # question and must state why.
+        CandidateLine(status=LineStatus.NO_SUPPORTED_CANDIDATE,
+                     external_disposition=ExternalDisposition.EXCLUDED,
+                     reason_code="no_supported_candidate", blocking_reason="")
+
+
+def test_a_pre_f9r8d_stored_payload_still_loads_with_disposition_backfilled():
+    """A payload stored BEFORE F9-R8-D added `external_disposition`/
+    `blocking_stage`/`reason_code` (schema_version 4 covers both shapes --
+    the fields were purely additive) has no `external_disposition` key at
+    all. Without a backfill, the plain pydantic field default
+    (BILLABLE_AND_DEFENSIBLE/""/"") would then contradict a non-RECOMMENDED
+    `status`, and the F9-R9-E consistency validator above would reject every
+    such artifact on load -- a real regression the mandatory post-fix review
+    caught before it ever reached this handoff. The fields must instead be
+    BACKFILLED from `status` when genuinely absent from the input, not
+    defaulted and then judged."""
+    from app.contracts.claim_bundle import ExternalDisposition, LineStatus, ServiceLine
+
+    sl = ServiceLine.model_validate({
+        "sequence": 1, "system": "cpt", "code": "X", "units": 1,
+        "status": "HELD_POLICY_OR_DATA",
+    })
+    assert sl.external_disposition == ExternalDisposition.EXCLUDED
+    assert sl.blocking_stage == "submission"
+    assert sl.reason_code == "held_policy_or_data"
 
 
 def test_a_rule_excluded_resolved_line_surfaces_with_its_code_still_visible():

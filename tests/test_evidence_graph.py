@@ -1343,31 +1343,53 @@ class DependencyScopedPartialRelease(unittest.TestCase):
         """Procedure A has its OWN resolved, record-grounded diagnosis link and
         stays independently billable. Procedure B's diagnosis is unresolved --
         B alone is excluded, named by `medical_necessity_gate`'s own
-        `affected_fact_ids`, not the whole encounter. `diagnosis B` itself
-        stays a genuine open question (unresolved diagnoses keep their
-        existing, deliberately conservative blocking default -- see
-        `dx_non_material`), so the overall destination is PROVIDER_QUERY, not
-        AUTO_READY; the property under test is that PA/DXA1 are NOT entangled
-        into that hold."""
+        `affected_fact_ids`, not the whole encounter. `diagnosis B` itself has
+        NO documented relationship to anything else on the claim (no relation
+        names it at all) -- once B is excluded, its own ambiguity has no
+        further impact on PA/DXA1, so the overall destination is AUTO_READY,
+        with diagnosis B surfacing as a non-blocking provider query (issue #6
+        F9-R9-A, Codex's independent re-review of 6ff2761: materiality for a
+        diagnosis is graph-entanglement-based, like every other fact kind --
+        not blocking-by-default merely because its kind is DIAGNOSIS, which is
+        exactly what forced the whole encounter away from AUTO_READY for an
+        isolated diagnosis with zero relationship to the released pair)."""
         from claude_coder.models import (CandidateCode, CodingResult,
                                          RelationAssertion, RelationPredicate,
                                          RelationState, ResolutionMethod, ResolvedLine)
         from claude_coder import gates as gates_mod
         from claude_coder.autonomy import decide
 
+        # Distinct `anatomy` attributes keep eligibility's own duplicate-mention
+        # merge (`merge_duplicate_intents`) from clustering PA/PB (or DXA/DXB)
+        # into one shared claim-line intent -- these are genuinely SEPARATE
+        # documented events, not two mentions of the same one, and the test's
+        # premise (PA/DXA independently release while PB/DXB do not) depends
+        # on eligibility seeing them that way, exactly as a real note with two
+        # distinguishable procedures/diagnoses would.
         proc_a = _fact("PA", FactKind.PROCEDURE, "procedure A",
-                      spans=[_span("procedure A performed", span_id="sp-PA")])
+                      spans=[_span("procedure A performed", span_id="sp-PA")],
+                      attributes={"anatomy": "site-a"})
         proc_b = _fact("PB", FactKind.PROCEDURE, "procedure B",
-                      spans=[_span("procedure B performed", span_id="sp-PB")])
+                      spans=[_span("procedure B performed", span_id="sp-PB")],
+                      attributes={"anatomy": "site-b"})
         dx_a = _fact("DXA", FactKind.DIAGNOSIS, "diagnosis A",
-                    spans=[_span("diagnosis A documented", span_id="sp-DXA")])
+                    spans=[_span("diagnosis A documented", span_id="sp-DXA")],
+                    attributes={"anatomy": "site-a"})
         dx_b = _fact("DXB", FactKind.DIAGNOSIS, "diagnosis B",
-                    spans=[_span("diagnosis B documented", span_id="sp-DXB")])
+                    spans=[_span("diagnosis B documented", span_id="sp-DXB")],
+                    attributes={"anatomy": "site-b"})
         rel = RelationAssertion(
             subject_event_id="DXA", predicate=RelationPredicate.REASON_FOR,
             object_event_id="PA", state=RelationState.ASSERTED,
             evidence_span_ids=["sp-DXA", "sp-PA"], confidence=0.95,
             reconciliation_status="source_directional", reconciliation_evidence=["sp-PA"])
+        facts = [proc_a, proc_b, dx_a, dx_b]
+        intents = eligibility.evaluate(facts, [rel], "enc", "2026-03-14")
+        episodes, _ = eligibility.build_episodes(facts, [rel], "enc", "2026-03-14")
+        compiled = graph.build_graph(facts, [rel], intents, encounter_id="enc",
+                                     date_of_service="2026-03-14", episodes=episodes,
+                                     extraction_schema_version="v1",
+                                     relation_grammar_version="v1")
         lines = [
             ResolvedLine(fact=proc_a, chosen=CandidateCode("CPT_A", "cpt", "procedure A"),
                         method=ResolutionMethod.DETERMINISTIC),
@@ -1380,16 +1402,81 @@ class DependencyScopedPartialRelease(unittest.TestCase):
                         documentation_gap="which diagnosis variant?"),
         ]
         result = CodingResult(encounter_id="enc", date_of_service="2026-03-14",
-                              lines=lines, relations=[rel], graph=None)
+                              lines=lines, relations=[rel], graph=compiled,
+                              claim_line_intents=list(intents))
         result.gates = [gates_mod.medical_necessity_gate(result, source=None)]
         decide(result, source=None)
-        self.assertEqual(result.destination.value, "PROVIDER_QUERY", result.notes)
+        self.assertEqual(result.destination.value, "AUTO_READY", result.notes)
         self.assertEqual(sorted(ln.chosen.code for ln in result.billable_lines),
                          ["CPT_A", "DXA1"],
                          "procedure A has its own independent qualifying diagnosis "
                          "and must release; procedure B, lacking one, must not")
         self.assertIsNone(lines[0].excluded_reason)
         self.assertIsNotNone(lines[1].excluded_reason)
+        non_blocking = [r for r in result.routing if not r["blocking"]]
+        self.assertTrue(any(r["fact_id"] == "DXB" for r in non_blocking),
+                        "diagnosis B must still surface as an open question, "
+                        "just a non-blocking one")
+
+    def test_an_isolated_unresolved_diagnosis_never_blocks_an_unrelated_justified_pair(self):
+        """issue #6 F9-R9-A, Codex's independent re-review of 6ff2761: a
+        diagnosis with NO documented relationship to anything else on the
+        claim (no REASON_FOR, no shared episode) must not force the whole
+        encounter away from AUTO_READY just because its fact kind is
+        DIAGNOSIS. Reproduced directly before this fix: one resolved
+        procedure with its OWN resolved, grounded diagnosis link (ungoverned
+        -- no coverage policy at all, so the gate's only requirement is the
+        encounter-specific link, which IS present) plus one fully isolated
+        unresolved diagnosis still produced `PROVIDER_QUERY`, never
+        `AUTO_READY`, even though `billable_lines` already correctly held
+        only the justified pair."""
+        from claude_coder.models import (CandidateCode, CodingResult,
+                                         RelationAssertion, RelationPredicate,
+                                         RelationState, ResolutionMethod, ResolvedLine)
+        from claude_coder import gates as gates_mod
+        from claude_coder.autonomy import decide
+
+        proc_a = _fact("PA", FactKind.PROCEDURE, "procedure A",
+                      spans=[_span("procedure A performed", span_id="sp-PA")],
+                      attributes={"anatomy": "site-a"})
+        dx_a = _fact("DXA", FactKind.DIAGNOSIS, "diagnosis A",
+                    spans=[_span("diagnosis A documented", span_id="sp-DXA")],
+                    attributes={"anatomy": "site-a"})
+        dx_c = _fact("DXC", FactKind.DIAGNOSIS, "diagnosis C, isolated",
+                    spans=[_span("diagnosis C documented", span_id="sp-DXC")],
+                    attributes={"anatomy": "site-c"})
+        rel = RelationAssertion(
+            subject_event_id="DXA", predicate=RelationPredicate.REASON_FOR,
+            object_event_id="PA", state=RelationState.ASSERTED,
+            evidence_span_ids=["sp-DXA", "sp-PA"], confidence=0.95,
+            reconciliation_status="source_directional", reconciliation_evidence=["sp-PA"])
+        facts = [proc_a, dx_a, dx_c]
+        intents = eligibility.evaluate(facts, [rel], "enc", "2026-03-14")
+        episodes, _ = eligibility.build_episodes(facts, [rel], "enc", "2026-03-14")
+        compiled = graph.build_graph(facts, [rel], intents, encounter_id="enc",
+                                     date_of_service="2026-03-14", episodes=episodes,
+                                     extraction_schema_version="v1",
+                                     relation_grammar_version="v1")
+        lines = [
+            ResolvedLine(fact=proc_a, chosen=CandidateCode("CPT_A", "cpt", "procedure A"),
+                        method=ResolutionMethod.DETERMINISTIC),
+            ResolvedLine(fact=dx_a, chosen=CandidateCode("DXA1", "icd10", "diagnosis A"),
+                        method=ResolutionMethod.DETERMINISTIC),
+            ResolvedLine(fact=dx_c, chosen=None, method=ResolutionMethod.ABSTAINED,
+                        alternatives=[CandidateCode("DXC1", "icd10", "diagnosis C v1")],
+                        documentation_gap="which variant of diagnosis C?"),
+        ]
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14",
+                              lines=lines, relations=[rel], graph=compiled,
+                              claim_line_intents=list(intents))
+        result.gates = [gates_mod.medical_necessity_gate(result, source=None)]
+        decide(result, source=None)
+        self.assertEqual(result.destination.value, "AUTO_READY", result.notes)
+        self.assertEqual(sorted(ln.chosen.code for ln in result.billable_lines),
+                         ["CPT_A", "DXA1"])
+        non_blocking = [r for r in result.routing if not r["blocking"]]
+        self.assertTrue(any(r["fact_id"] == "DXC" for r in non_blocking),
+                        "diagnosis C must still surface, just non-blocking")
 
     def test_a_hard_gate_failure_still_blocks_the_whole_encounter(self):
         """Encounter-wide integrity failures are UNCHANGED by this round: a hard

@@ -72,7 +72,7 @@ import re
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 #: issue #6 item 9/F8-R5: the shape a real git commit SHA / OCI image digest
 #: takes -- used only to reject an obviously-fabricated self-attestation
@@ -424,12 +424,29 @@ class LineStatus(str, Enum):
     #: `ClaimBundle.candidate_lines` with an empty `candidates` tuple.
     NO_SUPPORTED_CANDIDATE = "NO_SUPPORTED_CANDIDATE"
     #: issue #6 F9-R8-D, Codex's independent re-review of 5ab4a13: `fact.
-    #: billable is False` (a disposition fact -- not performed during this
-    #: encounter) was previously just `continue`d out of `candidate_lines`
-    #: entirely, the exact silent-erasure defect F9-R7 item 4 closed for
-    #: HELD/CANDIDATES_* -- visible only in the untyped `audit.excluded_lines`
-    #: trace, if at all. Carried in `ClaimBundle.candidate_lines` now.
-    NONPERFORMED = "NONPERFORMED"
+    #: billable is False` (a disposition fact) was previously just `continue`d
+    #: out of `candidate_lines` entirely, the exact silent-erasure defect
+    #: F9-R7 item 4 closed for HELD/CANDIDATES_* -- visible only in the
+    #: untyped `audit.excluded_lines` trace, if at all. Carried in
+    #: `ClaimBundle.candidate_lines` now.
+    #:
+    #: issue #6 F9-R9-D, Codex's independent re-review of 6ff2761:
+    #: `fact.billable` collapses FOUR clinically distinct reasons (ICD-10-CM
+    #: outpatient coding rules, `ClinicalFact.billable`'s own precedence) into
+    #: one boolean -- a single generic `NONPERFORMED` status/reason text was
+    #: dishonest for three of the four (an uncertain/suspected diagnosis, a
+    #: family-history/non-patient condition, and a historical condition were
+    #: NOT "not performed", they are different real reasons). Split into the
+    #: four real signals `ClinicalFact.billable` itself already distinguishes,
+    #: in the SAME precedence order (`_nonbillable_status`), so the mapping
+    #: can never drift from what the property actually checks:
+    #: `not fact.certain` first, then `fact.experiencer != "patient"`, then
+    #: (for a DIAGNOSIS) `disposition is HISTORICAL`, then (everything else)
+    #: `disposition is not PERFORMED`.
+    UNCERTAIN_DIAGNOSIS = "UNCERTAIN_DIAGNOSIS"
+    NON_PATIENT_CONDITION = "NON_PATIENT_CONDITION"
+    HISTORICAL_CONDITION = "HISTORICAL_CONDITION"
+    NOT_PERFORMED = "NOT_PERFORMED"
     #: issue #6 F9-R8-D: a line that DID resolve (`line.chosen` set) but a
     #: later pipeline rule (NCCI bundling, global-package bundling, duplicate-
     #: mention dedup, pre-retrieval integrity hold) excluded it via `excluded_
@@ -448,7 +465,7 @@ class ExternalDisposition(str, Enum):
     FROM `LineStatus`, never replacing it. `LineStatus` stays the finer-
     grained internal signal `release_blockers()` and every internal consumer
     already keys off; this is the canonical, deliberately coarser value an
-    EXTERNAL consumer reads instead of having to know all 7 internal states.
+    EXTERNAL consumer reads instead of having to know every internal state.
     """
 
     #: LineStatus.RECOMMENDED.
@@ -457,7 +474,8 @@ class ExternalDisposition(str, Enum):
     #: fact (`CandidateLine.blocking_reason`).
     CANDIDATE_REQUIRING_FACT = "CANDIDATE_REQUIRING_FACT"
     #: Every other LineStatus: HELD_POLICY_OR_DATA, CANDIDATES_UNRESOLVED,
-    #: NO_SUPPORTED_CANDIDATE, NONPERFORMED, EXCLUDED_BY_RULE. Each names its
+    #: NO_SUPPORTED_CANDIDATE, UNCERTAIN_DIAGNOSIS, NON_PATIENT_CONDITION,
+    #: HISTORICAL_CONDITION, NOT_PERFORMED, EXCLUDED_BY_RULE. Each names its
     #: own `blocking_stage`/`reason_code` plus the exact producer reason text
     #: -- the finer internal subreason is carried, never discarded.
     EXCLUDED = "EXCLUDED"
@@ -475,9 +493,28 @@ _EXTERNAL_DISPOSITION_BY_STATUS: dict[LineStatus, tuple[ExternalDisposition, str
                                          "retrieval"),
     LineStatus.CANDIDATES_UNRESOLVED: (ExternalDisposition.EXCLUDED, "retrieval"),
     LineStatus.NO_SUPPORTED_CANDIDATE: (ExternalDisposition.EXCLUDED, "retrieval"),
-    LineStatus.NONPERFORMED: (ExternalDisposition.EXCLUDED, "eligibility"),
+    LineStatus.UNCERTAIN_DIAGNOSIS: (ExternalDisposition.EXCLUDED, "eligibility"),
+    LineStatus.NON_PATIENT_CONDITION: (ExternalDisposition.EXCLUDED, "eligibility"),
+    LineStatus.HISTORICAL_CONDITION: (ExternalDisposition.EXCLUDED, "eligibility"),
+    LineStatus.NOT_PERFORMED: (ExternalDisposition.EXCLUDED, "eligibility"),
     LineStatus.EXCLUDED_BY_RULE: (ExternalDisposition.EXCLUDED, "pipeline"),
 }
+
+
+def _nonbillable_status(fact: Any) -> LineStatus:
+    """WHICH of the four real reasons `ClinicalFact.billable` is False for
+    this fact -- in the EXACT SAME precedence `billable` itself checks (issue
+    #6 F9-R9-D, Codex's independent re-review of 6ff2761), so this can never
+    name a reason the property did not actually find. Only called for a fact
+    already known to be non-billable; never re-derives `billable` itself."""
+    if not getattr(fact, "certain", True):
+        return LineStatus.UNCERTAIN_DIAGNOSIS
+    if str(getattr(fact, "experiencer", "patient") or "patient") != "patient":
+        return LineStatus.NON_PATIENT_CONDITION
+    kind = getattr(fact, "kind", None)
+    if str(getattr(kind, "value", "")) == "diagnosis":
+        return LineStatus.HISTORICAL_CONDITION
+    return LineStatus.NOT_PERFORMED
 
 
 def external_disposition_of(status: LineStatus) -> tuple[ExternalDisposition, str, str]:
@@ -490,6 +527,58 @@ def external_disposition_of(status: LineStatus) -> tuple[ExternalDisposition, st
     disposition, stage = _EXTERNAL_DISPOSITION_BY_STATUS[status]
     reason_code = "" if status is LineStatus.RECOMMENDED else status.value.lower()
     return disposition, stage, reason_code
+
+
+def _backfill_external_disposition(data: Any) -> Any:
+    """A payload stored before F9-R8-D added `external_disposition`/
+    `blocking_stage`/`reason_code` (schema_version 4 covers BOTH shapes --
+    the field was purely additive, never a version bump) has no opinion about
+    them at all; they are simply ABSENT from the JSON, not explicitly wrong.
+    Backfilling from `status` before validation -- rather than letting them
+    fall to the plain field defaults -- means the after-validator below can
+    enforce a REAL invariant (an actively-supplied value must be consistent)
+    without also rejecting every pre-F9-R8-D stored artifact whose `status`
+    happens to be anything but RECOMMENDED. Only fills keys the payload never
+    mentioned; an explicit (even if wrong) value is left for the after-
+    validator to catch."""
+    if not isinstance(data, dict) or "status" not in data:
+        return data
+    missing = {"external_disposition", "blocking_stage", "reason_code"} - set(data)
+    if not missing:
+        return data
+    status = data["status"]
+    if isinstance(status, str):
+        try:
+            status = LineStatus(status)
+        except ValueError:
+            return data          # let pydantic's own field validation report it
+    disposition, stage, reason_code = external_disposition_of(status)
+    filled = dict(data)
+    if "external_disposition" in missing:
+        filled["external_disposition"] = disposition
+    if "blocking_stage" in missing:
+        filled["blocking_stage"] = stage
+    if "reason_code" in missing:
+        filled["reason_code"] = reason_code
+    return filled
+
+
+def _check_external_disposition_consistent(line: Any) -> None:
+    """issue #6 F9-R9-E, Codex's independent re-review of 6ff2761:
+    `external_disposition`/`blocking_stage`/`reason_code` were described as
+    computed from `status` but were independently writable fields with
+    defaults -- a line with `status=CANDIDATES_NEEDING_FACT` and
+    `external_disposition=EXCLUDED` constructed successfully, as did
+    mismatched reason/stage values. Shared by `_CodedLine` and `CandidateLine`
+    so the ONE real rule (the tuple must equal `external_disposition_of
+    (status)` exactly) can never be enforced two different, divergent ways."""
+    expected = external_disposition_of(line.status)
+    got = (line.external_disposition, line.blocking_stage, line.reason_code)
+    if got != expected:
+        raise ValueError(
+            f"external_disposition/blocking_stage/reason_code {got!r} do not "
+            f"match external_disposition_of(status={line.status!r}) = "
+            f"{expected!r}")
 
 
 # --------------------------------------------------------------------------
@@ -640,6 +729,16 @@ class _CodedLine(_Strict):
     #: derivable from `status`, never a separate guess.
     reason_code: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_disposition(cls, data: Any) -> Any:
+        return _backfill_external_disposition(data)
+
+    @model_validator(mode="after")
+    def _disposition_matches_status(self) -> "_CodedLine":
+        _check_external_disposition_consistent(self)
+        return self
+
 
 class DiagnosisLine(_CodedLine):
     """One ordered diagnosis. `sequence == 1` is the first-listed diagnosis;
@@ -717,6 +816,22 @@ class CandidateLine(_Strict):
     #: already states one (`documentation_gap`, `tie_record`, or `rationale`).
     blocking_reason: str = ""
     evidence: tuple[EvidenceReference, ...] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_disposition(cls, data: Any) -> Any:
+        return _backfill_external_disposition(data)
+
+    @model_validator(mode="after")
+    def _disposition_matches_status(self) -> "CandidateLine":
+        _check_external_disposition_consistent(self)
+        # A `CandidateLine`'s `status` is never RECOMMENDED (that lives on
+        # `_CodedLine`), so every instance is, by construction, an exclusion
+        # or an open question -- `blocking_reason` stating NOTHING would be
+        # exactly the erasure this contract exists to prevent.
+        if not self.blocking_reason.strip():
+            raise ValueError("CandidateLine.blocking_reason must not be empty")
+        return self
 
 
 class PatientIdentity(_Strict):
@@ -2191,9 +2306,31 @@ def bundle_from_coding_result(
         # visible only in the untyped `audit.excluded_lines` trace, if at all.
         # Each now gets its own named status instead of disappearing.
         if not getattr(fact, "billable", True):
-            status = LineStatus.NONPERFORMED
-            blocking_reason = ("documented but not identified as a performed "
-                              "service or diagnosis for this encounter")
+            # issue #6 F9-R9-D, Codex's independent re-review of 6ff2761: which
+            # of the four real reasons `ClinicalFact.billable` is False for
+            # THIS fact, not one generic "not performed" collapse -- an
+            # uncertain/suspected diagnosis, a family-history/non-patient
+            # condition, and a historical condition are not the same fact as
+            # a planned-but-not-yet-performed procedure, and the exact reason
+            # text now names which one this actually is.
+            status = _nonbillable_status(fact)
+            _billable_reasons = {
+                LineStatus.UNCERTAIN_DIAGNOSIS:
+                    "documented as suspected/probable/rule-out, not a confirmed "
+                    "diagnosis -- ICD-10-CM outpatient coding rules forbid coding "
+                    "an uncertain condition as confirmed",
+                LineStatus.NON_PATIENT_CONDITION:
+                    f"documented about {getattr(fact, 'experiencer', '') or 'someone'} "
+                    f"other than the patient (e.g. family history) -- not a "
+                    f"codeable condition of the patient's own encounter",
+                LineStatus.HISTORICAL_CONDITION:
+                    "documented as a historical condition, not a diagnosis "
+                    "established or addressed in this encounter",
+                LineStatus.NOT_PERFORMED:
+                    f"documented as {getattr(getattr(fact, 'disposition', None), 'value', '') or 'not performed'}, "
+                    f"not actually performed/dispensed during this encounter",
+            }
+            blocking_reason = _billable_reasons[status]
             candidates = tuple(_candidate_ref(c) for c in ([chosen] if chosen else [])
                                + alternatives)
         elif getattr(line, "excluded_reason", None):

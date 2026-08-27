@@ -351,6 +351,59 @@ class UmlsCandidatesAccessor(unittest.TestCase):
         self.assertEqual(merged.authority["umls_recall"]["matches"],
                          [{"cui": "C0000001"}])
 
+    def test_a_merged_candidate_still_gets_its_umls_reserved_lane_slot(self):
+        """issue #6 F9-R9-C, Codex's independent re-review of 6ff2761:
+        `_merge_candidate` keeps the higher-scored candidate's scalar
+        `.source`, so checking `c.source == "umls_recall"` alone misses a
+        merged candidate whenever retrieval outscored UMLS for it -- even
+        though its `authority["sources"]` still names `umls_recall`. Eight
+        higher-scored rivals plus a target proposed by BOTH retrieval (below
+        the rivals) and UMLS: reproduced directly before this fix, the merged
+        target's `.source` became "retrieval", so `_MIN_UMLS_SLOTS`'s reserved
+        lane never recognized it and it was crowded out before verification."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CandidateCode, ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder import resolution
+        from claude_coder.eligibility import (ClaimComponent, ClaimLineIntent,
+                                              EligibilityState, RetrievalRequest,
+                                              fact_snapshot_digest)
+
+        rivals = [CandidateCode(f"RIVAL{i}", "cpt", f"unrelated service {i}", 0.9,
+                                "retrieval") for i in range(8)]
+        target_rag = CandidateCode("TARGET", "cpt", "Synthetic target service", 0.2,
+                                   "retrieval", authority={"index": "rag-hybrid"})
+        target_umls = CandidateCode("TARGET", "cpt", "Synthetic target service", 0.3,
+                                    "umls_recall", authority={"matches": [{"cui": "C1"}]})
+
+        class DualSource(MockSource):
+            def retrieve(self, description, system, top_k=20):
+                return rivals + [target_rag] if system == "cpt" else []
+
+            def umls_candidates(self, terms, system, dos):
+                return [target_umls] if system == "cpt" else []
+
+        records = {(c.code, "cpt"): {"long_description": c.descriptor, "active": True}
+                  for c in rivals}
+        records[("TARGET", "cpt")] = {"long_description": "Synthetic target service",
+                                      "active": True}
+        src = DualSource(records=records)
+        text = "the synthetic target service was performed today"
+        fact = ClinicalFact(FactKind.PROCEDURE, text,
+                            evidence=[EvidenceSpan(text, anchored=True, span_id="s1")],
+                            confidence=0.99, fact_id="f1")
+        intent = ClaimLineIntent(
+            intent_id="t-f1", encounter_id="t", component=ClaimComponent.SERVICE,
+            clinical_event_ids=["f1"], fact_kind=fact.kind.value,
+            clinical_action=fact.description, attributes=dict(fact.attributes),
+            date_of_service=None, billing_entity_id=None, source_span_ids=[],
+            state=EligibilityState.ELIGIBLE_FOR_RETRIEVAL, fact_digest=fact_snapshot_digest(fact))
+        line = resolution.resolve(RetrievalRequest(intent, fact), src,
+                                  llm=lambda system, user: '{"candidates": []}')
+        target = next((c for c in line.alternatives if c.code == "TARGET"), None)
+        self.assertIsNotNone(target, "the merged candidate must still reach "
+                             "verification despite 8 higher-scored rivals")
+        self.assertEqual(set(target.authority["sources"]), {"retrieval", "umls_recall"})
+
 
 class SemanticClassMatchingRules(unittest.TestCase):
     """`AuthoritativeSource.semantic_class`'s rule interpreter, isolated from real

@@ -123,17 +123,26 @@ def test_materiality_from_authoritative_coverage():
     """Materiality of an unresolved diagnosis follows the necessity gate's OWN RESOLVED
     BINDING — the claim-line diagnosis that actually justified each service — not a second,
     parallel re-derivation from coverage membership (Codex F6-R3, adjacent instance):
-      (a) a procedure governed by NO policy (necessity unconfirmable) -> the
-          unresolved dx BLOCKS — this is the exostectomy/Haglund case (28118 is
-          ungoverned), where an unresolved principal indication must never release;
+      (a) a procedure governed by NO policy (necessity unconfirmable), documenting a
+          SECOND, unresolved indication for that SAME procedure alongside the
+          resolved one that already satisfies it -> the unresolved dx BLOCKS — this
+          is the exostectomy/Haglund case (28118 is ungoverned), where an unresolved
+          documented indication for the procedure must never silently drop out of
+          the claim's open items just because a DIFFERENT indication already
+          sufficed (issue #6 F9-R9-A, Codex's independent re-review of 6ff2761:
+          materiality is graph-entanglement-based, not diagnosis-kind-based, so this
+          case's fixture must actually DOCUMENT the dependency it exercises rather
+          than relying on every diagnosis blocking by default);
       (b) a governed procedure whose necessity the gate RESOLVED (encounter linkage AND a
-          policy-qualifying diagnosis) -> an unresolved EXTRA dx is non-material -> AUTO_READY;
+          policy-qualifying diagnosis) -> an unresolved EXTRA dx, with NO relationship to
+          anything on the claim, is non-material -> AUTO_READY;
       (c) a governed procedure with NO resolved qualifying dx -> BLOCKS;
-      (d) no source at all -> fail-closed;
+      (d) no source at all (the necessity gate never even runs) -> fail-closed;
       (e) a governed procedure whose covered dx is merely PRESENT on the claim, with no
           encounter linkage -> BLOCKS (coverage membership is not a justification)."""
     from claude_coder.models import GateResult, Verdict
     from claude_coder.autonomy import decide
+    from claude_coder import eligibility, graph as graph_mod
     def proc(code, fid="P"):
         return ResolvedLine(fact=ClinicalFact(FactKind.PROCEDURE, "p", evidence=[EvidenceSpan("p")],
                             disposition=Disposition.PERFORMED, confidence=0.99, fact_id=fid),
@@ -160,14 +169,30 @@ def test_materiality_from_authoritative_coverage():
                                  assertion_origins=["origin-a"])
 
     def run(lines, relations=(), source=src):
+        # A REAL graph, exactly as production builds one -- `autonomy.decide`'s
+        # dependency closure (issue #6 F9-R8-A/F9-R9-A) reads `result.graph.
+        # binding_for`, so a fixture that never builds one can never exercise
+        # (or correctly NOT exercise) entanglement at all.
+        facts = [ln.fact for ln in lines]
+        intents = eligibility.evaluate(facts, list(relations), "e", "2026-01-05")
+        episodes, _ = eligibility.build_episodes(facts, list(relations), "e", "2026-01-05")
+        compiled = graph_mod.build_graph(facts, list(relations), intents,
+                                         encounter_id="e", date_of_service="2026-01-05",
+                                         episodes=episodes, extraction_schema_version="v1",
+                                         relation_grammar_version="v1")
         # the REAL gate writes the binding autonomy then reads -- one authority, not two
         r = CodingResult("e", "2026-01-05", lines=lines, gates=list(gates_ok),
-                         relations=list(relations))
+                         relations=list(relations), graph=compiled,
+                         claim_line_intents=list(intents))
         if source is not None:
             r.gates.append(gates.medical_necessity_gate(r, source))
         decide(r, source=source)
         return r.verdict
-    assert run([proc("UU01"), dx("DQ01"), dx(None)], [_link("DDQ01")]) \
+    # (a): dx(None) ("Dx") is a SECOND documented REASON_FOR indication for the
+    # SAME ungoverned procedure UU01, alongside the already-resolved DQ01 --
+    # entangled with a still-billable procedure, so it stays blocking even
+    # though UU01's necessity is independently satisfied by DQ01 alone.
+    assert run([proc("UU01"), dx("DQ01"), dx(None)], [_link("DDQ01"), _link("Dx")]) \
         is Verdict.REVIEW_REQUIRED                                               # (a)
     assert run([proc("GG01"), dx("DQ01"), dx(None)], [_link("DDQ01")]) \
         is Verdict.AUTO_READY                                                    # (b)

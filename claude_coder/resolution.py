@@ -1343,8 +1343,27 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     # issue #6 F9-R7-C: split off UMLS-sourced candidates for their OWN reserved
     # lane (see `_MIN_UMLS_SLOTS`) -- they must not compete on raw score against
     # embedding-similarity-ranked retrieval.
-    umls_seeds = [c for c in retrieved_all if getattr(c, "source", "") == "umls_recall"]
-    retrieved = [c for c in retrieved_all if getattr(c, "source", "") != "umls_recall"]
+    #
+    # issue #6 F9-R9-C, Codex's independent re-review of 6ff2761: `_merge_candidate`
+    # (F9-R8-C) keeps the HIGHER-scored candidate's scalar `.source` when a code is
+    # proposed by both retrieval and UMLS -- checking `.source == "umls_recall"`
+    # alone therefore misses a merged candidate whenever retrieval outscored UMLS
+    # for it, even though its `authority["sources"]` still names `umls_recall`.
+    # Reproduced directly: 8 higher-scored rivals plus a target proposed by both
+    # retrieval (lower score than the rivals) and UMLS -- the merged target's
+    # `.source` became "retrieval", so it got no reserved-lane protection and was
+    # crowded out before verification, the exact defect `_MIN_UMLS_SLOTS` exists
+    # to prevent. `_candidate_sources` reads the REAL merged provenance
+    # (`_merge_candidate`'s own `authority["sources"]` field) instead of the
+    # single scalar, so admission can never disagree with what the lineage
+    # itself already states.
+    def _candidate_sources(c: CandidateCode) -> set[str]:
+        sources = {str(getattr(c, "source", "") or "")} if getattr(c, "source", "") else set()
+        sources.update(str(s) for s in (getattr(c, "authority", None) or {}).get("sources", ()) if s)
+        return sources
+
+    umls_seeds = [c for c in retrieved_all if "umls_recall" in _candidate_sources(c)]
+    retrieved = [c for c in retrieved_all if "umls_recall" not in _candidate_sources(c)]
     umls_cap = min(len(umls_seeds), _MIN_UMLS_SLOTS)
     # Fix4: reserve a floor of shortlist slots for authoritative RETRIEVAL so LLM
     # memory proposals cannot crowd it out. Keep up to (VERIFY_K - floor) proposals
