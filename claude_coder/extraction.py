@@ -590,6 +590,17 @@ def _participant_index(billing_context: dict[str, Any] | None) -> dict[str, dict
     return idx
 
 
+#: A malformed-shape response (invalid JSON, a fact missing a required field, an
+#: attribute_evidence entry that isn't the object the prompt specifies, ...) is a
+#: single bad draw from the model, not a deterministic property of the note -- the
+#: SAME class of failure the vision extraction call already retries against (see
+#: app/ingestion/pdf_parser.py's per-attempt JSON/shape validation loop, added after
+#: a malformed-but-unretried response reached the pipeline live). Retrying here closes
+#: the one place that class of failure could still turn a single bad draw into a
+#: whole encounter held at pre_retrieval_integrity instead of a normal coded result.
+_EXTRACTION_MAX_ATTEMPTS = 3
+
+
 def extract_note(note_text: str, llm: LLMFn | None = None,
                  billing_context: dict[str, Any] | None = None, *,
                  run_id: str | None = None,
@@ -600,7 +611,26 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
     participants = _participant_index(billing_context)
     user = json.dumps({"encounter_context": billing_context or {}, "note": note_text},
                       sort_keys=True)
-    raw_response = llm(_SYSTEM, user)
+    for attempt in range(1, _EXTRACTION_MAX_ATTEMPTS + 1):
+        raw_response = llm(_SYSTEM, user)
+        try:
+            return _parse_extraction_response(
+                raw_response, participants, billing_context, note_text,
+                run_id=run_id, model_profile=model_profile)
+        except ExtractionSchemaError as exc:
+            if attempt == _EXTRACTION_MAX_ATTEMPTS:
+                raise
+            from app.core.logger import get_logger
+            get_logger(__name__).warning(
+                f"  Extraction attempt {attempt}: {exc} — retrying")
+    raise AssertionError("unreachable")  # loop always returns or raises above
+
+
+def _parse_extraction_response(
+    raw_response: str, participants: dict[str, Any],
+    billing_context: dict[str, Any] | None, note_text: str, *,
+    run_id: str | None, model_profile: dict[str, Any] | None,
+) -> ExtractionResult:
     raw = _strict_extract_json(raw_response)
     seen_ids: set[str] = set()
     # R1: strict top-level schema -- 'facts' must be a present array (missing/null/wrong-type

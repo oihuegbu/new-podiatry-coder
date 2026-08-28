@@ -61,6 +61,42 @@ def test_malformed_relation_raises_not_silently_dropped():
         extract_note("note", _stub(payload))
 
 
+# ------------------------------------------------------------ F9-R11-E malformed-draw retry
+# A malformed-shape response is a single bad draw from the model, not a deterministic
+# property of the note or the prompt (the same premise the vision extraction call's own
+# retry loop already acts on) -- so extract_note must retry a schema failure instead of
+# turning one bad draw into an encounter-wide SYSTEM_HOLD. Verified live: an operative-note
+# run's extraction batch returned a fact whose 'attribute_evidence' was not an object,
+# holding the whole encounter at pre_retrieval_integrity with zero diagnosis/service lines.
+def _sequenced_llm(*payloads):
+    """One entry per call, in order -- proves retry behavior, not just single-shot shape."""
+    calls = iter(payloads)
+    call_count = []
+
+    def _llm(system, user):
+        call_count.append(1)
+        payload = next(calls)
+        return payload if isinstance(payload, str) else json.dumps(payload)
+
+    _llm.call_count = call_count
+    return _llm
+
+
+def test_a_malformed_draw_is_retried_and_recovers_on_a_later_attempt():
+    good = {"facts": [_fact()]}
+    llm = _sequenced_llm("not json at all", good)
+    result = extract_note("note", llm)
+    assert len(result.facts) == 1 and result.facts[0].fact_id == "F1"
+    assert len(llm.call_count) == 2
+
+
+def test_a_persistently_malformed_draw_still_raises_after_bounded_retries():
+    llm = _sequenced_llm("bad 1", "bad 2", "bad 3")
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", llm)
+    assert len(llm.call_count) == 3        # bounded -- never retried a 4th time
+
+
 # ---------------------------------------------------------------- F6-R2 actor from context
 def _person_ctx():
     # actor-1 is a person, context-designated performer, affiliated to org-1 (an organization)
