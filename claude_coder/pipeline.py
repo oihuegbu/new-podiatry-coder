@@ -870,17 +870,31 @@ def code_encounter(
     # gets a genuinely pristine baseline, not one that already reflects this
     # function's own one-time pre-escalation pass a few lines down.
     _pre_claim_set_baseline = _snapshot_pre_claim_set_state(result)
-    # Claim-level modifiers (E/M-25, distinct-service 59/X) once all lines exist —
-    # this records which PTP pairs a justified modifier bypasses.
-    modifier_engine.assign_claim(result, source, source_reconciliation)
-    # Mechanic 3 — resolve NCCI PTP conflicts by DEMOTING the bundled component
-    # (not blocking the claim) whenever no distinct-service modifier is justified.
-    apply_ncci_bundling(result, source)
-    # An ancillary procedure that ESCALATED but is an NCCI 'always-bundled' component
-    # of a billed primary is INTEGRAL — decide it (bundle), don't send it to review.
-    apply_integral_bundling(result, source)
-
-    apply_global_package(result, source)
+    # Set BEFORE the first reconciliation call below (not only after the
+    # escalation block, as before F9-R11-D): `gates.run_gates` reads
+    # `result.source_reconciliation` directly, and a gate evaluated before
+    # this was ever assigned would see the CodingResult default (None),
+    # reporting "no source document accompanied this encounter" even when
+    # one genuinely did. Re-assigned again after escalation below if that
+    # block updates the local `source_reconciliation` variable.
+    result.source_reconciliation = source_reconciliation
+    # Same reason, same fix -- `source_evidence_gate` reads BOTH of these
+    # attributes together to decide its outcome, so both must be set before
+    # the first gate evaluation, not only `source_reconciliation`.
+    result.document_version = document_version
+    # issue #6 F9-R11-D, Codex's independent re-review of 42f2b45: the
+    # claim-set mechanics (modifiers/NCCI/integral/global-package) and the
+    # reconciliation loop they feed used to run AFTER the escalation's
+    # `billed_span_ids` was already computed from a ONE-TIME pre-pass -- so
+    # a line that becomes billable only THROUGH reconciliation (F9-R11-B: an
+    # NCCI component returning once its primary is dependency-pruned) had
+    # its evidence page never targeted for independent verification, even
+    # with a reader available. Reconciliation now runs HERE, establishing
+    # the dependency-pruned PROVISIONAL final claim BEFORE any page is
+    # chosen, so escalation targets what will actually be billed.
+    _reconcile_claim_after_pruning(result, source, note_text, modifier_engine,
+                                   source_reconciliation, pre_retrieval_gates,
+                                   readings, baseline=_pre_claim_set_baseline)
     # ---- Escalation to a PAID independent read, scoped to where it matters -----------
     # Only now is it known WHICH quotations justify a released line, so only now can the
     # second read be aimed. A page is re-read only when (a) a quotation behind a billed
@@ -888,7 +902,6 @@ def code_encounter(
     # low-yield page. A document whose text layer covers it therefore costs nothing
     # extra; a scanned one costs a read of the few pages the claim rests on, never a
     # second read of the whole note.
-    result.document_version = document_version
     if (source_evidence is not None and source_reader is not None
             and source_reconciliation is not None):
         from app.contracts.source_evidence import pages_needing_independent_read
@@ -932,13 +945,21 @@ def code_encounter(
                         return _system_hold_result(
                             encounter_id, date_of_service,
                             "source_evidence_audit_persistence", exc, source)
+                    # issue #6 F9-R11-D: the newly-incorporated page content can
+                    # change anything `_reconcile_claim_after_pruning` itself
+                    # depends on (an axis now CLAIM-AUTHORIZED, a relation now
+                    # reconciled) -- re-run it once more, from the SAME
+                    # pristine baseline, so the claim-set mechanics/gates/
+                    # decide that follow see the UPDATED reconciliation, never
+                    # the pre-escalation one. Set on `result` FIRST, same
+                    # reason as the first call above: `gates.run_gates` reads
+                    # the attribute, not this local variable.
+                    result.source_reconciliation = source_reconciliation
+                    _reconcile_claim_after_pruning(
+                        result, source, note_text, modifier_engine,
+                        source_reconciliation, pre_retrieval_gates, readings,
+                        baseline=_pre_claim_set_baseline)
     result.source_reconciliation = source_reconciliation
-    # issue #6 F9-R9-B: re-derives modifiers/NCCI/integral/global-package/gates
-    # from the CURRENT surviving line set, repeating until `decide`'s graph/
-    # necessity pruning stops changing it -- see the function's own docstring.
-    _reconcile_claim_after_pruning(result, source, note_text, modifier_engine,
-                                   source_reconciliation, pre_retrieval_gates,
-                                   readings, baseline=_pre_claim_set_baseline)
     # Actionable documentation guidance for whatever could not be coded confidently.
     from . import recommendations as _recs
     result.recommendations = _recs.build_recommendations(result)

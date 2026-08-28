@@ -863,6 +863,16 @@ class ClaimAfterPruningReconciliationTest(unittest.TestCase):
         self.assertIsNotNone(b.excluded_reason,
                              "sanity: B is demoted by the unresolved NCCI conflict "
                              "before any pruning")
+        # issue #6 F9-R11-D, Codex's independent re-review of 42f2b45: this is
+        # the exact set `code_encounter` used to compute `billed_span_ids`
+        # from, BEFORE reconciliation ran -- B's evidence span is missing,
+        # so an independent reader would never be asked to verify B's page
+        # even though B ends up billable. `code_encounter` now runs
+        # reconciliation BEFORE computing this set.
+        pre_reconciliation_span_ids = {s.span_id for ln in result.billable_lines
+                                       for s in (ln.fact.evidence or []) if s.span_id}
+        self.assertNotIn("s-B", pre_reconciliation_span_ids,
+                         "sanity: B's span is not yet targetable before reconciliation")
 
         _reconcile_claim_after_pruning(result, src, note_text, eng, None, [], None,
                                        baseline=baseline)
@@ -873,6 +883,12 @@ class ClaimAfterPruningReconciliationTest(unittest.TestCase):
                           "B's only NCCI partner is gone -- it must return")
         self.assertEqual(sorted(ln.chosen.code for ln in result.billable_lines),
                          ["B_CODE", "DXA_CODE", "DXB_CODE"])
+        post_reconciliation_span_ids = {s.span_id for ln in result.billable_lines
+                                        for s in (ln.fact.evidence or []) if s.span_id}
+        self.assertIn("s-B", post_reconciliation_span_ids,
+                      "B's span must be targetable for independent verification "
+                      "once reconciliation has run -- this is exactly what "
+                      "escalation page-targeting must see")
 
 
 class GlobalPackageTest(unittest.TestCase):
