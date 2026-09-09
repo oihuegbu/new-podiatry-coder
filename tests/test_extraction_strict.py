@@ -658,3 +658,207 @@ def test_inherited_scope_without_a_parent_fact_id_is_malformed():
         extract_note("note", _stub({"facts": [_fact(
             attribute_evidence={"laterality": [
                 {"text": "right side", "scope": "inherited"}]})]}))
+
+
+# ------------------------------------------------- F9-R11-F strict wire extraction contract
+# `attributes`/`attribute_evidence`/`axis_confidence` are dynamic-key maps that neither
+# provider's structured-output grammar can express (`additionalProperties` must be
+# explicitly `false` on every object -- confirmed live: a bare `{"type": "object"}` 400s,
+# and closing it with no declared properties is accepted but then the grammar can ONLY ever
+# produce `{}`, discarding whatever the model was asked to put there). The wire contract
+# below represents each dynamic map as a closed array of named entries instead;
+# `wire_to_legacy_extraction_json` converts it back to the exact legacy dict shape every
+# OTHER test in this file exercises directly via `_stub`/`_fact` -- this section tests ONLY
+# the wire<->legacy boundary and the two production callers, never the domain model.
+from claude_coder.extraction import (        # noqa: E402
+    EXTRACTION_WIRE_SCHEMA, wire_to_legacy_extraction_json, _default_llm,
+    default_second_extract_llm,
+)
+import app.core.llm_client as _llm_client
+import app.core.config as _llm_config
+
+
+def _wire_fact(**over):
+    f = {"fact_id": "F1", "kind": "procedure", "description": "svc",
+         "attributes": {"strings": [], "numbers": [], "booleans": []},
+         "attribute_evidence": [], "disposition": "performed_today",
+         "negated": False, "certainty": "confirmed", "experiencer": "patient",
+         "evidence": ["svc performed"], "confidence": 0.99,
+         "axis_confidence": [{"name": a, "confidence": 0.99} for a in
+                             ("occurrence", "action", "evidence", "temporal",
+                              "performer", "relationship")]}
+    f.update(over)
+    return f
+
+
+def _wire_payload(facts, relations=None):
+    return {"schema_version": "extraction-wire-v1", "facts": facts,
+           "relations": relations or []}
+
+
+def test_both_extraction_callers_request_the_strict_wire_schema():
+    """Primary AND second-reading extraction must both be grammar-constrained -- an
+    unwired caller is exactly the production gap F9-R11-F reported (only
+    json_mode=True, no json_schema, on either)."""
+    seen = {}
+    orig = _llm_client.chat_completion
+    _llm_client.chat_completion = lambda s, u, **kw: (
+        seen.update(kw), (json.dumps(_wire_payload([])), {}))[1]
+    try:
+        _default_llm("sys", "user")
+        assert seen.get("json_schema") == EXTRACTION_WIRE_SCHEMA
+
+        seen.clear()
+        orig_provider, orig_openai_model = (
+            _llm_config.LLM_PROVIDER, _llm_config.OPENAI_MODEL)
+        _llm_config.LLM_PROVIDER = "claude"
+        _llm_config.OPENAI_MODEL = "gpt-x"
+        try:
+            default_second_extract_llm("sys", "user")
+        finally:
+            _llm_config.LLM_PROVIDER, _llm_config.OPENAI_MODEL = (
+                orig_provider, orig_openai_model)
+        assert seen.get("json_schema") == EXTRACTION_WIRE_SCHEMA
+    finally:
+        _llm_client.chat_completion = orig
+
+
+def test_wire_adapter_flattens_typed_attribute_arrays():
+    wire = {"strings": [{"name": "laterality", "value": "right"}],
+           "numbers": [{"name": "depth_mm", "value": 3}],
+           "booleans": [{"name": "new_patient", "value": True}]}
+    legacy = wire_to_legacy_extraction_json(
+        _wire_payload([_wire_fact(attributes=wire)]))["facts"][0]
+    assert legacy["attributes"] == {
+        "laterality": "right", "depth_mm": 3, "new_patient": True}
+
+
+def test_wire_adapter_rejects_duplicate_name_across_type_arrays():
+    wire = {"strings": [{"name": "count", "value": "two"}],
+           "numbers": [{"name": "count", "value": 2}], "booleans": []}
+    with pytest.raises(ExtractionSchemaError):
+        wire_to_legacy_extraction_json(_wire_payload([_wire_fact(attributes=wire)]))
+
+
+def test_wire_adapter_rejects_duplicate_name_within_one_type_array():
+    wire = {"strings": [{"name": "anatomy", "value": "heel"},
+                        {"name": "anatomy", "value": "ankle"}],
+           "numbers": [], "booleans": []}
+    with pytest.raises(ExtractionSchemaError):
+        wire_to_legacy_extraction_json(_wire_payload([_wire_fact(attributes=wire)]))
+
+
+def test_wire_adapter_rejects_duplicate_axis_confidence_name():
+    axes = [{"name": "occurrence", "confidence": 0.9},
+           {"name": "occurrence", "confidence": 0.5}]
+    with pytest.raises(ExtractionSchemaError):
+        wire_to_legacy_extraction_json(_wire_payload([_wire_fact(axis_confidence=axes)]))
+
+
+def test_wire_adapter_rejects_blank_attribute_evidence_name():
+    ev = [{"name": "  ", "text": "quote", "scope": "local", "parent_fact_id": "",
+          "assertion_state": "asserted", "value": "right"}]
+    with pytest.raises(ExtractionSchemaError):
+        wire_to_legacy_extraction_json(_wire_payload([_wire_fact(attribute_evidence=ev)]))
+
+
+def test_wire_adapter_groups_attribute_evidence_by_name_not_rejected_as_duplicate():
+    """Unlike attributes/axis_confidence, several attribute_evidence entries naming the
+    SAME axis are expected (several quotes bearing on one value) -- must group, never
+    reject as a duplicate."""
+    ev = [{"name": "laterality", "text": "right heel", "scope": "local",
+          "parent_fact_id": "", "assertion_state": "asserted", "value": "right"},
+         {"name": "laterality", "text": "right-sided procedure", "scope": "local",
+          "parent_fact_id": "", "assertion_state": "asserted", "value": "right"}]
+    legacy = wire_to_legacy_extraction_json(
+        _wire_payload([_wire_fact(attribute_evidence=ev)]))["facts"][0]
+    assert len(legacy["attribute_evidence"]["laterality"]) == 2
+
+
+def test_wire_inherited_evidence_survives_the_existing_relation_validation_path():
+    """End-to-end proof through the UNCHANGED domain model: a wire response with an
+    inherited-scope attribute_evidence entry, backed by a real part_of relation, must
+    resolve through extract_note exactly like the legacy shape already does (see
+    test_an_inherited_value_resolves_against_its_part_of_relation above)."""
+    parent = _wire_fact(fact_id="F1", attributes={
+        "strings": [{"name": "laterality", "value": "right"}],
+        "numbers": [], "booleans": []},
+        attribute_evidence=[{"name": "laterality", "text": "right heel",
+                             "scope": "local", "parent_fact_id": "",
+                             "assertion_state": "asserted", "value": "right"}])
+    child = _wire_fact(fact_id="F2", description="component",
+                       attribute_evidence=[{"name": "laterality",
+                                            "text": "the component step",
+                                            "scope": "inherited",
+                                            "parent_fact_id": "F1",
+                                            "assertion_state": "asserted",
+                                            "value": "right"}])
+    relations = [{"subject_event_id": "F2", "predicate": "part_of",
+                 "object_event_id": "F1", "state": "asserted",
+                 "evidence_fact_ids": [], "confidence": 0.9}]
+    legacy = wire_to_legacy_extraction_json(_wire_payload([parent, child], relations))
+    result = extract_note("note", _stub(legacy))
+    child_fact = next(f for f in result.facts if f.fact_id == "F2")
+    assert child_fact.attribute_evidence["laterality"][0].scope == "inherited"
+    assert child_fact.attribute_evidence["laterality"][0].parent_fact_id == "F1"
+
+
+def test_second_reading_and_primary_produce_identical_legacy_shape_from_equivalent_wire():
+    """Parity: both callers share the SAME adapter, so an equivalent wire response
+    converts to an identical legacy fact regardless of which caller produced it."""
+    wire = _wire_payload([_wire_fact(attributes={
+        "strings": [{"name": "laterality", "value": "right"}],
+        "numbers": [], "booleans": []})])
+    orig = _llm_client.chat_completion
+    _llm_client.chat_completion = lambda s, u, **kw: (json.dumps(wire), {})
+    try:
+        primary_out = _default_llm("sys", "user")
+        orig_provider, orig_openai_model = (
+            _llm_config.LLM_PROVIDER, _llm_config.OPENAI_MODEL)
+        _llm_config.LLM_PROVIDER = "claude"
+        _llm_config.OPENAI_MODEL = "gpt-x"
+        try:
+            second_out = default_second_extract_llm("sys", "user")
+        finally:
+            _llm_config.LLM_PROVIDER, _llm_config.OPENAI_MODEL = (
+                orig_provider, orig_openai_model)
+    finally:
+        _llm_client.chat_completion = orig
+    assert json.loads(primary_out) == json.loads(second_out)
+
+
+def test_wire_level_malformation_retries_through_extract_note_and_recovers():
+    """A wire-adapter rejection (duplicate name across arrays -- something the
+    provider's grammar itself cannot forbid) must retry through extract_note's
+    bounded loop exactly like a parser-level rejection, not escape it (the `llm(...)`
+    call is now INSIDE the try/except for exactly this reason)."""
+    bad = _wire_payload([_wire_fact(attributes={
+        "strings": [{"name": "count", "value": "two"}],
+        "numbers": [{"name": "count", "value": 2}], "booleans": []})])
+    good = _wire_payload([_wire_fact()])
+    calls = []
+
+    def _llm(system, user):
+        calls.append(1)
+        wire = bad if len(calls) < 2 else good
+        return json.dumps(wire_to_legacy_extraction_json(wire))
+
+    result = extract_note("note", _llm)
+    assert len(result.facts) == 1 and len(calls) == 2
+
+
+def test_wire_level_malformation_persists_still_bounds_and_raises():
+    """Never an empty silent success -- persistent wire malformation raises after
+    exactly _EXTRACTION_MAX_ATTEMPTS, matching F9-R11-E's own bound."""
+    bad = _wire_payload([_wire_fact(attributes={
+        "strings": [{"name": "count", "value": "two"}],
+        "numbers": [{"name": "count", "value": 2}], "booleans": []})])
+    calls = []
+
+    def _llm(system, user):
+        calls.append(1)
+        return json.dumps(wire_to_legacy_extraction_json(bad))
+
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _llm)
+    assert len(calls) == 3

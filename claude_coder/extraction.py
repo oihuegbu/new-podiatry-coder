@@ -44,17 +44,46 @@ For each fact return an object with:
         For performed services also capture actor participation using ONLY ids supplied
         in encounter_context: performer_id, performer_function, organization_id, and
         billing_entity_id. Never invent an id or equate a person with an organization.
-  - "attribute_evidence": for EVERY key you emit in "attributes", one or more
-        {"text": <verbatim quote>, "scope": "local"|"inherited", "parent_fact_id": <id>,
-        "assertion_state": "asserted"|"negated"|"uncertain", "value": <the exact
-        value this quote is about>} entries proving that specific value — the SAME
-        per-endpoint quoting discipline you already use for directional relations
-        below, applied to attributes instead. "value" MUST equal, verbatim, one of
-        the values you wrote for this key in "attributes" (e.g. if "attributes"
-        says "laterality": "right", an entry proving that says "value": "right") —
+        For an evaluation_management fact, also give the medical-decision-making
+        elements when documented: "problems", "data", "risk" each as one of
+        straightforward | low | moderate | high, plus "new_patient" (true/false),
+        "setting" (office | emergency | inpatient | observation | nursing | home —
+        from the place of service / note header, default office for a clinic),
+        "total_time_minutes" if the note records visit time, and
+        "separately_identifiable" (true only if the note documents E/M work
+        significant and separate from any procedure done the same day).
+        Emit each attribute as ONE entry in exactly one of three arrays, chosen
+        by the value's own natural type — never coerce a value into the wrong
+        array to make it fit, and never emit the same axis name in more than
+        one array (or twice in the same array):
+          "strings": {"name": <axis>, "value": <string>} — anatomy, laterality,
+              product/material, drug name, approach, contrast,
+              technical_vs_professional, performer_id, performer_function,
+              organization_id, billing_entity_id, problems, data, risk,
+              setting, and any other text-valued axis.
+          "numbers": {"name": <axis>, "value": <number>} — depth, area/size,
+              count/quantity, dose, wasted amount, total_time_minutes.
+          "booleans": {"name": <axis>, "value": true|false} — new_patient,
+              separately_identifiable.
+  - "attribute_evidence": a FLAT array — one entry per verbatim quote proving
+        one attribute value, not grouped by axis. Each entry is {"name": <the
+        exact axis name from "attributes" this quote is about>, "text":
+        <verbatim quote>, "scope": "local"|"inherited", "parent_fact_id": <id,
+        or "" when scope is "local">, "assertion_state":
+        "asserted"|"negated"|"uncertain", "value": <the exact value this quote
+        is about, always written as a string even when the attribute itself is
+        numeric or boolean — e.g. "3" for a numeric depth of 3, "true" for a
+        boolean new_patient>} — every axis name you emit anywhere in
+        "attributes" (any of the three arrays) needs at least one entry here
+        naming it; an axis may have several entries when several quotes bear
+        on it — the SAME per-endpoint quoting discipline you already use for
+        directional relations below, applied to attributes instead. "value"
+        MUST equal, verbatim, one of the values you wrote for this axis in
+        "attributes" (e.g. if "attributes" says laterality: "right", an entry
+        proving that says "value": "right") —
         never a description of the quote, never a different value than the one it
         is cited for; if you also have evidence bearing on a DIFFERENT candidate
-        value for the same key (for example the note first says "left" then
+        value for the same axis (for example the note first says "left" then
         corrects to "right"), that is a SEPARATE entry with its own "value". A
         quote proving a value the note ultimately RULES OUT still names that
         ruled-out value in "value", paired with "assertion_state": "negated" — a
@@ -79,17 +108,9 @@ For each fact return an object with:
         parent as object_event_id (this fact IS part_of the parent — never the
         reverse, and never same_episode_as, which does not establish that two events
         share the same laterality/anatomy/product/count/approach or any other
-        code-changing attribute; omit "parent_fact_id" for "local" scope). Never mark
-        a value "inherited" without a real, correctly-directed part_of relation behind
-        it, and never fabricate a quote a value is not literally present in.
-        For an evaluation_management fact, also give the medical-decision-making
-        elements when documented: "problems", "data", "risk" each as one of
-        straightforward | low | moderate | high, plus "new_patient" (true/false),
-        "setting" (office | emergency | inpatient | observation | nursing | home —
-        from the place of service / note header, default office for a clinic),
-        "total_time_minutes" if the note records visit time, and
-        "separately_identifiable" (true only if the note documents E/M work
-        significant and separate from any procedure done the same day).
+        code-changing attribute; use "" for "parent_fact_id" on "local" scope). Never
+        mark a value "inherited" without a real, correctly-directed part_of relation
+        behind it, and never fabricate a quote a value is not literally present in.
   - "disposition": performed_today | ordered | planned | discussed |
         historical | unclear  — ONLY performed_today / dispensed work is billable.
         For a PROCEDURE/supply/drug this is whether it was actually done today.
@@ -109,10 +130,11 @@ For each fact return an object with:
   - "evidence": a list of VERBATIM quotes copied exactly from the note that
         support this fact (never paraphrased)
   - "confidence": 0.0-1.0, your certainty this event is documented as stated
-  - "axis_confidence": confidence for each required extraction axis. Always emit
-        occurrence, action, evidence, temporal; for diagnoses also assertion and
-        experiencer; for services also performer and relationship. Missing/unclear is
-        0.0, never omitted or averaged away.
+  - "axis_confidence": a FLAT array of {"name": <axis>, "confidence": 0.0-1.0}
+        entries, one per required extraction axis. Always emit occurrence, action,
+        evidence, temporal; for diagnoses also assertion and experiencer; for
+        services also performer and relationship. Missing/unclear is 0.0, never
+        omitted or averaged away.
 
 Also return "relations": documented edges between facts. Each has
 subject_event_id, predicate (part_of | used_in | reason_for | same_episode_as |
@@ -142,10 +164,14 @@ concise clinical name of ONE condition — when a note phrase lists several
 conditions together, emit a SEPARATE diagnosis fact for each, and keep severity
 prose, counts, and functional-limitation wording OUT of the description (put
 them in attributes or omit). Return JSON only:
-{"facts": [ ... ], "relations": [ ... ]}."""
+{"schema_version": "extraction-wire-v1", "facts": [ ... ], "relations": [ ... ]}."""
 
 
-_SCHEMA_VERSION = "clinical-graph-v1"
+#: v2 (issue #6 F9-R11-F): the model now emits attributes/attribute_evidence/
+#: axis_confidence as the closed EXTRACTION_WIRE_SCHEMA below rather than
+#: advisory json_mode-only dicts. Bumped so an origin/audit record can never
+#: mix a pre-wire-schema generation with a strict-wire one under one identity.
+_SCHEMA_VERSION = "clinical-graph-v2"
 
 
 @dataclass(frozen=True)
@@ -287,10 +313,217 @@ def _extract_json(text: str) -> dict:
         return {}
 
 
+#: issue #6 F9-R11-F. `attributes`/`attribute_evidence`/`axis_confidence` are
+#: genuinely dynamic-key maps -- the model names its own attribute vocabulary
+#: per note (anatomy, laterality, depth, performer_id, ...), which was never a
+#: fixed enumerable set. Neither Anthropic's nor OpenAI's structured-output
+#: grammar can express an open-key object: `additionalProperties` must be
+#: explicitly `false` on every object node (confirmed live -- a bare
+#: `{"type": "object"}` 400s; adding `additionalProperties: false` with no
+#: declared `properties` is accepted, but then the grammar can ONLY ever
+#: produce `{}`, silently discarding whatever the model was asked to put
+#: there). So the WIRE contract below represents every dynamic map as a
+#: closed, generic array of named entries instead, and `wire_to_legacy_*`
+#: converts it back to the plain dict shape `_parse_extraction_response`
+#: already validates and consumes -- the provider schema is a wire contract,
+#: not the domain model; `ClinicalFact`/`AttributeEvidence` and every
+#: downstream consumer are unchanged.
+_SCHEMA_VERSION_WIRE = "extraction-wire-v1"
+
+
+def _closed(properties: dict) -> dict:
+    """A closed JSON-Schema object: every property enumerated and required,
+    `additionalProperties: false` -- the discipline `app/coding/schemas.py`
+    documents as empirically required by both providers' structured-output
+    grammar (this module's own docstring records where that was verified)."""
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties),
+        "additionalProperties": False,
+    }
+
+
+_NAMED_STRING = _closed({"name": {"type": "string"}, "value": {"type": "string"}})
+_NAMED_NUMBER = _closed({"name": {"type": "string"}, "value": {"type": "number"}})
+_NAMED_BOOLEAN = _closed({"name": {"type": "string"}, "value": {"type": "boolean"}})
+
+#: Each dynamic attribute is one named entry in exactly one of three typed
+#: arrays, chosen by the value's own type (never coerced) -- see the prompt.
+_WIRE_ATTRIBUTES = _closed({
+    "strings": {"type": "array", "items": _NAMED_STRING},
+    "numbers": {"type": "array", "items": _NAMED_NUMBER},
+    "booleans": {"type": "array", "items": _NAMED_BOOLEAN},
+})
+
+_WIRE_AXIS_CONFIDENCE = {
+    "type": "array",
+    "items": _closed({"name": {"type": "string"}, "confidence": {"type": "number"}}),
+}
+
+#: Flat, not grouped by axis on the wire -- `wire_to_legacy_*` groups by
+#: "name" into the existing `dict[str, list[AttributeEvidence]]` shape.
+_WIRE_ATTRIBUTE_EVIDENCE = {
+    "type": "array",
+    "items": _closed({
+        "name": {"type": "string"},
+        "text": {"type": "string"},
+        "scope": {"type": "string", "enum": ["local", "inherited"]},
+        "parent_fact_id": {"type": "string"},
+        "assertion_state": {"type": "string",
+                            "enum": ["asserted", "negated", "uncertain"]},
+        "value": {"type": "string"},
+    }),
+}
+
+_WIRE_FACT = _closed({
+    "fact_id": {"type": "string"},
+    "kind": {"type": "string", "enum": [k.value for k in FactKind]},
+    "description": {"type": "string"},
+    "attributes": _WIRE_ATTRIBUTES,
+    "attribute_evidence": _WIRE_ATTRIBUTE_EVIDENCE,
+    "disposition": {"type": "string", "enum": [d.value for d in Disposition]},
+    "negated": {"type": "boolean"},
+    "certainty": {"type": "string",
+                 "enum": ["confirmed", "suspected", "ruled_out"]},
+    "experiencer": {"type": "string", "enum": ["patient", "family", "other"]},
+    "evidence": {"type": "array", "items": {"type": "string"}},
+    "confidence": {"type": "number"},
+    "axis_confidence": _WIRE_AXIS_CONFIDENCE,
+})
+
+#: Only the predicates the prompt actually asks the extractor to emit
+#: (PERFORMED_BY/ON_BEHALF_OF are established elsewhere in the pipeline, never
+#: by this call) -- a schema no wider than what's asked for.
+_WIRE_RELATION_PREDICATES = ["part_of", "used_in", "reason_for", "same_episode_as",
+                            "separate_from", "uses_device", "guides", "repairs",
+                            "removes"]
+
+_WIRE_RELATION = _closed({
+    "subject_event_id": {"type": "string"},
+    "predicate": {"type": "string", "enum": _WIRE_RELATION_PREDICATES},
+    "object_event_id": {"type": "string"},
+    "state": {"type": "string", "enum": ["asserted", "negated", "uncertain"]},
+    "evidence_fact_ids": {"type": "array", "items": {"type": "string"}},
+    "confidence": {"type": "number"},
+})
+
+EXTRACTION_WIRE_SCHEMA = _closed({
+    "schema_version": {"type": "string", "enum": [_SCHEMA_VERSION_WIRE]},
+    "facts": {"type": "array", "items": _WIRE_FACT},
+    "relations": {"type": "array", "items": _WIRE_RELATION},
+})
+
+
+def _wire_name(raw: Any, where: str) -> str:
+    """A non-blank string name, or a typed error -- the ONE thing the provider's
+    grammar cannot itself enforce across independent array entries (a closed
+    schema types EACH entry correctly but has no cross-array uniqueness
+    constraint, so a model could legally repeat one axis name in two arrays)."""
+    if isinstance(raw, bool) or not isinstance(raw, str) or not raw.strip():
+        raise ExtractionSchemaError(f"{where} 'name' must be a non-blank string")
+    return raw.strip()
+
+
+def _wire_attributes_to_legacy(wire: dict, where: str) -> dict[str, Any]:
+    """The three typed arrays flattened to the legacy `{name: value}` dict,
+    rejecting a name repeated within or across arrays -- a duplicate/conflicting
+    axis makes the attribute value unknowable, the same discipline
+    `_participant_index` already applies to a duplicated participant id."""
+    flat: dict[str, Any] = {}
+    for group in ("strings", "numbers", "booleans"):
+        entries = wire.get(group)
+        if not isinstance(entries, list):
+            raise ExtractionSchemaError(f"{where} {group!r} must be an array")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ExtractionSchemaError(f"{where} {group!r} entry is not an object")
+            name = _wire_name(entry.get("name"), f"{where} {group!r} entry")
+            if name in flat:
+                raise ExtractionSchemaError(
+                    f"{where} declares attribute {name!r} more than once")
+            flat[name] = entry.get("value")
+    return flat
+
+
+def _wire_axis_confidence_to_legacy(wire: list, where: str) -> dict[str, Any]:
+    flat: dict[str, Any] = {}
+    for entry in wire:
+        if not isinstance(entry, dict):
+            raise ExtractionSchemaError(f"{where} entry is not an object")
+        name = _wire_name(entry.get("name"), f"{where} entry")
+        if name in flat:
+            raise ExtractionSchemaError(f"{where} declares axis {name!r} more than once")
+        flat[name] = entry.get("confidence")
+    return flat
+
+
+def _wire_attribute_evidence_to_legacy(wire: list, where: str) -> dict[str, list]:
+    """The flat wire array grouped by "name" into the legacy
+    `{name: [entry, ...]}` shape `_parse_extraction_response` already walks --
+    unlike attributes/axis_confidence, several entries per name are expected
+    (several quotes may bear on one axis), so this groups rather than rejects
+    a repeat."""
+    grouped: dict[str, list] = {}
+    for entry in wire:
+        if not isinstance(entry, dict):
+            raise ExtractionSchemaError(f"{where} entry is not an object")
+        name = _wire_name(entry.get("name"), f"{where} entry")
+        grouped.setdefault(name, []).append({
+            "text": entry.get("text"),
+            "scope": entry.get("scope"),
+            "parent_fact_id": entry.get("parent_fact_id"),
+            "assertion_state": entry.get("assertion_state"),
+            "value": entry.get("value"),
+        })
+    return grouped
+
+
+def _wire_fact_to_legacy(wire_fact: Any, index: int) -> dict:
+    if not isinstance(wire_fact, dict):
+        raise ExtractionSchemaError(f"wire fact #{index} is not an object")
+    where = f"wire fact #{index}"
+    legacy = dict(wire_fact)  # fact_id/kind/description/disposition/negated/
+                              # certainty/experiencer/evidence/confidence are
+                              # IDENTICAL shape on the wire and in the legacy
+                              # contract -- only the three dynamic maps convert.
+    legacy["attributes"] = _wire_attributes_to_legacy(
+        wire_fact.get("attributes") or {}, f"{where} 'attributes'")
+    legacy["axis_confidence"] = _wire_axis_confidence_to_legacy(
+        wire_fact.get("axis_confidence") or [], f"{where} 'axis_confidence'")
+    legacy["attribute_evidence"] = _wire_attribute_evidence_to_legacy(
+        wire_fact.get("attribute_evidence") or [], f"{where} 'attribute_evidence'")
+    return legacy
+
+
+def wire_to_legacy_extraction_json(raw: dict) -> dict:
+    """Convert one EXTRACTION_WIRE_SCHEMA-shaped, already-parsed response into
+    the legacy `{"facts": [...], "relations": [...]}` shape
+    `_parse_extraction_response` validates and consumes -- the ONE place the
+    strict wire contract meets the existing domain model. Everything
+    downstream of this function is unchanged from before F9-R11-F."""
+    version = raw.get("schema_version") if isinstance(raw, dict) else None
+    if version != _SCHEMA_VERSION_WIRE:
+        raise ExtractionSchemaError(
+            f"unrecognized extraction wire schema_version: {version!r}")
+    facts_in = raw.get("facts")
+    if not isinstance(facts_in, list):
+        raise ExtractionSchemaError("wire output is missing a 'facts' array")
+    relations_in = raw.get("relations")
+    if relations_in is not None and not isinstance(relations_in, list):
+        raise ExtractionSchemaError("wire 'relations' must be an array when present")
+    return {
+        "facts": [_wire_fact_to_legacy(f, i) for i, f in enumerate(facts_in)],
+        "relations": relations_in or [],
+    }
+
+
 def _default_llm(system: str, user: str) -> str:
     from app.core.llm_client import chat_completion
-    out, _ = chat_completion(system, user, temperature=0.0, json_mode=True)
-    return out
+    out, _ = chat_completion(system, user, temperature=0.0, json_mode=True,
+                             json_schema=EXTRACTION_WIRE_SCHEMA)
+    legacy = wire_to_legacy_extraction_json(_strict_extract_json(out))
+    return json.dumps(legacy)
 
 
 #: Which provider gives the INDEPENDENT second reading, given the primary one. Two
@@ -326,8 +559,10 @@ def default_second_extract_llm(system: str, user: str) -> str:
             f"extraction provider {primary!r}")
     model = (config.OPENAI_MODEL if provider == "openai" else config.CLAUDE_MODEL)
     out, _ = chat_completion(system, user, model=model, provider=provider,
-                             temperature=0.0, json_mode=True, use_batch=False)
-    return out
+                             temperature=0.0, json_mode=True, use_batch=False,
+                             json_schema=EXTRACTION_WIRE_SCHEMA)
+    legacy = wire_to_legacy_extraction_json(_strict_extract_json(out))
+    return json.dumps(legacy)
 
 
 class ExtractionSchemaError(ValueError):
@@ -471,7 +706,7 @@ def _relation(value: Any, index: int) -> RelationAssertion | None:
     refs = [f"event:{str(x).strip()}" for x in (efi or []) if str(x).strip()]
     conf = _confidence(value.get("confidence"), f"relation #{index} 'confidence'")
     return RelationAssertion(subject, pred, obj, state=state, evidence_span_ids=refs,
-                             extraction_source="clinical-graph-v1", confidence=conf)
+                             extraction_source=_SCHEMA_VERSION, confidence=conf)
 
 
 def _strict_extract_json(text: str) -> dict:
@@ -612,8 +847,15 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
     user = json.dumps({"encounter_context": billing_context or {}, "note": note_text},
                       sort_keys=True)
     for attempt in range(1, _EXTRACTION_MAX_ATTEMPTS + 1):
-        raw_response = llm(_SYSTEM, user)
         try:
+            # `llm(...)` is INSIDE the try (issue #6 F9-R11-F): a production llm
+            # callable now does its own wire->legacy conversion (see
+            # `wire_to_legacy_extraction_json`) and can raise ExtractionSchemaError
+            # itself -- e.g. a duplicate attribute name across wire arrays, which
+            # the provider's grammar cannot itself forbid. That must retry exactly
+            # like a malformed-shape response already parsed by
+            # `_parse_extraction_response` below, not escape the retry loop.
+            raw_response = llm(_SYSTEM, user)
             return _parse_extraction_response(
                 raw_response, participants, billing_context, note_text,
                 run_id=run_id, model_profile=model_profile)

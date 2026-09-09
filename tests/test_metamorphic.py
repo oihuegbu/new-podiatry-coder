@@ -460,7 +460,8 @@ def test_default_llm_forwards_json_mode_and_zero_temperature():
     import app.core.llm_client as client
     seen = {}
     orig = client.chat_completion
-    client.chat_completion = lambda s, u, **kw: (seen.update(kw), ('{"facts": []}', {}))[1]
+    wire = '{"schema_version": "extraction-wire-v1", "facts": [], "relations": []}'
+    client.chat_completion = lambda s, u, **kw: (seen.update(kw), (wire, {}))[1]
     try:
         from claude_coder.extraction import _default_llm
         _default_llm("sys", "user")
