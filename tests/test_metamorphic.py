@@ -57,8 +57,8 @@ def test_disposition_flip():
 
 
 def test_negation_drops():
-    aff = extraction.extract_facts("x", llm=lambda s, u: '{"facts":[{"kind":"diagnosis","description":"finding","evidence":["finding"]}]}')
-    neg = extraction.extract_facts("x", llm=lambda s, u: '{"facts":[{"kind":"diagnosis","description":"finding","negated":true,"evidence":["no finding"]}]}')
+    aff = extraction.extract_facts("x", llm=lambda s, u: '{"facts":[{"fact_id":"F1","kind":"diagnosis","description":"finding","evidence":["finding"]}]}')
+    neg = extraction.extract_facts("x", llm=lambda s, u: '{"facts":[{"fact_id":"F1","kind":"diagnosis","description":"finding","negated":true,"evidence":["no finding"]}]}')
     assert len(aff) == 1 and len(neg) == 0
 
 
@@ -365,19 +365,24 @@ def test_extraction_sets_assertion_axes_and_drops_ruled_out():
     billable guard can act) and must DROP a ruled-out finding outright."""
     from claude_coder.extraction import extract_facts
     payload = {"facts": [
-        {"kind": "diagnosis", "description": "possible stress fracture", "certainty": "suspected",
+        {"fact_id": "F1", "kind": "diagnosis", "description": "possible stress fracture",
+         "certainty": "suspected",
          "evidence": ["possible stress fracture"], "confidence": 0.9},
-        {"kind": "diagnosis", "description": "diabetes in mother", "experiencer": "family",
+        {"fact_id": "F2", "kind": "diagnosis", "description": "diabetes in mother",
+         "experiencer": "family",
          "evidence": ["mother has diabetes"], "confidence": 0.9},
-        {"kind": "diagnosis", "description": "cellulitis", "certainty": "ruled_out",
+        {"fact_id": "F3", "kind": "diagnosis", "description": "cellulitis",
+         "certainty": "ruled_out",
          "evidence": ["cellulitis ruled out"], "confidence": 0.9},
-        {"kind": "diagnosis", "description": "onychomycosis", "certainty": "confirmed",
+        {"fact_id": "F4", "kind": "diagnosis", "description": "onychomycosis",
+         "certainty": "confirmed",
          "evidence": ["onychomycosis"], "confidence": 0.9},
         # an UNRECOGNIZED certainty must fail closed (not coded as confirmed)
-        {"kind": "diagnosis", "description": "vague finding", "certainty": "maybe-ish",
+        {"fact_id": "F5", "kind": "diagnosis", "description": "vague finding",
+         "certainty": "maybe-ish",
          "evidence": ["vague finding"], "confidence": 0.9},
         # an OMITTED certainty defaults to confirmed (a plainly documented condition)
-        {"kind": "diagnosis", "description": "hallux valgus",
+        {"fact_id": "F6", "kind": "diagnosis", "description": "hallux valgus",
          "evidence": ["hallux valgus"], "confidence": 0.9},
     ]}
     facts = extract_facts("note", llm=lambda s, u: json.dumps(payload))
@@ -432,7 +437,8 @@ def test_extraction_rejects_malformed_facts():
     empty_desc = {"facts": [
         {"kind": "diagnosis", "description": "   ", "evidence": ["x"]}]}
     good = {"facts": [
-        {"kind": "diagnosis", "description": "onychomycosis", "evidence": ["onychomycosis"]}]}
+        {"fact_id": "F1", "kind": "diagnosis", "description": "onychomycosis",
+         "evidence": ["onychomycosis"]}]}
     with pytest.raises(ExtractionSchemaError):
         extract_facts("note", llm=lambda s, u: json.dumps(bad_kind))
     with pytest.raises(ExtractionSchemaError):
@@ -446,7 +452,7 @@ def test_extraction_preserves_attributes():
     it is what lets the deterministic resolver pick a specific code (kills the
     `attributes or {}` Or->And mutant, which would blank a present attribute dict)."""
     from claude_coder.extraction import extract_facts
-    payload = {"facts": [{"kind": "diagnosis", "description": "bursitis",
+    payload = {"facts": [{"fact_id": "F1", "kind": "diagnosis", "description": "bursitis",
                           "attributes": {"laterality": "left", "anatomy": "heel"},
                           "evidence": ["left heel bursitis"]}]}
     (fact,) = extract_facts("note", llm=lambda s, u: json.dumps(payload))

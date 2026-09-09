@@ -683,8 +683,20 @@ def _attribute_evidence_entry(raw: Any) -> tuple[str, str, str, RelationState, s
     return raw_text, scope, parent, assertion_state, bound_value
 
 
-def _relation(value: Any, index: int) -> RelationAssertion | None:
-    """A relation, or None when its identity/shape is malformed (the caller raises).
+def _relation(value: Any, index: int, retained_fact_ids: set[str],
+             filtered_reason: dict[str, str] | None = None) -> RelationAssertion | None:
+    """A relation, or None when its SHAPE is malformed (the caller raises a generic
+    "cannot be safely dropped" error). An IDENTITY defect -- an endpoint or evidence
+    reference that does not name a fact THIS SAME response actually retained -- raises
+    ExtractionSchemaError directly with a specific message, so it retries through
+    `extract_note`'s bounded loop exactly like a malformed-shape response, instead of
+    surfacing only much later in `provenance.validate_relations` (a RelationIntegrityError
+    that loop never sees, which held the whole encounter on the very first bad draw
+    instead of retrying it). `provenance.validate_relations` remains the downstream
+    defense-in-depth check for anything that reaches it anyway -- unchanged, not
+    weakened. `retained_fact_ids` deliberately excludes a fact the model itself marked
+    negated/ruled_out: a relation to a fact that was never billable is an invalid
+    retained graph, not an edge to silently drop. (Codex F9-R11-G.)
 
     Confidence is validated with the SAME strict rule as fact confidence and raises
     directly, so a boolean/string/NaN relation confidence can never be coerced into a
@@ -700,10 +712,30 @@ def _relation(value: Any, index: int) -> RelationAssertion | None:
     obj = str(value.get("object_event_id", "")).strip()
     if not subject or not obj:
         return None
+    filtered_reason = filtered_reason or {}
+    for role, event_id in (("subject_event_id", subject), ("object_event_id", obj)):
+        if event_id not in retained_fact_ids:
+            reason = filtered_reason.get(event_id)
+            detail = (f"names fact {event_id!r}, which this response marked {reason} and "
+                     f"did not retain" if reason else
+                     f"names {event_id!r}, which is not a fact_id this response emitted")
+            raise ExtractionSchemaError(f"relation #{index} {role!r} {detail}")
+    if subject == obj:
+        raise ExtractionSchemaError(f"relation #{index} is self-referential: {subject!r}")
     efi = value.get("evidence_fact_ids")
     if efi is not None and not isinstance(efi, list):
         return None                                  # malformed -> extract_note raises (R1)
-    refs = [f"event:{str(x).strip()}" for x in (efi or []) if str(x).strip()]
+    raw_efi = [str(x).strip() for x in (efi or []) if str(x).strip()]
+    if not raw_efi:
+        raise ExtractionSchemaError(
+            f"relation #{index} 'evidence_fact_ids' must be a non-empty list of "
+            f"retained fact_ids")
+    unretained = [x for x in raw_efi if x not in retained_fact_ids]
+    if unretained:
+        raise ExtractionSchemaError(
+            f"relation #{index} 'evidence_fact_ids' names {unretained!r}, which is not "
+            f"a fact_id this response retained")
+    refs = [f"event:{x}" for x in raw_efi]
     conf = _confidence(value.get("confidence"), f"relation #{index} 'confidence'")
     return RelationAssertion(subject, pred, obj, state=state, evidence_span_ids=refs,
                              extraction_source=_SCHEMA_VERSION, confidence=conf)
@@ -836,6 +868,24 @@ def _participant_index(billing_context: dict[str, Any] | None) -> dict[str, dict
 _EXTRACTION_MAX_ATTEMPTS = 3
 
 
+#: Fixed, categorical retry guidance -- NEVER the raw exception text (which can quote
+#: model-supplied ids/values back into the prompt) and NEVER the note text again (already
+#: present in `base_payload["note"]`). Regenerates the FULL response from scratch; the
+#: prior malformed response is discarded, never patched in place. (Codex F9-R11-G item 5.)
+_RETRY_VALIDATION_FEEDBACK = (
+    "Your previous response was rejected for a structural error and discarded. "
+    "Regenerate the FULL response from scratch -- do not try to patch the prior one. "
+    "Two rules the prior response violated somewhere: (1) every fact's \"fact_id\" "
+    "must be an explicit, non-blank string you choose yourself, unique across the "
+    "whole response -- never leave it blank or omit it. (2) every relation's "
+    "subject_event_id, object_event_id, and every entry in evidence_fact_ids must "
+    "exactly name the fact_id of a fact YOU ALSO EMIT in this same response as a "
+    "RETAINED fact -- a fact you mark \"negated\": true, or \"certainty\": "
+    "\"ruled_out\", is not retained and must never be a relation endpoint or "
+    "evidence reference."
+)
+
+
 def extract_note(note_text: str, llm: LLMFn | None = None,
                  billing_context: dict[str, Any] | None = None, *,
                  run_id: str | None = None,
@@ -844,8 +894,8 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
     # Validate the authoritative encounter context BEFORE spending an extraction call: a
     # malformed roster can never produce trustworthy ownership, so it fails closed up front.
     participants = _participant_index(billing_context)
-    user = json.dumps({"encounter_context": billing_context or {}, "note": note_text},
-                      sort_keys=True)
+    base_payload = {"encounter_context": billing_context or {}, "note": note_text}
+    user = json.dumps(base_payload, sort_keys=True)
     for attempt in range(1, _EXTRACTION_MAX_ATTEMPTS + 1):
         try:
             # `llm(...)` is INSIDE the try (issue #6 F9-R11-F): a production llm
@@ -865,6 +915,9 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
             from app.core.logger import get_logger
             get_logger(__name__).warning(
                 f"  Extraction attempt {attempt}: {exc} — retrying")
+            user = json.dumps({**base_payload,
+                              "validation_feedback": _RETRY_VALIDATION_FEEDBACK},
+                             sort_keys=True)
     raise AssertionError("unreachable")  # loop always returns or raises above
 
 
@@ -886,6 +939,13 @@ def _parse_extraction_response(
     if not isinstance(relations_in, list):
         raise ExtractionSchemaError("'relations' must be an array when present")
     facts: list[ClinicalFact] = []
+    # The set every relation endpoint/evidence reference is checked against below --
+    # every raw fact_id the model declared, MINUS the ones it also marked negated/
+    # ruled_out. `filtered_reason` records WHY a raw id was excluded, purely so a
+    # relation naming it gets a specific "this fact was negated/ruled_out" message
+    # instead of an indistinguishable "unknown fact" one. (Codex F9-R11-G.)
+    retained_fact_ids: set[str] = set()
+    filtered_reason: dict[str, str] = {}
     # (fact_id, attr_name, text, parent_fact_id, assertion_state) for every
     # "inherited"-scope attribute_evidence entry -- resolved against the relations
     # graph in the second pass below, once every relation has been parsed (issue #6
@@ -894,6 +954,22 @@ def _parse_extraction_response(
     for i, item in enumerate(facts_in):
         if not isinstance(item, dict):
             raise ExtractionSchemaError(f"fact #{i} is not a JSON object")
+        # fact_id identity is validated and registered for EVERY raw fact -- BEFORE
+        # negated/ruled_out filtering below -- because a relation can reference this
+        # exact id regardless of whether the fact it names goes on to be billable.
+        # NEVER a fallback f"F{i+1}": that silently manufactured an id for a missing/
+        # blank one, made the very next line's blank-id check unreachable, and could
+        # collide with (or diverge from) an id the model itself used elsewhere in the
+        # SAME response -- e.g. in a relation or an attribute_evidence entry. A
+        # missing/blank fact_id is always the model's error to retry, never something
+        # this parser papers over. (Codex F9-R11-G item 1/adjacent defect.)
+        raw_fid = item.get("fact_id")
+        if isinstance(raw_fid, bool) or not isinstance(raw_fid, str) or not raw_fid.strip():
+            raise ExtractionSchemaError(f"fact #{i} has a missing or blank fact_id")
+        fid = raw_fid.strip()
+        if fid in seen_ids:
+            raise ExtractionSchemaError(f"duplicate fact_id: {fid}")
+        seen_ids.add(fid)
         kind = _coerce_kind(item.get("kind", ""))
         desc = str(item.get("description", "")).strip()
         if kind is None:
@@ -907,7 +983,14 @@ def _parse_extraction_response(
         raw_cert = item.get("certainty")
         certainty = str(raw_cert).strip().lower() if raw_cert is not None else "confirmed"
         if item.get("negated") is True or certainty == "ruled_out":
+            # `fid` is already registered in `seen_ids` above (so a duplicate is still
+            # caught) but deliberately kept OUT of `retained_fact_ids`: a relation
+            # naming this id -- e.g. a stale part_of/separate_from written before the
+            # model decided to negate/rule out the fact -- names an invalid retained
+            # graph, not an edge that can be silently dropped (Codex F9-R11-G item 3).
+            filtered_reason[fid] = "negated" if item.get("negated") is True else "ruled_out"
             continue
+        retained_fact_ids.add(fid)
         # Fail-closed on both assertion axes: a condition is coded as present ONLY when
         # it is explicitly CONFIRMED — suspected/probable/possible, or any unrecognized
         # certainty, is not coded as confirmed; and it is the PATIENT's condition only
@@ -958,7 +1041,6 @@ def _parse_extraction_response(
         if attr_ev_in is not None and not isinstance(attr_ev_in, dict):
             raise ExtractionSchemaError(f"fact #{i} 'attribute_evidence' must be an object")
         attribute_evidence: dict[str, list[AttributeEvidence]] = {}
-        this_fid = str(item.get("fact_id") or f"F{i+1}").strip()
         for attr_name, entries in (attr_ev_in or {}).items():
             if not isinstance(entries, list):
                 raise ExtractionSchemaError(
@@ -977,7 +1059,7 @@ def _parse_extraction_response(
                                          value=bound_value))
                 else:
                     pending_inherited.append(
-                        (this_fid, str(attr_name), text, parent, assertion_state, bound_value))
+                        (fid, str(attr_name), text, parent, assertion_state, bound_value))
         # R2: actor identity is resolved EXCLUSIVELY from the structured encounter context.
         # A model-supplied performer/organization id absent from the authoritative roster is
         # invented/unauthorized and is discarded (ownership then resolves to UNKNOWN and
@@ -1013,12 +1095,6 @@ def _parse_extraction_response(
         if billing_context and billing_context.get("billing_entity_id"):
             attributes["billing_entity_id"] = str(
                 billing_context["billing_entity_id"]).strip()
-        fid = str(item.get("fact_id") or f"F{i+1}").strip()
-        if not fid:
-            raise ExtractionSchemaError(f"fact #{i} has a blank fact_id")
-        if fid in seen_ids:
-            raise ExtractionSchemaError(f"duplicate fact_id: {fid}")
-        seen_ids.add(fid)
         facts.append(ClinicalFact(
             kind=kind, description=desc, attributes=attributes,
             disposition=_coerce_disposition(item.get("disposition")),
@@ -1031,7 +1107,7 @@ def _parse_extraction_response(
     origin = call_origin(note_text, raw_response, run_id=run_id, model_profile=model_profile)
     relations: list[RelationAssertion] = []
     for j, x in enumerate(relations_in):
-        rel = _relation(x, j)
+        rel = _relation(x, j, retained_fact_ids, filtered_reason)
         if rel is None:
             raise ExtractionSchemaError(
                 f"relation #{j} is malformed and cannot be safely dropped: {x!r}")

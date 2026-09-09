@@ -78,22 +78,25 @@ def _facts_json(*, link_evidence=True):
         proc_ev.append(_PROC_MENTION)
         dx_ev.append(_DX_MENTION)
     return json.dumps({"facts": [
-        {"kind": "procedure", "description": "excision of lesion alpha",
+        {"fact_id": "F1", "kind": "procedure", "description": "excision of lesion alpha",
          "attributes": {"laterality": "right", "anatomy": "site two",
                         "performer_id": "actor-1", "billing_entity_id": "actor-1"},
          "disposition": "performed_today", "negated": False, "evidence": proc_ev,
          "confidence": 0.97,
          "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
                              "temporal": 0.99, "performer": 0.99, "relationship": 0.99}},
-        {"kind": "diagnosis", "description": "condition alpha of the right side",
+        {"fact_id": "F2", "kind": "diagnosis",
+         "description": "condition alpha of the right side",
          "attributes": {"laterality": "right"}, "disposition": "performed_today",
          "negated": False, "evidence": dx_ev, "confidence": 0.98,
          "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
                              "temporal": 0.99, "assertion": 0.99, "experiencer": 0.99}},
-        {"kind": "procedure", "description": "procedure beta correction", "attributes": {},
+        {"fact_id": "F3", "kind": "procedure", "description": "procedure beta correction",
+         "attributes": {},
          "disposition": "planned", "negated": False,
          "evidence": ["Plan procedure beta correction next visit"], "confidence": 0.9},
-        {"kind": "diagnosis", "description": "finding gamma", "attributes": {},
+        {"fact_id": "F4", "kind": "diagnosis", "description": "finding gamma",
+         "attributes": {},
          "disposition": "performed_today", "negated": True,
          "evidence": ["denies finding gamma"], "confidence": 0.9},
     ], "relations": [
@@ -371,7 +374,8 @@ class BundlingExclusionTest(unittest.TestCase):
         src = MockSource(records={("BUNDLED_X", "hcpcs"): {"active": True}},
                          retrieval={("*", "hcpcs"): [cand]},
                          nonbillable={"BUNDLED_X"})
-        facts = ('{"facts":[{"kind":"supply","description":"bundled service",'
+        facts = ('{"facts":[{"fact_id":"F1","kind":"supply",'
+                 '"description":"bundled service",'
                  '"attributes":{"performer_id":"actor-1","billing_entity_id":"actor-1"},'
                  '"disposition":"performed_today","negated":false,'
                  '"evidence":["bundled service provided"],"confidence":0.99}]}')
@@ -2501,7 +2505,8 @@ class DiagnosisModifierTest(unittest.TestCase):
                            0.9, "retrieval")
         src = MockSource(records={("DX_UNSPEC", "icd10"): {"active": True}},
                          retrieval={("*", "icd10"): [dx]})
-        facts = ('{"facts":[{"kind":"diagnosis","description":"some condition",'
+        facts = ('{"facts":[{"fact_id":"F1","kind":"diagnosis",'
+                 '"description":"some condition",'
                  '"attributes":{"laterality":"right"},"disposition":"performed_today",'
                  '"negated":false,"evidence":["some condition, right side"],'
                  '"confidence":0.98}]}')

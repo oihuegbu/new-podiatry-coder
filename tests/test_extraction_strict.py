@@ -463,7 +463,8 @@ def test_an_inherited_entry_resolves_only_against_a_real_relation():
                       "parent_fact_id": "F1"}]}),
         ],
         "relations": [{"subject_event_id": "F2", "predicate": "part_of",
-                       "object_event_id": "F1", "state": "asserted"}],
+                       "object_event_id": "F1", "state": "asserted",
+                       "evidence_fact_ids": ["F1", "F2"]}],
     }
     result = extract_note("note", _stub(payload))
     component = next(f for f in result.facts if f.fact_id == "F2")
@@ -492,7 +493,8 @@ def test_an_inherited_entrys_assertion_state_survives_the_second_pass():
                       "parent_fact_id": "F1", "assertion_state": "negated"}]}),
         ],
         "relations": [{"subject_event_id": "F2", "predicate": "part_of",
-                       "object_event_id": "F1", "state": "asserted"}],
+                       "object_event_id": "F1", "state": "asserted",
+                       "evidence_fact_ids": ["F1", "F2"]}],
     }
     result = extract_note("note", _stub(payload))
     component = next(f for f in result.facts if f.fact_id == "F2")
@@ -567,7 +569,8 @@ def test_an_inherited_entrys_value_survives_the_second_pass():
                       "value": "right"}]}),
         ],
         "relations": [{"subject_event_id": "F2", "predicate": "part_of",
-                       "object_event_id": "F1", "state": "asserted"}],
+                       "object_event_id": "F1", "state": "asserted",
+                       "evidence_fact_ids": ["F1", "F2"]}],
     }
     result = extract_note("note", _stub(payload))
     component = next(f for f in result.facts if f.fact_id == "F2")
@@ -609,7 +612,8 @@ def test_same_episode_as_is_never_a_candidate_relation_for_inheritance():
                       "parent_fact_id": "F1"}]}),
         ],
         "relations": [{"subject_event_id": "F2", "predicate": "same_episode_as",
-                       "object_event_id": "F1", "state": "asserted"}],
+                       "object_event_id": "F1", "state": "asserted",
+                       "evidence_fact_ids": ["F1", "F2"]}],
     }
     result = extract_note("note", _stub(payload))
     component = next(f for f in result.facts if f.fact_id == "F2")
@@ -630,7 +634,8 @@ def test_a_reversed_part_of_direction_is_never_a_candidate_relation():
                       "parent_fact_id": "F1"}]}),
         ],
         "relations": [{"subject_event_id": "F1", "predicate": "part_of",
-                       "object_event_id": "F2", "state": "asserted"}],
+                       "object_event_id": "F2", "state": "asserted",
+                       "evidence_fact_ids": ["F1", "F2"]}],
     }
     result = extract_note("note", _stub(payload))
     component = next(f for f in result.facts if f.fact_id == "F2")
@@ -795,7 +800,7 @@ def test_wire_inherited_evidence_survives_the_existing_relation_validation_path(
                                             "value": "right"}])
     relations = [{"subject_event_id": "F2", "predicate": "part_of",
                  "object_event_id": "F1", "state": "asserted",
-                 "evidence_fact_ids": [], "confidence": 0.9}]
+                 "evidence_fact_ids": ["F1", "F2"], "confidence": 0.9}]
     legacy = wire_to_legacy_extraction_json(_wire_payload([parent, child], relations))
     result = extract_note("note", _stub(legacy))
     child_fact = next(f for f in result.facts if f.fact_id == "F2")
@@ -862,3 +867,150 @@ def test_wire_level_malformation_persists_still_bounds_and_raises():
     with pytest.raises(ExtractionSchemaError):
         extract_note("note", _llm)
     assert len(calls) == 3
+
+
+# ------------------------------------------------ F9-R11-G relation/fact_id identity
+def test_relation_with_unknown_subject_is_rejected_inside_extract_note():
+    """Codex F9-R11-G: an identity defect must raise from extract_note's OWN retry
+    loop, not only much later in provenance.validate_relations (a RelationIntegrityError
+    that loop never sees)."""
+    payload = {"facts": [_fact(fact_id="F1")],
+              "relations": [{"subject_event_id": "GHOST", "predicate": "part_of",
+                             "object_event_id": "F1", "state": "asserted",
+                             "evidence_fact_ids": ["F1"], "confidence": 0.9}]}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub(payload))
+
+
+def test_relation_with_unknown_object_is_rejected_inside_extract_note():
+    payload = {"facts": [_fact(fact_id="F1")],
+              "relations": [{"subject_event_id": "F1", "predicate": "part_of",
+                             "object_event_id": "GHOST", "state": "asserted",
+                             "evidence_fact_ids": ["F1"], "confidence": 0.9}]}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub(payload))
+
+
+def test_self_referential_relation_is_rejected():
+    payload = {"facts": [_fact(fact_id="F1")],
+              "relations": [{"subject_event_id": "F1", "predicate": "part_of",
+                             "object_event_id": "F1", "state": "asserted",
+                             "evidence_fact_ids": ["F1"], "confidence": 0.9}]}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub(payload))
+
+
+def test_empty_evidence_fact_ids_is_rejected():
+    payload = {"facts": [_fact(fact_id="F1"), _fact(fact_id="F2")],
+              "relations": [{"subject_event_id": "F1", "predicate": "part_of",
+                             "object_event_id": "F2", "state": "asserted",
+                             "evidence_fact_ids": [], "confidence": 0.9}]}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub(payload))
+
+
+def test_evidence_fact_ids_naming_an_unknown_id_is_rejected():
+    payload = {"facts": [_fact(fact_id="F1"), _fact(fact_id="F2")],
+              "relations": [{"subject_event_id": "F1", "predicate": "part_of",
+                             "object_event_id": "F2", "state": "asserted",
+                             "evidence_fact_ids": ["F1", "GHOST"], "confidence": 0.9}]}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub(payload))
+
+
+def test_relation_to_a_negated_fact_is_rejected_before_pipeline_provenance():
+    """Codex F9-R11-G item 3: a relation naming a fact the model itself marked
+    negated is an invalid retained graph -- caught here, never a silently-dropped
+    edge and never left to fail only downstream in provenance.validate_relations."""
+    payload = {"facts": [_fact(fact_id="F1"), _fact(fact_id="F2", negated=True)],
+              "relations": [{"subject_event_id": "F1", "predicate": "part_of",
+                             "object_event_id": "F2", "state": "asserted",
+                             "evidence_fact_ids": ["F1"], "confidence": 0.9}]}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub(payload))
+
+
+def test_relation_to_a_ruled_out_fact_is_rejected_before_pipeline_provenance():
+    payload = {"facts": [_fact(fact_id="F1"),
+                        _fact(fact_id="F2", certainty="ruled_out")],
+              "relations": [{"subject_event_id": "F1", "predicate": "part_of",
+                             "object_event_id": "F2", "state": "asserted",
+                             "evidence_fact_ids": ["F1"], "confidence": 0.9}]}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub(payload))
+
+
+def test_missing_fact_id_is_rejected_never_autogenerated():
+    """Never a fallback f"F{i+1}" for a missing fact_id -- that fallback made this
+    exact check unreachable and could desynchronize model relation references from
+    retained event identity (Codex F9-R11-G adjacent defect)."""
+    bad = _fact()
+    bad.pop("fact_id")
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [bad]}))
+
+
+def test_blank_fact_id_is_rejected_never_autogenerated():
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub({"facts": [_fact(fact_id="   ")]}))
+
+
+def test_a_dangling_relation_retries_with_categorical_feedback_and_recovers():
+    """Codex F9-R11-G items 5/6: a relation-identity defect retries through the SAME
+    bounded loop as a malformed-shape response. The second attempt's prompt carries
+    fixed, CATEGORICAL guidance -- never the raw exception text (which could quote
+    the dangling id back) and never a repeat of the note -- and a valid second draw
+    succeeds."""
+    from claude_coder import extraction as _ext
+    calls = []
+    good_payload = {"facts": [_fact(fact_id="F1")], "relations": []}
+    bad_payload = {"facts": [_fact(fact_id="F1")],
+                   "relations": [{"subject_event_id": "F1", "predicate": "part_of",
+                                  "object_event_id": "GHOST", "state": "asserted",
+                                  "evidence_fact_ids": ["F1"], "confidence": 0.9}]}
+
+    def flaky(system, user):
+        calls.append(user)
+        return json.dumps(bad_payload if len(calls) == 1 else good_payload)
+
+    result = extract_note("note", flaky)
+    assert len(calls) == 2
+    assert result.facts[0].fact_id == "F1"
+    first, second = json.loads(calls[0]), json.loads(calls[1])
+    assert "validation_feedback" not in first
+    assert second.get("validation_feedback") == _ext._RETRY_VALIDATION_FEEDBACK
+    assert "GHOST" not in second["validation_feedback"]
+    assert second["note"] == first["note"]                 # note is not repeated/altered
+
+
+def test_three_dangling_relation_responses_stay_bounded_and_fail_closed():
+    bad_payload = {"facts": [_fact(fact_id="F1")],
+                   "relations": [{"subject_event_id": "F1", "predicate": "part_of",
+                                  "object_event_id": "GHOST", "state": "asserted",
+                                  "evidence_fact_ids": ["F1"], "confidence": 0.9}]}
+    calls = []
+
+    def always_bad(system, user):
+        calls.append(1)
+        return json.dumps(bad_payload)
+
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", always_bad)
+    assert len(calls) == 3
+
+
+def test_a_valid_relation_graph_is_unchanged_by_the_new_identity_checks():
+    """Sanity: a normal, well-formed graph is unaffected by F9-R11-G -- not a
+    regression in disguise."""
+    payload = {
+        "facts": [_fact(fact_id="F1", description="parent step"),
+                 _fact(fact_id="F2", description="component step")],
+        "relations": [{"subject_event_id": "F2", "predicate": "part_of",
+                       "object_event_id": "F1", "state": "asserted",
+                       "evidence_fact_ids": ["F1", "F2"], "confidence": 0.9}],
+    }
+    result = extract_note("note", _stub(payload))
+    assert len(result.facts) == 2
+    assert len(result.relations) == 1
+    rel = result.relations[0]
+    assert rel.subject_event_id == "F2" and rel.object_event_id == "F1"

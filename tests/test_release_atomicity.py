@@ -18,7 +18,7 @@ import claude_coder.certificate as cert_mod
 import claude_coder.provenance as provenance
 from tests import shortlist_verdict as _sv
 
-_FACTS = ('{"facts":[{"kind":"procedure","description":"excision of lesion",'
+_FACTS = ('{"facts":[{"fact_id":"F1","kind":"procedure","description":"excision of lesion",'
           '"attributes":{"performer_id":"actor-1","billing_entity_id":"actor-1"},'
           '"disposition":"performed_today","negated":false,'
           '"evidence":["excision of lesion performed"],"confidence":0.99}]}')

@@ -130,7 +130,7 @@ NOTE_TEXT = (
 
 FACTS_JSON = json.dumps({
     "facts": [
-        {"kind": "procedure", "description": "excision of lesion alpha",
+        {"fact_id": "F1", "kind": "procedure", "description": "excision of lesion alpha",
          "attributes": {"laterality": "right", "anatomy": "site two"},
          "disposition": "performed_today", "negated": False,
          "evidence": ["excision of lesion alpha, right site two",
@@ -138,7 +138,8 @@ FACTS_JSON = json.dumps({
          "confidence": 0.97,
          "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
                              "temporal": 0.99, "performer": 0.99, "relationship": 0.99}},
-        {"kind": "diagnosis", "description": "condition alpha of the right side",
+        {"fact_id": "F2", "kind": "diagnosis",
+         "description": "condition alpha of the right side",
          "attributes": {"laterality": "right"}, "disposition": "performed_today",
          "negated": False,
          "evidence": ["condition alpha, right side",

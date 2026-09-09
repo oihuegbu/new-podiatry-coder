@@ -762,7 +762,8 @@ class TiePolicyEndToEndTest(unittest.TestCase):
     NOTE = ("Procedure: assembly service was completed today. "
             "Assessment: condition alpha.")
 
-    FACTS = ('{"facts": [{"kind": "supply", "description": "assembly service",'
+    FACTS = ('{"facts": [{"fact_id": "F1", "kind": "supply",'
+             ' "description": "assembly service",'
              ' "attributes": {"performer_id": "actor-1", "billing_entity_id": "actor-1"},'
              ' "disposition": "performed_today", "negated": false,'
              ' "evidence": ["assembly service was completed today"], "confidence": 0.99,'
@@ -959,7 +960,8 @@ class SelectionUniquenessTest(unittest.TestCase):
         from claude_coder.pipeline import code_encounter
         from claude_coder.provenance import NullAuditRepository
         note = ("Procedure: " + self.BOTH_DOCUMENTED + ". Assessment: condition alpha.")
-        facts = ('{"facts": [{"kind": "procedure", "description": "assembly service",'
+        facts = ('{"facts": [{"fact_id": "F1", "kind": "procedure",'
+                 ' "description": "assembly service",'
                  ' "attributes": {"performer_id": "actor-1",'
                  ' "billing_entity_id": "actor-1"},'
                  ' "disposition": "performed_today", "negated": false,'

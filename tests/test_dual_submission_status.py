@@ -101,7 +101,8 @@ class EvaluateStampsSubmissionStatus(unittest.TestCase):
         RetrievalRequest(intent, fact)
 
 
-_FACTS_UNRESOLVED = ('{"facts":[{"kind":"procedure","description":"excision of lesion",'
+_FACTS_UNRESOLVED = ('{"facts":[{"fact_id":"F1","kind":"procedure",'
+                    '"description":"excision of lesion",'
                     '"attributes":{"performer_id":"actor-1"},'
                     '"disposition":"performed_today","negated":false,'
                     '"evidence":["excision of lesion performed"],"confidence":0.99}]}')

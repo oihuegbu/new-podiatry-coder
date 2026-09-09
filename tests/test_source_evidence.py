@@ -99,7 +99,7 @@ def _facts_json(lines: list[str]) -> str:
     that nothing downstream of the transcription can tell it is wrong.
     """
     return json.dumps({"facts": [
-        {"kind": "procedure", "description": "excision of lesion alpha",
+        {"fact_id": "F1", "kind": "procedure", "description": "excision of lesion alpha",
          "attributes": {"laterality": "right", "anatomy": "site two",
                         "performer_id": "actor-1", "billing_entity_id": "actor-1"},
          "disposition": "performed_today", "negated": False,
@@ -107,7 +107,8 @@ def _facts_json(lines: list[str]) -> str:
          "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
                              "temporal": 0.99, "performer": 0.99,
                              "relationship": 0.99}},
-        {"kind": "diagnosis", "description": "condition alpha of the right side",
+        {"fact_id": "F2", "kind": "diagnosis",
+         "description": "condition alpha of the right side",
          "attributes": {"laterality": "right"}, "disposition": "performed_today",
          "negated": False,
          "evidence": ["condition alpha, right side",
