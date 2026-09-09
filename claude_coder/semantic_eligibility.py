@@ -116,6 +116,8 @@ carefully on its own.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from enum import Enum
 
 from . import graph_consensus as _gc
 from . import ontology as _ontology
@@ -189,42 +191,102 @@ def _authorized_roles(facts: list[ClinicalFact], reconciliation) -> set[str]:
                         for f in facts) if v}
 
 
-def _service_role_exclusions(facts: list[ClinicalFact], candidates: list,
-                             source, reconciliation=None) -> dict[tuple[str, str], str]:
-    """`{(code, system) -> reason}` for candidates a documented procedure
-    service_role positively excludes (Codex F9-R11-H): broad recall must not
-    itself define the clinically eligible set. Runs BEFORE verification (via
-    `eligible_partition`, below) so an incompatible-role candidate never reaches
-    the model at all, rather than relying on the verifier to notice a role
-    mismatch it was never asked to check.
+class RoleControlStatus(str, Enum):
+    """Why the service-role control did or did not exclude ONE candidate
+    (Codex F9-R11-H-D). Before this, `_service_role_exclusions` returned a bare
+    `{}` for five materially different situations -- no documented fact role,
+    conflicting fact roles, a mixed-kind intent, an unclassifiable candidate,
+    and "ran, found nothing incompatible" -- so the audit trail could not
+    distinguish "this control never had a chance to run" from "it ran and
+    found this candidate compatible", which is exactly why a real-note
+    discrepancy (an operative-classified candidate surviving in an
+    anesthesia-role fact's pool) could not be traced to a cause. Every
+    candidate now gets ONE of these, always, whether or not it survives."""
+    EXCLUDED = "excluded"                        #: ran; this candidate's role conflicted
+    COMPATIBLE = "compatible"                     #: ran; this candidate's role matched
+    CANDIDATE_UNCLASSIFIED = "candidate_unclassified"  #: ran; this candidate's own role
+                                                        #: could not be determined
+    FACT_ROLE_MISSING = "fact_role_missing"       #: did not run; no fact documented a role
+    FACT_ROLE_CONFLICT = "fact_role_conflict"     #: did not run; facts disagree on role
+    MIXED_KIND_INTENT = "mixed_kind_intent"       #: did not run; not every fact is a PROCEDURE
 
-    Only fires when EVERY fact in this intent is a FactKind.PROCEDURE (a mixed
-    intent has no single procedure role to check against) AND the composed
-    intent documents EXACTLY ONE distinct role across every member fact
-    (`_authorized_roles`, above) -- conflicting roles across a composed intent
-    (Codex F9-R11-H-A) exclude nothing on this basis, the same as no role at
-    all: a genuine role conflict needs upstream composition/provider-query
-    resolution, not an arbitrary pick between two documented alternatives. A
-    candidate is excluded only when its OWN role is positively classified AND
-    differs from the fact's -- an unclassifiable candidate role excludes
-    nothing either: absence of grounding is not evidence against anyone, the
-    same principle `_anatomy_dominance_exclusions` already follows."""
+
+@dataclass(frozen=True)
+class RoleControlDecision:
+    """One candidate's service-role control outcome, always populated -- never
+    a silent skip (Codex F9-R11-H-D). `fact_roles` is the full set
+    `_authorized_roles` found (empty when none, >1 element when conflicting,
+    exactly one element when the control actually ran); `candidate_role` is
+    this candidate's own classification, or None when unclassifiable."""
+    status: RoleControlStatus
+    fact_roles: tuple[str, ...]
+    candidate_role: str | None
+    excluded: bool
+    source_id: str = "semantic_class"
+
+
+def _service_role_control(facts: list[ClinicalFact], candidates: list,
+                          source, reconciliation=None
+                          ) -> dict[tuple[str, str], RoleControlDecision]:
+    """`{(code, system) -> RoleControlDecision}` for EVERY candidate, always --
+    the typed replacement for the old bare-`{}` `_service_role_exclusions`
+    (Codex F9-R11-H-D). Runs BEFORE verification (via `eligible_partition`,
+    below) so an incompatible-role candidate never reaches the model at all.
+
+    The control only actually EVALUATES candidates when EVERY fact in this
+    intent is a FactKind.PROCEDURE (a mixed intent has no single procedure
+    role to check against -- `MIXED_KIND_INTENT`) AND the composed intent
+    documents EXACTLY ONE distinct role across every member fact
+    (`_authorized_roles`; zero is `FACT_ROLE_MISSING`, more than one is
+    `FACT_ROLE_CONFLICT` -- Codex F9-R11-H-A: a genuine role conflict across a
+    composed intent needs upstream composition/provider-query resolution, not
+    an arbitrary pick between two documented alternatives). When it DOES run,
+    a candidate is excluded only when its OWN role is positively classified
+    AND differs from the fact's; an unclassifiable candidate role is kept
+    (`CANDIDATE_UNCLASSIFIED`) -- absence of grounding is not evidence against
+    anyone, the same principle `_anatomy_dominance_exclusions` already
+    follows."""
     if {f.kind for f in facts} != {FactKind.PROCEDURE}:
-        return {}
+        return {(c.code, c.system): RoleControlDecision(
+                    RoleControlStatus.MIXED_KIND_INTENT, (), None, False)
+                for c in candidates}
     roles = _authorized_roles(facts, reconciliation)
-    if len(roles) != 1:
-        return {}
+    if not roles:
+        return {(c.code, c.system): RoleControlDecision(
+                    RoleControlStatus.FACT_ROLE_MISSING, (), None, False)
+                for c in candidates}
+    if len(roles) > 1:
+        return {(c.code, c.system): RoleControlDecision(
+                    RoleControlStatus.FACT_ROLE_CONFLICT, tuple(sorted(roles)), None, False)
+                for c in candidates}
     fact_role = next(iter(roles))
     if fact_role not in _PROCEDURE_ROLES:
-        return {}
-    out: dict[tuple[str, str], str] = {}
+        return {(c.code, c.system): RoleControlDecision(
+                    RoleControlStatus.FACT_ROLE_MISSING, tuple(roles), None, False)
+                for c in candidates}
+    out: dict[tuple[str, str], RoleControlDecision] = {}
     for c in candidates:
         role = _candidate_procedure_role(c, source)
-        if role and role != fact_role:
-            out[(c.code, c.system)] = (
-                f"candidate's authoritative classification is {role!r}, "
-                f"incompatible with the fact's documented service_role {fact_role!r}")
+        if role is None:
+            status, excluded = RoleControlStatus.CANDIDATE_UNCLASSIFIED, False
+        elif role != fact_role:
+            status, excluded = RoleControlStatus.EXCLUDED, True
+        else:
+            status, excluded = RoleControlStatus.COMPATIBLE, False
+        out[(c.code, c.system)] = RoleControlDecision(status, (fact_role,), role, excluded)
     return out
+
+
+def _service_role_exclusions(facts: list[ClinicalFact], candidates: list,
+                             source, reconciliation=None) -> dict[tuple[str, str], str]:
+    """`{(code, system) -> reason}` -- the exclusion-reason VIEW of
+    `_service_role_control`, for callers that only need the filter, not the
+    full audit decision."""
+    control = _service_role_control(facts, candidates, source, reconciliation)
+    return {key: (f"candidate's authoritative classification is "
+                 f"{decision.candidate_role!r}, incompatible with the fact's "
+                 f"documented service_role {decision.fact_roles[0]!r}")
+           for key, decision in control.items() if decision.excluded}
 
 
 def _candidate_measurement_dimension(candidate, source) -> str | None:
@@ -555,15 +617,37 @@ def eligibility_report(facts: list[ClinicalFact], candidates: list, source,
     so this record can never claim a different reason than the one that actually
     decided it."""
     pool = [c for c in candidates if eligible(c, facts, source, date_of_service)]
-    role_excluded = _service_role_exclusions(facts, pool, source, reconciliation)
-    surviving = [c for c in pool if (c.code, c.system) not in role_excluded]
+    role_control = _service_role_control(facts, pool, source, reconciliation)
+    surviving = [c for c in pool
+                if not role_control[(c.code, c.system)].excluded]
     dominance = _anatomy_dominance_exclusions(facts, surviving, source, reconciliation)
     report = []
     for c in candidates:
+        key = (c.code, c.system)
         reason = _ineligibility_reason(c, facts, source, date_of_service)
+        role_decision = role_control.get(key)
+        if reason is None and role_decision is not None and role_decision.excluded:
+            reason = (f"candidate's authoritative classification is "
+                     f"{role_decision.candidate_role!r}, incompatible with the "
+                     f"fact's documented service_role {role_decision.fact_roles[0]!r}")
         if reason is None:
-            reason = (role_excluded.get((c.code, c.system))
-                      or dominance.get((c.code, c.system)))
-        report.append({"code": c.code, "system": c.system, "eligible": reason is None,
-                       "reason": reason})
+            reason = dominance.get(key)
+        report.append({
+            "code": c.code, "system": c.system, "eligible": reason is None,
+            "reason": reason,
+            # Codex F9-R11-H-D: ALWAYS present, even when this candidate was never
+            # evaluated for role compatibility at all (key absent from
+            # `role_control` -- excluded earlier by `eligible()` before the role
+            # control ever ran) -- an audit trail that omits the field on a skip
+            # is indistinguishable from one that forgot to check, which is the
+            # exact defect this typed decision exists to close.
+            "role_control": (
+                {"status": role_decision.status.value,
+                 "fact_roles": list(role_decision.fact_roles),
+                 "candidate_role": role_decision.candidate_role,
+                 "source_id": role_decision.source_id}
+                if role_decision is not None else
+                {"status": "not_evaluated", "fact_roles": [], "candidate_role": None,
+                 "source_id": None}),
+        })
     return report

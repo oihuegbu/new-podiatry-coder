@@ -607,6 +607,44 @@ class ServiceRoleExclusion(unittest.TestCase):
             self._source(), "2026-01-01")
         self.assertEqual({c.code for c in result}, {"OP", "ANES"})
 
+    # ---------------------------------------------------- Codex F9-R11-H-D
+    def test_role_control_is_never_silently_absent_from_the_report(self):
+        """The exact defect: `eligibility_report` must carry a typed,
+        non-None role_control decision for EVERY candidate, in every one of
+        the control's five distinct non-run/run states -- never a bare
+        omission a reader could confuse with "forgot to check". This is the
+        end-to-end F5-shaped regression Codex required: it must FAIL if the
+        control silently skips (i.e. if role_control were ever missing or a
+        placeholder null)."""
+        cases = [
+            # (facts, expected top-level status for the OP candidate)
+            ([_service_role_fact("operative")], "compatible"),
+            ([_service_role_fact("anesthesia")], "excluded"),
+            ([_service_role_fact(None)], "fact_role_missing"),
+            ([_service_role_fact("operative", description="c1"),
+             _service_role_fact("anesthesia", description="c2")], "fact_role_conflict"),
+            ([_service_role_fact("operative"),
+             ClinicalFact(FactKind.DIAGNOSIS, "a condition", fact_id="D1")],
+             "mixed_kind_intent"),
+        ]
+        for facts, expected_status in cases:
+            report = {r["code"]: r for r in semelig.eligibility_report(
+                facts, [_candidate("OP")], self._source(), "2026-01-01")}
+            rc = report["OP"]["role_control"]
+            self.assertIsNotNone(rc, f"role_control silently absent for {expected_status}")
+            self.assertEqual(rc["status"], expected_status)
+            self.assertTrue(rc["source_id"] or expected_status.startswith(
+                ("fact_role", "mixed_kind")), rc)
+
+    def test_role_control_reports_an_unclassifiable_candidate_explicitly(self):
+        fact = _service_role_fact("operative")
+        report = {r["code"]: r for r in semelig.eligibility_report(
+            [fact], [_candidate("PLAIN")], self._source(), "2026-01-01")}
+        rc = report["PLAIN"]["role_control"]
+        self.assertEqual(rc["status"], "candidate_unclassified")
+        self.assertIsNone(rc["candidate_role"])
+        self.assertEqual(rc["fact_roles"], ["operative"])
+
 
 if __name__ == "__main__":
     unittest.main()

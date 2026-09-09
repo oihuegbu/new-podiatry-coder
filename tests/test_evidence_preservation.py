@@ -24,8 +24,16 @@ class EligibilityReportReasons(unittest.TestCase):
         fact = ClinicalFact(FactKind.PROCEDURE, "did a thing")
         cand = CandidateCode("Z1", "cpt", "a service", 0.5)
         report = semelig.eligibility_report([fact], [cand], source, None)
+        # issue #6 F9-R11-H-D: eligibility_report now always carries a typed
+        # role_control decision alongside eligible/reason -- here
+        # "fact_role_missing" since this fact never documents a service_role.
         self.assertEqual(report, [{"code": "Z1", "system": "cpt",
-                                   "eligible": True, "reason": None}])
+                                   "eligible": True, "reason": None,
+                                   "role_control": {
+                                       "status": "fact_role_missing",
+                                       "fact_roles": [],
+                                       "candidate_role": None,
+                                       "source_id": "semantic_class"}}])
 
     def test_ineligible_candidate_carries_a_reason(self):
         source = MockSource(records={("Z1", "cpt"): {"long_description": "a service",

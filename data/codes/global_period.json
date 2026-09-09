@@ -1,10 +1,11 @@
 {
- "source": "CMS Medicare PFS Relative Value File (PPRRVU): GLOB DAYS + BILAT SURG + STATUS CODE columns",
- "url": "https://www.cms.gov/files/zip/rvu26b.zip",
- "file": "PPRRVU2026_Apr_nonQPP.csv",
- "provenance": "authoritative CMS data, parsed verbatim from the RVU file",
- "generated": "2026-09-09",
- "count": 17028,
+ "source": "Projected from the authoritative 'global_periods' source (data/global_periods.json) -- glob_days/bilat_surg/status fields, re-keyed for claude_coder.data_access. Not a second independently downloaded CMS extract (issue #6 F9-R11-H-C).",
+ "parent_source": "CMS National Physician Fee Schedule Relative Value File -- PPRRVU2026_Jul_nonQPP.csv",
+ "parent_version": "RVU26C (2026 July release)",
+ "parent_source_url": "https://www.cms.gov/medicare/payment/fee-schedules/physician/pfs-relative-value-files/rvu26c",
+ "parent_sha256": "e2a0ca51b552d5cb7d4597367588947eea075e2aa41280351e4b21a266cecdcf",
+ "generated": "2026-09-09T15:58:59.893695+00:00",
+ "count": 17095,
  "codes": {
   "0001F": {
    "global": "XXX",
@@ -4806,65 +4807,205 @@
    "bilat": "9",
    "status": "I"
   },
+  "1026T": {
+   "global": "YYY",
+   "bilat": "0",
+   "status": "C"
+  },
+  "1027T": {
+   "global": "YYY",
+   "bilat": "0",
+   "status": "C"
+  },
+  "1028T": {
+   "global": "XXX",
+   "bilat": "0",
+   "status": "C"
+  },
+  "1029T": {
+   "global": "XXX",
+   "bilat": "0",
+   "status": "C"
+  },
   "1030F": {
    "global": "XXX",
    "bilat": "9",
    "status": "I"
+  },
+  "1030T": {
+   "global": "XXX",
+   "bilat": "0",
+   "status": "C"
   },
   "1031F": {
    "global": "XXX",
    "bilat": "9",
    "status": "I"
   },
+  "1031T": {
+   "global": "ZZZ",
+   "bilat": "0",
+   "status": "C"
+  },
   "1032F": {
    "global": "XXX",
    "bilat": "9",
    "status": "I"
+  },
+  "1032T": {
+   "global": "XXX",
+   "bilat": "0",
+   "status": "C"
   },
   "1033F": {
    "global": "XXX",
    "bilat": "9",
    "status": "I"
   },
+  "1033T": {
+   "global": "ZZZ",
+   "bilat": "0",
+   "status": "C"
+  },
   "1034F": {
    "global": "XXX",
    "bilat": "9",
    "status": "I"
+  },
+  "1034T": {
+   "global": "XXX",
+   "bilat": "0",
+   "status": "C"
   },
   "1035F": {
    "global": "XXX",
    "bilat": "9",
    "status": "I"
   },
+  "1035T": {
+   "global": "ZZZ",
+   "bilat": "0",
+   "status": "C"
+  },
   "1036F": {
    "global": "XXX",
    "bilat": "9",
    "status": "M"
+  },
+  "1036T": {
+   "global": "XXX",
+   "bilat": "0",
+   "status": "C"
+  },
+  "1037T": {
+   "global": "YYY",
+   "bilat": "0",
+   "status": "C"
   },
   "1038F": {
    "global": "XXX",
    "bilat": "9",
    "status": "M"
   },
+  "1038T": {
+   "global": "XXX",
+   "bilat": "0",
+   "status": "C"
+  },
   "1039F": {
    "global": "XXX",
    "bilat": "9",
    "status": "M"
+  },
+  "1039T": {
+   "global": "XXX",
+   "bilat": "0",
+   "status": "C"
   },
   "1040F": {
    "global": "XXX",
    "bilat": "9",
    "status": "I"
   },
+  "1040T": {
+   "global": "YYY",
+   "bilat": "0",
+   "status": "C"
+  },
+  "1041T": {
+   "global": "XXX",
+   "bilat": "0",
+   "status": "C"
+  },
+  "1042T": {
+   "global": "ZZZ",
+   "bilat": "0",
+   "status": "C"
+  },
+  "1043T": {
+   "global": "XXX",
+   "bilat": "3",
+   "status": "C"
+  },
+  "1044T": {
+   "global": "YYY",
+   "bilat": "0",
+   "status": "C"
+  },
+  "1045T": {
+   "global": "ZZZ",
+   "bilat": "0",
+   "status": "C"
+  },
+  "1046T": {
+   "global": "YYY",
+   "bilat": "0",
+   "status": "C"
+  },
+  "1047T": {
+   "global": "ZZZ",
+   "bilat": "0",
+   "status": "C"
+  },
+  "1048T": {
+   "global": "YYY",
+   "bilat": "0",
+   "status": "C"
+  },
+  "1049T": {
+   "global": "ZZZ",
+   "bilat": "0",
+   "status": "C"
+  },
   "1050F": {
    "global": "XXX",
    "bilat": "9",
    "status": "I"
   },
+  "1050T": {
+   "global": "000",
+   "bilat": "0",
+   "status": "C"
+  },
+  "1051T": {
+   "global": "000",
+   "bilat": "0",
+   "status": "C"
+  },
   "1052F": {
    "global": "XXX",
    "bilat": "9",
    "status": "I"
+  },
+  "1052T": {
+   "global": "XXX",
+   "bilat": "0",
+   "status": "C"
+  },
+  "1053T": {
+   "global": "XXX",
+   "bilat": "0",
+   "status": "C"
   },
   "1055F": {
    "global": "XXX",
@@ -26628,7 +26769,7 @@
   },
   "46505": {
    "global": "010",
-   "bilat": "1",
+   "bilat": "0",
    "status": "A"
   },
   "46600": {
@@ -48776,6 +48917,11 @@
    "bilat": "9",
    "status": "X"
   },
+  "90616": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
   "90619": {
    "global": "XXX",
    "bilat": "9",
@@ -48857,6 +49003,11 @@
    "status": "X"
   },
   "90638": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
+  "90639": {
    "global": "XXX",
    "bilat": "9",
    "status": "X"
@@ -55297,9 +55448,9 @@
    "status": "A"
   },
   "A4100": {
-   "global": "ZZZ",
-   "bilat": "0",
-   "status": "A"
+   "global": "XXX",
+   "bilat": "9",
+   "status": "C"
   },
   "A4206": {
    "global": "XXX",
@@ -58897,6 +59048,11 @@
    "status": "C"
   },
   "A9573": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
+  "A9574": {
    "global": "XXX",
    "bilat": "9",
    "status": "X"
@@ -65001,6 +65157,21 @@
    "bilat": "0",
    "status": "A"
   },
+  "G0574": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
+  "G0575": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
+  "G0577": {
+   "global": "000",
+   "bilat": "0",
+   "status": "C"
+  },
   "G0659": {
    "global": "XXX",
    "bilat": "9",
@@ -65047,6 +65218,56 @@
    "status": "X"
   },
   "G0668": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
+  "G0669": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
+  "G0670": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
+  "G0671": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
+  "G0672": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
+  "G0673": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
+  "G0674": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
+  "G0675": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
+  "G0676": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
+  "G0677": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
+  "G0678": {
    "global": "XXX",
    "bilat": "9",
    "status": "X"
@@ -70616,6 +70837,11 @@
    "bilat": "9",
    "status": "E"
   },
+  "J0528": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
   "J0558": {
    "global": "XXX",
    "bilat": "9",
@@ -71501,6 +71727,11 @@
    "bilat": "9",
    "status": "E"
   },
+  "J1289": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
   "J1290": {
    "global": "XXX",
    "bilat": "9",
@@ -71857,6 +72088,11 @@
    "status": "E"
   },
   "J1576": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
+  "J1577": {
    "global": "XXX",
    "bilat": "9",
    "status": "E"
@@ -72611,6 +72847,11 @@
    "bilat": "9",
    "status": "E"
   },
+  "J2361": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
   "J2371": {
    "global": "XXX",
    "bilat": "9",
@@ -72622,6 +72863,11 @@
    "status": "E"
   },
   "J2373": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
+  "J2374": {
    "global": "XXX",
    "bilat": "9",
    "status": "E"
@@ -72967,6 +73213,11 @@
    "status": "E"
   },
   "J2788": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
+  "J2789": {
    "global": "XXX",
    "bilat": "9",
    "status": "E"
@@ -73361,6 +73612,11 @@
    "bilat": "9",
    "status": "E"
   },
+  "J3386": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
   "J3387": {
    "global": "XXX",
    "bilat": "9",
@@ -73427,6 +73683,11 @@
    "status": "E"
   },
   "J3404": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
+  "J3405": {
    "global": "XXX",
    "bilat": "9",
    "status": "E"
@@ -73647,6 +73908,11 @@
    "status": "E"
   },
   "J7175": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
+  "J7176": {
    "global": "XXX",
    "bilat": "9",
    "status": "E"
@@ -74746,6 +75012,11 @@
    "bilat": "9",
    "status": "E"
   },
+  "J9053": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
   "J9054": {
    "global": "XXX",
    "bilat": "9",
@@ -74772,6 +75043,11 @@
    "status": "E"
   },
   "J9061": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
+  "J9062": {
    "global": "XXX",
    "bilat": "9",
    "status": "E"
@@ -75087,6 +75363,11 @@
    "status": "E"
   },
   "J9230": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
+  "J9232": {
    "global": "XXX",
    "bilat": "9",
    "status": "E"
@@ -75632,6 +75913,16 @@
    "status": "X"
   },
   "M0224": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
+  "M0231": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
+  "M0232": {
    "global": "XXX",
    "bilat": "9",
    "status": "X"
@@ -78266,6 +78557,11 @@
    "bilat": "9",
    "status": "X"
   },
+  "Q0234": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "X"
+  },
   "Q0235": {
    "global": "XXX",
    "bilat": "9",
@@ -78944,17 +79240,17 @@
   "Q4112": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4113": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4114": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4115": {
    "global": "ZZZ",
@@ -78974,7 +79270,7 @@
   "Q4118": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4121": {
    "global": "ZZZ",
@@ -79059,7 +79355,7 @@
   "Q4139": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4140": {
    "global": "ZZZ",
@@ -79084,7 +79380,7 @@
   "Q4145": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4146": {
    "global": "ZZZ",
@@ -79104,7 +79400,7 @@
   "Q4149": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4150": {
    "global": "ZZZ",
@@ -79134,7 +79430,7 @@
   "Q4155": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4156": {
    "global": "ZZZ",
@@ -79169,7 +79465,7 @@
   "Q4162": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4163": {
    "global": "ZZZ",
@@ -79199,7 +79495,7 @@
   "Q4168": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4169": {
    "global": "ZZZ",
@@ -79214,7 +79510,7 @@
   "Q4171": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4173": {
    "global": "ZZZ",
@@ -79224,7 +79520,7 @@
   "Q4174": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4175": {
    "global": "ZZZ",
@@ -79239,7 +79535,7 @@
   "Q4177": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4178": {
    "global": "ZZZ",
@@ -79279,7 +79575,7 @@
   "Q4185": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4186": {
    "global": "ZZZ",
@@ -79299,7 +79595,7 @@
   "Q4189": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4190": {
    "global": "ZZZ",
@@ -79314,7 +79610,7 @@
   "Q4192": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4193": {
    "global": "ZZZ",
@@ -79364,7 +79660,7 @@
   "Q4202": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4203": {
    "global": "ZZZ",
@@ -79384,7 +79680,7 @@
   "Q4206": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4208": {
    "global": "ZZZ",
@@ -79404,12 +79700,12 @@
   "Q4212": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4213": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4214": {
    "global": "ZZZ",
@@ -79419,7 +79715,7 @@
   "Q4215": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4216": {
    "global": "ZZZ",
@@ -79484,7 +79780,7 @@
   "Q4230": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4232": {
    "global": "ZZZ",
@@ -79494,7 +79790,7 @@
   "Q4233": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4234": {
    "global": "ZZZ",
@@ -79529,27 +79825,27 @@
   "Q4240": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4241": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4242": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4245": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4246": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4247": {
    "global": "ZZZ",
@@ -79864,7 +80160,7 @@
   "Q4310": {
    "global": "XXX",
    "bilat": "9",
-   "status": "E"
+   "status": "C"
   },
   "Q4311": {
    "global": "ZZZ",
@@ -80842,6 +81138,46 @@
    "status": "E"
   },
   "Q5162": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
+  "Q5164": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
+  "Q5165": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
+  "Q5166": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
+  "Q5167": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
+  "Q5168": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
+  "Q5169": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
+  "Q5170": {
+   "global": "XXX",
+   "bilat": "9",
+   "status": "E"
+  },
+  "Q5171": {
    "global": "XXX",
    "bilat": "9",
    "status": "E"
