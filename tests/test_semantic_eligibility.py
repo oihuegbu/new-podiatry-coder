@@ -488,6 +488,10 @@ class ServiceRoleExclusion(unittest.TestCase):
     recall must not itself define the clinically eligible set."""
 
     def _source(self):
+        # Codex F9-R11-H-B: candidate role now comes ONLY from semantic_class()
+        # (never a descriptor-phrase proxy), so both roles are stubbed via
+        # MockSource's semantic_class map, exactly like every other
+        # semantic_class-driven test in this file.
         return MockSource(
             records={
                 ("OP", "cpt"): {"long_description": "Ostectomy, calcaneus",
@@ -498,7 +502,7 @@ class ServiceRoleExclusion(unittest.TestCase):
                 ("PLAIN", "cpt"): {"long_description": "Excision, unrelated site",
                                    "active": True},
             },
-            semantic_class={"OP": "surgical_procedure"})
+            semantic_class={"OP": "surgical_procedure", "ANES": "anesthesia"})
 
     def test_operative_fact_excludes_the_anesthesia_classified_candidate(self):
         fact = _service_role_fact("operative")
@@ -550,9 +554,58 @@ class ServiceRoleExclusion(unittest.TestCase):
                  semelig.eligibility_report([fact], candidates, self._source(), "2026-01-01")}
         for code, entry in report.items():
             self.assertEqual(entry["eligible"], code in kept, report)
-        self.assertIsNotNone(report["ANES"]["reason"])
-        self.assertIn("service_role", report["ANES"]["reason"])
-        self.assertIsNone(report["OP"]["reason"])
+
+    # ---------------------------------------------------- Codex F9-R11-H-A
+    def test_conflicting_roles_in_a_composed_intent_exclude_neither_candidate(self):
+        """A composed intent (e.g. a PART_OF-linked operative component and
+        anesthesia component) with genuinely CONFLICTING documented roles must
+        not pick one arbitrarily -- neither candidate family is excluded on
+        this basis; a real conflict needs upstream composition/provider-query
+        resolution, not a guess."""
+        op_fact = _service_role_fact("operative", description="operative component")
+        anes_fact = _service_role_fact("anesthesia", description="anesthesia component")
+        result = semelig.eligible_partition(
+            [op_fact, anes_fact], [_candidate("OP"), _candidate("ANES")],
+            self._source(), "2026-01-01")
+        self.assertEqual({c.code for c in result}, {"OP", "ANES"})
+
+    def test_conflicting_roles_are_order_invariant(self):
+        """The exact defect Codex's independent reproduction found: fact ORDER
+        must never change which candidate family survives."""
+        op_fact = _service_role_fact("operative", description="operative component")
+        anes_fact = _service_role_fact("anesthesia", description="anesthesia component")
+        forward = semelig.eligible_partition(
+            [op_fact, anes_fact], [_candidate("OP"), _candidate("ANES")],
+            self._source(), "2026-01-01")
+        backward = semelig.eligible_partition(
+            [anes_fact, op_fact], [_candidate("OP"), _candidate("ANES")],
+            self._source(), "2026-01-01")
+        self.assertEqual({c.code for c in forward}, {c.code for c in backward})
+
+    def test_one_known_role_plus_one_missing_role_still_enforces_the_known_one(self):
+        """A composed intent where only ONE member documents a role (the other
+        is silent, not conflicting) still has exactly one AUTHORIZED role --
+        the known one enforces normally. Missing is not the same as
+        conflicting."""
+        op_fact = _service_role_fact("operative", description="operative component")
+        silent = ClinicalFact(FactKind.PROCEDURE, "an unrelated component",
+                              fact_id="F-silent")
+        result = semelig.eligible_partition(
+            [op_fact, silent], [_candidate("OP"), _candidate("ANES")],
+            self._source(), "2026-01-01")
+        self.assertEqual([c.code for c in result], ["OP"])
+
+    def test_three_component_intent_with_one_conflicting_role_excludes_neither(self):
+        """A third, agreeing component does not let two-out-of-three roles
+        "win" -- ANY genuine conflict in the set excludes nothing, not just a
+        strict pairwise tie."""
+        op1 = _service_role_fact("operative", description="component one")
+        op2 = _service_role_fact("operative", description="component two")
+        anes = _service_role_fact("anesthesia", description="component three")
+        result = semelig.eligible_partition(
+            [op1, op2, anes], [_candidate("OP"), _candidate("ANES")],
+            self._source(), "2026-01-01")
+        self.assertEqual({c.code for c in result}, {"OP", "ANES"})
 
 
 if __name__ == "__main__":

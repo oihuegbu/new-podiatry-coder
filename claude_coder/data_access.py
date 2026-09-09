@@ -186,6 +186,8 @@ class CodeSource(Protocol):
 
     def bilat_indicator(self, code: str) -> str | None: ...
 
+    def pfs_status(self, code: str) -> str | None: ...
+
     def index_codes(self, description: str, system: str) -> set[str]: ...
 
     def snomed_codes(self, description: str, system: str) -> set[str]: ...
@@ -1207,6 +1209,16 @@ class AuthoritativeSource:
         (no laterality modifier). None if unknown."""
         return self._pfs(code).get("bilat")
 
+    def pfs_status(self, code: str) -> str | None:
+        """CMS PFS payment-status indicator (single letter, e.g. 'J' = paid under
+        the anesthesia payment methodology) -- the field `coding_semantics.json`'s
+        `anesthesia` class rule (`pfs_status_any`) reads (issue #6 F9-R11-H-B).
+        Source: PFS RVU file's own STATUS CODE column
+        (`tools/build_global_period.py`), the SAME file `global_period`/
+        `bilat_indicator` already read. None/empty when unknown -- never a guess,
+        and never approximated from a descriptor-phrase proxy."""
+        return self._pfs(code).get("status") or None
+
     # -- retrieval: RECALL only (concept -> candidate code identities) ---------
     def _vector_store(self):
         if self._store is None:
@@ -1783,11 +1795,15 @@ class AuthoritativeSource:
           - `icd_chapter_ids`: the code's 3-character category falls inside one of
             the listed CDC/NCHS ICD-10-CM chapters.
           - `cpt_category`: the code is a member of the licensed CPT category.
-          - `pfs_status_any`: NOT YET SATISFIABLE here -- `claude_coder`'s own PFS
-            table (`_pfs_table`, built by `tools/build_global_period.py`) does not
-            carry the CMS status-indicator field this rule reads, only global/bilat.
-            A class whose ONLY rule is `pfs_status_any` is honestly unclassifiable
-            from this source today rather than approximated; the first match wins
+          - `pfs_status_any`: the code's CMS PFS payment-status indicator (`pfs_status`,
+            the SAME PPRRVU file `global_period`/`bilat_indicator` already read) is
+            one of the listed single-letter values (issue #6 F9-R11-H-B: this rule
+            was previously unsatisfiable -- the PFS table carried only global/bilat
+            -- and `semantic_eligibility` had fallen back to a hand-authored
+            descriptor-phrase proxy for exactly the class this rule names, which
+            CLAUDE.md's no-hardcoding rule forbids for a claim-affecting decision;
+            `tools/build_global_period.py` now also extracts the STATUS CODE
+            column). The first match wins
             when a code matches more than one class, so which class table order
             settles it is a config decision, not a code one.
         """
@@ -1805,6 +1821,11 @@ class AuthoritativeSource:
             if rule.get("global_days_kind") == "numeric" and system in ("cpt", "hcpcs"):
                 gp = self.global_period(code)
                 if gp and gp.isdigit():
+                    return name
+            status_any = rule.get("pfs_status_any")
+            if status_any and system in ("cpt", "hcpcs"):
+                st = self.pfs_status(code)
+                if st and st in status_any:
                     return name
             chapter_ids = rule.get("icd_chapter_ids")
             if chapter_ids and system == "icd10":
@@ -1836,6 +1857,7 @@ class MockSource:
                  nonbillable: set[str] | None = None,
                  gp: dict[str, str] | None = None,
                  bilat: dict[str, str] | None = None,
+                 status: dict[str, str] | None = None,
                  index: dict[str, set] | None = None,
                  snomed: dict[str, set] | None = None,
                  proc_index: dict[str, set] | None = None,
@@ -1863,6 +1885,7 @@ class MockSource:
         self._nonbillable = nonbillable or set()
         self._gp = gp or {}
         self._bilat = bilat or {}
+        self._status = status or {}
         self._index = index or {}
         self._snomed_map = snomed or {}
         self._proc_index = proc_index or {}
@@ -1917,6 +1940,9 @@ class MockSource:
 
     def bilat_indicator(self, code):
         return self._bilat.get(code)
+
+    def pfs_status(self, code):
+        return self._status.get(code)
 
     def index_codes(self, description, system):
         return set(self._index.get(description, set())) if system == "icd10" else set()

@@ -90,12 +90,20 @@ attempt, this does not route an ADVISORY source into eligibility -- the fact sid
 is a real, evidence-backed EXTRACTION AXIS (`service_role`, the same
 attributes/attribute_evidence mechanism every other axis already uses, so it is
 independently verifiable against the note like laterality or anatomy), and the
-candidate side reads only `semantic_class`/`code_section` -- the SAME two
-already-authoritative, already-reviewed structural sources this module's anatomy
-check and the compiled-semantics classifier already trust. `umls_crosswalk_entry`
-is deliberately NOT used for this (its own docstring: "must NEVER be used to
-select or expand a code" -- a real, separate follow-up item, not folded in here
-under time pressure).
+candidate side reads ONLY `semantic_class()` -- the same already-authoritative,
+already-reviewed structural classifier the compiled-semantics module already
+trusts. `umls_crosswalk_entry` is deliberately NOT used for this (its own
+docstring: "must NEVER be used to select or expand a code" -- a real, separate
+follow-up item, not folded in here under time pressure). An earlier revision of
+this module also fell back to `ontology.code_section`'s literal descriptor-phrase
+table when `semantic_class()` could not yet classify "anesthesia" -- Codex
+F9-R11-H-B correctly identified that as the SAME hardcoded-proxy pattern
+CLAUDE.md forbids for a claim-affecting decision, notwithstanding that it read an
+authoritative descriptor's own text: the MATCHING RULE itself was a hand-authored,
+unversioned Python literal, not sourced from `coding_semantics.json`. Removed;
+`semantic_class()`'s own `anesthesia` rule (`pfs_status_any`) is now wired to a
+real CMS PFS status-indicator column instead (`tools/build_global_period.py`,
+`data_access.AuthoritativeSource.pfs_status`).
 
 Not implemented here, and deliberately left for separate, more careful design:
 Codex's broader "positive action/anatomy support from UMLS CUI lineage" proposal
@@ -134,40 +142,51 @@ _FACT_KIND_SEMANTIC_CLASS = {FactKind.EM: "evaluation_management"}
 _PROCEDURE_ROLES = ("operative", "anesthesia")
 
 #: CANDIDATE-side procedure role, from already-loaded authoritative structure only
-#: -- never a code range/prefix (Codex F9-R11-H item 2; see this module's own
-#: CLAUDE.md history above re: `IMAGING_PREFIXES`). `semantic_class()`'s own
+#: -- never a code range/prefix, and never a hand-authored descriptor PROXY either
+#: (Codex F9-R11-H-B): an earlier version of this mapping fell back to
+#: `ontology.code_section`'s literal `("anesthesia for", "anesthesia,")` phrase
+#: table when `semantic_class()` could not classify "anesthesia" -- CLAUDE.md's
+#: no-hardcoding rule forbids exactly this pattern for a claim-affecting decision
+#: (approximating a real, queryable field with a fixed proxy), even though the
+#: proxy read an authoritative descriptor's own text. `semantic_class()`'s
 #: `surgical_procedure` rule (`global_days_kind: numeric`, a real CMS PFS field)
-#: covers "operative"; its `anesthesia` rule cannot currently classify anything --
-#: its only configured source, the CMS status-indicator field, is not wired into
-#: this codebase's PFS table yet (`data_access.semantic_class`'s own docstring) --
-#: so `ontology.code_section` (descriptor-grammar: "anesthesia for ..."/"anesthesia,
-#: ...", never a code range) is the fallback that actually classifies it today.
-#: Neither mapping names a medical code; both map an already-authoritative
+#: covers "operative"; its `anesthesia` rule (`pfs_status_any: ["J"]`) now reads
+#: the CMS PFS STATUS CODE column `tools/build_global_period.py` extracts from
+#: the same RVU file (`data_access.AuthoritativeSource.pfs_status`) -- ONLY
+#: `semantic_class()` is consulted here. A candidate this classifier cannot
+#: resolve to a role is an honest data gap, never guessed from its descriptor
+#: text. This mapping names no medical code -- it maps an already-authoritative
 #: CLASSIFICATION NAME onto this module's own closed role vocabulary, the same
 #: pattern `_FACT_KIND_SEMANTIC_CLASS` above already uses.
-_SEMANTIC_CLASS_TO_PROCEDURE_ROLE = {"surgical_procedure": "operative"}
-_CODE_SECTION_TO_PROCEDURE_ROLE = {"anesthesia": "anesthesia"}
+_SEMANTIC_CLASS_TO_PROCEDURE_ROLE = {"surgical_procedure": "operative",
+                                     "anesthesia": "anesthesia"}
 
 
 def _candidate_procedure_role(candidate, source) -> str | None:
-    """This candidate's procedure role (`_PROCEDURE_ROLES`), or None when neither
-    already-authoritative source classifies it -- an honest data gap, never a
-    guess. Tried in order: the compiled semantics classifier, then the
-    descriptor-grammar CPT section (the only source that currently resolves
-    "anesthesia" -- see `_CODE_SECTION_TO_PROCEDURE_ROLE` above)."""
+    """This candidate's procedure role (`_PROCEDURE_ROLES`), or None when
+    `semantic_class()` does not classify it -- an honest data gap, never a
+    guess and never a descriptor-phrase proxy (Codex F9-R11-H-B)."""
     classifier = getattr(source, "semantic_class", None)
     try:
         cls = classifier(candidate.code, candidate.system) if callable(classifier) else None
     except Exception:
         cls = None
-    role = _SEMANTIC_CLASS_TO_PROCEDURE_ROLE.get(cls)
-    if role:
-        return role
-    rec = getattr(source, "lookup", None)
-    rec = rec(candidate.code, candidate.system) if callable(rec) else None
-    descriptor = str((rec or {}).get("long_description") or (rec or {}).get("description")
-                     or (rec or {}).get("short_description") or "")
-    return _CODE_SECTION_TO_PROCEDURE_ROLE.get(_ontology.code_section(descriptor))
+    return _SEMANTIC_CLASS_TO_PROCEDURE_ROLE.get(cls)
+
+
+def _authorized_roles(facts: list[ClinicalFact], reconciliation) -> set[str]:
+    """The set of DISTINCT claim-authorized `service_role` values documented
+    anywhere across `facts` (Codex F9-R11-H-A). NEVER "first nonempty": a
+    composed multi-fact intent (e.g. an operative component and an anesthesia
+    component grouped by `PART_OF`) can genuinely carry more than one role, and
+    picking whichever fact happened to sort first made the excluded candidate
+    family depend on fact ORDER, not on what was documented -- the same
+    intent produced opposite exclusions depending on list order, independently
+    reproduced. Returns every distinct value stated, so the caller can tell
+    "exactly one, consistently documented" apart from "conflicting" or "none"."""
+    return {v for v in (str(_gc.claim_authorized_value(f, "service_role", reconciliation)
+                            or "").strip().lower()
+                        for f in facts) if v}
 
 
 def _service_role_exclusions(facts: list[ClinicalFact], candidates: list,
@@ -180,17 +199,22 @@ def _service_role_exclusions(facts: list[ClinicalFact], candidates: list,
     mismatch it was never asked to check.
 
     Only fires when EVERY fact in this intent is a FactKind.PROCEDURE (a mixed
-    intent has no single procedure role to check against) AND the fact side
-    explicitly documents which role via the claim-authorized "service_role"
-    attribute (never the raw, possibly-negated value -- same discipline
-    `_fact_attribute_value` already applies to laterality). A candidate is
-    excluded only when its OWN role is positively classified AND differs from
-    the fact's -- an unclassifiable candidate role, or a fact that never states
-    one, excludes nothing: absence of grounding is not evidence against anyone,
-    the same principle `_anatomy_dominance_exclusions` already follows."""
+    intent has no single procedure role to check against) AND the composed
+    intent documents EXACTLY ONE distinct role across every member fact
+    (`_authorized_roles`, above) -- conflicting roles across a composed intent
+    (Codex F9-R11-H-A) exclude nothing on this basis, the same as no role at
+    all: a genuine role conflict needs upstream composition/provider-query
+    resolution, not an arbitrary pick between two documented alternatives. A
+    candidate is excluded only when its OWN role is positively classified AND
+    differs from the fact's -- an unclassifiable candidate role excludes
+    nothing either: absence of grounding is not evidence against anyone, the
+    same principle `_anatomy_dominance_exclusions` already follows."""
     if {f.kind for f in facts} != {FactKind.PROCEDURE}:
         return {}
-    fact_role = _fact_attribute_value(facts, "service_role", reconciliation).lower()
+    roles = _authorized_roles(facts, reconciliation)
+    if len(roles) != 1:
+        return {}
+    fact_role = next(iter(roles))
     if fact_role not in _PROCEDURE_ROLES:
         return {}
     out: dict[tuple[str, str], str] = {}

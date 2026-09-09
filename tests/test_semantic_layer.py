@@ -443,6 +443,30 @@ class SemanticClassMatchingRules(unittest.TestCase):
             gp={"W3": {"global": "XXX"}})
         self.assertIsNone(s.semantic_class("W3", "cpt"))
 
+    def test_pfs_status_any_matches_a_listed_status_indicator(self):
+        """issue #6 F9-R11-H-B: the `anesthesia` class's rule (`pfs_status_any`)
+        is now dispatched and reads the CMS PFS STATUS CODE column via the SAME
+        `_gp`-backed table `global_period`/`bilat_indicator` already read."""
+        s = self._source(
+            records={("W7", "cpt"): {"long_description": "Anesthesia widget"}},
+            rules={"anesthesia": {"pfs_status_any": ["J"]}},
+            gp={"W7": {"status": "J"}})
+        self.assertEqual(s.semantic_class("W7", "cpt"), "anesthesia")
+
+    def test_pfs_status_any_does_not_match_an_unlisted_status_indicator(self):
+        s = self._source(
+            records={("W8", "cpt"): {"long_description": "Widget procedure"}},
+            rules={"anesthesia": {"pfs_status_any": ["J"]}},
+            gp={"W8": {"status": "A"}})
+        self.assertIsNone(s.semantic_class("W8", "cpt"))
+
+    def test_pfs_status_any_absent_status_is_unclassified_not_a_guess(self):
+        s = self._source(
+            records={("W9", "cpt"): {"long_description": "Widget procedure"}},
+            rules={"anesthesia": {"pfs_status_any": ["J"]}},
+            gp={})
+        self.assertIsNone(s.semantic_class("W9", "cpt"))
+
     def test_icd_chapter_ids_matches_by_the_codes_own_category_not_the_full_code(self):
         """Regression: a full code longer than its 3-character category must still
         match a chapter boundary expressed only at the category level (the
