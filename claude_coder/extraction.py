@@ -44,6 +44,13 @@ For each fact return an object with:
         For performed services also capture actor participation using ONLY ids supplied
         in encounter_context: performer_id, performer_function, organization_id, and
         billing_entity_id. Never invent an id or equate a person with an organization.
+        For a "procedure" fact ONLY, when the note itself distinguishes it: "service_role"
+        as "operative" when this fact IS the surgical/therapeutic act itself, or
+        "anesthesia" when this fact IS the anesthesia service administered FOR another
+        procedure (e.g. "under monitored anesthesia care", "regional block performed by
+        Dr. X for the procedure") — omit entirely for every other fact kind, and omit for
+        a procedure fact too when the note does not make this distinction (never guess
+        "operative" by default just because most procedures are).
         For an evaluation_management fact, also give the medical-decision-making
         elements when documented: "problems", "data", "risk" each as one of
         straightforward | low | moderate | high, plus "new_patient" (true/false),
@@ -59,8 +66,8 @@ For each fact return an object with:
           "strings": {"name": <axis>, "value": <string>} — anatomy, laterality,
               product/material, drug name, approach, contrast,
               technical_vs_professional, performer_id, performer_function,
-              organization_id, billing_entity_id, problems, data, risk,
-              setting, and any other text-valued axis.
+              organization_id, billing_entity_id, service_role, problems, data,
+              risk, setting, and any other text-valued axis.
           "numbers": {"name": <axis>, "value": <number>} — depth, area/size,
               count/quantity, dose, wasted amount, total_time_minutes.
           "booleans": {"name": <axis>, "value": true|false} — new_patient,

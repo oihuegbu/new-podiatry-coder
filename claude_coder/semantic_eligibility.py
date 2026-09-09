@@ -79,6 +79,31 @@ the broad RECALL pool AND the authoritative-index `seeds` in `resolution.py` ali
 -- and `eligible_partition` is a PURE filter with no fallback that restores an
 excluded candidate; see its own docstring for why an earlier version's fallback was
 itself a defect, not a safety net.
+
+SERVICE ROLE (issue #6 F9-R11-H) narrows one specific case the "ACTION stays
+unimplemented" note above does NOT cover, and does so without repeating that
+attempt's defect: FactKind.PROCEDURE alone cannot distinguish the operative act
+from the anesthesia administered FOR it, so both land in the same undifferentiated
+recall pool on a real note (confirmed live: an anesthesia-block CPT family showing
+up inside a surgical procedure's candidate shortlist). Unlike the reverted ACTION
+attempt, this does not route an ADVISORY source into eligibility -- the fact side
+is a real, evidence-backed EXTRACTION AXIS (`service_role`, the same
+attributes/attribute_evidence mechanism every other axis already uses, so it is
+independently verifiable against the note like laterality or anatomy), and the
+candidate side reads only `semantic_class`/`code_section` -- the SAME two
+already-authoritative, already-reviewed structural sources this module's anatomy
+check and the compiled-semantics classifier already trust. `umls_crosswalk_entry`
+is deliberately NOT used for this (its own docstring: "must NEVER be used to
+select or expand a code" -- a real, separate follow-up item, not folded in here
+under time pressure).
+
+Not implemented here, and deliberately left for separate, more careful design:
+Codex's broader "positive action/anatomy support from UMLS CUI lineage" proposal
+(F9-R11-H items 3-4) for candidates OTHER than the procedure/anesthesia split --
+`umls_crosswalk_entry`'s docstring warns three times over against exactly this
+class of use, and the ACTION revert above is a direct precedent for what goes
+wrong when that boundary is crossed under time pressure rather than reviewed
+carefully on its own.
 """
 from __future__ import annotations
 
@@ -92,11 +117,90 @@ from .models import ClinicalFact, FactKind, Outcome
 #: A candidate positively classified as evaluation/management is a different kind of
 #: service from a candidate that is not, and vice versa -- the one FactKind/semantic-
 #: class correspondence narrow and certain enough to check without guessing (issue #6
-#: item 4). Other classes (`surgical_procedure`, `anesthesia`, ...) do not have an
-#: equally reliable FactKind correspondence -- FactKind.PROCEDURE alone does not
-#: distinguish a surgical from a non-surgical procedure -- so they are deliberately
-#: left unchecked here rather than approximated.
+#: item 4).
 _FACT_KIND_SEMANTIC_CLASS = {FactKind.EM: "evaluation_management"}
+
+#: Closed FACT-side vocabulary for the ONE FactKind.PROCEDURE sub-distinction that
+#: matters for eligibility and has no other structural signal (Codex F9-R11-H):
+#: FactKind.PROCEDURE alone does not distinguish the operative/procedural act from
+#: the anesthesia administered FOR it -- both are extracted as "procedure" facts,
+#: so without this the anesthesia candidate pool and the operative candidate pool
+#: are the same undifferentiated recall set. The extractor now documents this via
+#: the SAME evidence-backed "attributes"/"attribute_evidence" mechanism as every
+#: other axis (`extraction._SYSTEM`) -- no wire-schema change, since attribute
+#: NAMES were already open-vocabulary. A fact that never states it (the overwhelming
+#: majority of non-procedure facts, and any procedure fact the note does not make
+#: this distinction for) stays UNKNOWN and is never guessed either way.
+_PROCEDURE_ROLES = ("operative", "anesthesia")
+
+#: CANDIDATE-side procedure role, from already-loaded authoritative structure only
+#: -- never a code range/prefix (Codex F9-R11-H item 2; see this module's own
+#: CLAUDE.md history above re: `IMAGING_PREFIXES`). `semantic_class()`'s own
+#: `surgical_procedure` rule (`global_days_kind: numeric`, a real CMS PFS field)
+#: covers "operative"; its `anesthesia` rule cannot currently classify anything --
+#: its only configured source, the CMS status-indicator field, is not wired into
+#: this codebase's PFS table yet (`data_access.semantic_class`'s own docstring) --
+#: so `ontology.code_section` (descriptor-grammar: "anesthesia for ..."/"anesthesia,
+#: ...", never a code range) is the fallback that actually classifies it today.
+#: Neither mapping names a medical code; both map an already-authoritative
+#: CLASSIFICATION NAME onto this module's own closed role vocabulary, the same
+#: pattern `_FACT_KIND_SEMANTIC_CLASS` above already uses.
+_SEMANTIC_CLASS_TO_PROCEDURE_ROLE = {"surgical_procedure": "operative"}
+_CODE_SECTION_TO_PROCEDURE_ROLE = {"anesthesia": "anesthesia"}
+
+
+def _candidate_procedure_role(candidate, source) -> str | None:
+    """This candidate's procedure role (`_PROCEDURE_ROLES`), or None when neither
+    already-authoritative source classifies it -- an honest data gap, never a
+    guess. Tried in order: the compiled semantics classifier, then the
+    descriptor-grammar CPT section (the only source that currently resolves
+    "anesthesia" -- see `_CODE_SECTION_TO_PROCEDURE_ROLE` above)."""
+    classifier = getattr(source, "semantic_class", None)
+    try:
+        cls = classifier(candidate.code, candidate.system) if callable(classifier) else None
+    except Exception:
+        cls = None
+    role = _SEMANTIC_CLASS_TO_PROCEDURE_ROLE.get(cls)
+    if role:
+        return role
+    rec = getattr(source, "lookup", None)
+    rec = rec(candidate.code, candidate.system) if callable(rec) else None
+    descriptor = str((rec or {}).get("long_description") or (rec or {}).get("description")
+                     or (rec or {}).get("short_description") or "")
+    return _CODE_SECTION_TO_PROCEDURE_ROLE.get(_ontology.code_section(descriptor))
+
+
+def _service_role_exclusions(facts: list[ClinicalFact], candidates: list,
+                             source, reconciliation=None) -> dict[tuple[str, str], str]:
+    """`{(code, system) -> reason}` for candidates a documented procedure
+    service_role positively excludes (Codex F9-R11-H): broad recall must not
+    itself define the clinically eligible set. Runs BEFORE verification (via
+    `eligible_partition`, below) so an incompatible-role candidate never reaches
+    the model at all, rather than relying on the verifier to notice a role
+    mismatch it was never asked to check.
+
+    Only fires when EVERY fact in this intent is a FactKind.PROCEDURE (a mixed
+    intent has no single procedure role to check against) AND the fact side
+    explicitly documents which role via the claim-authorized "service_role"
+    attribute (never the raw, possibly-negated value -- same discipline
+    `_fact_attribute_value` already applies to laterality). A candidate is
+    excluded only when its OWN role is positively classified AND differs from
+    the fact's -- an unclassifiable candidate role, or a fact that never states
+    one, excludes nothing: absence of grounding is not evidence against anyone,
+    the same principle `_anatomy_dominance_exclusions` already follows."""
+    if {f.kind for f in facts} != {FactKind.PROCEDURE}:
+        return {}
+    fact_role = _fact_attribute_value(facts, "service_role", reconciliation).lower()
+    if fact_role not in _PROCEDURE_ROLES:
+        return {}
+    out: dict[tuple[str, str], str] = {}
+    for c in candidates:
+        role = _candidate_procedure_role(c, source)
+        if role and role != fact_role:
+            out[(c.code, c.system)] = (
+                f"candidate's authoritative classification is {role!r}, "
+                f"incompatible with the fact's documented service_role {fact_role!r}")
+    return out
 
 
 def _candidate_measurement_dimension(candidate, source) -> str | None:
@@ -411,6 +515,8 @@ def eligible_partition(facts: list[ClinicalFact], candidates: list, source,
     an empty pool as an honest abstention; that is the correct outcome here
     too, not a reason to disable the filter."""
     pool = [c for c in candidates if eligible(c, facts, source, date_of_service)]
+    role_excluded = _service_role_exclusions(facts, pool, source, reconciliation)
+    pool = [c for c in pool if (c.code, c.system) not in role_excluded]
     excluded = _anatomy_dominance_exclusions(facts, pool, source, reconciliation)
     return [c for c in pool if (c.code, c.system) not in excluded]
 
@@ -425,12 +531,15 @@ def eligibility_report(facts: list[ClinicalFact], candidates: list, source,
     so this record can never claim a different reason than the one that actually
     decided it."""
     pool = [c for c in candidates if eligible(c, facts, source, date_of_service)]
-    dominance = _anatomy_dominance_exclusions(facts, pool, source, reconciliation)
+    role_excluded = _service_role_exclusions(facts, pool, source, reconciliation)
+    surviving = [c for c in pool if (c.code, c.system) not in role_excluded]
+    dominance = _anatomy_dominance_exclusions(facts, surviving, source, reconciliation)
     report = []
     for c in candidates:
         reason = _ineligibility_reason(c, facts, source, date_of_service)
         if reason is None:
-            reason = dominance.get((c.code, c.system))
+            reason = (role_excluded.get((c.code, c.system))
+                      or dominance.get((c.code, c.system)))
         report.append({"code": c.code, "system": c.system, "eligible": reason is None,
                        "reason": reason})
     return report

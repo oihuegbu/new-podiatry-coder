@@ -462,5 +462,98 @@ class AnatomyPhraseDecomposition(unittest.TestCase):
         self.assertEqual({c.code for c in result}, {"QUALIFIED", "UNGROUNDED"})
 
 
+def _service_role_fact(role: str | None, description="a procedure") -> ClinicalFact:
+    """A PROCEDURE fact with a claim-authorized "service_role" attribute, exactly
+    the shape `_fact_attribute_value`/`claim_authorized_value` requires (scope-
+    valid, source-reconciled, ASSERTED) -- same construction the existing
+    laterality-contradiction test above uses. `role=None` builds a fact that never
+    states one at all."""
+    if role is None:
+        return ClinicalFact(FactKind.PROCEDURE, description)
+    from claude_coder.models import AttributeEvidence, EvidenceSpan, RelationState
+    span = EvidenceSpan(f"performed under {role}", anchored=True, span_id="s1")
+    return ClinicalFact(
+        FactKind.PROCEDURE, description, attributes={"service_role": role},
+        evidence=[span],
+        attribute_evidence={"service_role": (
+            AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                              value=role),)})
+
+
+class ServiceRoleExclusion(unittest.TestCase):
+    """issue #6 F9-R11-H: a documented procedure service_role (operative vs.
+    anesthesia -- the one FactKind.PROCEDURE sub-distinction with no other
+    structural signal) must positively exclude an authoritative candidate
+    classified as the OTHER role, BEFORE verification ever sees it -- broad
+    recall must not itself define the clinically eligible set."""
+
+    def _source(self):
+        return MockSource(
+            records={
+                ("OP", "cpt"): {"long_description": "Ostectomy, calcaneus",
+                                "active": True},
+                ("ANES", "cpt"): {"long_description": "Anesthesia for procedures "
+                                                       "on the calcaneus",
+                                  "active": True},
+                ("PLAIN", "cpt"): {"long_description": "Excision, unrelated site",
+                                   "active": True},
+            },
+            semantic_class={"OP": "surgical_procedure"})
+
+    def test_operative_fact_excludes_the_anesthesia_classified_candidate(self):
+        fact = _service_role_fact("operative")
+        result = semelig.eligible_partition(
+            [fact], [_candidate("OP"), _candidate("ANES")], self._source(), "2026-01-01")
+        self.assertEqual([c.code for c in result], ["OP"])
+
+    def test_anesthesia_fact_excludes_the_operative_classified_candidate(self):
+        fact = _service_role_fact("anesthesia")
+        result = semelig.eligible_partition(
+            [fact], [_candidate("OP"), _candidate("ANES")], self._source(), "2026-01-01")
+        self.assertEqual([c.code for c in result], ["ANES"])
+
+    def test_fact_with_no_service_role_excludes_nothing_on_this_basis(self):
+        """Absence of the axis is a data gap, never evidence against either
+        candidate -- both survive the role check (though not necessarily every
+        other eligibility check)."""
+        fact = _service_role_fact(None)
+        result = semelig.eligible_partition(
+            [fact], [_candidate("OP"), _candidate("ANES")], self._source(), "2026-01-01")
+        self.assertEqual({c.code for c in result}, {"OP", "ANES"})
+
+    def test_candidate_with_unclassifiable_role_is_not_excluded(self):
+        """An operative fact does not exclude a candidate whose OWN role cannot be
+        classified from already-authoritative structure -- absence of grounding
+        on the candidate side is not evidence against it either."""
+        fact = _service_role_fact("operative")
+        result = semelig.eligible_partition(
+            [fact], [_candidate("OP"), _candidate("PLAIN")], self._source(), "2026-01-01")
+        self.assertEqual({c.code for c in result}, {"OP", "PLAIN"})
+
+    def test_mixed_fact_kinds_never_check_service_role(self):
+        """A multi-member intent (e.g. a procedure plus its diagnosis) has no
+        single procedure role to check candidates against -- the check does not
+        fire at all rather than picking one fact's role arbitrarily."""
+        proc = _service_role_fact("operative")
+        dx = ClinicalFact(FactKind.DIAGNOSIS, "a condition", fact_id="D1")
+        result = semelig.eligible_partition(
+            [proc, dx], [_candidate("OP"), _candidate("ANES")], self._source(),
+            "2026-01-01")
+        self.assertEqual({c.code for c in result}, {"OP", "ANES"})
+
+    def test_eligibility_report_reflects_the_service_role_exclusion(self):
+        fact = _service_role_fact("operative")
+        candidates = [_candidate("OP"), _candidate("ANES")]
+        kept = {c.code for c in
+                semelig.eligible_partition([fact], candidates, self._source(), "2026-01-01")}
+        report = {r["code"]: r for r in
+                 semelig.eligibility_report([fact], candidates, self._source(), "2026-01-01")}
+        for code, entry in report.items():
+            self.assertEqual(entry["eligible"], code in kept, report)
+        self.assertIsNotNone(report["ANES"]["reason"])
+        self.assertIn("service_role", report["ANES"]["reason"])
+        self.assertIsNone(report["OP"]["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()
