@@ -11,12 +11,18 @@ for that code. Two phrase sources:
    plain title texts from the mainTerm down (nonessential modifiers in
    <nemod> are dropped). Trailing '-' on codes (incomplete stems like
    L03.03-) is stripped; consumers prefix-match.
-2. One-hop cross references: a mainTerm with NO code of its own whose
-   <see>/<seeAlso> points at another main term ("Paronychia — see also
+2. Cross references: a mainTerm with NO code of its own whose <see>/
+   <seeAlso> points at another main term ("Paronychia — see also
    Cellulitis, digit") contributes its own title as an alias phrase on
    every code under the referenced main term's subtree. This is what maps
    'paronychia' to the L03.0x cellulitis family and NOT to the L03.04x
    lymphangitis family (which lives under the 'Lymphangitis' main term).
+   The subtree walk itself follows a SECOND <see>/<seeAlso> hop too, when
+   a node inside that subtree also carries no code of its own: 'Cellulitis
+   > digit > finger'/'toe' are themselves such codeless redirects (each
+   points back to the direct 'Cellulitis, finger'/'Cellulitis, toe' entry
+   that DOES carry a code), so a naive one-hop-only walk finds zero codes
+   under 'digit' and silently drops the alias entirely.
 
 Usage: python tools/parse_icd10cm_index.py <icd10cm-index-*.xml> [out.json]
 """
@@ -79,13 +85,32 @@ def navigate(ref, main_terms):
     return node
 
 
-def subtree_codes(node) -> set[str]:
+def subtree_codes(node, main_terms=None, _visited=None) -> set[str]:
+    """Every code reachable under `node`'s subtree -- including through a
+    NESTED node's own <see>/<seeAlso> when that node carries no direct code
+    of its own. Some Index branches are themselves a second hop: e.g.
+    Cellulitis > digit > finger/toe each carry no code, only a <see> back to
+    the direct 'Cellulitis, finger'/'Cellulitis, toe' entries that do (this
+    is what previously made a one-hop alias like 'Paronychia -- see also
+    Cellulitis, digit' resolve to zero codes, silently, even though a real
+    two-hop path to L03.01-/L03.03- exists). `main_terms`/`_visited` are
+    only needed to chase that second hop; omitting `main_terms` reproduces
+    the original one-hop-only behavior for any other caller."""
+    if _visited is None:
+        _visited = set()
     codes = set()
     c = norm_code(node.findtext("code") or "")
     if c:
         codes.add(c)
+    elif main_terms is not None:
+        ref = (node.findtext("see") or node.findtext("seeAlso") or "").strip()
+        if ref and ref.lower() not in _visited:
+            _visited.add(ref.lower())
+            target = navigate(ref, main_terms)
+            if target is not None:
+                codes |= subtree_codes(target, main_terms, _visited)
     for child in node.findall("term"):
-        codes |= subtree_codes(child)
+        codes |= subtree_codes(child, main_terms, _visited)
     return codes
 
 
@@ -116,7 +141,7 @@ def main():
             target = navigate(ref, main_terms)
             if target is None:
                 continue
-            for code in subtree_codes(target):
+            for code in subtree_codes(target, main_terms):
                 out[code].add(title)
                 aliases += 1
 
