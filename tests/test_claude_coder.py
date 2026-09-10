@@ -1186,6 +1186,31 @@ class SingleCodeCrossReferenceOnlyCandidateTest(unittest.TestCase):
                                and line.chosen.code == "CROSSONLY")
         self.assertFalse(unilaterally_billed, line.rationale)
 
+    def test_a_redirect_only_hit_with_no_competing_candidate_still_abstains(self):
+        """issue #6 F9-R12-A, second re-review (Codex's exact required
+        regression): a redirect-only single-code hit must not close
+        deterministically even as the pool's SOLE survivor -- with no
+        retrieval candidates at all and no LLM to independently verify it,
+        it must ABSTAIN and retain the code as a candidate, never auto-bill
+        on the redirect alone. (The earlier test above only proved the pool
+        no longer shortcuts PAST a competing candidate; this proves the
+        narrower, harder case Codex's own reproduction targeted directly.)"""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind, ResolutionMethod
+        from claude_coder.resolution import resolve
+        src = MockSource(
+            records={("CROSSONLY", "icd10"): {"long_description": "some condition, unspecified",
+                                              "active": True}},
+            index={"a documented condition": {"CROSSONLY"}},
+            index_direct={})   # reachable ONLY via cross-reference; no retrieval configured at all
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="a documented condition",
+                            evidence=[EvidenceSpan("a documented condition")], confidence=0.9)
+        line = resolve(_request(fact), src)
+        self.assertNotEqual(line.method, ResolutionMethod.DETERMINISTIC, line.rationale)
+        self.assertIsNone(line.chosen, line.rationale)
+        alt_codes = {c.code for c in (line.alternatives or [])}
+        self.assertIn("CROSSONLY", alt_codes, line.rationale)
+
 
 class ConceptRelationIndexTest(unittest.TestCase):
     """SAME / ancestor-descendant-or-ambiguous-overlap / unresolved for two clinical

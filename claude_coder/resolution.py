@@ -465,6 +465,15 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                 for c in _authoritative_pool(stem, source):
                     if c.code not in seen_codes:
                         seen_codes.add(c.code)
+                        if stem not in idx_direct:
+                            # issue #6 F9-R12-A, second re-review: tagged on
+                            # the candidate ITSELF (not a local set) so the
+                            # provenance survives every later merge/re-rank
+                            # -- the no-LLM fallback below reads this to
+                            # keep a redirect-only hit from closing
+                            # deterministically just because it happens to
+                            # be the pool's sole survivor.
+                            c.authority["index_source_kind"] = "redirect"
                         seeds.append(c)
         # SECOND authoritative layer: the SNOMED CT -> ICD-10-CM crosswalk (the long-
         # tail eponyms/synonyms the ICD Index lacks — e.g. an eponymous condition).
@@ -778,8 +787,30 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                             documentation_gap=(gap_summary if measurement_gap else None))
         line.candidate_eligibility = _candidate_eligibility
     else:
-        line = _decide(fact, pool, source=source, dos=dos,
-                       reconciliation=reconciliation)
+        # issue #6 F9-R12-A, second re-review: a redirect-only Index hit
+        # (see/seeAlso, never a direct entry) is supplementary navigation,
+        # not proof -- it must not close deterministically just because it
+        # happens to be `_decide`'s sole survivor. With an LLM available,
+        # `_propose_then_verify` above already re-verifies every candidate
+        # through entailment regardless of provenance; this NO-LLM fallback
+        # is the one path with no such check, so it is the one that must
+        # exclude an unconfirmed redirect-only candidate from ever being
+        # the thing `_decide` auto-selects. `authority["index_source_kind"]`
+        # survives on the candidate itself through every merge above.
+        trusted_pool = [c for c in pool
+                        if c.authority.get("index_source_kind") != "redirect"]
+        if not trusted_pool and pool:
+            line = ResolvedLine(
+                fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
+                alternatives=pool[:5],
+                rationale=("the only candidate(s) reached a see/seeAlso Index "
+                    "redirect, supplementary navigation rather than proof the "
+                    "note supports the code, and no LLM is available to confirm "
+                    "descriptor entailment -- a coder classification decision, "
+                    "requiring independent confirmation before billing"))
+        else:
+            line = _decide(fact, trusted_pool, source=source, dos=dos,
+                           reconciliation=reconciliation)
         line.candidate_eligibility = _candidate_eligibility
     # NOTE: the `if llm is not None and fact.kind in (...)` branch above sets
     # `line.candidate_eligibility` itself, INSIDE `_propose_then_verify` --

@@ -222,6 +222,38 @@ def test_a_nested_redirect_source_emits_its_own_full_path_alias(tmp_path, monkey
     assert "cellulitis digit toe" in data["cross_reference_terms"].get("L03031", [])
 
 
+_TIER_COLLISION_XML = """
+<index>
+  <letter>
+    <mainTerm><title>Foo, foosynonym</title><code>F00.1</code></mainTerm>
+    <mainTerm><title>Bar, foo</title><code>F00.2</code></mainTerm>
+    <mainTerm><title>Redirector</title><seeAlso>Foo</seeAlso></mainTerm>
+  </letter>
+</index>
+"""
+
+
+def test_a_canonical_heading_resolves_despite_an_unrelated_secondary_collision(
+        tmp_path, monkeypatch):
+    """issue #6 F9-R12-C, second re-review: a MONOTONICITY property -- a
+    lower-priority tier (a DIFFERENT main term's own secondary/qualifying
+    comma segment) must never suppress a higher-priority tier's unique
+    match. 'Foo, foosynonym''s canonical (position-0) head 'foo' must
+    resolve to ITS OWN main term even though 'Bar, foo' also happens to
+    carry 'foo' as ITS OWN secondary qualifier -- the earlier flat,
+    single-priority component map treated this as one ambiguous collision
+    and left 'foo' unresolved entirely."""
+    import tools.parse_icd10cm_index as mod
+    src = tmp_path / "index.xml"
+    src.write_text(_TIER_COLLISION_XML)
+    dst = tmp_path / "out.json"
+    monkeypatch.setattr(sys, "argv", ["parse_icd10cm_index.py", str(src), str(dst)])
+    mod.main()
+    data = json.loads(dst.read_text())
+    assert "redirector" in data["cross_reference_terms"].get("F001", [])
+    assert "redirector" not in data["cross_reference_terms"].get("F002", [])
+
+
 def test_a_broad_cross_reference_alias_never_enters_per_code_embedding_text(
         tmp_path, monkeypatch):
     """issue #6 F9-R12-A: `app/rag/vector_store._load_icd10_records` only ever
@@ -303,6 +335,6 @@ def test_every_reference_directive_is_classified_never_silently_dropped(tmp_path
     assert directives["unresolved"] == 1
     assert (directives["resolved"] + directives["external_table_reference"]
            + directives["unresolved"]) == directives["total"]
-    assert any("nowhere" in s.lower() for s in directives["unresolved_sample"])
+    assert any("nowhere" in s.lower() for s in directives["unresolved_directives"])
     # The resolved directive still produces a real alias; the other two must not.
     assert "resolvable" in data["cross_reference_terms"].get("M001", [])

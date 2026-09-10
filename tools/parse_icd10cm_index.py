@@ -6,7 +6,7 @@ icd10cm-index-*.xml) into data/codes/icd10cm_index_terms.json:
      "cross_reference_terms": {"<dotless code>": ["alias phrase", ...]},
      "reference_directives": {"total": N, "resolved": N,
                               "external_table_reference": N, "unresolved": N,
-                              "unresolved_sample": ["<raw ref text>", ...]}}
+                              "unresolved_directives": ["<tag>: <raw ref text>", ...]}}
 
 Two DISTINCT trust tiers, kept in separate maps (issue #6 F9-R12-A) rather
 than merged, because they mean different things and downstream consumers
@@ -62,6 +62,19 @@ component, but ONLY when it names a single main term across the whole
 source (an ambiguous component -- 5 in the real source -- is left
 unresolved rather than guessed).
 
+issue #6 F9-R12-C, second re-review: the single flat `_components` map
+above was itself structurally wrong -- an unrelated main term's own
+SECONDARY (non-first) comma qualifier could collide with, and block, a
+totally different main term's CANONICAL first heading, leaving 102
+distinct reference texts (449 directives) unresolved even though they
+identified a unique canonical heading. Fixed with three PRIORITY tiers
+(exact full title, then each main term's OWN position-0 heading, then
+its remaining position-1+ qualifiers), consulted in order -- a tier
+claims a token (resolving it if unique, leaving it unresolved but BLOCKED
+if ambiguous) before the next, lower-priority tier is ever consulted for
+that same token. `unresolved_directives` in the artifact is now the
+COMPLETE list, never a capped sample.
+
 Usage: python tools/parse_icd10cm_index.py <icd10cm-index-*.xml> [out.json]
 """
 
@@ -84,6 +97,19 @@ CODE_RE = re.compile(r"^[A-Z][0-9][0-9A-Z](?:\.[0-9A-Za-z]{1,4})?-?$")
 #: this codebase matches a source's own declared convention rather than
 #: guessing.
 _EXTERNAL_TABLE_PREFIX = "table of"
+
+#: The Index's OWN universal INSTRUCTIONAL convention -- "see condition"
+#: on a bare adjective/qualifier mainTerm ('Accidental', 'Acute', ...)
+#: tells the CODER to look up their actual diagnosis term as the main
+#: entry; it is not a literal pointer anywhere in this document. A real
+#: mainTerm happens to ALSO be titled "Condition" in the source, so
+#: navigating this instruction literally resolves it to that unrelated
+#: entry's own subtree -- discovered via this round's own verification
+#: (606 directives use this convention; broadened component matching
+#: made "condition" newly, and wrongly, resolvable). Matched by exact
+#: normalized text, the same structural-marker discipline as
+#: `_EXTERNAL_TABLE_PREFIX` above -- not a clinical phrase.
+_SEE_CONDITION_INSTRUCTION = "condition"
 
 
 def plain_title(node) -> str:
@@ -153,9 +179,18 @@ def navigate(ref, main_terms):
     Whitespace-normalized on both sides (issue #6 F9-R12-B): the source XML's
     <see>/<seeAlso> text occasionally carries doubled internal spacing
     ('Abnormal,  diagnostic imaging') that a bare .strip() does not collapse,
-    which otherwise fails an exact title match that is genuinely present."""
+    which otherwise fails an exact title match that is genuinely present.
+
+    issue #6 F9-R12-C, second re-review: a bare 'see condition' (no further
+    qualifier) is the Index's own universal INSTRUCTION to look up the
+    actual diagnosis term -- never a literal pointer, even though a real
+    mainTerm happens to ALSO be titled 'Condition'. Broadening component
+    matching made that coincidental title newly, wrongly reachable (606
+    directives use this exact convention); refused here, at the one place
+    every caller -- top-level classification AND subtree_codes' own
+    internal recursive resolution -- funnels through."""
     parts = [_norm_ws(p).lower() for p in ref.split(",") if _norm_ws(p)]
-    if not parts:
+    if not parts or parts == [_SEE_CONDITION_INSTRUCTION]:
         return None
     node = main_terms.get(parts[0])
     for part in parts[1:]:
@@ -219,30 +254,58 @@ def main():
 
     out: dict[str, set] = defaultdict(set)
     main_terms: dict[str, ET.Element] = {}
-    # issue #6 F9-R12-B/C (Codex's independent structural check): a real
-    # main-term's OWN title is sometimes a COMPOSITE of several official
-    # comma-joined heading forms ("Abnormal, abnormality"), indexed here
-    # under the one full-title key -- but a <see>/<seeAlso> directive
+    # issue #6 F9-R12-B/C/C-second (Codex's independent structural check): a
+    # real main-term's OWN title is sometimes a COMPOSITE of several
+    # official comma-joined heading forms ("Abnormal, abnormality"), indexed
+    # here under the one full-title key -- but a <see>/<seeAlso> directive
     # elsewhere in the same source routinely cites just ONE heading
     # component ("see Abnormal, ..."), which never matches that composite
-    # key at all. Measured: 6,392 of the "unresolved" directives have a
-    # first segment matching exactly one such component. Each component is
-    # indexed as its own lookup key too, but ONLY when it identifies a
-    # SINGLE main term across the whole source (an ambiguous component --
-    # 5 in the real source -- stays unresolved rather than guessing).
-    _components: dict[str, set[ET.Element]] = defaultdict(set)
+    # key at all.
+    #
+    # THREE priority tiers, consulted in order, each one BLOCKING the next
+    # for a given token the moment it has ANY claim on it (even an
+    # ambiguous one) -- not merged into one flat map. The first attempt at
+    # this (a single `_components` dict over every comma position at equal
+    # weight) let an unrelated main term's own SECONDARY qualifier word
+    # ("...abnormal Y" as a deep, narrow variant) collide with and block a
+    # totally different main term's CANONICAL first heading ("Abnormal,
+    # abnormality" -- both segments equally name the SAME entry) -- 102
+    # distinct reference texts (449 directives) that resolve through a
+    # unique canonical first heading were measured staying wrongly
+    # unresolved this way.
+    #   1. exact_titles  -- the full title string (main_terms itself).
+    #   2. canonical_heads -- EACH main term's OWN position-0 comma segment
+    #      only (its primary alphabetical heading).
+    #   3. secondary_components -- EACH main term's remaining (position 1+)
+    #      comma segments (narrower qualifying variants).
+    # A component earns a lookup key only when it identifies a SINGLE main
+    # term WITHIN ITS OWN TIER (an ambiguous component -- 5 in the real
+    # source, at tier 2 -- stays unresolved rather than guessing, and BLOCKS
+    # the lower tier from claiming that same token on its behalf).
+    _canonical_heads: dict[str, set[ET.Element]] = defaultdict(set)
+    _secondary_components: dict[str, set[ET.Element]] = defaultdict(set)
     for letter in root.findall("letter"):
         for mt in letter.findall("mainTerm"):
             title = _norm_ws(plain_title(mt)).lower()
             if title:
                 main_terms.setdefault(title, mt)
-                for part in title.split(","):
-                    part = part.strip()
-                    if part:
-                        _components[part].add(mt)
+                parts = [p.strip() for p in title.split(",") if p.strip()]
+                if parts:
+                    _canonical_heads[parts[0]].add(mt)
+                    for part in parts[1:]:
+                        _secondary_components[part].add(mt)
             walk(mt, [], out)
-    for component, nodes in _components.items():
-        if component not in main_terms and len(nodes) == 1:
+    _claimed = set(main_terms)   # tier 1 already owns these tokens
+    for component, nodes in _canonical_heads.items():
+        if component in _claimed:
+            continue
+        _claimed.add(component)          # tier 2 owns this token now, ambiguous or not
+        if len(nodes) == 1:
+            main_terms[component] = next(iter(nodes))
+    for component, nodes in _secondary_components.items():
+        if component in _claimed:
+            continue
+        if len(nodes) == 1:
             main_terms[component] = next(iter(nodes))
 
     # Cross-reference aliases: kept in a SEPARATE map (issue #6 F9-R12-A) --
@@ -253,7 +316,10 @@ def main():
     cross_ref: dict[str, set] = defaultdict(set)
     directive_counts = {"total": 0, "resolved": 0,
                         "external_table_reference": 0, "unresolved": 0}
-    unresolved_sample: set[str] = set()
+    # issue #6 F9-R12-C, second re-review: EVERY unresolved directive, not a
+    # capped sample -- a directive this compiler cannot resolve is a
+    # complete, auditable record, never truncated away.
+    unresolved_full: set[str] = set()
     for letter in root.findall("letter"):
         for mt in letter.findall("mainTerm"):
             for node, path in iter_index_nodes(mt):
@@ -272,8 +338,8 @@ def main():
                     if status == "resolved":
                         for code in codes:
                             cross_ref[code].add(phrase)
-                    elif status == "unresolved" and len(unresolved_sample) < 200:
-                        unresolved_sample.add(f"{tag}: {ref}")
+                    elif status == "unresolved":
+                        unresolved_full.add(f"{tag}: {ref}")
 
     version = root.findtext("version") or ""
     data = {"version": version.strip(),
@@ -281,7 +347,7 @@ def main():
             "terms": {c: sorted(ps) for c, ps in sorted(out.items())},
             "cross_reference_terms": {c: sorted(ps) for c, ps in sorted(cross_ref.items())},
             "reference_directives": {**directive_counts,
-                                    "unresolved_sample": sorted(unresolved_sample)}}
+                                    "unresolved_directives": sorted(unresolved_full)}}
     dst.write_text(json.dumps(data, indent=1))
     n_phrases = sum(len(v) for v in out.values())
     n_xref = sum(len(v) for v in cross_ref.values())

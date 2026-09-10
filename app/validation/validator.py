@@ -157,6 +157,28 @@ class CodingValidator:
         # NCCI-dependent rule below found nothing for a reason that has nothing to do
         # with the claim.  See `_record_ncci_authority_loss`.
         self._ncci_authority_lost = False
+        # issue #6 F9-R12-D, second re-review: lazy-loaded, cached SNOMED CT
+        # concept graph -- None = not yet attempted, False = attempted and
+        # unavailable (REVIEWED-OPTIONAL: absence degrades to no governed-
+        # equivalence check at all, never a guess), else the loaded index.
+        self._concept_graph_cache = None
+
+    def _governed_concept_graph(self):
+        """The SNOMED CT Body Structure/condition concept graph
+        (`claude_coder.terminology.ConceptRelationIndex`), for
+        `_check_icd_sibling_descriptor`'s governed-equivalence check --
+        confirming an eponym and its descriptive synonym name the SAME
+        concept, never a guess from word rarity. REVIEWED-OPTIONAL, same
+        disposition as every other licensed recall aid on this adapter:
+        absent/unloadable degrades to None (no equivalence check at all),
+        never a wrong verdict."""
+        if self._concept_graph_cache is None:
+            try:
+                from claude_coder.terminology import ConceptRelationIndex
+                self._concept_graph_cache, _identity = ConceptRelationIndex.load_snapshot()
+            except Exception:
+                self._concept_graph_cache = False
+        return self._concept_graph_cache or None
 
     def _is_em(self, code: str) -> bool:
         """Authoritative service classification; absence fails closed."""
@@ -1984,15 +2006,6 @@ class CodingValidator:
 
     _EG_PAREN_RE = re.compile(r"\((?:eg|e\.g\.)[^)]*\)")
 
-    #: Generic English qualifier connectors (issue #6 F9-R12-B) -- not
-    #: clinical vocabulary, just the structural grammar an Index/inclusion
-    #: term uses to join TWO distinct findings into one compound phrase
-    #: ('X with Y', 'X due to Y'). `_any_term_documented`'s single-rare-
-    #: token shortcut must not fire on a term shaped like this: matching
-    #: only 'X' does not prove 'Y' was also documented.
-    _QUALIFIER_CONNECTOR_RE = re.compile(
-        r"\b(with|without|due to|secondary to|associated with|complicated by)\b")
-
     def _anatomy_lexicon(self) -> set:
         """Anatomy/site vocabulary mined from ICD-10-CM category headings:
         the words AFTER the 'of/at' pivot name sites ('Fracture OF foot and
@@ -2727,6 +2740,7 @@ class CodingValidator:
         swap on broad evidence is the safe direction."""
         if not note_full_text or not icd:
             return
+        from claude_coder.terminology import CONCEPT_SAME as _CONCEPT_SAME
         self._icd_condition_lexicon()
         note_words, low_note = self._note_evidence(note_full_text)
         clin_words, clin_low = self._clinical_evidence(note_full_text)
@@ -2780,6 +2794,28 @@ class CodingValidator:
                 terms.update(r[0].lower() for r in rows)
             return terms
 
+        def _governed_equivalent_documented(missing_toks, words) -> bool:
+            """issue #6 F9-R12-D, second re-review: the ONLY remaining path
+            for a term that is not fully, literally documented -- a
+            CONFIRMED governed SNOMED CT concept match between a token the
+            note does NOT literally state and a word the note DOES state.
+            This is exactly the genuine case corpus rarity used to
+            approximate ('Morton's metatarsalgia' documented by a note
+            saying 'Morton's neuroma' -- 'metatarsalgia' and 'neuroma' name
+            the SAME concept), but PROVEN rather than guessed from word
+            length/corpus frequency: two clinically DIFFERENT terms sharing
+            one rare word no longer passes. REVIEWED-OPTIONAL: absence of
+            the concept graph degrades to no equivalence at all (never a
+            guess standing in for a missing source)."""
+            graph = self._governed_concept_graph()
+            if graph is None:
+                return False
+            for missing in missing_toks:
+                for doc_word in words:
+                    if graph.relation(missing, doc_word) == _CONCEPT_SAME:
+                        return True
+            return False
+
         def _any_term_documented(terms, words=None, low=None,
                                  risky_terms: frozenset = frozenset()) -> bool:
             words = note_words if words is None else words
@@ -2788,34 +2824,25 @@ class CodingValidator:
                 toks = [t for t in self._tokens(term) if t not in self._DESC_STOPWORDS]
                 if not toks:
                     continue
-                # full-phrase match, OR any of the term's signature tokens —
-                # 'Morton's metatarsalgia' is documented by a note that says
-                # 'Morton's neuroma' ('morton' is unique to this entity even
-                # though 'metatarsalgia' never appears).
+                # full-phrase match — every signature token literally documented.
                 if all(self._desc_documented(t, words, low) for t in toks):
                     return True
-                # issue #6 F9-R12-D (Codex's re-review of the F9-R12-B
-                # connector-list fix): corpus rarity alone is not semantic
-                # equivalence -- a shared rare token can belong to two
-                # clinically DIFFERENT multi-word terms just as easily as to
-                # an eponym/synonym pair naming the SAME thing, and a
-                # compound Index cross-reference phrase can omit a listed
-                # connector word entirely while still requiring multiple
-                # independent clinical facts. So for a term reachable ONLY
-                # through a cross-reference redirect, the shortcut never
-                # applies at all -- full-phrase entailment (checked above)
-                # is the only way such a term counts as documented. Every
-                # OTHER term (inclusion terms, DIRECT Index entries, lexicon
-                # synonyms -- where the Morton's-eponym precedent actually
-                # applies) keeps the narrower connector-based guard.
+                # issue #6 F9-R12-D, second re-review (Codex): corpus rarity
+                # is REMOVED entirely as proof of semantic equivalence -- for
+                # EVERY term, not just cross-reference-sourced ones. It could
+                # auto-swap a billed diagnosis off of one coincidentally
+                # shared rare word between two clinically DIFFERENT
+                # multi-token terms (direct Index entries and inclusion
+                # terms included, not only cross-reference redirects). A
+                # cross-reference-only term (`risky_terms`) additionally
+                # never gets even the governed-equivalence attempt below --
+                # a compound redirect phrase's own components are not
+                # alternate names for the SAME thing, so there is nothing
+                # for a concept graph to legitimately confirm.
                 if term in risky_terms:
                     continue
-                if (len(toks) > 1
-                        and self._QUALIFIER_CONNECTOR_RE.search(term)):
-                    continue
-                if any(self._icd_token_df.get(t, 0) <= 25
-                       and self._desc_documented(t, words, low)
-                       for t in toks):
+                missing = [t for t in toks if not self._desc_documented(t, words, low)]
+                if missing and _governed_equivalent_documented(missing, words):
                     return True
             return False
 
