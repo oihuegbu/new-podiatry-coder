@@ -207,6 +207,24 @@ def _candidate_procedure_role(candidate, source, *, dos: str | None = None) -> s
     return _SEMANTIC_CLASS_TO_PROCEDURE_ROLE.get(cls)
 
 
+def _candidate_release_version(candidate, source, dos: str | None) -> str | None:
+    """The declared PFS release identity that answered this candidate's
+    classification, for `RoleControlDecision.authority_version` (issue #6
+    F9-R11-H-D, third re-review: was a permanent `None` placeholder).
+    Best-effort and never raises -- unlike `_candidate_procedure_role`, a
+    missing/failing `pfs_release_version` here means only that the AUDIT
+    TRAIL can't cite a version, not that the control itself is compromised
+    (the actual role classification already went through the fail-closed
+    `semantic_class` path above)."""
+    getter = getattr(source, "pfs_release_version", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter(candidate.code, dos)
+    except Exception:
+        return None
+
+
 def _authorized_roles(facts: list[ClinicalFact], reconciliation) -> set[str]:
     """The set of DISTINCT claim-authorized `service_role` values documented
     anywhere across `facts` (Codex F9-R11-H-A). NEVER "first nonempty": a
@@ -296,8 +314,14 @@ def _service_role_control(facts: list[ClinicalFact], candidates: list,
     never resolved but not WHAT that candidate's own classification actually
     was, which is exactly the fact a reviewer needs to judge whether the
     ambiguity is real."""
+    # Documented roles are computed regardless of mixed_kind (Codex F9-R11-H-D,
+    # third re-review): status (whether the control could ACT) and fact_roles
+    # (what was actually DOCUMENTED) are separate facts -- a prior version
+    # forced fact_roles=() for a mixed-kind intent, discarding a genuinely
+    # documented procedure role from the audit trail exactly when a reviewer
+    # most needs to see it.
+    roles = tuple(sorted(_authorized_roles(facts, reconciliation)))
     mixed_kind = {f.kind for f in facts} != {FactKind.PROCEDURE}
-    roles = () if mixed_kind else tuple(sorted(_authorized_roles(facts, reconciliation)))
     if mixed_kind:
         base_status = RoleControlStatus.MIXED_KIND_INTENT
     elif not roles:
@@ -316,8 +340,10 @@ def _service_role_control(facts: list[ClinicalFact], candidates: list,
         blocks = (base_status in (RoleControlStatus.FACT_ROLE_CONFLICT,
                                   RoleControlStatus.MIXED_KIND_INTENT)
                  and len(distinct_roles) > 1)
-        return {key: RoleControlDecision(base_status, roles, role, False, blocks)
-               for key, role in classified.items()}
+        return {(c.code, c.system): RoleControlDecision(
+                    base_status, roles, classified[(c.code, c.system)], False, blocks,
+                    authority_version=_candidate_release_version(c, source, dos))
+               for c in candidates}
 
     fact_role = roles[0]
     out: dict[tuple[str, str], RoleControlDecision] = {}
@@ -329,7 +355,9 @@ def _service_role_control(facts: list[ClinicalFact], candidates: list,
             status, excluded = RoleControlStatus.EXCLUDED, True
         else:
             status, excluded = RoleControlStatus.COMPATIBLE, False
-        out[(c.code, c.system)] = RoleControlDecision(status, (fact_role,), role, excluded)
+        out[(c.code, c.system)] = RoleControlDecision(
+            status, (fact_role,), role, excluded,
+            authority_version=_candidate_release_version(c, source, dos))
     return out
 
 

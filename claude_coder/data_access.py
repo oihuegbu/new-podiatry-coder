@@ -188,6 +188,8 @@ class CodeSource(Protocol):
 
     def pfs_status(self, code: str, dos: str | None = None) -> str | None: ...
 
+    def pfs_release_version(self, code: str, dos: str | None = None) -> str | None: ...
+
     def index_codes(self, description: str, system: str) -> set[str]: ...
 
     def snomed_codes(self, description: str, system: str) -> set[str]: ...
@@ -1259,6 +1261,19 @@ class AuthoritativeSource:
         self._pfs_binding()
         return self._compliance().billing_status(code, dos)
 
+    def pfs_release_version(self, code: str, dos: str | None = None) -> str | None:
+        """The declared PFS release identity (e.g. "RVU26C (2026 July
+        release)") that answered `global_period`/`bilat_indicator`/
+        `pfs_status` for `code` at `dos` -- for audit/certificate citation
+        (issue #6 F9-R11-H-D, third re-review: `RoleControlDecision.
+        authority_version` cites this rather than staying a permanent
+        `None` placeholder). None when no covering release exists, or when
+        the row that matched came from the live scheduled-refresh path
+        (`ComplianceDataStore.ingest_snapshot`), which does not record one."""
+        self._pfs_binding()
+        row = self._compliance().pfs_record(code, dos)
+        return row.get("source_version") if row else None
+
     # -- retrieval: RECALL only (concept -> candidate code identities) ---------
     def _vector_store(self):
         if self._store is None:
@@ -1989,6 +2004,9 @@ class MockSource:
 
     def pfs_status(self, code, dos=None):
         return self._status.get(code)
+
+    def pfs_release_version(self, code, dos=None):
+        return None
 
     def index_codes(self, description, system):
         return set(self._index.get(description, set())) if system == "icd10" else set()

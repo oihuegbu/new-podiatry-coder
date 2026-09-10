@@ -88,17 +88,22 @@ _RVU_RELEASE_MONTH = {"A": "01", "B": "04", "C": "07", "D": "10"}
 _RVU_VERSION_RE = re.compile(r"RVU(\d{2})([A-D])\b")
 
 
-def _rvu_release_effective_from(version: str, fallback: str) -> str:
+def _rvu_release_effective_from(version: str) -> str | None:
     """The real CMS effective-from date a PFS RVU release's own `version`
     string names (e.g. "RVU26C (2026 July release)" -> "2026-07-01"), or
-    `fallback` (this box's own ingest-time signal) when the string doesn't
-    match CMS's documented release-letter convention."""
+    None when the string doesn't match CMS's documented release-letter
+    convention -- deliberately NO filesystem-mtime (or any other guessed)
+    fallback (issue #6 F9-R11-H-C, third re-review: a guessed effective date
+    is exactly the kind of unsourced approximation that let a DOS resolve a
+    release that does not apply to it). The caller must reject the refresh
+    outright when this returns None -- ingesting an undated release is a
+    worse defect than skipping it."""
     m = _RVU_VERSION_RE.search(version or "")
     if not m:
-        return fallback
+        return None
     yy, letter = m.groups()
     month = _RVU_RELEASE_MONTH.get(letter)
-    return f"20{yy}-{month}-01" if month else fallback
+    return f"20{yy}-{month}-01" if month else None
 
 
 _CODE_TOKEN_RE = re.compile(r"[A-TV-Z][0-9][0-9A-Z]{0,5}(?:\.[0-9A-Z-]{1,4})?")
@@ -616,6 +621,27 @@ class ComplianceDataStore:
             self._ingest_global_periods()
             self.conn.commit()
 
+        # global_period.source_version: the exact declared release string a
+        # row came from (e.g. "RVU26C (2026 July release)"), added so a
+        # role-control decision can cite which PFS release actually answered
+        # it instead of a placeholder (issue #6 F9-R11-H-D, third re-review).
+        # The wipe+reingest this triggers is ALSO the migration that fixes
+        # issue #6 F9-R11-H-C's H-C1: every already-deployed database's rows
+        # still carried the legacy effective_from='1900-01-01' seed baseline,
+        # and the old per-VALUE diff ingest treated an unchanged value as
+        # "nothing to do", so that baseline never advanced. A full
+        # wipe+reingest through the current complete-snapshot
+        # _ingest_global_periods is the only way an already-deployed row's
+        # window gets corrected to a real release date; a fresh install gets
+        # the same effective-dated rows a wipe+reingest here produces, so the
+        # two converge to identical state either way.
+        gp_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(global_period)")}
+        if "source_version" not in gp_cols:
+            self.conn.execute("ALTER TABLE global_period ADD COLUMN source_version TEXT")
+            self.conn.execute("DELETE FROM global_period")
+            self._ingest_global_periods()
+            self.conn.commit()
+
         n_mce = self.conn.execute("SELECT COUNT(*) FROM mce_edit").fetchone()[0]
         if n_mce == 0:
             self._ingest_mce_edits()
@@ -940,7 +966,12 @@ class ComplianceDataStore:
                 co_surg   TEXT,                  -- 62 permitted? ('0' = not permitted)
                 team_surg TEXT,                  -- 66 permitted? ('0' = not permitted)
                 effective_from TEXT NOT NULL DEFAULT '1900-01-01',
-                effective_to   TEXT NOT NULL DEFAULT '9999-12-31'
+                effective_to   TEXT NOT NULL DEFAULT '9999-12-31',
+                source_version TEXT              -- the declared release string this row
+                                                  -- came from (e.g. "RVU26C (2026 July
+                                                  -- release)") -- NULL for a row the live
+                                                  -- refresh path (ingest_snapshot) wrote,
+                                                  -- which does not populate it.
             );
             CREATE INDEX ix_glob ON global_period(code);
 
@@ -1335,45 +1366,72 @@ class ComplianceDataStore:
         n_mai = sum(1 for r in rows if r[2])
         logger.info(f"  mue: {len(rows)} entries ({n_mai} with parsed MAI)")
 
+    #: Provenance identity for the SEED (data/global_periods.json) ingest below --
+    #: distinct from "pfs_global", the id the LIVE scheduled refresh
+    #: (app/compliance/refresh/runner.py) uses for the SAME table, so the two
+    #: provenance streams never collide in data_source_version even though they
+    #: write the same physical rows (issue #6 F9-R11-H-C, third re-review).
+    _GLOBAL_PERIODS_SOURCE_ID = "global_periods_seed"
+
     def _ingest_global_periods(self) -> None:
-        """Diff-based upsert, NOT clear-then-replace (issue #6 F9-R11-H-C,
-        second re-review): a blind clear on every refresh made DOS-aware
-        selection meaningless -- there was never more than one row per code to
-        select between. A code whose values are UNCHANGED from the currently-
-        open row is left alone; a code whose values genuinely changed gets its
-        old row closed at the new release's effective_from and a new open row
-        inserted -- so a DOS before that boundary still resolves the prior
-        (still correct, for that DOS) release, and a rebuild never erases
-        previously-ingested history. A code missing from this load is NOT
-        closed out: absence from one file is a data gap in THIS load, not
-        evidence CMS retired the code."""
+        """Complete-snapshot replacement, not a per-code diff (issue #6
+        F9-R11-H-C, third re-review -- REPLACES the second re-review's
+        diff-based upsert, which left three real defects: a legacy
+        `effective_from='1900-01-01'` row with unchanged values was never
+        re-baselined to a real release date; a code OMITTED from a newer
+        release kept its old row open forever, indistinguishable from a code
+        genuinely still active; and there was no protection against an older
+        release ingesting after a newer one).
+
+        data/global_periods.json is a single, asserted-COMPLETE CMS PFS
+        extract (its own "counts" field states the total). Given that,
+        absence of a code from a new release is a real signal -- the code
+        left the fee schedule -- not a gap in this one load. So: derive this
+        release's effective_from STRICTLY from its own declared CMS RVU
+        release-letter convention (`_rvu_release_effective_from` -- never a
+        filesystem timestamp or any other guessed date; reject the refresh
+        outright if it can't be derived). Reject an older release arriving
+        after a newer one, and reject re-ingesting the SAME release twice
+        (idempotent per (source_id, effective_from), the same contract
+        `ingest_snapshot` already established for ncci_ptp/mue/global_period
+        on the LIVE refresh path). Otherwise, close EVERY currently-open row
+        -- not just the ones whose values changed -- at this release's
+        effective_from, then insert the release's own rows fresh. A DOS
+        before that boundary still resolves whatever release was open then;
+        a rebuild never erases that history (nothing here ever deletes an
+        already-closed row)."""
         try:
             with open(GLOBAL_PERIODS_FILE) as f:
                 data = json.load(f)
         except Exception as exc:
             logger.warning(f"  global_period: could not load ({exc})")
             return
-        try:
-            mtime_date = date.fromtimestamp(GLOBAL_PERIODS_FILE.stat().st_mtime).isoformat()
-        except OSError:
-            mtime_date = date.today().isoformat()
-        new_effective_from = _rvu_release_effective_from(
-            str(data.get("version") or ""), mtime_date)
+        version = str(data.get("version") or "")
+        new_effective_from = _rvu_release_effective_from(version)
+        if new_effective_from is None:
+            logger.warning(
+                f"  global_period: version {version!r} does not match the CMS RVU "
+                f"release-letter convention -- refresh REJECTED (no guessed date)")
+            return
 
-        fields = ("glob_days", "billing_status", "bilat_surg", "pctc_ind",
-                  "mult_proc", "asst_surg", "co_surg", "team_surg")
-        existing = {
-            row["code"]: row
-            for row in self.conn.execute(
-                "SELECT code, glob_days, billing_status, bilat_surg, pctc_ind, "
-                "mult_proc, asst_surg, co_surg, team_surg, effective_from "
-                "FROM global_period WHERE effective_to=?", (_OPEN,))
-        }
+        self._ensure_source_version_table()
+        already = self.conn.execute(
+            "SELECT 1 FROM data_source_version WHERE source_id=? AND effective_from=?",
+            (self._GLOBAL_PERIODS_SOURCE_ID, new_effective_from)).fetchone()
+        if already:
+            logger.info(f"  global_period: release {new_effective_from} already "
+                       f"ingested -- skip")
+            return
+        newest = self.conn.execute(
+            "SELECT MAX(effective_from) m FROM data_source_version WHERE source_id=?",
+            (self._GLOBAL_PERIODS_SOURCE_ID,)).fetchone()
+        if newest and newest["m"] and new_effective_from < newest["m"]:
+            logger.warning(
+                f"  global_period: release {new_effective_from} is OLDER than the "
+                f"already-ingested {newest['m']} -- refresh REJECTED (out of order)")
+            return
 
-        inserts: list[tuple] = []
-        close_updates: list[tuple[str, str]] = []
-        close_deletes: list[tuple[str, str]] = []
-        unchanged = 0
+        rows = []
         for code, days in data.get("codes", {}).items():
             # New format: dict with {global_days, status, pctc_ind, ...}
             # Old format: bare integer/string
@@ -1390,35 +1448,21 @@ class ComplianceDataStore:
                 status = bilat_surg = pctc = mult = asst = co = team = None
             if not glob_days:
                 continue
-            norm = _norm(code)
-            new_values = (glob_days, status, bilat_surg, pctc, mult, asst, co, team)
-            old = existing.get(norm)
-            if old is not None:
-                if tuple(old[f] for f in fields) == new_values:
-                    unchanged += 1
-                    continue
-                if old["effective_from"] >= new_effective_from:
-                    # This release's effective_from doesn't post-date the
-                    # currently-open row's own -- nothing to bound a distinct
-                    # historical window with (same-day re-ingest of a changed
-                    # file, or clock skew). Replace the open row in place
-                    # rather than inserting a second row with a
-                    # non-advancing window.
-                    close_deletes.append((norm, old["effective_from"]))
-                else:
-                    close_updates.append((norm,))
-            inserts.append((norm, *new_values, new_effective_from, _OPEN))
-        from datetime import timedelta
+            rows.append((_norm(code), glob_days, status, bilat_surg, pctc, mult,
+                        asst, co, team, new_effective_from, _OPEN, version))
+        if not rows:
+            logger.warning("  global_period: 0 rows parsed -- refresh REJECTED "
+                          "(a 0-row snapshot must never be recorded as ingested)")
+            return
+
+        from datetime import datetime, timedelta
         day_before = (date.fromisoformat(new_effective_from)
                      - timedelta(days=1)).isoformat()
-        for norm, in close_updates:
-            self.conn.execute(
-                "UPDATE global_period SET effective_to=? "
-                "WHERE code=? AND effective_to=?", (day_before, norm, _OPEN))
-        for norm, old_from in close_deletes:
-            self.conn.execute(
-                "DELETE FROM global_period WHERE code=? AND effective_from=? "
-                "AND effective_to=?", (norm, old_from, _OPEN))
+        # Close EVERY open row, including ones this release doesn't mention --
+        # a complete snapshot's silence about a code IS the signal (H-C2).
+        self.conn.execute(
+            "UPDATE global_period SET effective_to=? WHERE effective_to=?",
+            (day_before, _OPEN))
         # Named columns, not positional VALUES — ALTER TABLE ADD COLUMN (the
         # migration path for DBs built before billing_status existed) always
         # appends the new column at the end of the table regardless of where
@@ -1426,13 +1470,26 @@ class ComplianceDataStore:
         # write billing_status into the wrong column on a migrated DB.
         self.conn.executemany(
             "INSERT INTO global_period (code, glob_days, billing_status, bilat_surg, "
-            "pctc_ind, mult_proc, asst_surg, co_surg, team_surg, effective_from, effective_to) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            inserts,
+            "pctc_ind, mult_proc, asst_surg, co_surg, team_surg, effective_from, "
+            "effective_to, source_version) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            rows,
         )
-        logger.info(f"  global_period: {len(inserts)} row(s) new/changed "
-                   f"(effective_from={new_effective_from}), {unchanged} unchanged, "
-                   f"{len(existing)} previously open")
+        self.conn.execute(
+            "INSERT INTO data_source_version VALUES (?,?,?,?,?)",
+            (self._GLOBAL_PERIODS_SOURCE_ID, new_effective_from,
+             datetime.now().isoformat(timespec="seconds"), len(rows),
+             f"global_periods.json ({version})"))
+        self.conn.commit()
+        logger.info(f"  global_period: {len(rows)} row(s) (release {version!r}, "
+                   f"effective_from={new_effective_from})")
+
+    def _ensure_source_version_table(self) -> None:
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS data_source_version ("
+            "source_id TEXT NOT NULL, effective_from TEXT, ingested_at TEXT, "
+            "row_count INTEGER, file_name TEXT)"
+        )
 
     def _ingest_lcd(self) -> None:
         """podiatry_lcd.json is the full CMS Coverage API dataset: hundreds of
@@ -3180,22 +3237,27 @@ class ComplianceDataStore:
         """The single CMS PFS indicator row for `code` applicable to `dos`
         (the encounter's date of service, defaulting to today when absent).
         `global_period`/`billing_status`/`bilat_surg`/`pfs_indicators` below
-        are thin projections of this ONE query, via the SAME `_asof` helper
-        every other effective-dated compliance table (NCCI, MUE) already
-        uses, so a DOS-selected release can never disagree between them and
-        this table's degrade behavior on an out-of-window DOS stays
-        consistent with the rest of the store rather than inventing a
-        PFS-only policy (issue #6 F9-R11-H-C, second re-review — previously
-        `global_period`/`billing_status`/`bilat_surg` ran `WHERE code=?
-        LIMIT 1`, silently ignoring `dos` and returning whatever single
-        snapshot happened to be loaded regardless of which release actually
-        covers the encounter)."""
-        row = self._asof(
-            "global_period",
-            "glob_days, billing_status, bilat_surg, pctc_ind, mult_proc, "
-            "asst_surg, co_surg, team_surg, effective_from, effective_to",
-            "code=?", (_norm(code),), self._dos(dos),
-        )
+        are thin projections of this ONE query, so a DOS-selected release can
+        never disagree between them.
+
+        STRICT: exactly one query, `effective_from<=dos<=effective_to`, no
+        further fallback -- deliberately NOT `_asof` (issue #6 F9-R11-H-C,
+        third re-review: `_asof`'s graceful degrade returns the EARLIEST
+        available row when `dos` predates every ingested release, which for
+        PFS meant a 2020 DOS could resolve a 2026 release -- non-applicable
+        medical-policy data, not an honest "unknown". `_asof`'s degrade
+        stays exactly as-is for NCCI/MUE, its established, separately-
+        reviewed callers; this is a bounded, PFS-only correction, not a
+        change to that shared helper). None when no ingested release covers
+        `dos` -- an honest data gap, never the newest/oldest available row
+        standing in for an era it does not describe."""
+        row = self.conn.execute(
+            "SELECT glob_days, billing_status, bilat_surg, pctc_ind, mult_proc, "
+            "asst_surg, co_surg, team_surg, effective_from, effective_to, source_version "
+            "FROM global_period WHERE code=? AND effective_from<=? AND effective_to>=? "
+            "ORDER BY effective_from DESC LIMIT 1",
+            (_norm(code), self._dos(dos), self._dos(dos)),
+        ).fetchone()
         return dict(row) if row else None
 
     def global_period(self, code: str, dos=None) -> str | None:

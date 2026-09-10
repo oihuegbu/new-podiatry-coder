@@ -367,7 +367,13 @@ RELEASE_METADATA_SOURCES = frozenset({
 # Version of the required-source SCHEMA below.  A release attestation records it, so a
 # certificate built against an older/other required-source definition is identifiable
 # rather than silently comparable.  Bump it whenever the required set or a role changes.
-REQUIRED_SOURCE_SCHEMA_VERSION = "release-required-sources-v3"
+REQUIRED_SOURCE_SCHEMA_VERSION = "release-required-sources-v4"
+# v3 -> v4 (issue #6 F9-R11-S): "pfs_indicators" removed -- the coder no
+# longer reads a second, independently-parsed data/codes/global_period.json
+# extract; PFS values now come from ComplianceDataStore, built from the
+# already-required "global_periods" source. A v3 certificate and a v4
+# certificate declare materially different required-source sets and must
+# never be treated as comparable.
 
 # The COMPLETE set of release-bearing source identities a certifiable release must
 # account for, each with the ROLE it plays.  Absence of any one of these means a claim

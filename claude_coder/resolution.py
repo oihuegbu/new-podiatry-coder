@@ -612,6 +612,33 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
     pool = [c for c in pool if (c.code, c.system) in _eligible_ids]
     seeds = [c for c in seeds if (c.code, c.system) in _eligible_ids]
 
+    # Fail-closed backstop for a genuine, OBSERVED service-role ambiguity
+    # (issue #6 F9-R11-H-D, third re-review): `blocks_line` is only ever True
+    # when this intent's OWN retrieved candidates actually classify into more
+    # than one distinct role while the documented facts are conflicting or of
+    # mixed kind -- not a hypothetical conflict with no practical consequence
+    # for this pool. Such a candidate is still `eligible` above (role
+    # incompatibility alone did not exclude it -- there is no single
+    # authorized role to compare it against), so without this check
+    # resolution would proceed normally over an ambiguous pool. This is the
+    # BACKSTOP, not the fix: it stops a bad release; it does not correct the
+    # upstream intent composition that produced the ambiguity (the real fix
+    # needs the event-id/performer-ownership split this module's own
+    # docstring already documents as deliberately not implemented here).
+    if any(r.get("role_control", {}).get("blocks_line") for r in _candidate_eligibility):
+        line = ResolvedLine(
+            fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
+            alternatives=[c for c in _all_candidates
+                         if (c.code, c.system) in _eligible_ids],
+            rationale=("this claim-line intent's own retrieved candidates classify into "
+                      "more than one service role (operative vs. anesthesia) while the "
+                      "documented facts are conflicting or of mixed kind -- a "
+                      "composition/coder decision, never auto-resolved from an "
+                      "ambiguous candidate pool"),
+            documentation_gap="classification_data_gap:service_role_conflict")
+        line.candidate_eligibility = _candidate_eligibility
+        return line
+
     # The authoritative index hits (if any) LEAD the shortlist as high-confidence
     # candidates — but they are billed only if propose-then-verify below confirms
     # entailment + corroboration, so a unique Index hit no longer auto-bills.

@@ -686,6 +686,32 @@ def test_necessity_binding_data_identity_and_terminal_anchor_coexist_on_one_rele
         assert _rehash(payload) != cert["certificate_sha256"]
 
 
+def test_a_pre_schema_bump_fingerprint_is_not_certifiable(tmp_path):
+    """issue #6 F9-R11-S: REQUIRED_SOURCE_SCHEMA_VERSION bumped v3 -> v4 when
+    "pfs_indicators" was removed from the required set (the coder no longer
+    reads a second, independently-parsed data/codes/global_period.json
+    extract -- PFS now comes from ComplianceDataStore, built from the
+    already-required "global_periods" source). A fingerprint stamped with
+    the OLD schema version names a materially different required-source
+    contract and must never be treated as comparable to -- or certifiable
+    under -- the current one, even though every OTHER field is a real,
+    otherwise-valid release."""
+    import claude_coder.pipeline as pl
+    from app.release.source_manifest import REQUIRED_SOURCE_SCHEMA_VERSION
+    from claude_coder.models import Verdict
+
+    r, repo, note = _auto_ready_release(tmp_path)
+    assert r.verdict is Verdict.AUTO_READY, r.notes
+    fingerprint = r.certificate["source_identity"]["data"]
+    assert pl._fingerprint_certifiable(fingerprint) is True   # control: the real one passes
+
+    import copy
+    stale = copy.deepcopy(fingerprint)
+    assert stale["source_manifest"]["required_sources_schema"] == REQUIRED_SOURCE_SCHEMA_VERSION
+    stale["source_manifest"]["required_sources_schema"] = "release-required-sources-v3"
+    assert pl._fingerprint_certifiable(stale) is False
+
+
 def test_a_consistently_truncated_store_holds_the_whole_encounter(tmp_path):
     """The reviewer's exact attack, driven through `code_encounter` rather than through
     `append` alone: with an anchor configured, removing the terminal journal entry AND the
