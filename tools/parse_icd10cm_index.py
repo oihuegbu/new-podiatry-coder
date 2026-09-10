@@ -1,28 +1,39 @@
 """Parse the official ICD-10-CM Alphabetic Index XML (CDC/NCHS,
 icd10cm-index-*.xml) into data/codes/icd10cm_index_terms.json:
 
-    {"version": "...", "terms": {"<dotless code>": ["phrase", ...]}}
+    {"version": "...",
+     "terms": {"<dotless code>": ["phrase", ...]},
+     "cross_reference_terms": {"<dotless code>": ["alias phrase", ...]}}
 
-Each phrase is the full Index path that leads to the code ("cellulitis toe",
-"paronychia"), i.e. the official alternate wording a clinical note may use
-for that code. Two phrase sources:
+Two DISTINCT trust tiers, kept in separate maps (issue #6 F9-R12-A) rather
+than merged, because they mean different things and downstream consumers
+must not treat them alike:
 
-1. Direct entries: every term node carrying a <code>, phrase = the chain of
-   plain title texts from the mainTerm down (nonessential modifiers in
-   <nemod> are dropped). Trailing '-' on codes (incomplete stems like
-   L03.03-) is stripped; consumers prefix-match.
-2. Cross references: a mainTerm with NO code of its own whose <see>/
-   <seeAlso> points at another main term ("Paronychia — see also
-   Cellulitis, digit") contributes its own title as an alias phrase on
-   every code under the referenced main term's subtree. This is what maps
-   'paronychia' to the L03.0x cellulitis family and NOT to the L03.04x
-   lymphangitis family (which lives under the 'Lymphangitis' main term).
-   The subtree walk itself follows a SECOND <see>/<seeAlso> hop too, when
-   a node inside that subtree also carries no code of its own: 'Cellulitis
-   > digit > finger'/'toe' are themselves such codeless redirects (each
-   points back to the direct 'Cellulitis, finger'/'Cellulitis, toe' entry
-   that DOES carry a code), so a naive one-hop-only walk finds zero codes
-   under 'digit' and silently drops the alias entirely.
+1. `terms` -- direct entries: every term node carrying a <code>, phrase =
+   the chain of plain title texts from the mainTerm down (nonessential
+   modifiers in <nemod> are dropped). Trailing '-' on codes (incomplete
+   stems like L03.03-) is stripped; consumers prefix-match. This is a
+   precise clinician-term -> code mapping, safe to embed per-code.
+2. `cross_reference_terms` -- redirect aliases: a mainTerm with NO code of
+   its own whose <see>/<seeAlso> points at another main term ("Paronychia
+   — see also Cellulitis, digit") contributes its own title as an alias
+   phrase on every code under the referenced main term's subtree. This is
+   what maps 'paronychia' to the L03.0x cellulitis family and NOT to the
+   L03.04x lymphangitis family (which lives under the 'Lymphangitis' main
+   term). The subtree walk itself follows a SECOND <see>/<seeAlso> hop too,
+   when a node inside that subtree also carries no code of its own:
+   'Cellulitis > digit > finger'/'toe' are themselves such codeless
+   redirects (each points back to the direct 'Cellulitis, finger'/
+   'Cellulitis, toe' entry that DOES carry a code), so a naive
+   one-hop-only walk finds zero codes under 'digit' and silently drops the
+   alias entirely.
+   A redirect means "keep navigating under this term", not "this bare word
+   is an equivalent synonym for every descendant code" -- a broad redirect
+   can fan out to hundreds of codes, so `cross_reference_terms` must never
+   be flattened into a per-code embedding vector (that pollutes retrieval
+   for every code in the family). It is only for exact Index lookup, which
+   already defers a multi-code hit to candidate narrowing rather than
+   trusting it blindly (see `claude_coder.resolution`).
 
 Usage: python tools/parse_icd10cm_index.py <icd10cm-index-*.xml> [out.json]
 """
@@ -128,7 +139,10 @@ def main():
                 main_terms.setdefault(title, mt)
             walk(mt, [], out)
 
-    # one-hop see/seeAlso aliases for code-less main terms
+    # Cross-reference aliases for code-less main terms: kept in a SEPARATE map
+    # (issue #6 F9-R12-A) -- a redirect alias is exact-Index-lookup signal
+    # only, never per-code embedding text (see module docstring).
+    cross_ref: dict[str, set] = defaultdict(set)
     aliases = 0
     for letter in root.findall("letter"):
         for mt in letter.findall("mainTerm"):
@@ -142,16 +156,20 @@ def main():
             if target is None:
                 continue
             for code in subtree_codes(target, main_terms):
-                out[code].add(title)
+                cross_ref[code].add(title)
                 aliases += 1
 
     version = root.findtext("version") or ""
     data = {"version": version.strip(),
             "source": src.name,
-            "terms": {c: sorted(ps) for c, ps in sorted(out.items())}}
+            "terms": {c: sorted(ps) for c, ps in sorted(out.items())},
+            "cross_reference_terms": {c: sorted(ps) for c, ps in sorted(cross_ref.items())}}
     dst.write_text(json.dumps(data, indent=1))
     n_phrases = sum(len(v) for v in out.values())
-    print(f"{len(out)} codes, {n_phrases} phrases ({aliases} via see/seeAlso aliases) -> {dst}")
+    n_xref = sum(len(v) for v in cross_ref.values())
+    print(f"{len(out)} codes, {n_phrases} direct phrases, "
+          f"{len(cross_ref)} codes / {n_xref} cross-reference phrases "
+          f"({aliases} see/seeAlso aliases resolved) -> {dst}")
 
 
 if __name__ == "__main__":

@@ -399,5 +399,82 @@ class GlobalPeriodCompleteSnapshotIngest(_Isolated):
                          fresh.pfs_record("64450", dos="2026-08-01"))
 
 
+class IcdIndexTermSourceLineageTest(_Isolated):
+    """issue #6 F9-R12-A: `icd10cm_index_terms.json` carries two DISTINCT
+    trust tiers -- `terms` (direct Index entries) and `cross_reference_terms`
+    (<see>/<seeAlso> redirect aliases, which the embedding loader must never
+    see -- app/rag/vector_store.py only reads `terms`). The compliance
+    store's own `icd10_index_term` table stays useful for
+    lookup/validation (app/validation/validator.py), so both tiers are
+    ingested there, but TAGGED by `source` so a caller can still tell them
+    apart -- never merged into one anonymous phrase list the way the
+    pre-fix parser output was."""
+
+    def _write_index_terms(self, tmp_path, monkeypatch, terms, cross_reference_terms):
+        path = tmp_path / "icd10cm_index_terms.json"
+        path.write_text(json.dumps({"version": "test", "source": "test",
+                                    "terms": terms,
+                                    "cross_reference_terms": cross_reference_terms}))
+        monkeypatch.setattr(store_module, "ICD10_INDEX_TERMS_FILE", path)
+        return path
+
+    def test_direct_and_cross_reference_terms_are_tagged_by_source(self):
+        s = self._isolated()
+        self._write_index_terms(
+            self.tmp_path, self.monkeypatch,
+            terms={"L0301": ["cellulitis of toe"]},
+            cross_reference_terms={"L0301": ["paronychia"]})
+        s._ingest_icd10_index_terms()
+        s.conn.commit()
+        rows = {(r[0], r[1]) for r in s.conn.execute(
+            "SELECT term, source FROM icd10_index_term WHERE code='L0301'")}
+        self.assertEqual(rows, {("cellulitis of toe", "direct"),
+                                ("paronychia", "cross_reference")})
+
+    def test_lookup_defaults_to_both_but_can_be_restricted_to_direct_only(self):
+        s = self._isolated()
+        self._write_index_terms(
+            self.tmp_path, self.monkeypatch,
+            terms={"L0301": ["cellulitis of toe"]},
+            cross_reference_terms={"L0301": ["paronychia"]})
+        s._ingest_icd10_index_terms()
+        s.conn.commit()
+        self.assertEqual(set(s.icd10_index_terms("L0301", min_level=4)),
+                         {"cellulitis of toe", "paronychia"})
+        self.assertEqual(set(s.icd10_index_terms(
+            "L0301", min_level=4, include_cross_reference=False)),
+            {"cellulitis of toe"})
+
+    def test_upgrading_a_pre_source_column_database_re_tags_existing_rows(self):
+        """A DB built before this column existed inserted every row (direct
+        AND cross-reference alike) with no `source` at all. The migration
+        must not leave old rows silently mistagged 'direct' -- it re-ingests
+        so a redirect alias among them is correctly re-tagged
+        'cross_reference'."""
+        s = self._isolated()
+        s.conn.executescript(
+            "DROP TABLE icd10_index_term;"
+            "CREATE TABLE icd10_index_term (code TEXT NOT NULL, term TEXT NOT NULL);")
+        s.conn.execute("INSERT INTO icd10_index_term VALUES ('L0301','paronychia')")
+        s.conn.commit()
+        self._write_index_terms(
+            self.tmp_path, self.monkeypatch,
+            terms={"L0301": ["cellulitis of toe"]},
+            cross_reference_terms={"L0301": ["paronychia"]})
+
+        cols = {row[1] for row in s.conn.execute("PRAGMA table_info(icd10_index_term)")}
+        self.assertNotIn("source", cols)
+        s.conn.execute(
+            "ALTER TABLE icd10_index_term ADD COLUMN source TEXT NOT NULL DEFAULT 'direct'")
+        s.conn.execute("DELETE FROM icd10_index_term")
+        s._ingest_icd10_index_terms()
+        s.conn.commit()
+
+        rows = {(r[0], r[1]) for r in s.conn.execute(
+            "SELECT term, source FROM icd10_index_term WHERE code='L0301'")}
+        self.assertEqual(rows, {("cellulitis of toe", "direct"),
+                                ("paronychia", "cross_reference")})
+
+
 if __name__ == "__main__":
     unittest.main()

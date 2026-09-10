@@ -53,12 +53,32 @@ class TerminologyIndex:
     """Inverts the authoritative {code: [index terms]} into term→codes lookups:
     an exact normalized-term map, and an order-independent token-set map that
     handles the Index's inverted phrasing ('Entity, qualifying-term') against a
-    note's natural phrasing ('qualifying-term entity')."""
+    note's natural phrasing ('qualifying-term entity').
 
-    def __init__(self, terms_by_code: dict[str, list[str]]):
+    Takes two DISTINCT term sources (issue #6 F9-R12-A): `terms_by_code`
+    (direct Index entries) and `cross_reference_terms_by_code` (redirect
+    aliases, e.g. "paronychia" resolving through a `<seeAlso>` chain to the
+    cellulitis family). Both are folded into the SAME lookup structures here
+    -- `candidates()` answers exact-term Index lookup, where a redirect alias
+    is legitimate signal (deferred to candidate narrowing downstream, never
+    trusted deterministically for a multi-code hit -- see
+    `claude_coder.resolution`). They are kept as separate keys in the source
+    JSON, and loaded separately here, specifically so callers building
+    PER-CODE EMBEDDING TEXT (`app/rag/vector_store.py`) can use `terms_by_code`
+    alone and never flatten a broad redirect alias into a code's embedding
+    vector -- this class itself does not embed anything, so it is safe to
+    merge both for its own exact-lookup purpose."""
+
+    def __init__(self, terms_by_code: dict[str, list[str]],
+                cross_reference_terms_by_code: dict[str, list[str]] | None = None):
         self._exact: dict[str, set[str]] = {}
         self._despaced: dict[str, set[str]] = {}   # 'two words' <-> 'twowords'
         self._byset: dict[frozenset[str], set[str]] = {}   # order + plural independent
+        self._index_terms(terms_by_code)
+        if cross_reference_terms_by_code:
+            self._index_terms(cross_reference_terms_by_code)
+
+    def _index_terms(self, terms_by_code: dict[str, list[str]]) -> None:
         for code, terms in terms_by_code.items():
             dotted = _dot(code)
             for term in terms or []:
@@ -99,7 +119,8 @@ class TerminologyIndex:
                                                  declared_document_snapshot)
         document, identity = declared_document_snapshot("index_terms",
                                                         DeclaredSourceUnavailable)
-        return cls(document.get("terms", {})), identity
+        return cls(document.get("terms", {}),
+                   document.get("cross_reference_terms", {})), identity
 
     @classmethod
     def load(cls) -> "TerminologyIndex":

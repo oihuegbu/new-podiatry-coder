@@ -529,7 +529,13 @@ class ComplianceDataStore:
             CREATE INDEX IF NOT EXISTS ix_icd10_inclusion_term ON icd10_inclusion_term(code);
             CREATE TABLE IF NOT EXISTS icd10_index_term (
                 code TEXT NOT NULL,   -- normalized (dotless) code or code stem
-                term TEXT NOT NULL    -- Alphabetic Index phrase leading to it
+                term TEXT NOT NULL,   -- Alphabetic Index phrase leading to it
+                source TEXT NOT NULL DEFAULT 'direct'  -- 'direct' (own Index
+                                       -- entry) or 'cross_reference' (a
+                                       -- <see>/<seeAlso> redirect alias --
+                                       -- issue #6 F9-R12-A: kept distinct so
+                                       -- a caller sensitive to precision can
+                                       -- filter to 'direct' only)
             );
             CREATE INDEX IF NOT EXISTS ix_icd10_index_term ON icd10_index_term(code);
             CREATE TABLE IF NOT EXISTS mce_edit (
@@ -820,6 +826,21 @@ class ComplianceDataStore:
             "SELECT COUNT(*) FROM icd10_index_term").fetchone()[0]
         if n_index_terms == 0:
             self._ingest_icd10_index_terms()
+
+        # icd10_index_term.source: distinguishes a direct Index entry from a
+        # cross-reference (<see>/<seeAlso>) redirect alias (issue #6
+        # F9-R12-A) -- added when the parser stopped merging the two into one
+        # anonymous phrase list. Re-ingest so pre-existing rows (all
+        # 'direct' by column default, which is simply wrong for the redirect
+        # aliases already among them) get correctly re-tagged.
+        idxterm_cols = {row[1] for row in
+                        self.conn.execute("PRAGMA table_info(icd10_index_term)")}
+        if "source" not in idxterm_cols:
+            self.conn.execute(
+                "ALTER TABLE icd10_index_term ADD COLUMN source TEXT NOT NULL DEFAULT 'direct'")
+            self.conn.execute("DELETE FROM icd10_index_term")
+            self._ingest_icd10_index_terms()
+            self.conn.commit()
 
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS prior_auth_policy ("
@@ -1179,7 +1200,8 @@ class ComplianceDataStore:
             -- like paronychia or onychomycosis to the right sibling.
             CREATE TABLE icd10_index_term (
                 code TEXT NOT NULL,
-                term TEXT NOT NULL
+                term TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'direct'
             );
             CREATE INDEX ix_icd10_index_term ON icd10_index_term(code);
 
@@ -2174,23 +2196,36 @@ class ComplianceDataStore:
     def _ingest_icd10_index_terms(self) -> None:
         """ICD-10-CM Alphabetic Index phrases (icd10cm_index_terms.json,
         parsed from the official CDC Index XML): every lookup path leading
-        to a code, plus one-hop see/see-also aliases. This is the code
-        set's own answer to 'what may a clinician call this condition' —
-        e.g. 'paronychia' resolves to the L03.0x cellulitis family and NOT
-        to L03.04x lymphangitis."""
+        to a code, plus cross-reference (<see>/<seeAlso>) redirect aliases.
+        This is the code set's own answer to 'what may a clinician call
+        this condition' — e.g. 'paronychia' resolves to the L03.0x
+        cellulitis family and NOT to L03.04x lymphangitis.
+
+        issue #6 F9-R12-A: the two are DISTINCT trust tiers in the source
+        JSON (direct entries vs. redirect aliases -- see
+        tools/parse_icd10cm_index.py's module docstring) and stay tagged by
+        `source` here rather than merged anonymously, so a caller sensitive
+        to precision can filter to 'direct' only."""
         try:
             with open(ICD10_INDEX_TERMS_FILE) as f:
                 data = json.load(f)
         except Exception as exc:
             logger.warning(f"  icd10_index_term: could not load ({exc})")
             return
-        rows = [
-            (_norm(code), term)
+        direct = [
+            (_norm(code), term, "direct")
             for code, terms in data.get("terms", {}).items()
             for term in terms if term
         ]
-        self.conn.executemany("INSERT INTO icd10_index_term VALUES (?,?)", rows)
-        logger.info(f"  icd10_index_term: {len(rows)} Alphabetic Index phrases")
+        cross_ref = [
+            (_norm(code), term, "cross_reference")
+            for code, terms in data.get("cross_reference_terms", {}).items()
+            for term in terms if term
+        ]
+        rows = direct + cross_ref
+        self.conn.executemany("INSERT INTO icd10_index_term VALUES (?,?,?)", rows)
+        logger.info(f"  icd10_index_term: {len(direct)} direct + {len(cross_ref)} "
+                   f"cross-reference Alphabetic Index phrases")
 
     def _ingest_icd10_chronic(self) -> None:
         """AHRQ HCUP Chronic Condition Indicator Refined (icd10cm_chronic.json,
@@ -2406,7 +2441,8 @@ class ComplianceDataStore:
             out = [(c, d) for c, d in out if c.startswith(tuple(chapter_prefixes))]
         return out
 
-    def icd10_index_terms(self, code: str, min_level: int = 3) -> list[str]:
+    def icd10_index_terms(self, code: str, min_level: int = 3,
+                          include_cross_reference: bool = True) -> list[str]:
         """Alphabetic Index phrases that resolve to this code, including
         phrases attached to its ancestor stems (the Index often points at a
         stem like L03.03- that covers all its children). min_level restricts
@@ -2414,12 +2450,21 @@ class ComplianceDataStore:
         icd10_inclusion_terms: when the question is whether a SPECIFIC
         family member is supported (vs. its unspecified sibling), phrases
         the Index attaches to the 3-char category describe the whole family
-        and prove neither member — min_level=4 excludes them."""
+        and prove neither member — min_level=4 excludes them.
+
+        `include_cross_reference` (issue #6 F9-R12-A, default True — same
+        set every caller matched before source tiers were split out) also
+        includes redirect-alias phrases (e.g. 'paronychia' on the cellulitis
+        leaves it resolves to via <seeAlso>). Pass False for a caller that
+        specifically needs only the code's OWN direct Index entries."""
         norm = _norm(code)
         terms: list[str] = []
+        sources = ("direct", "cross_reference") if include_cross_reference else ("direct",)
+        placeholders = ",".join("?" * len(sources))
         for ln in range(max(3, min_level), len(norm) + 1):
             rows = self.conn.execute(
-                "SELECT term FROM icd10_index_term WHERE code=?", (norm[:ln],)
+                f"SELECT term FROM icd10_index_term WHERE code=? AND source IN ({placeholders})",
+                (norm[:ln], *sources)
             ).fetchall()
             terms.extend(r[0] for r in rows)
         return terms

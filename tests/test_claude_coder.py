@@ -985,6 +985,18 @@ class TerminologyIndexTest(unittest.TestCase):
         self.assertEqual(idx.candidates("entity beta gamma"), {"BB2.20"}) # inverted, token-set
         self.assertEqual(idx.candidates("no such term here"), set())      # -> caller falls back
 
+    def test_cross_reference_terms_are_merged_into_lookup(self):
+        # issue #6 F9-R12-A: `cross_reference_terms_by_code` is a SECOND,
+        # distinct term source (kept separate in the source JSON specifically
+        # so the embedding loader never sees it) -- but exact-Index LOOKUP
+        # must still find it, folded into the same candidates() answer as a
+        # direct term.
+        from claude_coder.terminology import TerminologyIndex
+        idx = TerminologyIndex({"AA111": ["condition alpha"]},
+                               {"AA111": ["a redirect alias"], "BB220": ["a redirect alias"]})
+        self.assertEqual(idx.candidates("condition alpha"), {"AA1.11"})
+        self.assertEqual(idx.candidates("a redirect alias"), {"AA1.11", "BB2.20"})
+
     def test_diagnosis_resolves_via_index_first(self):
         from claude_coder.data_access import MockSource
         from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
@@ -1042,6 +1054,60 @@ class TerminologyIndexTest(unittest.TestCase):
         line = resolve(_request(fact), src)
         self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
         self.assertEqual(line.chosen.code, "DX41")     # right-side leaf, not the category
+
+
+class MultiCodeIndexCrossReferenceCandidateTest(unittest.TestCase):
+    """issue #6 F9-R12-A: a cross-reference (<see>/<seeAlso>) redirect can span
+    MULTIPLE, structurally distinct code families -- e.g. the real 'paronychia'
+    alias resolving to BOTH the toe and finger cellulitis families. Unlike the
+    single-stem category above, `index_codes` here returns more than one STEM,
+    so the len(idx)==1 deterministic-trust gate does not apply; each stem's
+    billable leaves must be UNIONED into the candidate pool as a normal
+    candidate source (never auto-selected), narrowed by whatever the
+    documentation actually supports -- the same tie policy any other
+    multi-candidate pool goes through. Synthetic codes/descriptors throughout."""
+
+    def test_a_multi_code_redirect_is_narrowed_by_a_documented_attribute(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,
+                                         FactKind, RelationState, ResolutionMethod)
+        from claude_coder.resolution import resolve
+        # Two DISTINCT stems (not siblings under one category) -- the shape of a
+        # redirect spanning two separate families, not a single category expanding
+        # to its own children.
+        recs = {("DX50", "icd10"): {"long_description": "some condition, right site", "active": True},
+                ("DX60", "icd10"): {"long_description": "some condition, left site", "active": True}}
+        src = MockSource(records=recs, index={"a documented condition": {"DX50", "DX60"}})
+        span = EvidenceSpan("a documented condition", anchored=True, span_id="s1")
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="a documented condition",
+                            attributes={"laterality": "right"},
+                            evidence=[span],
+                            attribute_evidence={"laterality": (
+                                AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                                  value="right"),)},
+                            confidence=0.99)
+        line = resolve(_request(fact), src)
+        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC, line.rationale)
+        self.assertEqual(line.chosen.code, "DX50", line.rationale)   # right-side family, not left
+
+    def test_an_unnarrowed_multi_code_redirect_is_never_auto_billed(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind, ResolutionMethod
+        from claude_coder.resolution import resolve
+        recs = {("DX50", "icd10"): {"long_description": "some condition, right site", "active": True},
+                ("DX60", "icd10"): {"long_description": "some condition, left site", "active": True}}
+        src = MockSource(records=recs, index={"a documented condition": {"DX50", "DX60"}})
+        # No laterality (or any other distinguishing) evidence documented at all --
+        # the redirect is real candidate signal, but nothing narrows it, so it must
+        # NOT auto-bill either family.
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="a documented condition",
+                            evidence=[EvidenceSpan("a documented condition")],
+                            confidence=0.99)
+        line = resolve(_request(fact), src)
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertNotEqual(line.method, ResolutionMethod.DETERMINISTIC)
+        alt_codes = {c.code for c in (line.alternatives or [])}
+        self.assertTrue({"DX50", "DX60"} & alt_codes, line.rationale)
 
 
 class ConceptRelationIndexTest(unittest.TestCase):
@@ -1998,6 +2064,86 @@ class ProposedCandidateDeterministicExclusionTest(unittest.TestCase):
         self.assertFalse(report["SMALL"]["eligible"])
         self.assertIn("measurement", report["SMALL"].get("reason", "").lower(),
                       report["SMALL"])
+        self.assertIsNotNone(line.chosen, line.rationale)
+        self.assertEqual(line.chosen.code, "UNBOUNDED", line.rationale)
+
+
+class ProposedAndRetrievedSameCodeExclusionTest(unittest.TestCase):
+    """issue #6 F9-R11-H-D, eighth re-review: the SAME (code, system) can arrive
+    through BOTH retrieval and the model proposal at once. `_evaluate_reason`
+    deterministically excludes it either way, but the merge used to SKIP a
+    proposal's exclusion whenever `candidate_eligibility` already carried a
+    record for that identity (from retrieval, typically eligible=True) --
+    reproduced directly: 'SMALL' retrieved as bounded/unbounded alongside
+    'UNBOUNDED', also proposed, selection lands correctly on 'UNBOUNDED' via
+    `_ranked` dropping 'SMALL' independently, but the ClaimBundle audit kept
+    SMALL's stale `eligible: true, reason: null` retrieval record. Fixed by
+    reconciling the exclusion against candidate IDENTITY, overriding any
+    existing record for that (code, system) rather than deferring to it.
+    Synthetic codes throughout."""
+
+    def test_a_laterality_contradictory_code_present_in_both_retrieval_and_proposal_is_excluded(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,
+                                         FactKind, RelationState)
+        from claude_coder.resolution import resolve
+        compatible = CandidateCode("RIGHT", "cpt", "act alpha, right side", 0.9)
+        # LEFT is RETRIEVED too, not just proposed -- eligibility_report already
+        # produces an (eligible=True) record for it before the proposal's own
+        # deterministic exclusion is merged in.
+        contradicted_retrieved = CandidateCode("LEFT", "cpt", "act alpha, left side", 0.5)
+        src = MockSource(
+            records={("RIGHT", "cpt"): {"long_description": "act alpha, right side",
+                                        "active": True},
+                    ("LEFT", "cpt"): {"long_description": "act alpha, left side",
+                                      "active": True}},
+            retrieval={("*", "cpt"): [compatible, contradicted_retrieved]})
+        span = EvidenceSpan("act alpha performed on the right side",
+                            anchored=True, span_id="s1")
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="act alpha, right side",
+                            attributes={"laterality": "right"}, evidence=[span],
+                            attribute_evidence={"laterality": (
+                                AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                                  value="right"),)},
+                            confidence=0.95)
+        # LEFT is ALSO the model's proposal -- same identity from both sources.
+        llm = _sv.judge(entails=lambda d: "right" in d.lower(),
+                        propose=["LEFT"], reason="proposed")
+        line = resolve(_request(fact), src, llm=_from(llm, "provider-a"))
+        report = {r["code"]: r for r in (line.candidate_eligibility or [])}
+        self.assertIn("LEFT", report, line.candidate_eligibility)
+        self.assertFalse(report["LEFT"]["eligible"], report["LEFT"])
+        self.assertIsNotNone(report["LEFT"].get("reason"), report["LEFT"])
+        self.assertIn("laterality", report["LEFT"]["reason"].lower(), report["LEFT"])
+        self.assertIsNotNone(line.chosen, line.rationale)
+        self.assertEqual(line.chosen.code, "RIGHT", line.rationale)
+
+    def test_an_out_of_range_code_present_in_both_retrieval_and_proposal_is_excluded(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder.resolution import resolve
+        compatible = CandidateCode("UNBOUNDED", "cpt", "wound dressing, sterile, each", 0.9)
+        contradicted_retrieved = CandidateCode(
+            "SMALL", "cpt", "wound dressing, sterile, size 16 sq. in. or less, each", 0.5)
+        src = MockSource(
+            records={("UNBOUNDED", "cpt"): {"long_description":
+                                            "wound dressing, sterile, each",
+                                            "active": True},
+                    ("SMALL", "cpt"): {"long_description": "wound dressing, sterile, "
+                                                           "size 16 sq. in. or less, each",
+                                      "active": True}},
+            retrieval={("*", "cpt"): [compatible, contradicted_retrieved]})
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="wound dressing",
+                            attributes={"size_sqin": 60},
+                            evidence=[EvidenceSpan("wound dressing 60 sq in applied")],
+                            confidence=0.95)
+        llm = _sv.judge(entails=lambda d: True, propose=["SMALL"], reason="proposed")
+        line = resolve(_request(fact), src, llm=_from(llm, "provider-a"))
+        report = {r["code"]: r for r in (line.candidate_eligibility or [])}
+        self.assertIn("SMALL", report, line.candidate_eligibility)
+        self.assertFalse(report["SMALL"]["eligible"], report["SMALL"])
+        self.assertIsNotNone(report["SMALL"].get("reason"), report["SMALL"])
+        self.assertIn("measurement", report["SMALL"]["reason"].lower(), report["SMALL"])
         self.assertIsNotNone(line.chosen, line.rationale)
         self.assertEqual(line.chosen.code, "UNBOUNDED", line.rationale)
 

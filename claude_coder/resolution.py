@@ -440,6 +440,23 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                 r = _take(pool, "ICD-10-CM Alphabetic Index")
                 if r is not None:
                     return r
+        elif len(idx) > 1:
+            # issue #6 F9-R12-A: a multi-code Index hit (a cross-reference
+            # redirect spanning a laterality/site family -- e.g. "paronychia"
+            # covering both the toe and finger cellulitis leaves) is real
+            # candidate signal, not parse noise to discard. It is never
+            # trusted deterministically (the whole reason for the len==1
+            # gate above), but every stem's billable leaves are seeded into
+            # propose-then-verify so the documented facts (laterality,
+            # anatomy, descriptor entailment) narrow it exactly like any
+            # other candidate -- it is a candidate SOURCE only, never an
+            # independent approval.
+            seen_codes = {c.code for c in seeds}
+            for stem in idx:
+                for c in _authoritative_pool(stem, source):
+                    if c.code not in seen_codes:
+                        seen_codes.add(c.code)
+                        seeds.append(c)
         # SECOND authoritative layer: the SNOMED CT -> ICD-10-CM crosswalk (the long-
         # tail eponyms/synonyms the ICD Index lacks — e.g. an eponymous condition).
         # A single crosswalk hit is a strong CANDIDATE, not a verdict: the concept's
@@ -1451,19 +1468,25 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     full_universe = list(pool) + extra
     candidate_eligibility = _semelig.eligibility_report(
         facts_for_role_check, full_universe, source, dos, reconciliation)
-    # Merge the deterministically-excluded proposals into the SAME report --
-    # they never went through semantic/role eligibility at all (a different,
-    # earlier axis), so their role_control is honestly "not_evaluated", the
-    # same placeholder `eligibility_report` itself already uses for a
-    # candidate excluded before role control ever ran.
-    reported_ids = {(r["code"], r["system"]) for r in candidate_eligibility}
-    for c, reason in proposals_deterministically_excluded:
-        key = (c.code, c.system)
-        if key in reported_ids:
-            continue
-        reported_ids.add(key)
+    # Merge the deterministically-excluded proposals into the SAME report.
+    # issue #6 F9-R11-H-D, eighth re-review: when the SAME (code, system) also
+    # arrived through retrieval, `eligibility_report` already emitted a record
+    # for it (typically eligible=True) -- a skip-if-already-reported merge left
+    # that stale, incorrect record standing (`eligible: true, reason: null`)
+    # even though this exact candidate is deterministically excluded (laterality
+    # contradiction / out-of-range measurement). The exclusion must OVERRIDE the
+    # existing record for that identity, not be dropped by it.
+    deterministic_exclusions = {(c.code, c.system): reason
+                                for c, reason in proposals_deterministically_excluded}
+    for record in candidate_eligibility:
+        reason = deterministic_exclusions.pop((record["code"], record["system"]), None)
+        if reason:
+            record["eligible"] = False
+            record["reason"] = reason
+            record["role_control"]["blocks_line"] = False
+    for (code, system), reason in deterministic_exclusions.items():
         candidate_eligibility.append({
-            "code": c.code, "system": c.system, "eligible": False, "reason": reason,
+            "code": code, "system": system, "eligible": False, "reason": reason,
             "role_control": {"status": "not_evaluated", "fact_roles": [],
                              "candidate_role": None, "blocks_line": False,
                              "authority_source_id": None, "authority_version": None}})
