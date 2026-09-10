@@ -30,11 +30,21 @@ def _store(tmp_path):
     return s
 
 
+_AUTO_COUNT = object()   # sentinel: default is "correct, computed from `codes`"
+
+
 def _write_release(tmp_path, monkeypatch, codes, version="RVU26C (2026 July release)",
-                   declared_count=None):
+                   declared_count=_AUTO_COUNT):
+    """`declared_count` defaults to the real, correct len(codes) -- counts.codes
+    is REQUIRED (issue #6 F9-R11-H-C, fifth re-review), so every test that
+    isn't specifically exercising a bad/absent count needs a correct one.
+    Pass an explicit int to simulate a truncated/wrong declaration, or
+    `None` to omit the "counts" key entirely (simulating an old file
+    without one)."""
     payload = {"version": version, "source": "test", "source_url": "", "codes": codes}
-    if declared_count is not None:
-        payload["counts"] = {"codes": declared_count}
+    count = len(codes) if declared_count is _AUTO_COUNT else declared_count
+    if count is not None:
+        payload["counts"] = {"codes": count}
     path = tmp_path / "global_periods.json"
     path.write_text(json.dumps(payload))
     monkeypatch.setattr(store_module, "GLOBAL_PERIODS_FILE", path)
@@ -248,6 +258,31 @@ class GlobalPeriodCompleteSnapshotIngest(_Isolated):
         rows = s.conn.execute("SELECT COUNT(*) c FROM global_period").fetchone()["c"]
         self.assertEqual(rows, 2, "the truncated release's row must never have been inserted")
 
+    def test_a_missing_declared_count_is_rejected_not_a_free_pass(self):
+        """issue #6 F9-R11-H-C, fifth re-review: counts.codes is REQUIRED, not
+        merely checked when present -- close-every-open-row's whole
+        justification is proof of completeness, and an absent declaration is
+        the absence of that proof, not evidence the body happens to be
+        complete anyway. Reproduces Codex's exact scenario: a complete
+        two-row January release, then a one-row July release that OMITS the
+        count entirely."""
+        s = self._isolated()
+        _write_release(self.tmp_path, self.monkeypatch,
+                       {"64450": {"global_days": "000", "status": "A"},
+                        "27650": {"global_days": "090", "status": "A"}},
+                       version="RVU26A (2026 January release)")
+        s._ingest_global_periods()
+        _write_release(self.tmp_path, self.monkeypatch,
+                       {"27650": {"global_days": "090", "status": "A"}},
+                       version="RVU26C (2026 July release)", declared_count=None)
+        s._ingest_global_periods()
+
+        self.assertIsNotNone(s.pfs_record("64450", dos="2026-08-01"),
+                             "an undeclared-count release must have been rejected -- "
+                             "the January row must still be open")
+        rows = s.conn.execute("SELECT COUNT(*) c FROM global_period").fetchone()["c"]
+        self.assertEqual(rows, 2, "the undeclared-count release must never have been ingested")
+
     def test_a_rebuild_does_not_erase_previously_ingested_history(self):
         """Codex's required regression #5: "global_periods" carries no
         "clear" entry in the source-freshness registry, so a refresh can
@@ -355,7 +390,8 @@ class GlobalPeriodCompleteSnapshotIngest(_Isolated):
         for store, tmp_path in ((upgraded, self.tmp_path), (fresh, Path(fresh_tmpdir.name))):
             path = tmp_path / "global_periods.json"
             path.write_text(json.dumps({"version": version, "source": "test",
-                                        "source_url": "", "codes": codes}))
+                                        "source_url": "", "codes": codes,
+                                        "counts": {"codes": len(codes)}}))
             self.monkeypatch.setattr(store_module, "GLOBAL_PERIODS_FILE", path)
             store._ingest_global_periods()
 

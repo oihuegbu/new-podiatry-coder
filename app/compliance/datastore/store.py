@@ -1428,9 +1428,21 @@ class ComplianceDataStore:
         # truncated/corrupt and must never be treated as authoritative for
         # "this code is no longer on the fee schedule" -- that would silently
         # retire almost the whole table on a partial read.
+        #
+        # REQUIRED, not optional (fifth re-review): an absent count is not a
+        # free pass -- close-every-open-row's whole justification is proof of
+        # completeness, and a missing declaration is the absence of that
+        # proof, not evidence the body happens to be complete anyway.
         codes_body = data.get("codes") or {}
         declared_count = (data.get("counts") or {}).get("codes")
-        if declared_count is not None and len(codes_body) != declared_count:
+        if not isinstance(declared_count, int) or isinstance(declared_count, bool) \
+                or declared_count <= 0:
+            logger.warning(
+                f"  global_period: counts.codes is missing or not a positive integer "
+                f"({declared_count!r}) -- refresh REJECTED (no proof this snapshot is "
+                f"complete, which close-every-open-row requires)")
+            return
+        if len(codes_body) != declared_count:
             logger.warning(
                 f"  global_period: declared count {declared_count} does not match "
                 f"the {len(codes_body)} code(s) actually present -- refresh REJECTED "

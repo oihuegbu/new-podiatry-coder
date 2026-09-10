@@ -1807,18 +1807,24 @@ class ProposeVerifyTest(unittest.TestCase):
 
 
 class ProposedCandidateServiceRoleTest(unittest.TestCase):
-    """issue #6 F9-R11-H-D, fourth re-review: `_service_role_control`'s
-    `blocks_line` backstop only ever saw the RETRIEVAL-time candidate
-    universe -- a candidate `verify.propose_codes` widens the pool with
-    (from the model's memory, not retrieval) never passed through it at
-    all. Adversarially reproduced live: a retrieval-eligible operative
-    candidate plus a model-PROPOSED anesthesia candidate, with the fact
-    documenting an operative service_role -- the proposal was verified and
-    released with no service-role check ever having run against it.
-    `resolve()` now re-checks role control over the actual final candidate
-    universe (retrieval-eligible pool + whatever was selected) right after
-    `_propose_then_verify` returns, closing exactly this gap. Synthetic
-    codes throughout."""
+    """issue #6 F9-R11-H-D: `_service_role_control`'s `blocks_line` backstop
+    only ever saw the RETRIEVAL-time candidate universe -- a candidate
+    `verify.propose_codes` widens the pool with (from the model's memory,
+    not retrieval) never passed through it at all.
+
+    Fourth re-review's fix (a post-selection re-check on `line.chosen`
+    alone) was itself incomplete, per the fifth re-review's own adversarial
+    reproduction: an incompatible proposal that LOST a verifier tie against
+    a compatible retrieved candidate never became `line.chosen` at all, so
+    the post-selection check never saw it -- and the tie escalation
+    (`chosen=None`) swallowed the compatible candidate right along with it,
+    losing an otherwise-defensible first-pass code. Fifth re-review moves
+    the check to BEFORE the verification shortlist is built: `resolve()`
+    now generates proposals, merges them with the already-eligible
+    retrieval pool, and runs role control over that COMPLETE universe
+    inside `_propose_then_verify` itself, excluding incompatible candidates
+    (or aborting on a genuine multi-role ambiguity) before any verifier
+    call is spent. Synthetic codes throughout."""
 
     OP_DESC = "Operative act alpha on the structure"
     ANES_DESC = "Anesthesia for act alpha on the structure"
@@ -1851,12 +1857,10 @@ class ProposedCandidateServiceRoleTest(unittest.TestCase):
                 AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
                                   value="operative"),)})
 
-    def test_a_role_incompatible_model_proposal_is_never_released(self):
-        """The exact adversarial reproduction: retrieval surfaces nothing
-        useful, the model proposes (and then verifies) the anesthesia-role
-        candidate against an operative-role fact. Must abstain, not
-        release -- the pre-verification eligibility pass never had a
-        chance to exclude a candidate that didn't exist yet at that point."""
+    def test_a_role_incompatible_model_proposal_is_excluded_before_verification(self):
+        """Retrieval surfaces nothing useful; the model proposes the
+        anesthesia-role candidate against an operative-role fact. Excluded
+        before the verifier ever sees it -- never released."""
         from claude_coder.models import ResolutionMethod
         from claude_coder.resolution import resolve
         src = self._src(op_eligible_at_retrieval=False)
@@ -1865,22 +1869,38 @@ class ProposedCandidateServiceRoleTest(unittest.TestCase):
         self.assertIsNone(line.chosen, line.rationale)
         self.assertNotEqual(line.method, ResolutionMethod.VERIFIED)
 
-    def test_a_role_incompatible_proposal_cannot_join_an_already_eligible_pool(self):
-        """Codex's exact adversarial shape: an operative candidate is ALREADY
-        eligible from retrieval (candidate_eligibility would show only it),
-        and the model separately proposes -- and the verifier picks -- the
-        anesthesia candidate. The final candidate universe (OP + ANES) is
-        what must be checked, not the proposal alone."""
-        from claude_coder.models import ResolutionMethod
+    def test_a_compatible_retrieved_candidate_survives_excluding_an_incompatible_proposal(self):
+        """Codex's required regression #3, and the exact defect the fourth
+        re-review's post-selection-only check missed: excluding the
+        incompatible proposal must happen BEFORE the verification
+        shortlist is built, so it can never contest (and win) a tie that
+        would otherwise swallow an equally-entailed, but role-compatible,
+        retrieved candidate along with it. `entails` accepts BOTH
+        descriptors -- proving OP wins because ANES was excluded
+        pre-verification, not because the verifier happened to prefer it."""
         from claude_coder.resolution import resolve
         src = self._src(op_eligible_at_retrieval=True)
-        # Verifier entails ONLY the anesthesia descriptor -- simulating a
-        # verified, confident (but role-incompatible) model selection.
-        llm = _sv.judge(entails=lambda d: "anesthesia" in d.lower(),
+        llm = _sv.judge(entails=lambda d: True, propose=["ANES"], reason="proposed")
+        line = resolve(_request(self._fact()), src, llm=_from(llm, "provider-a"))
+        self.assertIsNotNone(line.chosen, line.rationale)
+        self.assertEqual(line.chosen.code, "OP", line.rationale)
+
+    def test_every_validated_proposal_is_audited_in_candidate_eligibility(self):
+        """Codex's required regression #1: a validated proposal appears in
+        `candidate_eligibility` -- selected, excluded, or neither -- so the
+        ClaimBundle can audit the role decision made about it, not just
+        about whatever retrieval happened to surface."""
+        from claude_coder.resolution import resolve
+        src = self._src(op_eligible_at_retrieval=True)
+        llm = _sv.judge(entails=lambda d: "operative" in d.lower(),
                         propose=["ANES"], reason="proposed")
         line = resolve(_request(self._fact()), src, llm=_from(llm, "provider-a"))
-        self.assertIsNone(line.chosen, line.rationale)
-        self.assertNotEqual(line.method, ResolutionMethod.VERIFIED)
+        report = {r["code"]: r for r in (line.candidate_eligibility or [])}
+        self.assertIn("ANES", report, line.candidate_eligibility)
+        self.assertIn("OP", report, line.candidate_eligibility)
+        self.assertFalse(report["ANES"]["eligible"])
+        self.assertTrue(report["ANES"].get("reason"), report["ANES"])
+        self.assertTrue(report["OP"]["eligible"])
 
 
 class CorroborationIndependenceTest(unittest.TestCase):

@@ -676,12 +676,13 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                                          FactKind.DIAGNOSIS):
         line = _propose_then_verify(fact, source, pool, llm, corroborate, dos=dos,
                                     reconciliation=reconciliation,
-                                    coverage=coverage)
+                                    coverage=coverage, elig_facts=elig_facts)
         # #1 grounding: a DIAGNOSIS that verified only to a residual/catch-all category
         # with no distinctive descriptor overlap is an ungrounded guess (entailment
         # against a catch-all is near-tautological) -- escalate, never bill it verified.
         if (line.resolved and fact.kind is FactKind.DIAGNOSIS
                 and _residual_without_grounding(fact, line.chosen)):
+            _prior_eligibility = line.candidate_eligibility
             line = ResolvedLine(
                 fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
                 alternatives=[line.chosen],
@@ -690,49 +691,7 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                     "clinical term with the documentation -- a coder CLASSIFICATION/mapping "
                     "decision (identify the specific code, or confirm the residual bucket); "
                     "not a provider documentation gap, and not billed on a non-specific code"))
-        # Post-verification role-control re-check (issue #6 F9-R11-H-D, fourth
-        # re-review): `_propose_then_verify` widens the pool with MODEL-PROPOSED
-        # candidates (`verify.propose_codes`) that never passed through the
-        # `_candidate_eligibility`/`blocks_line` check computed above -- that
-        # check only ever saw the RETRIEVAL-time candidate universe
-        # (`_all_candidates`). A proposed candidate whose own role conflicts
-        # with what the facts document, or that -- combined with the
-        # already-eligible retrieval pool -- creates the same genuine
-        # multi-role ambiguity `blocks_line` exists to catch, must not reach a
-        # release just because it entered through generation, not retrieval.
-        # Re-runs role control over the FINAL candidate universe (the
-        # already-eligible retrieval pool plus whatever was actually chosen)
-        # rather than `line.chosen` alone -- `blocks_line` is inherently a
-        # multi-candidate signal, so checking one candidate in isolation could
-        # never detect it.
-        if line.resolved:
-            already_eligible = [c for c in _all_candidates
-                                if (c.code, c.system) in _eligible_ids]
-            final_universe = list(already_eligible)
-            if not any(c.code == line.chosen.code and c.system == line.chosen.system
-                      for c in final_universe):
-                final_universe.append(line.chosen)
-            post_report = {(r["code"], r["system"]): r for r in _semelig.eligibility_report(
-                elig_facts, final_universe, source, dos, reconciliation)}
-            post_decision = post_report.get((line.chosen.code, line.chosen.system),
-                                            {}).get("role_control") or {}
-            post_reason = post_report.get((line.chosen.code, line.chosen.system),
-                                          {}).get("reason")
-            if post_decision.get("blocks_line") or (
-                    not post_report.get((line.chosen.code, line.chosen.system),
-                                        {}).get("eligible", True)):
-                line = ResolvedLine(
-                    fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
-                    alternatives=[line.chosen],
-                    rationale=(f"the selected candidate ({line.chosen.code}) was proposed "
-                              f"by the model rather than retrieved, and a post-selection "
-                              f"service-role check the pre-verification eligibility pass "
-                              f"never ran against it found it incompatible with the "
-                              f"documented facts ({post_reason or 'multi-role ambiguity'}) "
-                              f"-- a composition/coder decision, never auto-released on a "
-                              f"model-generated candidate eligibility never saw"),
-                    documentation_gap=("classification_data_gap:service_role_conflict"
-                                      if post_decision.get("blocks_line") else None))
+            line.candidate_eligibility = _prior_eligibility
         # `_propose_then_verify` ran against an EMPTY pool (eligibility excluded
         # every retrieved candidate before it ever got a chance to check anything)
         # and, finding no candidate to propose against either, abstained with no
@@ -759,10 +718,17 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
         line = ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
                             rationale=rationale,
                             documentation_gap=(gap_summary if measurement_gap else None))
+        line.candidate_eligibility = _candidate_eligibility
     else:
         line = _decide(fact, pool, source=source, dos=dos,
                        reconciliation=reconciliation)
-    line.candidate_eligibility = _candidate_eligibility
+        line.candidate_eligibility = _candidate_eligibility
+    # NOTE: the `if llm is not None and fact.kind in (...)` branch above sets
+    # `line.candidate_eligibility` itself, INSIDE `_propose_then_verify` --
+    # the COMPLETE report there also covers model-proposed candidates
+    # (issue #6 F9-R11-H-D, fifth re-review), which `_candidate_eligibility`
+    # here (computed before proposals exist) does not. Overwriting it here
+    # unconditionally would silently narrow the audit trail back down.
     if _advisory:
         line.advisory_terminology = _advisory
     return line
@@ -1381,7 +1347,8 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
                          pool: list[CandidateCode], llm, corroborate=None,
                          dos: str | None = None,
                          reconciliation=None,
-                         coverage: "_requirement.CoverageCorpus | None" = None
+                         coverage: "_requirement.CoverageCorpus | None" = None,
+                         elig_facts: list[ClinicalFact] | None = None
                          ) -> ResolvedLine:
     """Recall as candidate GENERATOR, authoritative descriptor + entailment as TRUTH.
     Widen the pool with validated LLM proposals, select the candidate whose OFFICIAL
@@ -1395,20 +1362,84 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     candidate carries a NAMED elimination. When more than one candidate is still entailed
     the line is a TIE, and it goes to the same document-first tie policy the deterministic
     path uses -- narrowed against the original page, else ONE targeted provider query.
-    (Codex F8-R1: two models agreeing on one candidate never eliminated the rest.)"""
+    (Codex F8-R1: two models agreeing on one candidate never eliminated the rest.)
+
+    issue #6 F9-R11-H-D, fifth re-review: model-PROPOSED candidates are role-
+    controlled over the FULL candidate universe (the already-eligible retrieval
+    `pool` plus every validated proposal) BEFORE any shortlist is built or any
+    verification call runs -- not checked against `line.chosen` after selection
+    (the fourth re-review's own defect: an incompatible proposal that lost a
+    verifier TIE against a compatible retrieved candidate never reached
+    `line.chosen` at all, so a post-selection check could not see it, and the
+    tie escalation swallowed the compatible candidate along with it). A
+    role-incompatible proposal is excluded here, before it can ever contest a
+    tie; a genuine multi-role ambiguity across the combined universe aborts
+    with the typed `classification_data_gap` hold immediately, before any
+    verifier call is spent. The returned line's `candidate_eligibility` is the
+    COMPLETE report -- pool AND proposals, chosen or not -- so the audit trail
+    shows every candidate this fact's resolution actually considered."""
+    from . import verify as _verify
+    from . import semantic_eligibility as _semelig
+    proposed_matches = [_evaluate(fact, c, source, reconciliation)
+                        for c in _verify.propose_codes(fact, source, llm)]
+    proposals_raw = [m.candidate for m in proposed_matches
+                     if m is not None and not m.interval_unsupported]
+    proposals_unsupported = [m.candidate for m in proposed_matches
+                             if m is not None and m.interval_unsupported]
+
+    facts_for_role_check = elig_facts if elig_facts is not None else [fact]
+    pool_ids = {(c.code, c.system) for c in pool}
+    full_universe = list(pool) + [c for c in proposals_raw
+                                  if (c.code, c.system) not in pool_ids]
+    candidate_eligibility = _semelig.eligibility_report(
+        facts_for_role_check, full_universe, source, dos, reconciliation)
+    eligible_ids = {(r["code"], r["system"]) for r in candidate_eligibility
+                    if r["eligible"]}
+
+    if any(r.get("role_control", {}).get("blocks_line") for r in candidate_eligibility):
+        line = ResolvedLine(
+            fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
+            alternatives=[c for c in full_universe
+                         if (c.code, c.system) in eligible_ids],
+            rationale=("this claim-line intent's candidate universe (retrieval plus "
+                      "model-proposed candidates) classifies into more than one "
+                      "service role (operative vs. anesthesia) while the documented "
+                      "facts are conflicting or of mixed kind -- a composition/coder "
+                      "decision, never auto-resolved from an ambiguous pool"),
+            documentation_gap="classification_data_gap:service_role_conflict")
+        line.candidate_eligibility = candidate_eligibility
+        return line
+
+    proposals = [c for c in proposals_raw if (c.code, c.system) in eligible_ids]
+    pool = [c for c in pool if (c.code, c.system) in eligible_ids]
+    line = _propose_then_verify_core(
+        fact, source, pool, proposals, proposals_unsupported, llm, corroborate,
+        dos=dos, reconciliation=reconciliation, coverage=coverage)
+    line.candidate_eligibility = candidate_eligibility
+    return line
+
+
+def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
+                              pool: list[CandidateCode],
+                              proposals: list[CandidateCode],
+                              proposals_unsupported: list[CandidateCode],
+                              llm, corroborate=None, dos: str | None = None,
+                              reconciliation=None,
+                              coverage: "_requirement.CoverageCorpus | None" = None
+                              ) -> ResolvedLine:
+    """The shortlist-build + verification loop, over an ALREADY role-
+    eligibility-filtered `pool`/`proposals` (issue #6 F9-R11-H-D, fifth
+    re-review split this out of `_propose_then_verify` so eligibility runs
+    BEFORE any candidate reaches a verifier, not after one is selected)."""
     from . import verify as _verify
     # WHOSE second opinion this run has, decided once from the two callables' declared
     # identities: it governs whether an agreement may be credited as independent
     # confirmation below (and it must be computed even when `corroborate` is None, since
     # "no second opinion" is itself one of the non-independent origins).
     corroboration = _verify.corroboration_origin(llm, corroborate)
-    proposed_matches = [_evaluate(fact, c, source, reconciliation)
-                        for c in _verify.propose_codes(fact, source, llm)]
     retrieved_matches = _ranked(fact, pool, source, reconciliation)
-    unsupported = [m.candidate for m in [*proposed_matches, *retrieved_matches]
-                   if m is not None and m.interval_unsupported]
-    proposals = [m.candidate for m in proposed_matches
-                 if m is not None and not m.interval_unsupported]
+    unsupported = [m.candidate for m in retrieved_matches
+                   if m is not None and m.interval_unsupported] + proposals_unsupported
     retrieved_all = [m.candidate for m in retrieved_matches if not m.interval_unsupported]
     # issue #6 F9-R7-C: split off UMLS-sourced candidates for their OWN reserved
     # lane (see `_MIN_UMLS_SLOTS`) -- they must not compete on raw score against
