@@ -182,11 +182,11 @@ class CodeSource(Protocol):
 
     def separately_billable(self, code: str, system: str, dos: str | None) -> Outcome: ...
 
-    def global_period(self, code: str) -> str | None: ...
+    def global_period(self, code: str, dos: str | None = None) -> str | None: ...
 
-    def bilat_indicator(self, code: str) -> str | None: ...
+    def bilat_indicator(self, code: str, dos: str | None = None) -> str | None: ...
 
-    def pfs_status(self, code: str) -> str | None: ...
+    def pfs_status(self, code: str, dos: str | None = None) -> str | None: ...
 
     def index_codes(self, description: str, system: str) -> set[str]: ...
 
@@ -223,7 +223,8 @@ class CodeSource(Protocol):
 
     def instructional_terms(self, code: str, system: str) -> tuple[str, ...]: ...
 
-    def semantic_class(self, code: str, system: str) -> str | None: ...
+    def semantic_class(self, code: str, system: str, *,
+                       dos: str | None = None) -> str | None: ...
 
     def assert_claim_assembly_data_readable(self) -> None: ...
 
@@ -267,7 +268,8 @@ class AuthoritativeSource:
     def __init__(self) -> None:
         self._db = None
         self._store = None
-        self._gp: dict | None = None
+        self._compliance_store = None
+        self._pfs_bound = False
         self._idx = None
         self._snomed = None
         self._concept_relation_index = None
@@ -1158,29 +1160,64 @@ class AuthoritativeSource:
             return {_dot(undot)}
         return {_dot(u) for u in under}          # category -> its billable children
 
-    def _pfs_table(self) -> dict:
-        """The whole CMS PFS indicator table, read FAIL-CLOSED and cached.
+    def _pfs_binding(self) -> None:
+        """Bind the "global_periods" declared source's identity into the
+        certificate, FAIL-CLOSED, once per encounter.
 
         Absence of this REQUIRED source is caught by the capability gate before any
         certificate exists. PRESENT-BUT-CORRUPT is not: the manifest hashes the bytes
-        happily, and this read used to swallow the parse failure into `{}` -- at which point
-        every code reports global period None and bilateral indicator None, so
-        `apply_global_package` bundles nothing and the laterality modifiers change. That is
-        corruption RELAXING the claim, so it raises. (Round 5, phase 4.)
-        """
-        if self._gp is None:
-            self._gp, identity = declared_table_snapshot(
-                "pfs_indicators", "codes", PfsIndicatorsUnavailable)
-            self._bound_sources.bind(identity)
-        return self._gp
+        happily, so this reads the file (raising `PfsIndicatorsUnavailable` on a parse
+        failure) rather than letting a corrupt table silently degrade a downstream read.
+        (Round 5, phase 4.)
 
-    def _pfs(self, code: str) -> dict:
-        """The CMS PFS indicator record for a code ({'global':…, 'bilat':…}). {} when the
-        table has no record for this code -- a real answer from readable data, never the
-        table failing to load (that raises `PfsIndicatorsUnavailable`)."""
-        table = self._pfs_table()
-        rec = table.get(code) or table.get(code.replace(".", ""))
-        return rec if isinstance(rec, dict) else {}
+        Issue #6 F9-R11-H-C, second re-review: PFS VALUES are read through
+        `ComplianceDataStore` below -- the single, already effective-dated (via
+        `_asof`) runtime authority Codex asked for -- rather than a second,
+        independently-parsed `data/codes/global_period.json` projection of the
+        SAME file (`tools/build_global_period.py`, now removed: it could not run
+        in its own scheduled staging environment, and its parent-digest field was
+        never actually verified by anything, so the "projection" was a claim-
+        affecting duplicate authority in practice, not a safety net). This read
+        still parses `data/global_periods.json` once, ONLY to bind its exact bytes'
+        identity into the certificate -- `ComplianceDataStore` was built from the
+        SAME file, so the certificate still attests the bytes the SQL store's
+        answers actually came from, without this coder loading a second in-memory
+        copy of a 17k-code table it no longer looks up directly.
+
+        Also builds/loads `ComplianceDataStore` right here, not on the first
+        VALUE read (issue #6 F9-R11-H-D, second re-review, boundary-
+        interaction check): the whole point of proving readability up front
+        is that no later call site can crash on it instead of holding
+        gracefully. A build failure (e.g. a present-but-uncertifiable
+        `compliance.db`) is converted to the SAME typed
+        `PfsIndicatorsUnavailable` the pipeline's preflight boundary already
+        catches -- previously this store was only ever built lazily, the
+        first time `global_period`/`bilat_indicator`/`pfs_status` actually
+        ran, which for most encounters is mid-assembly (per-line modifiers),
+        well past the boundary this method exists to be.
+        """
+        if self._pfs_bound:
+            return
+        _, identity = declared_table_snapshot(
+            "global_periods", "codes", PfsIndicatorsUnavailable)
+        self._bound_sources.bind(identity)
+        try:
+            self._compliance()
+        except PfsIndicatorsUnavailable:
+            raise
+        except Exception as exc:
+            raise PfsIndicatorsUnavailable(
+                f"the compiled compliance database (global period / bilateral "
+                f"/ PFS status) could not be built or loaded: {exc}") from exc
+        self._pfs_bound = True
+
+    def _compliance(self):
+        if self._compliance_store is None:
+            from app.compliance.datastore.store import ComplianceDataStore
+            store = ComplianceDataStore()
+            store.build_or_load()
+            self._compliance_store = store
+        return self._compliance_store
 
     def assert_claim_assembly_data_readable(self) -> None:
         """Prove the authoritative tables CLAIM ASSEMBLY reads are readable, before it runs.
@@ -1191,33 +1228,36 @@ class AuthoritativeSource:
         downstream that could convert its unavailability into a hold. Asserting it here,
         once, is what makes the raise land on the pipeline's fail-closed boundary rather
         than escaping assembly as a crash.
-
-        This is the SAME cached load assembly performs, not a second one that could
-        disagree with it: once this returns, `_pfs` is served from `self._gp` and cannot
-        raise later within the same encounter.
         """
-        self._pfs_table()
+        self._pfs_binding()
 
-    def global_period(self, code: str) -> str | None:
-        """CMS global-surgical-package days (000/010/090/XXX/YYY/ZZZ/MMM). None if
-        unknown. Source: PFS RVU file (tools/build_global_period.py)."""
-        return self._pfs(code).get("global")
+    def global_period(self, code: str, dos: str | None = None) -> str | None:
+        """CMS global-surgical-package days (000/010/090/XXX/YYY/ZZZ/MMM) applicable
+        to `dos` (the encounter's date of service), or the currently-open release
+        when `dos` is absent. None if unknown. Source: `ComplianceDataStore.
+        global_period` (issue #6 F9-R11-H-C, second re-review — DOS threaded
+        through for the first time; previously ignored regardless of the
+        encounter's actual date of service)."""
+        self._pfs_binding()
+        return self._compliance().global_period(code, dos)
 
-    def bilat_indicator(self, code: str) -> str | None:
-        """CMS bilateral-surgery indicator: '1' = bilateral eligible (modifier 50
-        applies), '0'/'2'/'3' = 50 not appropriate, '9' = concept does not apply
-        (no laterality modifier). None if unknown."""
-        return self._pfs(code).get("bilat")
+    def bilat_indicator(self, code: str, dos: str | None = None) -> str | None:
+        """CMS bilateral-surgery indicator applicable to `dos`: '1' = bilateral
+        eligible (modifier 50 applies), '0'/'2'/'3' = 50 not appropriate, '9' =
+        concept does not apply (no laterality modifier). None if unknown."""
+        self._pfs_binding()
+        return self._compliance().bilat_surg(code, dos)
 
-    def pfs_status(self, code: str) -> str | None:
+    def pfs_status(self, code: str, dos: str | None = None) -> str | None:
         """CMS PFS payment-status indicator (single letter, e.g. 'J' = paid under
-        the anesthesia payment methodology) -- the field `coding_semantics.json`'s
-        `anesthesia` class rule (`pfs_status_any`) reads (issue #6 F9-R11-H-B).
-        Source: PFS RVU file's own STATUS CODE column
-        (`tools/build_global_period.py`), the SAME file `global_period`/
-        `bilat_indicator` already read. None/empty when unknown -- never a guess,
-        and never approximated from a descriptor-phrase proxy."""
-        return self._pfs(code).get("status") or None
+        the anesthesia payment methodology) applicable to `dos` -- the field
+        `coding_semantics.json`'s `anesthesia` class rule (`pfs_status_any`) reads
+        (issue #6 F9-R11-H-B). Source: `ComplianceDataStore.billing_status`, the
+        SAME table `global_period`/`bilat_indicator` already read. None/empty when
+        unknown -- never a guess, and never approximated from a descriptor-phrase
+        proxy."""
+        self._pfs_binding()
+        return self._compliance().billing_status(code, dos)
 
     # -- retrieval: RECALL only (concept -> candidate code identities) ---------
     def _vector_store(self):
@@ -1782,10 +1822,16 @@ class AuthoritativeSource:
         self._cptcat = cache
         return cache
 
-    def semantic_class(self, code: str, system: str) -> str | None:
+    def semantic_class(self, code: str, system: str, *, dos: str | None = None) -> str | None:
         """The `coding_semantics.json` class this code matches, or None when no rule
         matches -- an honest "unclassified", never a guess (issue #6 item 1: "unknown
         semantics remain unknown").
+
+        `dos` (the encounter's date of service) selects which PFS release's
+        `global_days`/`pfs_status` this checks against for the `global_days_kind`/
+        `pfs_status_any` rules below (issue #6 F9-R11-H-C, second re-review) --
+        absent when the caller has none to give, in which case the currently-open
+        release is used.
 
         Each class declares exactly one authoritative-data rule:
           - `descriptor_any`: the code's own long/short description contains one of
@@ -1819,12 +1865,12 @@ class AuthoritativeSource:
             if terms and descriptor and any(str(t).casefold() in descriptor for t in terms):
                 return name
             if rule.get("global_days_kind") == "numeric" and system in ("cpt", "hcpcs"):
-                gp = self.global_period(code)
+                gp = self.global_period(code, dos)
                 if gp and gp.isdigit():
                     return name
             status_any = rule.get("pfs_status_any")
             if status_any and system in ("cpt", "hcpcs"):
-                st = self.pfs_status(code)
+                st = self.pfs_status(code, dos)
                 if st and st in status_any:
                     return name
             chapter_ids = rule.get("icd_chapter_ids")
@@ -1935,13 +1981,13 @@ class MockSource:
         self._umls_crosswalk_data = {str(k): dict(v) for k, v in (umls_crosswalk or {}).items()}
         self._umls_candidates_data = umls_candidates or {}
 
-    def global_period(self, code):
+    def global_period(self, code, dos=None):
         return self._gp.get(code)
 
-    def bilat_indicator(self, code):
+    def bilat_indicator(self, code, dos=None):
         return self._bilat.get(code)
 
-    def pfs_status(self, code):
+    def pfs_status(self, code, dos=None):
         return self._status.get(code)
 
     def index_codes(self, description, system):
@@ -2191,7 +2237,7 @@ class MockSource:
             out |= self._inclusion_term_data.get(undot[:length], set())
         return tuple(sorted(out))
 
-    def semantic_class(self, code, system):
+    def semantic_class(self, code, system, *, dos=None):
         return self._semantic_class_data.get(str(code))
 
     def record_snapshot_identity(self, code, system):

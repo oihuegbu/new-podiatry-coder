@@ -102,8 +102,9 @@ CLAUDE.md forbids for a claim-affecting decision, notwithstanding that it read a
 authoritative descriptor's own text: the MATCHING RULE itself was a hand-authored,
 unversioned Python literal, not sourced from `coding_semantics.json`. Removed;
 `semantic_class()`'s own `anesthesia` rule (`pfs_status_any`) is now wired to a
-real CMS PFS status-indicator column instead (`tools/build_global_period.py`,
-`data_access.AuthoritativeSource.pfs_status`).
+real CMS PFS status-indicator column instead (`data_access.
+AuthoritativeSource.pfs_status`, backed by `ComplianceDataStore.billing_status`
+since issue #6 F9-R11-H-C, second re-review).
 
 Not implemented here, and deliberately left for separate, more careful design:
 Codex's broader "positive action/anatomy support from UMLS CUI lineage" proposal
@@ -153,8 +154,9 @@ _PROCEDURE_ROLES = ("operative", "anesthesia")
 #: proxy read an authoritative descriptor's own text. `semantic_class()`'s
 #: `surgical_procedure` rule (`global_days_kind: numeric`, a real CMS PFS field)
 #: covers "operative"; its `anesthesia` rule (`pfs_status_any: ["J"]`) now reads
-#: the CMS PFS STATUS CODE column `tools/build_global_period.py` extracts from
-#: the same RVU file (`data_access.AuthoritativeSource.pfs_status`) -- ONLY
+#: the CMS PFS STATUS CODE column via `data_access.AuthoritativeSource.pfs_status`
+#: (backed by `ComplianceDataStore.billing_status`, DOS-aware since issue #6
+#: F9-R11-H-C, second re-review) -- ONLY
 #: `semantic_class()` is consulted here. A candidate this classifier cannot
 #: resolve to a role is an honest data gap, never guessed from its descriptor
 #: text. This mapping names no medical code -- it maps an already-authoritative
@@ -164,15 +166,44 @@ _SEMANTIC_CLASS_TO_PROCEDURE_ROLE = {"surgical_procedure": "operative",
                                      "anesthesia": "anesthesia"}
 
 
-def _candidate_procedure_role(candidate, source) -> str | None:
+def _candidate_procedure_role(candidate, source, *, dos: str | None = None) -> str | None:
     """This candidate's procedure role (`_PROCEDURE_ROLES`), or None when
-    `semantic_class()` does not classify it -- an honest data gap, never a
-    guess and never a descriptor-phrase proxy (Codex F9-R11-H-B)."""
+    `semantic_class()` runs and returns an honest "unclassified" -- never a
+    guess and never a descriptor-phrase proxy (Codex F9-R11-H-B).
+
+    Does NOT catch a real authority failure into None (Codex F9-R11-H-D,
+    second re-review): a prior version caught every exception `semantic_class`
+    raised -- including `SemanticClassUnavailable`, a genuine "the
+    authoritative classifier could not be read" failure -- and reported it
+    identically to "read the classifier fine, this code just isn't
+    classified", silently WEAKENING a claim-affecting control exactly when
+    its own authority was broken. `source` missing the method entirely is
+    the one case treated the same way: no `semantic_class` support is itself
+    an authority failure, not an honest per-code "unclassified" answer.
+    A real failure propagates to the pipeline's existing `retrieval_execution`
+    system-hold boundary (`resolution.resolve`'s caller already wraps every
+    resolution call in a catch-all that converts any raised exception into a
+    typed hold) -- this module raises, it does not catch.
+
+    Never even asks for a non-CPT/HCPCS candidate (issue #6 F9-R11-H-D, second
+    re-review): the operative/anesthesia axis is a PROCEDURE-code distinction
+    -- an ICD-10 diagnosis candidate has no such role, honestly None, and
+    `semantic_class()`'s OWN rule branches already gate every procedure-role-
+    relevant rule the same way. `_service_role_control` now classifies every
+    candidate even for a MIXED_KIND_INTENT (a composed intent's candidate pool
+    can be for a non-procedure member fact), so without this guard it would
+    call the procedure-role classifier on diagnosis candidates for no reason
+    other than audit-trail completeness -- needlessly exercising an unrelated
+    ICD-chapter rule branch this axis has no business touching."""
+    if candidate.system not in ("cpt", "hcpcs"):
+        return None
     classifier = getattr(source, "semantic_class", None)
-    try:
-        cls = classifier(candidate.code, candidate.system) if callable(classifier) else None
-    except Exception:
-        cls = None
+    if not callable(classifier):
+        from .data_access import SemanticClassUnavailable
+        raise SemanticClassUnavailable(
+            "source does not implement semantic_class -- the service-role "
+            "authority is unavailable")
+    cls = classifier(candidate.code, candidate.system, dos=dos)
     return _SEMANTIC_CLASS_TO_PROCEDURE_ROLE.get(cls)
 
 
@@ -217,56 +248,81 @@ class RoleControlDecision:
     a silent skip (Codex F9-R11-H-D). `fact_roles` is the full set
     `_authorized_roles` found (empty when none, >1 element when conflicting,
     exactly one element when the control actually ran); `candidate_role` is
-    this candidate's own classification, or None when unclassifiable."""
+    this candidate's own classification, or None when unclassifiable.
+
+    `blocks_line` (Codex F9-R11-H-D, second re-review): True only for a
+    FACT_ROLE_CONFLICT/MIXED_KIND_INTENT decision where the candidates in
+    THIS pool actually classify into more than one distinct procedure role --
+    a genuine, observable ambiguity that could change which candidate family
+    wins, as opposed to a conflict/mixed state whose candidates all agree (or
+    none classify), where the ambiguity is moot for this specific pool. This
+    field names the condition; it is not yet wired into an upstream
+    hold/split -- the report is honest that the condition exists, without
+    claiming a line was actually stopped from releasing on it."""
     status: RoleControlStatus
     fact_roles: tuple[str, ...]
     candidate_role: str | None
     excluded: bool
-    source_id: str = "semantic_class"
+    blocks_line: bool = False
+    authority_source_id: str = "semantic_class"
+    authority_version: str | None = None
 
 
 def _service_role_control(facts: list[ClinicalFact], candidates: list,
-                          source, reconciliation=None
+                          source, reconciliation=None, dos: str | None = None
                           ) -> dict[tuple[str, str], RoleControlDecision]:
     """`{(code, system) -> RoleControlDecision}` for EVERY candidate, always --
     the typed replacement for the old bare-`{}` `_service_role_exclusions`
     (Codex F9-R11-H-D). Runs BEFORE verification (via `eligible_partition`,
     below) so an incompatible-role candidate never reaches the model at all.
 
-    The control only actually EVALUATES candidates when EVERY fact in this
-    intent is a FactKind.PROCEDURE (a mixed intent has no single procedure
-    role to check against -- `MIXED_KIND_INTENT`) AND the composed intent
-    documents EXACTLY ONE distinct role across every member fact
-    (`_authorized_roles`; zero is `FACT_ROLE_MISSING`, more than one is
-    `FACT_ROLE_CONFLICT` -- Codex F9-R11-H-A: a genuine role conflict across a
-    composed intent needs upstream composition/provider-query resolution, not
-    an arbitrary pick between two documented alternatives). When it DOES run,
-    a candidate is excluded only when its OWN role is positively classified
-    AND differs from the fact's; an unclassifiable candidate role is kept
-    (`CANDIDATE_UNCLASSIFIED`) -- absence of grounding is not evidence against
-    anyone, the same principle `_anatomy_dominance_exclusions` already
-    follows."""
-    if {f.kind for f in facts} != {FactKind.PROCEDURE}:
-        return {(c.code, c.system): RoleControlDecision(
-                    RoleControlStatus.MIXED_KIND_INTENT, (), None, False)
-                for c in candidates}
-    roles = _authorized_roles(facts, reconciliation)
-    if not roles:
-        return {(c.code, c.system): RoleControlDecision(
-                    RoleControlStatus.FACT_ROLE_MISSING, (), None, False)
-                for c in candidates}
-    if len(roles) > 1:
-        return {(c.code, c.system): RoleControlDecision(
-                    RoleControlStatus.FACT_ROLE_CONFLICT, tuple(sorted(roles)), None, False)
-                for c in candidates}
-    fact_role = next(iter(roles))
-    if fact_role not in _PROCEDURE_ROLES:
-        return {(c.code, c.system): RoleControlDecision(
-                    RoleControlStatus.FACT_ROLE_MISSING, tuple(roles), None, False)
-                for c in candidates}
+    The control only EXCLUDES candidates when EVERY fact in this intent is a
+    FactKind.PROCEDURE (a mixed intent has no single procedure role to check
+    against -- `MIXED_KIND_INTENT`) AND the composed intent documents EXACTLY
+    ONE distinct role across every member fact (`_authorized_roles`; zero is
+    `FACT_ROLE_MISSING`, more than one is `FACT_ROLE_CONFLICT` -- Codex
+    F9-R11-H-A: a genuine role conflict across a composed intent needs
+    upstream composition/provider-query resolution, not an arbitrary pick
+    between two documented alternatives). A candidate is excluded only when
+    its OWN role is positively classified AND differs from the fact's; an
+    unclassifiable candidate role is kept (`CANDIDATE_UNCLASSIFIED`) --
+    absence of grounding is not evidence against anyone, the same principle
+    `_anatomy_dominance_exclusions` already follows.
+
+    Every candidate's role is classified regardless of which of the above
+    applies (Codex F9-R11-H-D, second re-review) -- a prior version skipped
+    classification entirely for FACT_ROLE_MISSING/CONFLICT/MIXED_KIND_INTENT,
+    so the audit trail could show a real-note survivor's role controversy was
+    never resolved but not WHAT that candidate's own classification actually
+    was, which is exactly the fact a reviewer needs to judge whether the
+    ambiguity is real."""
+    mixed_kind = {f.kind for f in facts} != {FactKind.PROCEDURE}
+    roles = () if mixed_kind else tuple(sorted(_authorized_roles(facts, reconciliation)))
+    if mixed_kind:
+        base_status = RoleControlStatus.MIXED_KIND_INTENT
+    elif not roles:
+        base_status = RoleControlStatus.FACT_ROLE_MISSING
+    elif len(roles) > 1:
+        base_status = RoleControlStatus.FACT_ROLE_CONFLICT
+    elif roles[0] not in _PROCEDURE_ROLES:
+        base_status = RoleControlStatus.FACT_ROLE_MISSING
+    else:
+        base_status = None                    # the control actually runs, below
+
+    if base_status is not None:
+        classified = {(c.code, c.system): _candidate_procedure_role(c, source, dos=dos)
+                     for c in candidates}
+        distinct_roles = {r for r in classified.values() if r is not None}
+        blocks = (base_status in (RoleControlStatus.FACT_ROLE_CONFLICT,
+                                  RoleControlStatus.MIXED_KIND_INTENT)
+                 and len(distinct_roles) > 1)
+        return {key: RoleControlDecision(base_status, roles, role, False, blocks)
+               for key, role in classified.items()}
+
+    fact_role = roles[0]
     out: dict[tuple[str, str], RoleControlDecision] = {}
     for c in candidates:
-        role = _candidate_procedure_role(c, source)
+        role = _candidate_procedure_role(c, source, dos=dos)
         if role is None:
             status, excluded = RoleControlStatus.CANDIDATE_UNCLASSIFIED, False
         elif role != fact_role:
@@ -278,11 +334,12 @@ def _service_role_control(facts: list[ClinicalFact], candidates: list,
 
 
 def _service_role_exclusions(facts: list[ClinicalFact], candidates: list,
-                             source, reconciliation=None) -> dict[tuple[str, str], str]:
+                             source, reconciliation=None,
+                             dos: str | None = None) -> dict[tuple[str, str], str]:
     """`{(code, system) -> reason}` -- the exclusion-reason VIEW of
     `_service_role_control`, for callers that only need the filter, not the
     full audit decision."""
-    control = _service_role_control(facts, candidates, source, reconciliation)
+    control = _service_role_control(facts, candidates, source, reconciliation, dos)
     return {key: (f"candidate's authoritative classification is "
                  f"{decision.candidate_role!r}, incompatible with the fact's "
                  f"documented service_role {decision.fact_roles[0]!r}")
@@ -601,7 +658,8 @@ def eligible_partition(facts: list[ClinicalFact], candidates: list, source,
     an empty pool as an honest abstention; that is the correct outcome here
     too, not a reason to disable the filter."""
     pool = [c for c in candidates if eligible(c, facts, source, date_of_service)]
-    role_excluded = _service_role_exclusions(facts, pool, source, reconciliation)
+    role_excluded = _service_role_exclusions(facts, pool, source, reconciliation,
+                                             dos=date_of_service)
     pool = [c for c in pool if (c.code, c.system) not in role_excluded]
     excluded = _anatomy_dominance_exclusions(facts, pool, source, reconciliation)
     return [c for c in pool if (c.code, c.system) not in excluded]
@@ -617,7 +675,8 @@ def eligibility_report(facts: list[ClinicalFact], candidates: list, source,
     so this record can never claim a different reason than the one that actually
     decided it."""
     pool = [c for c in candidates if eligible(c, facts, source, date_of_service)]
-    role_control = _service_role_control(facts, pool, source, reconciliation)
+    role_control = _service_role_control(facts, pool, source, reconciliation,
+                                         dos=date_of_service)
     surviving = [c for c in pool
                 if not role_control[(c.code, c.system)].excluded]
     dominance = _anatomy_dominance_exclusions(facts, surviving, source, reconciliation)
@@ -645,9 +704,12 @@ def eligibility_report(facts: list[ClinicalFact], candidates: list, source,
                 {"status": role_decision.status.value,
                  "fact_roles": list(role_decision.fact_roles),
                  "candidate_role": role_decision.candidate_role,
-                 "source_id": role_decision.source_id}
+                 "blocks_line": role_decision.blocks_line,
+                 "authority_source_id": role_decision.authority_source_id,
+                 "authority_version": role_decision.authority_version}
                 if role_decision is not None else
                 {"status": "not_evaluated", "fact_roles": [], "candidate_role": None,
-                 "source_id": None}),
+                 "blocks_line": False, "authority_source_id": None,
+                 "authority_version": None}),
         })
     return report

@@ -636,8 +636,24 @@ def main(argv: list[str] | None = None) -> int:
                 f"{duplicates}; every encounter resolving through one of them "
                 f"will hold")
 
+    # `prepare()` raises AuthoritativeDataUnavailable when a REQUIRED
+    # claim-assembly source (PFS indicators, modifier definitions) is present
+    # but uncertifiable -- e.g. a compiled compliance.db that is not a valid
+    # sqlite file (issue #6 F9-R11-H-D, second re-review: a boundary this
+    # entrypoint never had to handle before compliance.db became part of the
+    # PFS authority `assert_claim_assembly_data_readable` proves readable).
+    # A batch that cannot even prove its own data is readable cannot process
+    # ANY note -- caught here, logged, and returned as the SAME controlled
+    # "operational failure" exit this function already uses below for "every
+    # note in this batch failed to process", rather than an unhandled
+    # traceback escaping the process.
+    from claude_coder.data_access import AuthoritativeDataUnavailable
     if args.setup_only:
-        AuthoritativeSource().prepare(force_rebuild_index=args.rebuild_index)
+        try:
+            AuthoritativeSource().prepare(force_rebuild_index=args.rebuild_index)
+        except AuthoritativeDataUnavailable as exc:
+            logger.error(f"--setup-only: claim-assembly data is not readable: {exc}")
+            return 1
         logger.info("\n--setup-only: dependencies loaded, no notes processed. Exiting.")
         return 0
 
@@ -652,7 +668,12 @@ def main(argv: list[str] | None = None) -> int:
     # the reference tables and every authoritative file, so per-note construction
     # would repay a multi-minute load on every note.
     source = AuthoritativeSource()
-    source.prepare(force_rebuild_index=args.rebuild_index)
+    try:
+        source.prepare(force_rebuild_index=args.rebuild_index)
+    except AuthoritativeDataUnavailable as exc:
+        logger.error(f"claim-assembly data is not readable: {exc}")
+        logger.error("Every note in this batch failed to process.")
+        return 1
 
     logger.info(f"\nProcessing {len(note_files)} clinical note(s)\n")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

@@ -141,13 +141,14 @@ NOTES_DIR = Path(os.getenv("NOTES_DIR", str(ATTACHMENTS_DIR)))
 
 # --- Supplementary rule tables (bundled with system) ---
 GLOBAL_PERIODS_FILE = DATA_DIR / "global_periods.json"
-# CMS PFS payment-policy indicator extract (GLOB DAYS + BILAT SURG) the CODER reads for
-# global-surgical-period and bilateral-surgery decisions, built by
-# tools/build_global_period.py.  This is a DIFFERENT extract from GLOBAL_PERIODS_FILE
-# above (which the compliance datastore ingests): both are release-bearing, both are
-# declared in app/release/source_manifest, and the path lives here -- not as a literal in
-# the reader -- so the bytes that are certified are provably the bytes that are read.
-PFS_INDICATOR_FILE = CODES_DIR / os.getenv("PFS_INDICATOR_FILENAME", "global_period.json")
+# The coder (claude_coder.data_access) reads global-surgical-period, bilateral-surgery,
+# and PFS payment-status decisions through ComplianceDataStore (app.compliance.datastore),
+# which ingests THIS SAME file -- not a second, independently-built extract (issue #6
+# F9-R11-H-C, second re-review: PFS_INDICATOR_FILE / tools/build_global_period.py, a
+# second extract of the same underlying CMS release, is removed -- it could not run in
+# its own scheduled staging environment, and had already been caught silently drifting
+# from this file, e.g. a stale April download read at decision time while a newer July
+# release sat right here unused).
 # Authoritative modifier definitions the coder's modifier engine resolves against.
 MODIFIER_FILE = CODES_DIR / os.getenv("MODIFIER_FILENAME", "modifiers.json")
 # ICD-10-CM Tabular instructional (Excludes1/Excludes2) notes -- gate-bearing: the

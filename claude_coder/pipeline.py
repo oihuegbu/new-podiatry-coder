@@ -237,7 +237,9 @@ def code_encounter(
                                        "source_evidence_integrity", exc, source)
 
     # ---- Fail-closed boundary for the data CLAIM ASSEMBLY reads ----------------------
-    # `pfs_indicators` (global period + bilateral indicator) and `modifier_definitions` are
+    # `global_periods` (global period + bilateral indicator, read through
+    # `ComplianceDataStore` -- issue #6 F9-R11-H-C, second re-review) and
+    # `modifier_definitions` are
     # REQUIRED release sources consumed while the claim is being BUILT -- per-line
     # modifiers, then the global surgical package -- which is BEFORE the first gate runs.
     # So, unlike coverage policy or the Tabular notes, no gate downstream can convert their
@@ -794,7 +796,7 @@ def code_encounter(
                 # (descriptor-driven, so a "2-4 items" code bills as one unit).
                 line.modifiers = modifier_engine.assign(
                     line.fact, line.chosen.descriptor,
-                    bilat=source.bilat_indicator(line.chosen.code),
+                    bilat=source.bilat_indicator(line.chosen.code, date_of_service),
                     reconciliation=source_reconciliation)
                 # issue #6 F9-R6-R2, sixth re-review: claim-authorized, not the raw
                 # attribute directly -- an unauthorized count/quantity must fall back
@@ -1839,7 +1841,7 @@ def apply_global_package(result: CodingResult, source: CodeSource) -> None:
     — dropped from the claim, kept in the audit trail. Fail-closed."""
     from .models import FactKind
     has_global_proc = any(
-        source.global_period(ln.chosen.code) in ("000", "010", "090")
+        source.global_period(ln.chosen.code, result.date_of_service) in ("000", "010", "090")
         for ln in result.billable_lines
         if ln.fact.kind is not FactKind.EM and ln.chosen.system in ("cpt", "hcpcs"))
     if not has_global_proc:

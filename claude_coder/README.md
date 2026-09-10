@@ -476,14 +476,16 @@ tunes the learned-index promotion threshold.
 Consumed from `data/codes/` (all sourced from real AMA/CMS/NCHS files with
 provenance): `<system>_codes.json`, `icd10cm_index_terms.json`,
 `icd10cm_instructional_notes.json`, `snomed_icd10_map.json`, `cpt_index_terms.json`,
-`hcpcs_drug_table.json`, `learned_cpt_index.json`, `global_period.json`,
-`modifiers.json`, `em_mdm_grid.json`; plus `compliance.db` (NCCI/MUE) and the RAG
-index.
+`hcpcs_drug_table.json`, `learned_cpt_index.json`,
+`modifiers.json`, `em_mdm_grid.json`; plus `compliance.db` (NCCI/MUE, and — since
+issue #6 F9-R11-H-C, second re-review — global period/bilateral/PFS status,
+ingested from `data/global_periods.json` rather than a second, separately
+downloaded `data/codes/global_period.json` extract) and the RAG index.
 
 Data-prep tools (automated source ingestion → preparation → integration; each a
 drop-in that the coder degrades gracefully without): `tools/parse_icd10cm_index.py`,
 `tools/parse_cpt_index.py`, `tools/build_snomed_icd10_map.py`,
-`tools/build_hcpcs_drug_table.py`, `tools/build_global_period.py`,
+`tools/build_hcpcs_drug_table.py`,
 `tools/build_learned_index.py`, `tools/refresh_authoritative_data.py`.
 
 ---

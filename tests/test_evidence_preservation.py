@@ -27,13 +27,19 @@ class EligibilityReportReasons(unittest.TestCase):
         # issue #6 F9-R11-H-D: eligibility_report now always carries a typed
         # role_control decision alongside eligible/reason -- here
         # "fact_role_missing" since this fact never documents a service_role.
+        # Second re-review: candidate_role is now always classified (even under
+        # FACT_ROLE_MISSING/CONFLICT/MIXED_KIND_INTENT) -- None here because
+        # MockSource's default semantic_class has no rule for "Z1" -- and the
+        # decision carries blocks_line/authority_source_id/authority_version.
         self.assertEqual(report, [{"code": "Z1", "system": "cpt",
                                    "eligible": True, "reason": None,
                                    "role_control": {
                                        "status": "fact_role_missing",
                                        "fact_roles": [],
                                        "candidate_role": None,
-                                       "source_id": "semantic_class"}}])
+                                       "blocks_line": False,
+                                       "authority_source_id": "semantic_class",
+                                       "authority_version": None}}])
 
     def test_ineligible_candidate_carries_a_reason(self):
         source = MockSource(records={("Z1", "cpt"): {"long_description": "a service",

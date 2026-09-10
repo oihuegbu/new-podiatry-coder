@@ -734,7 +734,7 @@ _ROUND5_REQUIRED = (
     "coverage_policy",              # data_access._coverage_map -> governed / qualifying dx
     "necessity_relation_control",   # gates.load_necessity_control
     "relation_evidence_grammar",    # provenance.load_relation_grammar
-    "pfs_indicators",               # data_access._pfs -> global period / bilateral
+    "global_periods",               # data_access._pfs_binding -> global period / bilateral
     "modifier_definitions",         # modifiers.load_modifier_defs
     "instructional_notes",          # data_access._excludes1_map -> Excludes1 gate
     "validator_rules",              # deterministic validation rule pack
@@ -1175,13 +1175,18 @@ def _corrupted_source(monkeypatch, source_id, content, tmp_path):
 
 def test_corrupt_pfs_indicators_raise_instead_of_an_empty_indicator_table(monkeypatch,
                                                                          tmp_path):
-    """`_pfs` swallowed every read failure into {}, which reports global period None and
-    bilateral indicator None for EVERY code -- so `apply_global_package` bundles nothing and
-    the laterality modifiers change. Both are the permissive direction."""
+    """`_pfs_binding` proves the "global_periods" identity is readable before any of
+    global_period/bilat_indicator/pfs_status trust a value from it (issue #6 F9-R11-H-C,
+    second re-review: was "pfs_indicators", a second independently-downloaded extract of
+    the same CMS release, now removed -- values are read through ComplianceDataStore,
+    built from this SAME "global_periods" file). Corruption must raise, never silently
+    report global period None and bilateral indicator None for EVERY code -- which would
+    make `apply_global_package` bundle nothing and change every laterality modifier, both
+    the permissive direction."""
     from claude_coder.data_access import (AuthoritativeDataUnavailable, AuthoritativeSource,
                                           PfsIndicatorsUnavailable)
     for content in _CORRUPTIONS:
-        _corrupted_source(monkeypatch, "pfs_indicators", content, tmp_path)
+        _corrupted_source(monkeypatch, "global_periods", content, tmp_path)
         src = AuthoritativeSource()
         for probe in (lambda: src.global_period("SYNTHETIC_PROC"),
                       lambda: src.bilat_indicator("SYNTHETIC_PROC"),
@@ -1297,7 +1302,7 @@ def test_a_single_diagnosis_never_consults_the_notes_at_all():
     assert icd_excludes_gate(result, _Unavailable()).outcome is Outcome.NOT_APPLICABLE
 
 
-@pytest.mark.parametrize("source_id", ["pfs_indicators", "modifier_definitions"])
+@pytest.mark.parametrize("source_id", ["global_periods", "modifier_definitions"])
 def test_corrupt_claim_assembly_data_holds_the_whole_pipeline(monkeypatch, tmp_path,
                                                               source_id):
     """The reads that happen during claim ASSEMBLY -- per-line modifiers, then the global
@@ -1386,7 +1391,7 @@ def test_every_required_source_the_coder_reads_fails_closed_on_corruption(monkey
     from claude_coder.modifiers import load_modifier_defs
     probes = {
         "coverage_policy": lambda s: s.qualifying_dx_for("SYNTHETIC_PROC", "cpt"),
-        "pfs_indicators": lambda s: s.global_period("SYNTHETIC_PROC"),
+        "global_periods": lambda s: s.global_period("SYNTHETIC_PROC"),
         "instructional_notes": lambda s: s.excludes1_refs("SYNTHETIC_DX", "icd10"),
         "modifier_definitions": lambda s: load_modifier_defs(),
     }

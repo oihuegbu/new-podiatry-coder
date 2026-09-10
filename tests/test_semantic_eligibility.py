@@ -633,7 +633,7 @@ class ServiceRoleExclusion(unittest.TestCase):
             rc = report["OP"]["role_control"]
             self.assertIsNotNone(rc, f"role_control silently absent for {expected_status}")
             self.assertEqual(rc["status"], expected_status)
-            self.assertTrue(rc["source_id"] or expected_status.startswith(
+            self.assertTrue(rc["authority_source_id"] or expected_status.startswith(
                 ("fact_role", "mixed_kind")), rc)
 
     def test_role_control_reports_an_unclassifiable_candidate_explicitly(self):

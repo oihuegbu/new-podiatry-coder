@@ -1974,7 +1974,16 @@ def test_an_uncertifiable_compiled_database_stops_the_deployed_entrypoint(deploy
     deployment if the raise is swallowed on the way out. This runs `run.main` -- the real
     entrypoint, the real artifact writer, the real release contract -- against a compiled
     database that is present but not certifiable, and asserts the encounter cannot be
-    released by any path."""
+    released by any path.
+
+    Does NOT require `main()` to return 0 (issue #6 F9-R11-H-C/H-D, second re-review):
+    compliance.db is now part of the PFS authority `AuthoritativeSource.prepare()` proves
+    readable BEFORE any note is processed (previously PFS came from a separate JSON
+    extract prepare() never validated against this specific file), so a corrupt db can now
+    ALSO fail the whole batch at startup -- a controlled, logged, nonzero exit (see run.py's
+    own `AuthoritativeDataUnavailable` handling), not a raw crash. A startup abort satisfies
+    "cannot be released by any path" at least as strongly as a per-note hold: no note is
+    even attempted, so nothing resembling a release can have happened."""
     from pathlib import Path as _Path
     from app.release import source_manifest as sm
     corrupt = tmp_path / "compliance.db"
@@ -1983,7 +1992,15 @@ def test_an_uncertifiable_compiled_database_stops_the_deployed_entrypoint(deploy
     runtime["compliance_database"] = lambda p=corrupt: _Path(p)
     monkeypatch.setattr(sm, "_RUNTIME_SOURCES", runtime)
 
-    payload = deployment.run()
+    argv = ["--billing-context", str(deployment.billing_context_file),
+           "--encounter-context", str(deployment.context_file)]
+    exit_code = entrypoint.main(argv)
+    if exit_code != 0:
+        assert not deployment.artifact_path.exists(), (
+            "batch aborted at startup but still wrote a results artifact")
+        return
+
+    payload = deployment.artifact()
     if payload.get("processing_error"):
         return          # failed loudly before a claim existed; nothing was released
     release = payload["release"]

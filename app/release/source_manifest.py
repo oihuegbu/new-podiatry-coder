@@ -25,13 +25,14 @@ _AUTHORITATIVE = {
     # Global-period / fee-schedule policy decides post-operative bundling, so it is
     # release-bearing and must be registered here (not only in the coder's capability
     # probe) -- the required-source declaration below resolves its path from THIS
-    # registry, so the two can never drift apart.  (Codex F6-R5.)
+    # registry, so the two can never drift apart.  (Codex F6-R5.)  The coder itself
+    # (claude_coder.data_access) also reads global-period/bilateral/PFS-status decisions
+    # from this SAME file now, through ComplianceDataStore -- not a second, independently
+    # downloaded extract (issue #6 F9-R11-H-C, second re-review removed the "pfs_indicators"
+    # source that used to live here: it had already been caught silently drifting from
+    # this one, e.g. a stale April download read at decision time while a newer July
+    # release sat right here unused).
     "global_periods": config.GLOBAL_PERIODS_FILE,
-    # The SECOND PFS extract: the one the coder itself reads for global-period and
-    # bilateral indicators.  It is a different file from `global_periods` above (a
-    # different quarterly RVU release, parsed for different columns), and it was read at
-    # decision time while being certified by nobody.  (Codex F6-R5, round 5.)
-    "pfs_indicators": config.PFS_INDICATOR_FILE,
     # Modifier definitions: the coder's modifier engine resolves every modifier it emits
     # out of these bytes, so they decide what appears on the claim.
     "modifier_definitions": config.MODIFIER_FILE,
@@ -386,13 +387,22 @@ _REQUIRED_RELEASE_SOURCES: dict[str, dict[str, str]] = {
     "global_periods": {
         "role": "global-period / fee-schedule policy",
         # REVIEWED EXCEPTION, stated explicitly rather than inferred from a blank field:
-        # the global-period extract is not ingested into a versioned effective-window /
-        # data_source_version table, so no upstream release window exists to require.
-        # Its identity therefore rests entirely on the content digest, which IS required.
+        # the FILE ITSELF carries no upstream release window (CMS publishes a single
+        # current-quarter snapshot, e.g. "RVU26C (2026 July release)", with no per-row
+        # effective_from/effective_to of its own). Its identity therefore rests on the
+        # content digest, which IS required. A real effective-window table now exists
+        # DOWNSTREAM of this file, not in it: ComplianceDataStore's ingest (issue #6
+        # F9-R11-H-C, second re-review) diffs each refresh against the currently-open
+        # row per code and, on a genuine change, closes the old row and opens a new one
+        # dated from this release's own CMS release-letter convention (or this file's
+        # mtime when that can't be parsed) -- so DOS-aware selection is real once two
+        # releases have been ingested, even though this SOURCE FILE alone still carries
+        # no window.
         "release_metadata_exemption":
-            "not ingested into a versioned effective-window table; no upstream release "
-            "window is published for this extract, so identity rests on the content "
-            "digest alone",
+            "the source file itself carries no upstream release window (single "
+            "current-quarter snapshot); identity rests on the content digest alone. "
+            "A real effective-window table is synthesized downstream, in "
+            "ComplianceDataStore, from successive ingests of this same file",
     },
     # --- added in round 5 after deriving the set from the RUNTIME dependency graph ---
     "coverage_policy": {
@@ -400,13 +410,6 @@ _REQUIRED_RELEASE_SOURCES: dict[str, dict[str, str]] = {
         # is GOVERNED and which diagnoses qualify.  Absent/invalid, it silently became an
         # empty map, moving every service onto the less restrictive ungoverned path.
         "role": "coverage policy (medical-necessity linkage)",
-    },
-    "pfs_indicators": {
-        "role": "PFS global-period / bilateral indicators",
-        "release_metadata_exemption":
-            "parsed extract of a CMS quarterly RVU file; it is not ingested into a "
-            "versioned effective-window table, so no upstream window is queryable and "
-            "identity rests on the content digest alone",
     },
     "modifier_definitions": {
         "role": "modifier definitions",

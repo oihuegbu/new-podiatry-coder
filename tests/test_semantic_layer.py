@@ -411,13 +411,34 @@ class SemanticClassMatchingRules(unittest.TestCase):
     file-backed loaders would produce) -- deterministic, no authoritative data file
     dependency, still exercising the REAL matching logic, not a reimplementation."""
 
+    class _FakeComplianceStore:
+        """Stand-in for `ComplianceDataStore`, pre-populated directly from the
+        test's own `gp` dict -- issue #6 F9-R11-H-C, second re-review: PFS
+        values now come from `AuthoritativeSource._compliance()` rather than
+        the old `self._gp` table this test used to inject straight onto the
+        source. Injecting a fake store into `_compliance_store` (the same
+        lazy-cache slot `_compliance()` checks before building a real one)
+        keeps this test isolated from real data exactly as before."""
+        def __init__(self, gp):
+            self._gp = gp
+
+        def global_period(self, code, dos=None):
+            return self._gp.get(code, {}).get("global")
+
+        def billing_status(self, code, dos=None):
+            return self._gp.get(code, {}).get("status")
+
+        def bilat_surg(self, code, dos=None):
+            return self._gp.get(code, {}).get("bilat")
+
     def _source(self, records, rules, icd_chapters=None, cpt_categories=None, gp=None):
         s = AuthoritativeSource()
         s._records = {}   # unused by this path; lookup() reads _reference()
         s._semrules = rules
         s._icdchap = icd_chapters or []
         s._cptcat = cpt_categories or {}
-        s._gp = gp or {}
+        s._compliance_store = self._FakeComplianceStore(gp or {})
+        s._pfs_bound = True    # skip the real "global_periods" binding read too
         # `semantic_class` calls `self.lookup`, which reads `self._reference()` --
         # patch `lookup` directly rather than the whole reference-DB machinery.
         s.lookup = lambda code, system: records.get((code, system))
@@ -638,12 +659,14 @@ class RealAuthoritativeDataSmokeTest(unittest.TestCase):
     without hardcoding a medical-code value in the test."""
 
     def test_some_real_cpt_code_with_a_numeric_global_period_classifies_as_surgical(self):
+        import json
+        from app.core.config import GLOBAL_PERIODS_FILE
         source = AuthoritativeSource()
-        table = source._pfs_table()
-        candidate = next((code for code, rec in table.items()
-                          if str(rec.get("global") or "").isdigit()), None)
+        data = json.loads(GLOBAL_PERIODS_FILE.read_text())
+        candidate = next((code for code, rec in data.get("codes", {}).items()
+                          if str(rec.get("global_days") or "").isdigit()), None)
         if candidate is None:
-            self.skipTest("no code with a numeric global period in the loaded PFS table")
+            self.skipTest("no code with a numeric global period in the loaded PFS source")
         result = source.semantic_class(candidate, "cpt")
         self.assertEqual(result, "surgical_procedure")
 

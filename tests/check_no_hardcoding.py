@@ -80,7 +80,7 @@ AGNOSTIC_TARGETS = [
         "parse_cpt_index", "parse_icd10cm_index", "build_hcpcs_drug_table",
         "build_learned_index", "refresh_authoritative_data",
         "build_snomed_icd10_map", "build_snomed_concept_terms",
-        "build_global_period", "recall_benchmark",
+        "recall_benchmark",
     ) if (ROOT / "tools" / f"{name}.py").exists()],
 ]
 

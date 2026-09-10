@@ -77,6 +77,29 @@ _CODE_RE = re.compile(r"^[A-Z0-9]{4}[A-Z0-9]$")
 _HCPCS_RE = re.compile(r"^[A-Z]\d{4}$")
 _OPEN = "9999-12-31"  # sentinel for "no end date"
 
+#: CMS's own quarterly PFS RVU release-letter convention (RVU<YY><A-D>): A/B/C/D
+#: name the January/April/July/October release of year 20YY -- a generic
+#: calendar fact CMS itself publishes and names its release files by (e.g.
+#: "PPRRVU2026_Jul_nonQPP.csv", "RVU26C (2026 July release)"), not a medical
+#: code family -- distinct from what CLAUDE.md's no-hardcoding rule forbids,
+#: the same way `_clean_date` already parses other CMS date strings in this
+#: file (issue #6 F9-R11-H-C, second re-review).
+_RVU_RELEASE_MONTH = {"A": "01", "B": "04", "C": "07", "D": "10"}
+_RVU_VERSION_RE = re.compile(r"RVU(\d{2})([A-D])\b")
+
+
+def _rvu_release_effective_from(version: str, fallback: str) -> str:
+    """The real CMS effective-from date a PFS RVU release's own `version`
+    string names (e.g. "RVU26C (2026 July release)" -> "2026-07-01"), or
+    `fallback` (this box's own ingest-time signal) when the string doesn't
+    match CMS's documented release-letter convention."""
+    m = _RVU_VERSION_RE.search(version or "")
+    if not m:
+        return fallback
+    yy, letter = m.groups()
+    month = _RVU_RELEASE_MONTH.get(letter)
+    return f"20{yy}-{month}-01" if month else fallback
+
 
 _CODE_TOKEN_RE = re.compile(r"[A-TV-Z][0-9][0-9A-Z]{0,5}(?:\.[0-9A-Z-]{1,4})?")
 
@@ -269,8 +292,13 @@ class ComplianceDataStore:
              "clear": [("ncci_ptp", None)], "ingest": [self._ingest_ncci]},
             {"id": "mue", "paths": [MUE_FILE],
              "clear": [("mue", None)], "ingest": [self._ingest_mue]},
+            # No "clear" entry (unlike every other source here): a blind clear
+            # would defeat _ingest_global_periods' own diff-based upsert,
+            # which needs the currently-open rows present to tell an
+            # unchanged code from a genuinely new release (issue #6
+            # F9-R11-H-C, second re-review).
             {"id": "global_periods", "paths": [GLOBAL_PERIODS_FILE],
-             "clear": [("global_period", None)], "ingest": [self._ingest_global_periods]},
+             "clear": [], "ingest": [self._ingest_global_periods]},
             # The MCD-export cache is fingerprinted WITH the seed file: a
             # weekly refresh that rewrites the cache must re-ingest coverage
             # (the cache carries the covered-ICD group roles), and a rebuild
@@ -1308,13 +1336,44 @@ class ComplianceDataStore:
         logger.info(f"  mue: {len(rows)} entries ({n_mai} with parsed MAI)")
 
     def _ingest_global_periods(self) -> None:
+        """Diff-based upsert, NOT clear-then-replace (issue #6 F9-R11-H-C,
+        second re-review): a blind clear on every refresh made DOS-aware
+        selection meaningless -- there was never more than one row per code to
+        select between. A code whose values are UNCHANGED from the currently-
+        open row is left alone; a code whose values genuinely changed gets its
+        old row closed at the new release's effective_from and a new open row
+        inserted -- so a DOS before that boundary still resolves the prior
+        (still correct, for that DOS) release, and a rebuild never erases
+        previously-ingested history. A code missing from this load is NOT
+        closed out: absence from one file is a data gap in THIS load, not
+        evidence CMS retired the code."""
         try:
             with open(GLOBAL_PERIODS_FILE) as f:
                 data = json.load(f)
         except Exception as exc:
             logger.warning(f"  global_period: could not load ({exc})")
             return
-        rows = []
+        try:
+            mtime_date = date.fromtimestamp(GLOBAL_PERIODS_FILE.stat().st_mtime).isoformat()
+        except OSError:
+            mtime_date = date.today().isoformat()
+        new_effective_from = _rvu_release_effective_from(
+            str(data.get("version") or ""), mtime_date)
+
+        fields = ("glob_days", "billing_status", "bilat_surg", "pctc_ind",
+                  "mult_proc", "asst_surg", "co_surg", "team_surg")
+        existing = {
+            row["code"]: row
+            for row in self.conn.execute(
+                "SELECT code, glob_days, billing_status, bilat_surg, pctc_ind, "
+                "mult_proc, asst_surg, co_surg, team_surg, effective_from "
+                "FROM global_period WHERE effective_to=?", (_OPEN,))
+        }
+
+        inserts: list[tuple] = []
+        close_updates: list[tuple[str, str]] = []
+        close_deletes: list[tuple[str, str]] = []
+        unchanged = 0
         for code, days in data.get("codes", {}).items():
             # New format: dict with {global_days, status, pctc_ind, ...}
             # Old format: bare integer/string
@@ -1331,8 +1390,35 @@ class ComplianceDataStore:
                 status = bilat_surg = pctc = mult = asst = co = team = None
             if not glob_days:
                 continue
-            rows.append((_norm(code), glob_days, status, bilat_surg,
-                         pctc, mult, asst, co, team, "1900-01-01", _OPEN))
+            norm = _norm(code)
+            new_values = (glob_days, status, bilat_surg, pctc, mult, asst, co, team)
+            old = existing.get(norm)
+            if old is not None:
+                if tuple(old[f] for f in fields) == new_values:
+                    unchanged += 1
+                    continue
+                if old["effective_from"] >= new_effective_from:
+                    # This release's effective_from doesn't post-date the
+                    # currently-open row's own -- nothing to bound a distinct
+                    # historical window with (same-day re-ingest of a changed
+                    # file, or clock skew). Replace the open row in place
+                    # rather than inserting a second row with a
+                    # non-advancing window.
+                    close_deletes.append((norm, old["effective_from"]))
+                else:
+                    close_updates.append((norm,))
+            inserts.append((norm, *new_values, new_effective_from, _OPEN))
+        from datetime import timedelta
+        day_before = (date.fromisoformat(new_effective_from)
+                     - timedelta(days=1)).isoformat()
+        for norm, in close_updates:
+            self.conn.execute(
+                "UPDATE global_period SET effective_to=? "
+                "WHERE code=? AND effective_to=?", (day_before, norm, _OPEN))
+        for norm, old_from in close_deletes:
+            self.conn.execute(
+                "DELETE FROM global_period WHERE code=? AND effective_from=? "
+                "AND effective_to=?", (norm, old_from, _OPEN))
         # Named columns, not positional VALUES — ALTER TABLE ADD COLUMN (the
         # migration path for DBs built before billing_status existed) always
         # appends the new column at the end of the table regardless of where
@@ -1342,9 +1428,11 @@ class ComplianceDataStore:
             "INSERT INTO global_period (code, glob_days, billing_status, bilat_surg, "
             "pctc_ind, mult_proc, asst_surg, co_surg, team_surg, effective_from, effective_to) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            rows,
+            inserts,
         )
-        logger.info(f"  global_period: {len(rows)} codes")
+        logger.info(f"  global_period: {len(inserts)} row(s) new/changed "
+                   f"(effective_from={new_effective_from}), {unchanged} unchanged, "
+                   f"{len(existing)} previously open")
 
     def _ingest_lcd(self) -> None:
         """podiatry_lcd.json is the full CMS Coverage API dataset: hundreds of
@@ -2334,15 +2422,15 @@ class ComplianceDataStore:
         """Per-code CMS PFS payment-policy indicators (PC/TC split,
         multiple-procedure, bilateral, assistant/co-/team-surgeon) — the
         code-specific modifier-validity signals CMS itself publishes.
-        Empty dict when the code isn't on the fee schedule."""
-        row = self._asof(
-            "global_period",
-            "pctc_ind, mult_proc, bilat_surg, asst_surg, co_surg, team_surg",
-            "code=?", (_norm(code),), self._dos(dos),
-        )
+        Empty dict when the code isn't on the fee schedule. A field-subset
+        projection of `pfs_record` (issue #6 F9-R11-H-C, second re-review) —
+        was its own separate `_asof` call reading the same table, which risked
+        the two silently drifting apart."""
+        row = self.pfs_record(code, dos)
         if not row:
             return {}
-        return {k: row[k] for k in row.keys() if row[k] is not None}
+        keys = ("pctc_ind", "mult_proc", "bilat_surg", "asst_surg", "co_surg", "team_surg")
+        return {k: row[k] for k in keys if row.get(k) is not None}
 
     def hcpcs_noncoverage_reason(self, code: str) -> str | None:
         """Medicare non-coverage reason from the HCPCS file's own coverage
@@ -3088,10 +3176,30 @@ class ComplianceDataStore:
         ).fetchone()
         return dict(row) if row else None
 
+    def pfs_record(self, code: str, dos=None) -> dict | None:
+        """The single CMS PFS indicator row for `code` applicable to `dos`
+        (the encounter's date of service, defaulting to today when absent).
+        `global_period`/`billing_status`/`bilat_surg`/`pfs_indicators` below
+        are thin projections of this ONE query, via the SAME `_asof` helper
+        every other effective-dated compliance table (NCCI, MUE) already
+        uses, so a DOS-selected release can never disagree between them and
+        this table's degrade behavior on an out-of-window DOS stays
+        consistent with the rest of the store rather than inventing a
+        PFS-only policy (issue #6 F9-R11-H-C, second re-review — previously
+        `global_period`/`billing_status`/`bilat_surg` ran `WHERE code=?
+        LIMIT 1`, silently ignoring `dos` and returning whatever single
+        snapshot happened to be loaded regardless of which release actually
+        covers the encounter)."""
+        row = self._asof(
+            "global_period",
+            "glob_days, billing_status, bilat_surg, pctc_ind, mult_proc, "
+            "asst_surg, co_surg, team_surg, effective_from, effective_to",
+            "code=?", (_norm(code),), self._dos(dos),
+        )
+        return dict(row) if row else None
+
     def global_period(self, code: str, dos=None) -> str | None:
-        row = self.conn.execute(
-            "SELECT glob_days FROM global_period WHERE code=? LIMIT 1", (_norm(code),)
-        ).fetchone()
+        row = self.pfs_record(code, dos)
         return row["glob_days"] if row else None
 
     def billing_status(self, code: str, dos=None) -> str | None:
@@ -3099,9 +3207,7 @@ class ComplianceDataStore:
         E/M/J/P which appear in the source but aren't documented by its own
         indicator_meanings — returned as-is; interpretation lives in
         not_separately_billable_reason / pfs_exclusion_advisory)."""
-        row = self.conn.execute(
-            "SELECT billing_status FROM global_period WHERE code=? LIMIT 1", (_norm(code),)
-        ).fetchone()
+        row = self.pfs_record(code, dos)
         return row["billing_status"] if row else None
 
     def em_mdm_level(self, code: str) -> str | None:
@@ -3259,9 +3365,7 @@ class ComplianceDataStore:
         indicator_meanings.bilat_surg). '1' is the real, code-specific signal
         that a laterality modifier (RT/LT/50) is expected on this code — used
         instead of guessing from a CPT section/prefix."""
-        row = self.conn.execute(
-            "SELECT bilat_surg FROM global_period WHERE code=? LIMIT 1", (_norm(code),)
-        ).fetchone()
+        row = self.pfs_record(code, dos)
         return row["bilat_surg"] if row else None
 
     def not_separately_billable_reason(self, code: str, dos=None) -> str | None:

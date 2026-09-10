@@ -10,7 +10,6 @@ change (quarterly NCCI/MUE, annual CPT/HCPCS/ICD) — nothing is hand-edited.
 Sources
 -------
 FREE / public (fetched automatically):
-  • global_period   – CMS PFS RVU file            -> build_global_period.py
   • icd10cm_index   – NCHS ICD-10-CM Alphabetic Index zip -> parse_icd10cm_index.py
 
 LICENSED (fetched from YOUR configured source — never a public download):
@@ -42,8 +41,20 @@ LICENSED (fetched from YOUR configured source — never a public download):
 Usage
 -----
   python tools/refresh_authoritative_data.py                 # all sources
-  python tools/refresh_authoritative_data.py global_period snomed_icd10
+  python tools/refresh_authoritative_data.py snomed_icd10
   python tools/refresh_authoritative_data.py --icd-url <zip> --dry-run
+
+Note (issue #6 F9-R11-H-C, second re-review): there is no `global_period` entry
+here. `data/global_periods.json` -- the CMS PFS RVU extract the coder reads
+for global-period/bilateral/PFS-status decisions through ComplianceDataStore
+-- is refreshed by its own pipeline outside this tool, not duplicated here.
+A prior `global_period` entry (`tools/build_global_period.py`) independently
+downloaded a SECOND copy of the same CMS release into `data/codes/
+global_period.json`; it could not run in its own scheduled staging
+environment (this tool only stages `data/codes/`, and the builder needed the
+sibling `data/global_periods.json`) and had already been caught silently
+drifting from the file it duplicated. Removed rather than patched: one
+authoritative source is simpler and more reliable than keeping two in sync.
 """
 from __future__ import annotations
 
@@ -151,11 +162,6 @@ def fetch_cpt_index(tmp: Path, args) -> Path | None:
 
 # ── source registry ────────────────────────────────────────────────────────────
 SOURCES: dict[str, dict] = {
-    "global_period": {
-        "output": "global_period.json",
-        "cadence": "quarterly",   # CMS PFS RVU: quarterly revisions (RVU26A..D)
-        "prepare": lambda tmp, args: [PY, "tools/build_global_period.py"],
-    },
     "ncci_ptp": {
         "cadence": "quarterly",
         # NCCI Procedure-to-Procedure edits — quarterly (Jan/Apr/Jul/Oct). Build
@@ -339,18 +345,28 @@ def _due(name: str, month: int) -> bool:
 
 
 def integrate() -> None:
-    """INTEGRATE — rebuild compliance.db from the refreshed JSON snapshots in one
-    deliberate step, so the runtime store reflects the new sources immediately (mirrors
-    app startup: CodeReferenceDB.load_all + ComplianceDataStore.build_or_load). Doing it
-    here, once, also removes the cold-build hazard for whatever loads the store next."""
-    print("\n== integrate: rebuilding compliance.db from refreshed snapshots ==")
-    for suffix in ("", "-wal", "-shm"):
-        (DATA_DIR / f"compliance.db{suffix}").unlink(missing_ok=True)
+    """INTEGRATE — bring compliance.db up to date with the refreshed JSON
+    snapshots in one deliberate step, so the runtime store reflects the new
+    sources immediately (mirrors app startup: CodeReferenceDB.load_all +
+    ComplianceDataStore.build_or_load).
+
+    Does NOT delete an existing compliance.db first (issue #6 F9-R11-H-C,
+    second re-review). global_period keeps real effective-dated history
+    across refreshes now (`ComplianceDataStore._ingest_global_periods`'s
+    diff-based upsert) -- an unconditional unlink-then-rebuild-from-static-
+    JSON discarded that history on every single integrate() run, regardless
+    of whether global_period's own source even changed. `build_or_load()`'s
+    own freshness check already does the right thing without deleting
+    anything: an up-to-date db loads as-is, and one with stale sources
+    (exactly what a refresh run just produced) re-ingests only the sources
+    whose fingerprint changed. A first-ever run (no db yet) still gets the
+    full fresh build, unchanged."""
+    print("\n== integrate: syncing compliance.db with refreshed snapshots ==")
     from app.rag.code_reference import CodeReferenceDB
     from app.compliance.datastore.store import ComplianceDataStore
     CodeReferenceDB().load_all()
     ComplianceDataStore().build_or_load()
-    print("  compliance.db rebuilt from the current snapshots")
+    print("  compliance.db synced with the current snapshots")
 
 
 def run_source(name: str, args) -> dict:
