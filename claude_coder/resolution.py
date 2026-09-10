@@ -690,6 +690,49 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                     "clinical term with the documentation -- a coder CLASSIFICATION/mapping "
                     "decision (identify the specific code, or confirm the residual bucket); "
                     "not a provider documentation gap, and not billed on a non-specific code"))
+        # Post-verification role-control re-check (issue #6 F9-R11-H-D, fourth
+        # re-review): `_propose_then_verify` widens the pool with MODEL-PROPOSED
+        # candidates (`verify.propose_codes`) that never passed through the
+        # `_candidate_eligibility`/`blocks_line` check computed above -- that
+        # check only ever saw the RETRIEVAL-time candidate universe
+        # (`_all_candidates`). A proposed candidate whose own role conflicts
+        # with what the facts document, or that -- combined with the
+        # already-eligible retrieval pool -- creates the same genuine
+        # multi-role ambiguity `blocks_line` exists to catch, must not reach a
+        # release just because it entered through generation, not retrieval.
+        # Re-runs role control over the FINAL candidate universe (the
+        # already-eligible retrieval pool plus whatever was actually chosen)
+        # rather than `line.chosen` alone -- `blocks_line` is inherently a
+        # multi-candidate signal, so checking one candidate in isolation could
+        # never detect it.
+        if line.resolved:
+            already_eligible = [c for c in _all_candidates
+                                if (c.code, c.system) in _eligible_ids]
+            final_universe = list(already_eligible)
+            if not any(c.code == line.chosen.code and c.system == line.chosen.system
+                      for c in final_universe):
+                final_universe.append(line.chosen)
+            post_report = {(r["code"], r["system"]): r for r in _semelig.eligibility_report(
+                elig_facts, final_universe, source, dos, reconciliation)}
+            post_decision = post_report.get((line.chosen.code, line.chosen.system),
+                                            {}).get("role_control") or {}
+            post_reason = post_report.get((line.chosen.code, line.chosen.system),
+                                          {}).get("reason")
+            if post_decision.get("blocks_line") or (
+                    not post_report.get((line.chosen.code, line.chosen.system),
+                                        {}).get("eligible", True)):
+                line = ResolvedLine(
+                    fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
+                    alternatives=[line.chosen],
+                    rationale=(f"the selected candidate ({line.chosen.code}) was proposed "
+                              f"by the model rather than retrieved, and a post-selection "
+                              f"service-role check the pre-verification eligibility pass "
+                              f"never ran against it found it incompatible with the "
+                              f"documented facts ({post_reason or 'multi-role ambiguity'}) "
+                              f"-- a composition/coder decision, never auto-released on a "
+                              f"model-generated candidate eligibility never saw"),
+                    documentation_gap=("classification_data_gap:service_role_conflict"
+                                      if post_decision.get("blocks_line") else None))
         # `_propose_then_verify` ran against an EMPTY pool (eligibility excluded
         # every retrieved candidate before it ever got a chance to check anything)
         # and, finding no candidate to propose against either, abstained with no

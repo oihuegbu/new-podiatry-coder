@@ -1806,6 +1806,83 @@ class ProposeVerifyTest(unittest.TestCase):
         self.assertEqual(line.chosen.code, "A2")     # re-selected past the rejected A1
 
 
+class ProposedCandidateServiceRoleTest(unittest.TestCase):
+    """issue #6 F9-R11-H-D, fourth re-review: `_service_role_control`'s
+    `blocks_line` backstop only ever saw the RETRIEVAL-time candidate
+    universe -- a candidate `verify.propose_codes` widens the pool with
+    (from the model's memory, not retrieval) never passed through it at
+    all. Adversarially reproduced live: a retrieval-eligible operative
+    candidate plus a model-PROPOSED anesthesia candidate, with the fact
+    documenting an operative service_role -- the proposal was verified and
+    released with no service-role check ever having run against it.
+    `resolve()` now re-checks role control over the actual final candidate
+    universe (retrieval-eligible pool + whatever was selected) right after
+    `_propose_then_verify` returns, closing exactly this gap. Synthetic
+    codes throughout."""
+
+    OP_DESC = "Operative act alpha on the structure"
+    ANES_DESC = "Anesthesia for act alpha on the structure"
+
+    def _src(self, *, op_eligible_at_retrieval: bool):
+        from claude_coder.data_access import MockSource
+        records = {("OP", "cpt"): {"long_description": self.OP_DESC, "active": True},
+                  ("ANES", "cpt"): {"long_description": self.ANES_DESC, "active": True}}
+        retrieval = ({("*", "cpt"): [CandidateCode("OP", "cpt", self.OP_DESC, 0.9)]}
+                    if op_eligible_at_retrieval else {("*", "cpt"): []})
+        return MockSource(records=records, retrieval=retrieval,
+                          semantic_class={"OP": "surgical_procedure",
+                                          "ANES": "anesthesia"})
+
+    def _fact(self):
+        # A claim-authorized service_role needs the fully evidenced shape
+        # `graph_consensus.claim_authorized_value` requires (scope-valid,
+        # source-reconciled, ASSERTED) -- a raw `fact.attributes[...]` write
+        # is deliberately NOT trusted on its own; see
+        # `test_semantic_eligibility._service_role_fact` for the same
+        # construction.
+        from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,
+                                         FactKind, RelationState)
+        span = EvidenceSpan("operative act alpha performed", anchored=True, span_id="s1")
+        return ClinicalFact(
+            kind=FactKind.PROCEDURE, description="operative act alpha on the structure",
+            evidence=[span], confidence=0.95,
+            attributes={"service_role": "operative"},
+            attribute_evidence={"service_role": (
+                AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                  value="operative"),)})
+
+    def test_a_role_incompatible_model_proposal_is_never_released(self):
+        """The exact adversarial reproduction: retrieval surfaces nothing
+        useful, the model proposes (and then verifies) the anesthesia-role
+        candidate against an operative-role fact. Must abstain, not
+        release -- the pre-verification eligibility pass never had a
+        chance to exclude a candidate that didn't exist yet at that point."""
+        from claude_coder.models import ResolutionMethod
+        from claude_coder.resolution import resolve
+        src = self._src(op_eligible_at_retrieval=False)
+        llm = _sv.judge(entails=lambda d: True, propose=["ANES"], reason="proposed")
+        line = resolve(_request(self._fact()), src, llm=_from(llm, "provider-a"))
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertNotEqual(line.method, ResolutionMethod.VERIFIED)
+
+    def test_a_role_incompatible_proposal_cannot_join_an_already_eligible_pool(self):
+        """Codex's exact adversarial shape: an operative candidate is ALREADY
+        eligible from retrieval (candidate_eligibility would show only it),
+        and the model separately proposes -- and the verifier picks -- the
+        anesthesia candidate. The final candidate universe (OP + ANES) is
+        what must be checked, not the proposal alone."""
+        from claude_coder.models import ResolutionMethod
+        from claude_coder.resolution import resolve
+        src = self._src(op_eligible_at_retrieval=True)
+        # Verifier entails ONLY the anesthesia descriptor -- simulating a
+        # verified, confident (but role-incompatible) model selection.
+        llm = _sv.judge(entails=lambda d: "anesthesia" in d.lower(),
+                        propose=["ANES"], reason="proposed")
+        line = resolve(_request(self._fact()), src, llm=_from(llm, "provider-a"))
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertNotEqual(line.method, ResolutionMethod.VERIFIED)
+
+
 class CorroborationIndependenceTest(unittest.TestCase):
     """Round 5, phase 5 — agreement between two calls to the SAME model provider is not
     corroboration, so it cannot buy the grounded VERIFIED method or the autonomy that rides

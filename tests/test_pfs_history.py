@@ -30,10 +30,13 @@ def _store(tmp_path):
     return s
 
 
-def _write_release(tmp_path, monkeypatch, codes, version="RVU26C (2026 July release)"):
+def _write_release(tmp_path, monkeypatch, codes, version="RVU26C (2026 July release)",
+                   declared_count=None):
+    payload = {"version": version, "source": "test", "source_url": "", "codes": codes}
+    if declared_count is not None:
+        payload["counts"] = {"codes": declared_count}
     path = tmp_path / "global_periods.json"
-    path.write_text(json.dumps({"version": version, "source": "test", "source_url": "",
-                                "codes": codes}))
+    path.write_text(json.dumps(payload))
     monkeypatch.setattr(store_module, "GLOBAL_PERIODS_FILE", path)
     return path
 
@@ -221,6 +224,30 @@ class GlobalPeriodCompleteSnapshotIngest(_Isolated):
             (s._GLOBAL_PERIODS_SOURCE_ID,)).fetchone()
         self.assertIsNone(already, "a 0-row snapshot must not be recorded as a real ingest")
 
+    def test_a_truncated_snapshot_is_rejected_not_accepted_as_complete(self):
+        """issue #6 F9-R11-H-C, fourth re-review: "complete snapshot" was
+        asserted in a comment but never validated -- a body with fewer codes
+        than the file's own declared "counts.codes" must never be accepted
+        as the new complete truth (which would silently retire every code
+        the truncation happened to drop)."""
+        s = self._isolated()
+        _write_release(self.tmp_path, self.monkeypatch,
+                       {"64450": {"global_days": "000", "status": "A"},
+                        "27650": {"global_days": "090", "status": "A"}},
+                       version="RVU26A (2026 January release)", declared_count=2)
+        s._ingest_global_periods()
+        # Second release CLAIMS count=2 but its body only has 1 -- truncated.
+        _write_release(self.tmp_path, self.monkeypatch,
+                       {"27650": {"global_days": "090", "status": "A"}},
+                       version="RVU26C (2026 July release)", declared_count=2)
+        s._ingest_global_periods()
+
+        self.assertIsNotNone(s.pfs_record("64450", dos="2026-08-01"),
+                             "the truncated release must have been rejected -- "
+                             "the January row must still be open")
+        rows = s.conn.execute("SELECT COUNT(*) c FROM global_period").fetchone()["c"]
+        self.assertEqual(rows, 2, "the truncated release's row must never have been inserted")
+
     def test_a_rebuild_does_not_erase_previously_ingested_history(self):
         """Codex's required regression #5: "global_periods" carries no
         "clear" entry in the source-freshness registry, so a refresh can
@@ -255,6 +282,55 @@ class GlobalPeriodCompleteSnapshotIngest(_Isolated):
             "SELECT 1 FROM global_period WHERE code=? AND effective_from=? "
             "AND effective_to=?", ("64450", "1900-01-01", "9999-12-31")).fetchone()
         self.assertIsNone(legacy_still_open, "the legacy row must have been closed")
+
+    def test_the_source_version_migration_preserves_genuine_live_refresh_history(self):
+        """issue #6 F9-R11-H-C, fourth re-review: the migration that adds
+        the source_version column previously did an unconditional `DELETE
+        FROM global_period` before reingesting -- which destroyed genuine
+        effective-dated rows the LIVE scheduled refresh (ingest_snapshot,
+        source_id "pfs_global") may already have accumulated, not just the
+        legacy 1900-01-01 seed baseline. Simulates a pre-migration table
+        (source_version column absent, matching a database built before
+        this round) carrying ONE genuine historical row with a real,
+        non-legacy effective_from -- it must survive the migration."""
+        s = self._isolated()
+        # Simulate the pre-migration schema: drop and recreate global_period
+        # WITHOUT source_version, matching what an already-deployed database
+        # (built before this round shipped) actually has on disk.
+        s.conn.executescript("""
+            DROP TABLE global_period;
+            CREATE TABLE global_period (
+                code TEXT NOT NULL, glob_days TEXT, billing_status TEXT,
+                bilat_surg TEXT, pctc_ind TEXT, mult_proc TEXT, asst_surg TEXT,
+                co_surg TEXT, team_surg TEXT,
+                effective_from TEXT NOT NULL DEFAULT '1900-01-01',
+                effective_to TEXT NOT NULL DEFAULT '9999-12-31'
+            );
+        """)
+        # A GENUINE historical row -- e.g. from a live "pfs_global" refresh
+        # -- not the legacy 1900-01-01 baseline. Every indicator populated
+        # (not just glob_days/billing_status) so the EARLIER, unrelated
+        # bilat_surg/pctc_ind backfill migration -- which itself re-ingests
+        # when ANY row has those columns NULL -- does not also fire here and
+        # confound what this test is isolating.
+        s.conn.execute(
+            "INSERT INTO global_period (code, glob_days, billing_status, bilat_surg, "
+            "pctc_ind, mult_proc, asst_surg, co_surg, team_surg, "
+            "effective_from, effective_to) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("27650", "090", "A", "9", "0", "9", "9", "9", "9", "2025-10-01", "9999-12-31"))
+        s.conn.commit()
+        _write_release(self.tmp_path, self.monkeypatch,
+                       {"64450": {"global_days": "000", "status": "A"}},
+                       version="RVU26C (2026 July release)")
+
+        s._ensure_migrations()
+
+        survived = s.conn.execute(
+            "SELECT effective_from, effective_to FROM global_period WHERE code=?",
+            ("27650",)).fetchone()
+        self.assertIsNotNone(survived, "the genuine historical row must not be deleted")
+        self.assertEqual(survived["effective_from"], "2025-10-01",
+                         "the migration must not have rebaselined a real effective date")
 
     def test_a_pre_change_deployed_database_and_a_fresh_one_converge_to_identical_state(self):
         """Codex's required "fresh-vs-upgraded equivalence" regression: an

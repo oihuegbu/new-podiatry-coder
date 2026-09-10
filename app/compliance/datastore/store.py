@@ -625,20 +625,26 @@ class ComplianceDataStore:
         # row came from (e.g. "RVU26C (2026 July release)"), added so a
         # role-control decision can cite which PFS release actually answered
         # it instead of a placeholder (issue #6 F9-R11-H-D, third re-review).
-        # The wipe+reingest this triggers is ALSO the migration that fixes
-        # issue #6 F9-R11-H-C's H-C1: every already-deployed database's rows
-        # still carried the legacy effective_from='1900-01-01' seed baseline,
-        # and the old per-VALUE diff ingest treated an unchanged value as
-        # "nothing to do", so that baseline never advanced. A full
-        # wipe+reingest through the current complete-snapshot
-        # _ingest_global_periods is the only way an already-deployed row's
-        # window gets corrected to a real release date; a fresh install gets
-        # the same effective-dated rows a wipe+reingest here produces, so the
-        # two converge to identical state either way.
+        #
+        # This migration ONLY removes the legacy effective_from='1900-01-01'
+        # seed baseline (issue #6 F9-R11-H-C, FOURTH re-review: a blanket
+        # `DELETE FROM global_period` here -- the second/third re-review's
+        # own fix -- deleted every row regardless of origin, which meant it
+        # silently destroyed genuine effective-dated history the LIVE
+        # scheduled refresh (app/compliance/refresh/runner.py's "pfs_global"
+        # source, via ingest_snapshot) may already have accumulated. That is
+        # exactly the loss issue #6's own prior acceptance criterion
+        # required preserving, and the fresh-vs-upgraded test only ever
+        # constructed a legacy row, so it could not catch this). Only the
+        # 1900-01-01 rows are the ones this migration owns; every other row
+        # -- however it got here -- is left untouched. Re-ingesting the
+        # current seed release afterward is still correct and still
+        # idempotent (a no-op if that exact release was already ingested).
         gp_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(global_period)")}
         if "source_version" not in gp_cols:
             self.conn.execute("ALTER TABLE global_period ADD COLUMN source_version TEXT")
-            self.conn.execute("DELETE FROM global_period")
+            self.conn.execute(
+                "DELETE FROM global_period WHERE effective_from='1900-01-01'")
             self._ingest_global_periods()
             self.conn.commit()
 
@@ -1414,6 +1420,23 @@ class ComplianceDataStore:
                 f"release-letter convention -- refresh REJECTED (no guessed date)")
             return
 
+        # "Complete snapshot" is an assertion this ingest ACTS on (H-C2's
+        # close-every-open-row behavior only makes sense for a genuinely
+        # complete release) -- it must be validated, not merely asserted in a
+        # comment (issue #6 F9-R11-H-C, fourth re-review). The file declares
+        # its own total in "counts.codes"; a body that doesn't match it is
+        # truncated/corrupt and must never be treated as authoritative for
+        # "this code is no longer on the fee schedule" -- that would silently
+        # retire almost the whole table on a partial read.
+        codes_body = data.get("codes") or {}
+        declared_count = (data.get("counts") or {}).get("codes")
+        if declared_count is not None and len(codes_body) != declared_count:
+            logger.warning(
+                f"  global_period: declared count {declared_count} does not match "
+                f"the {len(codes_body)} code(s) actually present -- refresh REJECTED "
+                f"(truncated/corrupt snapshot, not a genuinely complete release)")
+            return
+
         self._ensure_source_version_table()
         already = self.conn.execute(
             "SELECT 1 FROM data_source_version WHERE source_id=? AND effective_from=?",
@@ -1432,7 +1455,7 @@ class ComplianceDataStore:
             return
 
         rows = []
-        for code, days in data.get("codes", {}).items():
+        for code, days in codes_body.items():
             # New format: dict with {global_days, status, pctc_ind, ...}
             # Old format: bare integer/string
             if isinstance(days, dict):
