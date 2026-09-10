@@ -41,7 +41,7 @@ candidate pool and forbids it from verifying a code.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 
 from .data_access import CodeSource
 from .models import CandidateCode, ClinicalFact, FactKind, Outcome, ResolutionMethod, ResolvedLine
@@ -334,9 +334,18 @@ def _merge_candidate(existing: CandidateCode, incoming: CandidateCode) -> Candid
     merged_authority = {"sources": sources,
                         existing.source: dict(existing.authority or {}),
                         incoming.source: dict(incoming.authority or {})}
+    # issue #6 F9-R12-E: a genuinely trusted route (requires_verification=
+    # False) may supply closure even when the OTHER source that also found
+    # this same code was itself untrusted -- the direct route already
+    # independently confirms the code; the weaker signal's own lineage
+    # still survives in `merged_authority` above, it just doesn't downgrade
+    # the trust an independent direct hit already earned. Verification-
+    # required only when BOTH sides were.
     return CandidateCode(code=winner.code, system=winner.system,
                          descriptor=winner.descriptor, score=winner.score,
-                         source=winner.source, authority=merged_authority)
+                         source=winner.source, authority=merged_authority,
+                         requires_verification=(existing.requires_verification
+                                                and incoming.requires_verification))
 
 
 def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
@@ -403,11 +412,26 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
         # SNOMED CT crosswalk hit (always_verify) maps a concept to a best-fit DEFAULT
         # ICD code that can be less specific than — or wrong for — the documented
         # condition, so it is ALWAYS entailment-confirmed, never trusted deterministically.
-        if (llm is not None and _pv_kind
-                and (always_verify or any(_needs_verification(fact, c) for c in cands))):
-            seeds.extend(cands)                  # qualified / crosswalk -> confirm downstream
+        #
+        # issue #6 F9-R12-E (Codex): this gate previously ALSO required
+        # `llm is not None` -- meaning a candidate needing verification, with
+        # no verifier available to actually perform it, fell straight through
+        # to the immediate `_decide` call below and could still close
+        # DETERMINISTIC on zero confirmation (reproduced directly via this
+        # module's own `test_snomed_layer_resolves_when_index_misses`: a sole
+        # SNOMED hit with no LLM closed deterministic, despite this exact
+        # comment saying "ALWAYS entailment-confirmed"). Trust is now tracked
+        # ON THE CANDIDATE (`requires_verification`, via `dataclasses.replace`
+        # since CandidateCode is frozen) rather than gated on llm presence:
+        # a must-verify candidate ALWAYS defers to `seeds` -- confirmed
+        # downstream via propose-then-verify when an LLM exists, or excluded
+        # from the no-LLM fallback's own tie policy when one doesn't (see the
+        # final `else:` branch below), never auto-approved either way.
+        if _pv_kind and (always_verify or any(_needs_verification(fact, c) for c in cands)):
+            seeds.extend(_dc_replace(c, requires_verification=True) for c in cands)
             return None
-        line = _decide(fact, cands, authority=authority, source=source,
+        trusted = [_dc_replace(c, requires_verification=False) for c in cands]
+        line = _decide(fact, trusted, authority=authority, source=source,
                        reconciliation=reconciliation)
         if not line.resolved:
             return None
@@ -419,7 +443,7 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
         # never sees an unexplained None for a line that resolved this way.
         from . import semantic_eligibility as _semelig
         line.candidate_eligibility = _semelig.eligibility_report(
-            elig_facts, cands, source, dos, reconciliation)
+            elig_facts, trusted, source, dos, reconciliation)
         return line
 
     # AUTHORITATIVE FIRST: for a diagnosis, resolve through the ICD-10-CM
@@ -465,15 +489,14 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                 for c in _authoritative_pool(stem, source):
                     if c.code not in seen_codes:
                         seen_codes.add(c.code)
-                        if stem not in idx_direct:
-                            # issue #6 F9-R12-A, second re-review: tagged on
-                            # the candidate ITSELF (not a local set) so the
-                            # provenance survives every later merge/re-rank
-                            # -- the no-LLM fallback below reads this to
-                            # keep a redirect-only hit from closing
-                            # deterministically just because it happens to
-                            # be the pool's sole survivor.
-                            c.authority["index_source_kind"] = "redirect"
+                        # issue #6 F9-R12-E: every candidate reaching this
+                        # branch (a multi-code hit, OR a single code reached
+                        # ONLY via a redirect) is verification-required --
+                        # `requires_verification` defaults to True already,
+                        # tracked via the shared field (not a one-off
+                        # authority tag) so the SAME no-LLM-fallback
+                        # exclusion protects every verification-required
+                        # source uniformly, not just redirects.
                         seeds.append(c)
         # SECOND authoritative layer: the SNOMED CT -> ICD-10-CM crosswalk (the long-
         # tail eponyms/synonyms the ICD Index lacks — e.g. an eponymous condition).
@@ -607,6 +630,17 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
         if not q.strip():
             continue
         for c in source.retrieve(q, fact.system, top_k=top_k):
+            # issue #6 F9-R12-E: plain retrieval is the established RECALL
+            # foundation this whole architecture is built on -- `_decide`'s
+            # own axis-satisfaction tie policy against DOCUMENTED facts
+            # (below) is ITS verification, unlike a SNOMED crosswalk's
+            # best-fit-default mapping or a bare redirect, which route
+            # around that check entirely and need an independent
+            # entailment confirmation instead. Not `requires_verification`
+            # by default (unlike those), so an unambiguous retrieval hit
+            # keeps closing deterministically with no LLM, exactly as
+            # before this round.
+            c = _dc_replace(c, requires_verification=False)
             if c.code not in best or c.score > best[c.code].score:
                 best[c.code] = c
     # UMLS RECALL SEED (issue #6 F9-R7 item 2): the SAME normalized-phrase set
@@ -787,27 +821,28 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                             documentation_gap=(gap_summary if measurement_gap else None))
         line.candidate_eligibility = _candidate_eligibility
     else:
-        # issue #6 F9-R12-A, second re-review: a redirect-only Index hit
-        # (see/seeAlso, never a direct entry) is supplementary navigation,
-        # not proof -- it must not close deterministically just because it
-        # happens to be `_decide`'s sole survivor. With an LLM available,
-        # `_propose_then_verify` above already re-verifies every candidate
-        # through entailment regardless of provenance; this NO-LLM fallback
-        # is the one path with no such check, so it is the one that must
-        # exclude an unconfirmed redirect-only candidate from ever being
-        # the thing `_decide` auto-selects. `authority["index_source_kind"]`
-        # survives on the candidate itself through every merge above.
-        trusted_pool = [c for c in pool
-                        if c.authority.get("index_source_kind") != "redirect"]
+        # issue #6 F9-R12-E (Codex): a candidate this resolver itself marked
+        # verification-required (SNOMED/redirect/learned/UMLS/embedding/
+        # model-proposal seeds -- everything except a plain, unqualified
+        # direct Index/descriptor hit `_take` already confirmed needs no
+        # further check) must not close deterministically just because it
+        # happens to be `_decide`'s sole survivor here. With an LLM
+        # available, `_propose_then_verify` above already re-verifies every
+        # candidate through entailment regardless of provenance; this
+        # NO-LLM fallback is the one path with no such check, so it is the
+        # one that must refuse an unconfirmed candidate from ever being the
+        # thing `_decide` auto-selects. `requires_verification` survives on
+        # the candidate itself through every merge above.
+        trusted_pool = [c for c in pool if not c.requires_verification]
         if not trusted_pool and pool:
             line = ResolvedLine(
                 fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
                 alternatives=pool[:5],
-                rationale=("the only candidate(s) reached a see/seeAlso Index "
-                    "redirect, supplementary navigation rather than proof the "
-                    "note supports the code, and no LLM is available to confirm "
-                    "descriptor entailment -- a coder classification decision, "
-                    "requiring independent confirmation before billing"))
+                rationale=("every remaining candidate needs independent "
+                    "entailment/verification confirmation and no LLM is "
+                    "available to perform it -- a coder classification "
+                    "decision, requiring independent confirmation before "
+                    "billing"))
         else:
             line = _decide(fact, trusted_pool, source=source, dos=dos,
                            reconciliation=reconciliation)

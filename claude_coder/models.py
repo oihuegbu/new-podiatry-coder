@@ -273,6 +273,17 @@ class CandidateCode:
     score: float = 0.0                 # recall relevance (similarity), for ranking
     source: str = ""
     authority: dict[str, Any] = field(default_factory=dict)   # data provenance
+    # issue #6 F9-R12-E: whether this candidate may close a line WITHOUT
+    # independent entailment/verification. Defaults to True (SAFE default --
+    # verification-required unless a caller explicitly proves otherwise) so
+    # every existing candidate source (retrieval, UMLS, model proposals,
+    # SNOMED/learned/redirect seeds) stays verification-required unless
+    # `resolution._take()` itself determines a plain, unqualified, direct
+    # hit needs no confirmation. Represented ONCE on the candidate (via
+    # `dataclasses.replace`, since this dataclass is frozen) rather than as
+    # a per-source-name exception scattered through the resolver, so trust
+    # survives every later merge/re-rank.
+    requires_verification: bool = True
 
 
 class ResolutionMethod(str, Enum):

@@ -157,28 +157,6 @@ class CodingValidator:
         # NCCI-dependent rule below found nothing for a reason that has nothing to do
         # with the claim.  See `_record_ncci_authority_loss`.
         self._ncci_authority_lost = False
-        # issue #6 F9-R12-D, second re-review: lazy-loaded, cached SNOMED CT
-        # concept graph -- None = not yet attempted, False = attempted and
-        # unavailable (REVIEWED-OPTIONAL: absence degrades to no governed-
-        # equivalence check at all, never a guess), else the loaded index.
-        self._concept_graph_cache = None
-
-    def _governed_concept_graph(self):
-        """The SNOMED CT Body Structure/condition concept graph
-        (`claude_coder.terminology.ConceptRelationIndex`), for
-        `_check_icd_sibling_descriptor`'s governed-equivalence check --
-        confirming an eponym and its descriptive synonym name the SAME
-        concept, never a guess from word rarity. REVIEWED-OPTIONAL, same
-        disposition as every other licensed recall aid on this adapter:
-        absent/unloadable degrades to None (no equivalence check at all),
-        never a wrong verdict."""
-        if self._concept_graph_cache is None:
-            try:
-                from claude_coder.terminology import ConceptRelationIndex
-                self._concept_graph_cache, _identity = ConceptRelationIndex.load_snapshot()
-            except Exception:
-                self._concept_graph_cache = False
-        return self._concept_graph_cache or None
 
     def _is_em(self, code: str) -> bool:
         """Authoritative service classification; absence fails closed."""
@@ -2740,7 +2718,6 @@ class CodingValidator:
         swap on broad evidence is the safe direction."""
         if not note_full_text or not icd:
             return
-        from claude_coder.terminology import CONCEPT_SAME as _CONCEPT_SAME
         self._icd_condition_lexicon()
         note_words, low_note = self._note_evidence(note_full_text)
         clin_words, clin_low = self._clinical_evidence(note_full_text)
@@ -2773,83 +2750,32 @@ class CodingValidator:
                 terms.update(r[0].lower() for r in rows)
             return terms
 
-        def _index_terms_cross_reference_only(c: str) -> set:
-            """The subset of `_index_terms(c)` reachable ONLY through a
-            see/seeAlso cross-reference redirect, never the code's own
-            direct Index entry (issue #6 F9-R12-D). `_any_term_documented`
-            gates its single-rare-token shortcut off of this: a compound
-            cross-reference phrase ('paronychia WITH lymphangitis') names a
-            DIFFERENT condition than its components named alone, so a note
-            mentioning only 'paronychia' must not "prove" the whole
-            redirect-sourced term the way a genuine eponym/synonym pair
-            (a DIRECT entry) safely can."""
-            if self.store is None:
-                return set()
-            norm_c = c.replace(".", "")
-            terms = set()
-            for ln in range(3, len(norm_c) + 1):
-                rows = self.store.conn.execute(
-                    "SELECT term FROM icd10_index_term WHERE code=? AND source='cross_reference'",
-                    (norm_c[:ln],)).fetchall()
-                terms.update(r[0].lower() for r in rows)
-            return terms
-
-        def _governed_equivalent_documented(missing_toks, words) -> bool:
-            """issue #6 F9-R12-D, second re-review: the ONLY remaining path
-            for a term that is not fully, literally documented -- a
-            CONFIRMED governed SNOMED CT concept match between a token the
-            note does NOT literally state and a word the note DOES state.
-            This is exactly the genuine case corpus rarity used to
-            approximate ('Morton's metatarsalgia' documented by a note
-            saying 'Morton's neuroma' -- 'metatarsalgia' and 'neuroma' name
-            the SAME concept), but PROVEN rather than guessed from word
-            length/corpus frequency: two clinically DIFFERENT terms sharing
-            one rare word no longer passes. REVIEWED-OPTIONAL: absence of
-            the concept graph degrades to no equivalence at all (never a
-            guess standing in for a missing source)."""
-            graph = self._governed_concept_graph()
-            if graph is None:
-                return False
-            for missing in missing_toks:
-                for doc_word in words:
-                    if graph.relation(missing, doc_word) == _CONCEPT_SAME:
-                        return True
-            return False
-
-        def _any_term_documented(terms, words=None, low=None,
-                                 risky_terms: frozenset = frozenset()) -> bool:
+        def _any_term_documented(terms, words=None, low=None) -> bool:
+            """issue #6 F9-R12-D, third re-review (Codex): the prior round's
+            SNOMED-based governed-equivalence fallback was itself invalid --
+            `ConceptRelationIndex`'s default source is Body Structure
+            (anatomy) concepts, which cannot govern condition/diagnosis or
+            eponym equivalence, and its predicate compared isolated missing
+            tokens against the NOTE'S WHOLE WORD BAG rather than one
+            evidence span, so a single coincidentally-matching word anywhere
+            in the note could still authorize an automatic diagnosis swap.
+            Removed entirely rather than patched: until a correct
+            diagnosis-term identity source (e.g. a UMLS CUI-based view,
+            comparing complete normalized phrases within ONE evidence span,
+            unique-CUI-only) is compiled and wired in, only a term whose
+            EVERY signature token is literally, independently documented
+            may authorize this automatic correction. No rarity shortcut, no
+            concept-graph fallback, no exceptions by source."""
             words = note_words if words is None else words
             low = low_note if low is None else low
             for term in terms:
                 toks = [t for t in self._tokens(term) if t not in self._DESC_STOPWORDS]
-                if not toks:
-                    continue
-                # full-phrase match — every signature token literally documented.
-                if all(self._desc_documented(t, words, low) for t in toks):
-                    return True
-                # issue #6 F9-R12-D, second re-review (Codex): corpus rarity
-                # is REMOVED entirely as proof of semantic equivalence -- for
-                # EVERY term, not just cross-reference-sourced ones. It could
-                # auto-swap a billed diagnosis off of one coincidentally
-                # shared rare word between two clinically DIFFERENT
-                # multi-token terms (direct Index entries and inclusion
-                # terms included, not only cross-reference redirects). A
-                # cross-reference-only term (`risky_terms`) additionally
-                # never gets even the governed-equivalence attempt below --
-                # a compound redirect phrase's own components are not
-                # alternate names for the SAME thing, so there is nothing
-                # for a concept graph to legitimately confirm.
-                if term in risky_terms:
-                    continue
-                missing = [t for t in toks if not self._desc_documented(t, words, low)]
-                if missing and _governed_equivalent_documented(missing, words):
+                if toks and all(self._desc_documented(t, words, low) for t in toks):
                     return True
             return False
 
         def _terms_documented(c: str, min_level: int) -> bool:
-            return _any_term_documented(
-                _incl_terms(c, min_level) | _index_terms(c),
-                risky_terms=_index_terms_cross_reference_only(c))
+            return _any_term_documented(_incl_terms(c, min_level) | _index_terms(c))
 
         sites = self._site_lexicon()
 
@@ -2947,12 +2873,6 @@ class CodingValidator:
                 own_ix, sib_ix = _index_terms(norm), _index_terms(sib_code)
                 own_syn = _incl_terms(norm, common + 1) | (own_ix - sib_ix)
                 sib_syn = _incl_terms(sib_code, common + 1) | (sib_ix - own_ix)
-                # issue #6 F9-R12-D: which of own_syn/sib_syn's members are
-                # cross-reference-only -- an intersection, not a re-derivation,
-                # so it stays correct regardless of how own_syn/sib_syn were
-                # combined above.
-                own_syn_risky = own_syn & _index_terms_cross_reference_only(norm)
-                sib_syn_risky = sib_syn & _index_terms_cross_reference_only(sib_code)
                 # Condition-entity tokens (rare, lexicon-grade: 'lymphangitis')
                 # outrank qualifier tokens ('acute'): if the axis contains an
                 # entity, ITS documentation decides support — otherwise a
@@ -2979,17 +2899,14 @@ class CodingValidator:
                                 and self._icd_token_df.get(t, 0) <= 25)
                             for t in tt):
                             entity_syn.add(term)
-                    own_documented = direct_own or _any_term_documented(
-                        entity_syn, risky_terms=entity_syn & own_syn_risky)
+                    own_documented = direct_own or _any_term_documented(entity_syn)
                 else:
-                    own_documented = direct_own or _any_term_documented(
-                        own_syn, risky_terms=own_syn_risky)
+                    own_documented = direct_own or _any_term_documented(own_syn)
                 # swap-driving evidence: clinical view only (incidental
                 # tourniquet/positioning/prep anatomy never drives a swap)
                 sib_documented = (
                     all(self._desc_documented(t, clin_words, clin_low) for t in sib_only)
-                    or _any_term_documented(sib_syn, clin_words, clin_low,
-                                            risky_terms=sib_syn_risky))
+                    or _any_term_documented(sib_syn, clin_words, clin_low))
                 if sib_documented and not own_documented:
                     coverage = sum(1 for t in sib_toks
                                    if self._desc_documented(t, clin_words, clin_low))

@@ -6,7 +6,11 @@ icd10cm-index-*.xml) into data/codes/icd10cm_index_terms.json:
      "cross_reference_terms": {"<dotless code>": ["alias phrase", ...]},
      "reference_directives": {"total": N, "resolved": N,
                               "external_table_reference": N, "unresolved": N,
-                              "unresolved_directives": ["<tag>: <raw ref text>", ...]}}
+                              "unresolved_directives": [{"source_path": [...],
+                                                        "source_phrase": "...",
+                                                        "tag": "see"|"seeAlso",
+                                                        "target": "<raw ref text>",
+                                                        "status": "unresolved"}, ...]}}
 
 Two DISTINCT trust tiers, kept in separate maps (issue #6 F9-R12-A) rather
 than merged, because they mean different things and downstream consumers
@@ -316,10 +320,16 @@ def main():
     cross_ref: dict[str, set] = defaultdict(set)
     directive_counts = {"total": 0, "resolved": 0,
                         "external_table_reference": 0, "unresolved": 0}
-    # issue #6 F9-R12-C, second re-review: EVERY unresolved directive, not a
-    # capped sample -- a directive this compiler cannot resolve is a
-    # complete, auditable record, never truncated away.
-    unresolved_full: set[str] = set()
+    # issue #6 F9-R12-C, third re-review: ONE structured record per
+    # unresolved OCCURRENCE, not a deduplicated set of "<tag>: <ref>"
+    # strings -- the prior set-based form collapsed the SAME failing
+    # reference text repeated at different source paths into a single
+    # entry (5,476 occurrences, only 1,864 distinct strings), silently
+    # losing which specific source phrase(s) each failure actually came
+    # from. Every occurrence is now its own record with the full source
+    # path, so `len(unresolved_directives) ==
+    # reference_directives["unresolved"]` always holds.
+    unresolved_full: list[dict] = []
     for letter in root.findall("letter"):
         for mt in letter.findall("mainTerm"):
             for node, path in iter_index_nodes(mt):
@@ -339,7 +349,16 @@ def main():
                         for code in codes:
                             cross_ref[code].add(phrase)
                     elif status == "unresolved":
-                        unresolved_full.add(f"{tag}: {ref}")
+                        unresolved_full.append({
+                            "source_path": list(path),
+                            "source_phrase": phrase,
+                            "tag": tag,
+                            "target": ref,
+                            "status": status,
+                        })
+
+    assert len(unresolved_full) == directive_counts["unresolved"], (
+        len(unresolved_full), directive_counts["unresolved"])
 
     version = root.findtext("version") or ""
     data = {"version": version.strip(),
@@ -347,7 +366,7 @@ def main():
             "terms": {c: sorted(ps) for c, ps in sorted(out.items())},
             "cross_reference_terms": {c: sorted(ps) for c, ps in sorted(cross_ref.items())},
             "reference_directives": {**directive_counts,
-                                    "unresolved_directives": sorted(unresolved_full)}}
+                                    "unresolved_directives": unresolved_full}}
     dst.write_text(json.dumps(data, indent=1))
     n_phrases = sum(len(v) for v in out.values())
     n_xref = sum(len(v) for v in cross_ref.values())

@@ -335,6 +335,47 @@ def test_every_reference_directive_is_classified_never_silently_dropped(tmp_path
     assert directives["unresolved"] == 1
     assert (directives["resolved"] + directives["external_table_reference"]
            + directives["unresolved"]) == directives["total"]
-    assert any("nowhere" in s.lower() for s in directives["unresolved_directives"])
+    # issue #6 F9-R12-C, third re-review: one structured record per
+    # occurrence, never a deduplicated/capped set -- must equal the count.
+    assert len(directives["unresolved_directives"]) == directives["unresolved"]
+    record = directives["unresolved_directives"][0]
+    assert "nowhere" in record["target"].lower()
+    assert record["status"] == "unresolved"
+    assert record["source_path"] and isinstance(record["source_path"], list)
     # The resolved directive still produces a real alias; the other two must not.
     assert "resolvable" in data["cross_reference_terms"].get("M001", [])
+
+
+_REPEATED_UNRESOLVED_TARGET_XML = """
+<index>
+  <letter>
+    <mainTerm>
+      <title>Alpha</title>
+      <see>Nowhere, at all</see>
+      <term><title>beta</title><see>Nowhere, at all</see></term>
+    </mainTerm>
+  </letter>
+</index>
+"""
+
+
+def test_repeated_failures_at_different_source_paths_are_not_collapsed(tmp_path, monkeypatch):
+    """issue #6 F9-R12-C, third re-review: the SAME unresolvable target text
+    cited from two DIFFERENT source paths ('Alpha' itself, and its nested
+    child 'Alpha, beta') must produce TWO separate records, not one --
+    the prior set-of-"<tag>: <ref>"-strings form collapsed them (5,476
+    real occurrences down to 1,864 distinct strings), silently losing
+    which specific source phrases actually failed."""
+    import tools.parse_icd10cm_index as mod
+    src = tmp_path / "index.xml"
+    src.write_text(_REPEATED_UNRESOLVED_TARGET_XML)
+    dst = tmp_path / "out.json"
+    monkeypatch.setattr(sys, "argv", ["parse_icd10cm_index.py", str(src), str(dst)])
+    mod.main()
+    data = json.loads(dst.read_text())
+    directives = data["reference_directives"]
+    assert directives["unresolved"] == 2
+    records = directives["unresolved_directives"]
+    assert len(records) == 2
+    source_phrases = {r["source_phrase"] for r in records}
+    assert source_phrases == {"alpha", "alpha beta"}

@@ -1029,12 +1029,21 @@ class TerminologyIndexTest(unittest.TestCase):
         self.assertEqual(line.chosen.code, "C11.1")
         self.assertIn("Alphabetic Index", line.rationale)
 
-    def test_snomed_layer_resolves_when_index_misses(self):
+    def test_snomed_layer_contributes_a_candidate_but_never_closes_without_verification(self):
+        """issue #6 F9-R12-E (Codex): a SNOMED CT -> ICD-10-CM crosswalk hit
+        maps a concept to a best-fit DEFAULT code that can be less specific
+        than, or wrong for, the documented condition -- this module's own
+        long-standing docstring already said it must be ALWAYS entailment-
+        confirmed, never trusted deterministically, but with no LLM
+        available to actually perform that confirmation, it used to fall
+        straight through to `_decide` and close DETERMINISTIC anyway. Fixed
+        via `requires_verification`: with no verifier, it must ABSTAIN
+        (the code retained as a candidate requiring confirmation), never
+        auto-bill on the crosswalk alone."""
         from claude_coder.data_access import MockSource
         from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
                                          ResolutionMethod)
         from claude_coder.resolution import resolve
-        # Index has no entry; the SNOMED map resolves the term authoritatively.
         src = MockSource(records={("C22.2", "icd10"):
                                   {"long_description": "a terse authoritative descriptor",
                                    "active": True}},
@@ -1042,9 +1051,30 @@ class TerminologyIndexTest(unittest.TestCase):
         fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="a documented condition",
                             evidence=[EvidenceSpan("a documented condition")], confidence=0.95)
         line = resolve(_request(fact), src)
-        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
-        self.assertEqual(line.chosen.code, "C22.2")
-        self.assertIn("SNOMED", line.rationale)
+        self.assertNotEqual(line.method, ResolutionMethod.DETERMINISTIC, line.rationale)
+        self.assertIsNone(line.chosen, line.rationale)
+        alt_codes = {c.code for c in (line.alternatives or [])}
+        self.assertIn("C22.2", alt_codes, line.rationale)
+
+    def test_snomed_layer_resolves_once_a_verifier_confirms_entailment(self):
+        """The positive counterpart: with an LLM available to actually
+        perform the entailment confirmation the SNOMED crosswalk always
+        requires, a SNOMED-sourced hit still resolves -- the fix routes it
+        through real verification, it does not simply disable SNOMED
+        recall."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        from claude_coder.resolution import resolve
+        src = MockSource(records={("C22.2", "icd10"):
+                                  {"long_description": "a terse authoritative descriptor",
+                                   "active": True}},
+                         index={}, snomed={"a documented condition": {"C22.2"}})
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="a documented condition",
+                            evidence=[EvidenceSpan("a documented condition")], confidence=0.95)
+        llm = _sv.judge(entails=lambda d: True, reason="entailed")
+        line = resolve(_request(fact), src, llm=_from(llm, "provider-a"))
+        self.assertEqual(line.chosen.code, "C22.2", line.rationale)
 
     def test_category_expands_to_leaf_by_laterality(self):
         from claude_coder.data_access import MockSource
@@ -1082,7 +1112,14 @@ class MultiCodeIndexCrossReferenceCandidateTest(unittest.TestCase):
     documentation actually supports -- the same tie policy any other
     multi-candidate pool goes through. Synthetic codes/descriptors throughout."""
 
-    def test_a_multi_code_redirect_is_narrowed_by_a_documented_attribute(self):
+    def test_a_multi_code_redirect_narrowed_by_a_documented_attribute_still_needs_verification(self):
+        """issue #6 F9-R12-E (Codex): a multi-code Index redirect is
+        "supplementary navigation, not proof" even AFTER `_decide`'s own
+        laterality-narrowing settles it down to a single candidate -- the
+        underlying signal is still a `see`/`seeAlso` hit, not a direct
+        entry, so it stays `requires_verification=True` and must not
+        auto-close with no LLM available to confirm it, matching every
+        other redirect-only single-code case."""
         from claude_coder.data_access import MockSource
         from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,
                                          FactKind, RelationState, ResolutionMethod)
@@ -1102,8 +1139,34 @@ class MultiCodeIndexCrossReferenceCandidateTest(unittest.TestCase):
                                                   value="right"),)},
                             confidence=0.99)
         line = resolve(_request(fact), src)
-        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC, line.rationale)
-        self.assertEqual(line.chosen.code, "DX50", line.rationale)   # right-side family, not left
+        self.assertNotEqual(line.method, ResolutionMethod.DETERMINISTIC, line.rationale)
+        self.assertIsNone(line.chosen, line.rationale)
+        alt_codes = {c.code for c in (line.alternatives or [])}
+        self.assertIn("DX50", alt_codes, line.rationale)
+
+    def test_a_multi_code_redirect_resolves_once_a_verifier_confirms_the_narrowed_candidate(self):
+        """The positive counterpart: with an LLM available, the same
+        laterality-narrowed redirect candidate is entailment-confirmed and
+        released -- the fix routes it through real verification, it does
+        not simply disable index-redirect recall."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,
+                                         FactKind, RelationState)
+        from claude_coder.resolution import resolve
+        recs = {("DX50", "icd10"): {"long_description": "some condition, right site", "active": True},
+                ("DX60", "icd10"): {"long_description": "some condition, left site", "active": True}}
+        src = MockSource(records=recs, index={"a documented condition": {"DX50", "DX60"}})
+        span = EvidenceSpan("a documented condition", anchored=True, span_id="s1")
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="a documented condition",
+                            attributes={"laterality": "right"},
+                            evidence=[span],
+                            attribute_evidence={"laterality": (
+                                AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                                  value="right"),)},
+                            confidence=0.99)
+        llm = _sv.judge(entails=lambda d: "right" in d.lower(), reason="entailed")
+        line = resolve(_request(fact), src, llm=_from(llm, "provider-a"))
+        self.assertEqual(line.chosen.code, "DX50", line.rationale)
 
     def test_an_unnarrowed_multi_code_redirect_is_never_auto_billed(self):
         from claude_coder.data_access import MockSource
