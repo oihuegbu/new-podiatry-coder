@@ -1483,11 +1483,39 @@ class ComplianceDataStore:
                 status = bilat_surg = pctc = mult = asst = co = team = None
             if not glob_days:
                 continue
-            rows.append((_norm(code), glob_days, status, bilat_surg, pctc, mult,
+            norm = _norm(code)
+            if not norm:
+                logger.warning(
+                    f"  global_period: blank normalized code (raw {code!r}) -- "
+                    f"refresh REJECTED (a malformed entry cannot be silently "
+                    f"skipped in a snapshot whose completeness governs code "
+                    f"retirement)")
+                return
+            rows.append((norm, glob_days, status, bilat_surg, pctc, mult,
                         asst, co, team, new_effective_from, _OPEN, version))
         if not rows:
             logger.warning("  global_period: 0 rows parsed -- refresh REJECTED "
                           "(a 0-row snapshot must never be recorded as ingested)")
+            return
+        # issue #6 F9-R11-H-C, sixth re-review: `len(codes_body) == declared_count`
+        # alone is not proof every entry became a valid row -- a malformed entry
+        # (e.g. missing global_days) was silently `continue`d past, so a
+        # snapshot could pass the count check while still quietly dropping a
+        # code this ingest's own completeness assumption then retires. Every
+        # declared entry must actually parse, not merely be counted.
+        if len(rows) != declared_count:
+            logger.warning(
+                f"  global_period: {len(rows)} of {declared_count} declared code(s) "
+                f"parsed into a valid row -- refresh REJECTED (a malformed entry "
+                f"cannot be silently skipped in a snapshot whose completeness "
+                f"governs code retirement)")
+            return
+        seen_codes = {r[0] for r in rows}
+        if len(seen_codes) != len(rows):
+            logger.warning(
+                "  global_period: duplicate normalized code(s) in this release -- "
+                "refresh REJECTED (an ambiguous row set cannot be trusted as a "
+                "complete, unique-per-code snapshot)")
             return
 
         from datetime import datetime, timedelta

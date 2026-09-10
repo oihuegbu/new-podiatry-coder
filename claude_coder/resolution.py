@@ -674,8 +674,15 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
 
     if llm is not None and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING,
                                          FactKind.DIAGNOSIS):
-        line = _propose_then_verify(fact, source, pool, llm, corroborate, dos=dos,
-                                    reconciliation=reconciliation,
+        # issue #6 F9-R11-H-D, sixth re-review: the UNFILTERED retrieval/index
+        # universe, not the already-eligibility-narrowed `pool` -- passing the
+        # narrowed pool silently dropped every candidate the FIRST eligibility
+        # pass had already excluded from `_propose_then_verify`'s own
+        # "complete" report. `_propose_then_verify` recomputes eligibility over
+        # this same set itself (cheap -- no LLM call), so nothing here is
+        # trusted twice; it is simply given everything to report on.
+        line = _propose_then_verify(fact, source, _all_candidates, llm, corroborate,
+                                    dos=dos, reconciliation=reconciliation,
                                     coverage=coverage, elig_facts=elig_facts)
         # #1 grounding: a DIAGNOSIS that verified only to a residual/catch-all category
         # with no distinctive descriptor overlap is an ungrounded guess (entailment
@@ -1375,9 +1382,22 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     role-incompatible proposal is excluded here, before it can ever contest a
     tie; a genuine multi-role ambiguity across the combined universe aborts
     with the typed `classification_data_gap` hold immediately, before any
-    verifier call is spent. The returned line's `candidate_eligibility` is the
-    COMPLETE report -- pool AND proposals, chosen or not -- so the audit trail
-    shows every candidate this fact's resolution actually considered."""
+    verifier call is spent.
+
+    `pool` here MUST be the caller's UNFILTERED retrieval/index universe
+    (sixth re-review: passing the caller's own already-eligibility-filtered
+    pool silently dropped every candidate the FIRST pass had already
+    excluded from this function's own "complete" report -- an excluded
+    retrieval candidate's exact reason disappeared from the audit trail
+    exactly because it had been correctly excluded). Every validated
+    proposal is included too, including ones `_evaluate` rejects for an
+    unsupported measurement interval -- a different axis than role
+    eligibility, but still a real exclusion this function's own audit must
+    not silently drop. The returned line's `candidate_eligibility` is the
+    COMPLETE report -- every retrieval/index candidate AND every proposal,
+    chosen, excluded, or neither -- so the audit trail (and the ClaimBundle
+    that projects it) shows every candidate this fact's resolution actually
+    considered, with its exact reason."""
     from . import verify as _verify
     from . import semantic_eligibility as _semelig
     proposed_matches = [_evaluate(fact, c, source, reconciliation)
@@ -1389,8 +1409,14 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
 
     facts_for_role_check = elig_facts if elig_facts is not None else [fact]
     pool_ids = {(c.code, c.system) for c in pool}
-    full_universe = list(pool) + [c for c in proposals_raw
-                                  if (c.code, c.system) not in pool_ids]
+    extra: list[CandidateCode] = []
+    seen_extra: set[tuple[str, str]] = set()
+    for c in proposals_raw + proposals_unsupported:
+        key = (c.code, c.system)
+        if key not in pool_ids and key not in seen_extra:
+            seen_extra.add(key)
+            extra.append(c)
+    full_universe = list(pool) + extra
     candidate_eligibility = _semelig.eligibility_report(
         facts_for_role_check, full_universe, source, dos, reconciliation)
     eligible_ids = {(r["code"], r["system"]) for r in candidate_eligibility

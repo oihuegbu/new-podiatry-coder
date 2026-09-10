@@ -1829,12 +1829,16 @@ class ProposedCandidateServiceRoleTest(unittest.TestCase):
     OP_DESC = "Operative act alpha on the structure"
     ANES_DESC = "Anesthesia for act alpha on the structure"
 
-    def _src(self, *, op_eligible_at_retrieval: bool):
+    def _src(self, *, op_eligible_at_retrieval: bool, anes_also_retrieved: bool = False):
         from claude_coder.data_access import MockSource
         records = {("OP", "cpt"): {"long_description": self.OP_DESC, "active": True},
                   ("ANES", "cpt"): {"long_description": self.ANES_DESC, "active": True}}
-        retrieval = ({("*", "cpt"): [CandidateCode("OP", "cpt", self.OP_DESC, 0.9)]}
-                    if op_eligible_at_retrieval else {("*", "cpt"): []})
+        hits = []
+        if op_eligible_at_retrieval:
+            hits.append(CandidateCode("OP", "cpt", self.OP_DESC, 0.9))
+        if anes_also_retrieved:
+            hits.append(CandidateCode("ANES", "cpt", self.ANES_DESC, 0.85))
+        retrieval = {("*", "cpt"): hits}
         return MockSource(records=records, retrieval=retrieval,
                           semantic_class={"OP": "surgical_procedure",
                                           "ANES": "anesthesia"})
@@ -1901,6 +1905,26 @@ class ProposedCandidateServiceRoleTest(unittest.TestCase):
         self.assertFalse(report["ANES"]["eligible"])
         self.assertTrue(report["ANES"].get("reason"), report["ANES"])
         self.assertTrue(report["OP"]["eligible"])
+
+    def test_a_first_pass_excluded_retrieval_candidate_remains_audited(self):
+        """Codex's required regression #1, retrieval side: ANES is
+        RETRIEVED directly (not proposed) and excluded by the FIRST
+        eligibility pass in `resolve()`, before `_propose_then_verify` is
+        ever called. Passing the already-narrowed pool into
+        `_propose_then_verify` silently dropped exactly this candidate from
+        what was supposed to be the complete report -- it must still
+        appear, with its exact reason, and the compatible candidate must
+        still resolve."""
+        from claude_coder.resolution import resolve
+        src = self._src(op_eligible_at_retrieval=True, anes_also_retrieved=True)
+        llm = _sv.judge(entails=lambda d: "operative" in d.lower(), reason="entailed")
+        line = resolve(_request(self._fact()), src, llm=_from(llm, "provider-a"))
+        report = {r["code"]: r for r in (line.candidate_eligibility or [])}
+        self.assertIn("ANES", report, line.candidate_eligibility)
+        self.assertFalse(report["ANES"]["eligible"])
+        self.assertTrue(report["ANES"].get("reason"), report["ANES"])
+        self.assertIsNotNone(line.chosen, line.rationale)
+        self.assertEqual(line.chosen.code, "OP", line.rationale)
 
 
 class CorroborationIndependenceTest(unittest.TestCase):
