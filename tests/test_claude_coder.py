@@ -1927,6 +1927,81 @@ class ProposedCandidateServiceRoleTest(unittest.TestCase):
         self.assertEqual(line.chosen.code, "OP", line.rationale)
 
 
+class ProposedCandidateDeterministicExclusionTest(unittest.TestCase):
+    """issue #6 F9-R11-H-D, seventh re-review: `_evaluate` returns a bare
+    `None` (no reason) for two DETERMINISTIC eliminations -- an explicit
+    laterality contradiction, and a documented measurement outside the
+    descriptor's bounded interval. A registry-valid model PROPOSAL eliminated
+    this way used to vanish before `_propose_then_verify`'s own "complete"
+    candidate universe was even built, so the ClaimBundle audit trail could
+    say neither which candidate was excluded nor why. `_evaluate_reason`
+    (a reason-carrying sibling of `_evaluate`, which stays unchanged for its
+    other five callers) closes this. Synthetic codes throughout."""
+
+    def test_a_laterality_contradictory_proposal_remains_audited(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,
+                                         FactKind, RelationState)
+        from claude_coder.resolution import resolve
+        compatible = CandidateCode("RIGHT", "cpt", "act alpha, right side", 0.9)
+        src = MockSource(
+            records={("RIGHT", "cpt"): {"long_description": "act alpha, right side",
+                                        "active": True},
+                    ("LEFT", "cpt"): {"long_description": "act alpha, left side",
+                                      "active": True}},
+            retrieval={("*", "cpt"): [compatible]})
+        # laterality needs the fully evidenced, claim-authorized shape
+        # `_fact_laterality`/`claim_authorized_value` requires -- a raw
+        # `attributes[...]` write alone is not trusted (same construction as
+        # `OntologyResolutionTest.test_laterality_contradiction_eliminated`).
+        span = EvidenceSpan("act alpha performed on the right side",
+                            anchored=True, span_id="s1")
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="act alpha, right side",
+                            attributes={"laterality": "right"}, evidence=[span],
+                            attribute_evidence={"laterality": (
+                                AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                                  value="right"),)},
+                            confidence=0.95)
+        llm = _sv.judge(entails=lambda d: "right" in d.lower(),
+                        propose=["LEFT"], reason="proposed")
+        line = resolve(_request(fact), src, llm=_from(llm, "provider-a"))
+        report = {r["code"]: r for r in (line.candidate_eligibility or [])}
+        self.assertIn("LEFT", report, line.candidate_eligibility)
+        self.assertFalse(report["LEFT"]["eligible"])
+        self.assertIn("laterality", report["LEFT"].get("reason", "").lower(),
+                      report["LEFT"])
+        self.assertIsNotNone(line.chosen, line.rationale)
+        self.assertEqual(line.chosen.code, "RIGHT", line.rationale)
+
+    def test_an_out_of_range_proposal_remains_audited(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder.resolution import resolve
+        compatible = CandidateCode(
+            "UNBOUNDED", "cpt", "wound dressing, sterile, each", 0.9)
+        src = MockSource(
+            records={("UNBOUNDED", "cpt"): {"long_description":
+                                            "wound dressing, sterile, each",
+                                            "active": True},
+                    ("SMALL", "cpt"): {"long_description": "wound dressing, sterile, "
+                                                           "size 16 sq. in. or less, each",
+                                      "active": True}},
+            retrieval={("*", "cpt"): [compatible]})
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="wound dressing",
+                            attributes={"size_sqin": 60},
+                            evidence=[EvidenceSpan("wound dressing 60 sq in applied")],
+                            confidence=0.95)
+        llm = _sv.judge(entails=lambda d: True, propose=["SMALL"], reason="proposed")
+        line = resolve(_request(fact), src, llm=_from(llm, "provider-a"))
+        report = {r["code"]: r for r in (line.candidate_eligibility or [])}
+        self.assertIn("SMALL", report, line.candidate_eligibility)
+        self.assertFalse(report["SMALL"]["eligible"])
+        self.assertIn("measurement", report["SMALL"].get("reason", "").lower(),
+                      report["SMALL"])
+        self.assertIsNotNone(line.chosen, line.rationale)
+        self.assertEqual(line.chosen.code, "UNBOUNDED", line.rationale)
+
+
 class CorroborationIndependenceTest(unittest.TestCase):
     """Round 5, phase 5 — agreement between two calls to the SAME model provider is not
     corroboration, so it cannot buy the grounded VERIFIED method or the autonomy that rides

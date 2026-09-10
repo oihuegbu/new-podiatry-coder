@@ -186,14 +186,36 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
               source: CodeSource | None = None, reconciliation=None) -> _Match | None:
     """Apply the agnostic elimination rules and score specificity. Return None if
     the candidate CONTRADICTS the documented facts, else a scored match. Concept
-    relevance is not judged here — retrieval already guaranteed it."""
+    relevance is not judged here — retrieval already guaranteed it.
+
+    Thin wrapper over `_evaluate_reason` (issue #6 F9-R11-H-D, seventh
+    re-review) -- kept so this function's five other, reason-blind callers
+    are completely unaffected by that addition."""
+    return _evaluate_reason(fact, cand, source, reconciliation)[0]
+
+
+def _evaluate_reason(fact: ClinicalFact, cand: CandidateCode,
+                     source: CodeSource | None = None, reconciliation=None
+                     ) -> tuple["_Match | None", str | None]:
+    """Same elimination/scoring `_evaluate` performs, but also NAMES why a
+    candidate was eliminated (issue #6 F9-R11-H-D, seventh re-review):
+    `_evaluate`'s five other call sites only ever checked `is not None`, so
+    a deterministically-eliminated candidate (laterality contradiction, or a
+    documented measurement outside the descriptor's bounded interval) simply
+    vanished -- for an authoritative-validated model PROPOSAL specifically,
+    that meant it disappeared before `_propose_then_verify`'s own candidate
+    universe was even built, with no record or reason surviving into the
+    audit trail at all. `_evaluate` itself stays untouched in contract; only
+    `_propose_then_verify` calls this richer variant."""
     feats = parse_descriptor(cand.descriptor)
     reasons: list[str] = []
 
     # ELIMINATION — laterality contradiction.
     fl = _fact_laterality(fact, reconciliation)
     if fl and fl != "bilateral" and feats.laterality and fl not in feats.laterality:
-        return None
+        return None, (f"candidate's descriptor states laterality "
+                      f"{sorted(feats.laterality)}, contradicting the fact's "
+                      f"documented laterality {fl!r}")
 
     # TYPED, DIMENSION-GUARDED, role-safe measurement comparison, used for BOTH
     # elimination and specificity. A documented value is compared to a descriptor interval
@@ -204,7 +226,9 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
     # number and could deterministically prefer a dimensionally-incompatible candidate.)
     _in_range = _measure_in_range(fact, feats)
     if _in_range is False:
-        return None                     # documented measurement out of the code's range
+        # documented measurement out of the code's range
+        return None, ("documented measurement is outside the candidate descriptor's "
+                      "bounded interval")
     _iu = bool(feats.interval and feats.interval.bounded()) and _in_range is not True
 
     # SPECIFICITY — count the constraining attributes the descriptor POSITIVELY
@@ -234,7 +258,8 @@ def _evaluate(fact: ClinicalFact, cand: CandidateCode,
     support = support_score(desc_text, _fact_text(fact))
     reasons.append(f"recall {cand.score:.2f}")
 
-    return _Match(cand, feats, cand.score, spec, support, reasons, interval_unsupported=_iu)
+    return (_Match(cand, feats, cand.score, spec, support, reasons,
+                   interval_unsupported=_iu), None)
 
 
 def _advisory_procedure_expansions(fact, source) -> list[dict]:
@@ -1400,12 +1425,19 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     considered, with its exact reason."""
     from . import verify as _verify
     from . import semantic_eligibility as _semelig
-    proposed_matches = [_evaluate(fact, c, source, reconciliation)
-                        for c in _verify.propose_codes(fact, source, llm)]
-    proposals_raw = [m.candidate for m in proposed_matches
+    proposed_evals = [(c, *_evaluate_reason(fact, c, source, reconciliation))
+                      for c in _verify.propose_codes(fact, source, llm)]
+    proposals_raw = [c for c, m, _r in proposed_evals
                      if m is not None and not m.interval_unsupported]
-    proposals_unsupported = [m.candidate for m in proposed_matches
+    proposals_unsupported = [c for c, m, _r in proposed_evals
                              if m is not None and m.interval_unsupported]
+    # Registry-valid proposals `_evaluate` eliminated OUTRIGHT (laterality
+    # contradiction, or a documented measurement outside the descriptor's
+    # bounded interval) -- issue #6 F9-R11-H-D, seventh re-review: these
+    # never reached `full_universe` at all before, so the audit trail could
+    # not say a proposal was even considered, let alone why it was excluded.
+    proposals_deterministically_excluded = [(c, r) for c, m, r in proposed_evals
+                                            if m is None]
 
     facts_for_role_check = elig_facts if elig_facts is not None else [fact]
     pool_ids = {(c.code, c.system) for c in pool}
@@ -1419,6 +1451,22 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     full_universe = list(pool) + extra
     candidate_eligibility = _semelig.eligibility_report(
         facts_for_role_check, full_universe, source, dos, reconciliation)
+    # Merge the deterministically-excluded proposals into the SAME report --
+    # they never went through semantic/role eligibility at all (a different,
+    # earlier axis), so their role_control is honestly "not_evaluated", the
+    # same placeholder `eligibility_report` itself already uses for a
+    # candidate excluded before role control ever ran.
+    reported_ids = {(r["code"], r["system"]) for r in candidate_eligibility}
+    for c, reason in proposals_deterministically_excluded:
+        key = (c.code, c.system)
+        if key in reported_ids:
+            continue
+        reported_ids.add(key)
+        candidate_eligibility.append({
+            "code": c.code, "system": c.system, "eligible": False, "reason": reason,
+            "role_control": {"status": "not_evaluated", "fact_roles": [],
+                             "candidate_role": None, "blocks_line": False,
+                             "authority_source_id": None, "authority_version": None}})
     eligible_ids = {(r["code"], r["system"]) for r in candidate_eligibility
                     if r["eligible"]}
 
