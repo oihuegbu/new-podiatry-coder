@@ -48,6 +48,20 @@ unresolved) and the counts persist in the artifact's own
 `reference_directives` block -- so a directive this compiler cannot
 resolve is a visible, counted gap, never a silent drop.
 
+issue #6 F9-R12-C (Codex's re-review of the F9-R12-B fix): two further
+accuracy gaps in that same measurement. (1) "resolved" only meant
+`navigate()` found A node, not that the node's own subtree actually
+reaches any code -- 55 such directives counted as resolved while
+producing zero candidate edges; fixed by requiring a NONEMPTY code set.
+(2) A main term whose own title is a composite of several official
+comma-joined heading forms was indexed under one full-title key, but a
+directive elsewhere routinely cites just one heading component, which
+never matched; 6,392 of the "unresolved" directives had a first segment
+identifying exactly one such component. Fixed by also indexing each
+component, but ONLY when it names a single main term across the whole
+source (an ambiguous component -- 5 in the real source -- is left
+unresolved rather than guessed).
+
 Usage: python tools/parse_icd10cm_index.py <icd10cm-index-*.xml> [out.json]
 """
 
@@ -152,14 +166,16 @@ def navigate(ref, main_terms):
     return node
 
 
-def classify_reference(ref: str, main_terms) -> str:
-    """"resolved" (navigate finds a real target in this same Index),
-    "external_table_reference" (the Index's own "Table of ..." convention --
-    a real, known kind of redirect this compiler has no external table to
-    follow), or "unresolved" (neither -- a genuine, counted gap; issue #6
-    F9-R12-B requires every directive be classified, never silently
-    dropped)."""
-    if navigate(ref, main_terms) is not None:
+def classify_reference(ref: str, codes: set[str]) -> str:
+    """"resolved" (issue #6 F9-R12-C: means the directive actually reaches at
+    least one code -- a navigable-but-codeless target, or a target whose own
+    subtree resolves to nothing, is NOT "resolved"; it produces no candidate
+    edge at all, so counting it as resolved hid a real gap), "external_table_
+    reference" (the Index's own "Table of ..." convention -- a real, known
+    kind of redirect this compiler has no external table to follow), or
+    "unresolved" (neither -- a genuine, counted gap; every directive must be
+    classified, never silently dropped)."""
+    if codes:
         return "resolved"
     if ref.strip().lower().startswith(_EXTERNAL_TABLE_PREFIX):
         return "external_table_reference"
@@ -203,12 +219,31 @@ def main():
 
     out: dict[str, set] = defaultdict(set)
     main_terms: dict[str, ET.Element] = {}
+    # issue #6 F9-R12-B/C (Codex's independent structural check): a real
+    # main-term's OWN title is sometimes a COMPOSITE of several official
+    # comma-joined heading forms ("Abnormal, abnormality"), indexed here
+    # under the one full-title key -- but a <see>/<seeAlso> directive
+    # elsewhere in the same source routinely cites just ONE heading
+    # component ("see Abnormal, ..."), which never matches that composite
+    # key at all. Measured: 6,392 of the "unresolved" directives have a
+    # first segment matching exactly one such component. Each component is
+    # indexed as its own lookup key too, but ONLY when it identifies a
+    # SINGLE main term across the whole source (an ambiguous component --
+    # 5 in the real source -- stays unresolved rather than guessing).
+    _components: dict[str, set[ET.Element]] = defaultdict(set)
     for letter in root.findall("letter"):
         for mt in letter.findall("mainTerm"):
             title = _norm_ws(plain_title(mt)).lower()
             if title:
                 main_terms.setdefault(title, mt)
+                for part in title.split(","):
+                    part = part.strip()
+                    if part:
+                        _components[part].add(mt)
             walk(mt, [], out)
+    for component, nodes in _components.items():
+        if component not in main_terms and len(nodes) == 1:
+            main_terms[component] = next(iter(nodes))
 
     # Cross-reference aliases: kept in a SEPARATE map (issue #6 F9-R12-A) --
     # a redirect alias is exact-Index-lookup signal only, never per-code
@@ -227,15 +262,18 @@ def main():
                     continue
                 for tag, ref in reference_texts(node):
                     directive_counts["total"] += 1
-                    status = classify_reference(ref, main_terms)
-                    directive_counts[status] += 1
-                    if status != "resolved":
-                        if len(unresolved_sample) < 200:
-                            unresolved_sample.add(f"{tag}: {ref}")
-                        continue
+                    # issue #6 F9-R12-C: "resolved" requires a NONEMPTY code
+                    # set -- a navigable target that itself resolves to no
+                    # codes must not count as resolved.
                     target = navigate(ref, main_terms)
-                    for code in subtree_codes(target, main_terms):
-                        cross_ref[code].add(phrase)
+                    codes = subtree_codes(target, main_terms) if target is not None else set()
+                    status = classify_reference(ref, codes)
+                    directive_counts[status] += 1
+                    if status == "resolved":
+                        for code in codes:
+                            cross_ref[code].add(phrase)
+                    elif status == "unresolved" and len(unresolved_sample) < 200:
+                        unresolved_sample.add(f"{tag}: {ref}")
 
     version = root.findtext("version") or ""
     data = {"version": version.strip(),

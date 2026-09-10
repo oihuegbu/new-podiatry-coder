@@ -997,6 +997,21 @@ class TerminologyIndexTest(unittest.TestCase):
         self.assertEqual(idx.candidates("condition alpha"), {"AA1.11"})
         self.assertEqual(idx.candidates("a redirect alias"), {"AA1.11", "BB2.20"})
 
+    def test_direct_candidates_excludes_cross_reference_only_hits(self):
+        # issue #6 F9-R12-A, REOPENED: `direct_candidates()` answers the SAME
+        # lookup as `candidates()` but ONLY through `terms_by_code` -- a code
+        # reachable solely through a cross-reference redirect must be absent.
+        from claude_coder.terminology import TerminologyIndex
+        idx = TerminologyIndex({"AA111": ["condition alpha", "shared term"]},
+                               {"BB220": ["a redirect alias", "shared term"]})
+        self.assertEqual(idx.direct_candidates("condition alpha"), {"AA1.11"})
+        self.assertEqual(idx.direct_candidates("a redirect alias"), set())
+        self.assertEqual(idx.candidates("a redirect alias"), {"BB2.20"})
+        # a term BOTH sides carry: candidates() unions both codes, but
+        # direct_candidates() answers ONLY the direct one.
+        self.assertEqual(idx.candidates("shared term"), {"AA1.11", "BB2.20"})
+        self.assertEqual(idx.direct_candidates("shared term"), {"AA1.11"})
+
     def test_diagnosis_resolves_via_index_first(self):
         from claude_coder.data_access import MockSource
         from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
@@ -1108,6 +1123,68 @@ class MultiCodeIndexCrossReferenceCandidateTest(unittest.TestCase):
         self.assertNotEqual(line.method, ResolutionMethod.DETERMINISTIC)
         alt_codes = {c.code for c in (line.alternatives or [])}
         self.assertTrue({"DX50", "DX60"} & alt_codes, line.rationale)
+
+
+class SingleCodeCrossReferenceOnlyCandidateTest(unittest.TestCase):
+    """issue #6 F9-R12-A, REOPENED (Codex's re-review): even a SINGLE-code
+    Index hit must not close deterministically when that code is reachable
+    ONLY through a see/seeAlso cross-reference redirect -- a redirect is
+    supplementary navigation, not proof the note supports that code (the
+    real source has 1,142 single-code-resolved directives, 85 of them
+    seeAlso). `MockSource(index=..., index_direct=...)` lets a test
+    distinguish the two: `index` is the full (direct+cross-reference) hit
+    set `resolve()` reads for candidate recall, `index_direct` is the
+    subset reachable through a direct entry -- the gate for the old
+    immediate-trust shortcut. Synthetic codes throughout."""
+
+    def test_a_direct_single_code_hit_still_closes_deterministically(self):
+        # Unaffected control: MockSource defaults `index_direct` to the SAME
+        # dict as `index` when not overridden, so every pre-existing index=
+        # test (never mentioning redirects) keeps its prior behavior exactly.
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind, ResolutionMethod
+        from claude_coder.resolution import resolve
+        src = MockSource(
+            records={("DIRECT1", "icd10"): {"long_description": "a documented condition",
+                                            "active": True}},
+            index={"a documented condition": {"DIRECT1"}})
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="a documented condition",
+                            evidence=[EvidenceSpan("a documented condition")], confidence=0.9)
+        line = resolve(_request(fact), src)
+        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC, line.rationale)
+        self.assertEqual(line.chosen.code, "DIRECT1", line.rationale)
+
+    def test_a_cross_reference_only_single_code_hit_never_unilaterally_wins(self):
+        """The real safety property: a redirect-only hit must not shortcut
+        straight to DETERMINISTIC before a plausible competing candidate
+        (here, from ordinary retrieval) ever gets a chance to be weighed --
+        the OLD bug bypassed retrieval/recall entirely for a bare single-hit
+        Index result, auto-billing it unilaterally regardless of what else
+        was retrievable for the same query."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind, ResolutionMethod
+        from claude_coder.resolution import resolve
+        recs = {("CROSSONLY", "icd10"): {"long_description": "some condition, unspecified",
+                                         "active": True},
+               ("ALSOPLAUS", "icd10"): {"long_description": "some other condition, unspecified",
+                                        "active": True}}
+        src = MockSource(
+            records=recs,
+            index={"a documented condition": {"CROSSONLY"}},
+            index_direct={},   # CROSSONLY is reachable ONLY via cross-reference
+            # Score kept ABOVE the recall floor so this candidate actually
+            # competes rather than being screened out on relevance alone --
+            # the property under test is the TIE POLICY seeing both, not a
+            # relevance contest.
+            retrieval={("*", "icd10"): [
+                CandidateCode("ALSOPLAUS", "icd10", "some other condition, unspecified", 0.9)]})
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="a documented condition",
+                            evidence=[EvidenceSpan("a documented condition")], confidence=0.9)
+        line = resolve(_request(fact), src)
+        unilaterally_billed = (line.method == ResolutionMethod.DETERMINISTIC
+                               and line.chosen is not None
+                               and line.chosen.code == "CROSSONLY")
+        self.assertFalse(unilaterally_billed, line.rationale)
 
 
 class ConceptRelationIndexTest(unittest.TestCase):

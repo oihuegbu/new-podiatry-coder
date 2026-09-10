@@ -2759,7 +2759,29 @@ class CodingValidator:
                 terms.update(r[0].lower() for r in rows)
             return terms
 
-        def _any_term_documented(terms, words=None, low=None) -> bool:
+        def _index_terms_cross_reference_only(c: str) -> set:
+            """The subset of `_index_terms(c)` reachable ONLY through a
+            see/seeAlso cross-reference redirect, never the code's own
+            direct Index entry (issue #6 F9-R12-D). `_any_term_documented`
+            gates its single-rare-token shortcut off of this: a compound
+            cross-reference phrase ('paronychia WITH lymphangitis') names a
+            DIFFERENT condition than its components named alone, so a note
+            mentioning only 'paronychia' must not "prove" the whole
+            redirect-sourced term the way a genuine eponym/synonym pair
+            (a DIRECT entry) safely can."""
+            if self.store is None:
+                return set()
+            norm_c = c.replace(".", "")
+            terms = set()
+            for ln in range(3, len(norm_c) + 1):
+                rows = self.store.conn.execute(
+                    "SELECT term FROM icd10_index_term WHERE code=? AND source='cross_reference'",
+                    (norm_c[:ln],)).fetchall()
+                terms.update(r[0].lower() for r in rows)
+            return terms
+
+        def _any_term_documented(terms, words=None, low=None,
+                                 risky_terms: frozenset = frozenset()) -> bool:
             words = note_words if words is None else words
             low = low_note if low is None else low
             for term in terms:
@@ -2772,19 +2794,22 @@ class CodingValidator:
                 # though 'metatarsalgia' never appears).
                 if all(self._desc_documented(t, words, low) for t in toks):
                     return True
-                # issue #6 F9-R12-B: the single-rare-token shortcut below is
-                # only sound when the term names ONE entity by an alternate
-                # word -- an eponym vs. its descriptive name (Morton's
-                # example above), where either token alone is evidence of
-                # the SAME thing. A term whose own text joins two distinct
-                # clinical findings with a qualifying connector ('paronychia
-                # WITH lymphangitis', '... due to ...') names a compound,
-                # DIFFERENT condition -- each side must be independently
-                # documented, so a note mentioning only 'paronychia' must
-                # not "prove" a term that also requires lymphangitis. The
-                # richer Index cross-reference data (F9-R12-B's full-depth
-                # traversal) now surfaces real compound phrases like this
-                # one that the shortcut previously never saw.
+                # issue #6 F9-R12-D (Codex's re-review of the F9-R12-B
+                # connector-list fix): corpus rarity alone is not semantic
+                # equivalence -- a shared rare token can belong to two
+                # clinically DIFFERENT multi-word terms just as easily as to
+                # an eponym/synonym pair naming the SAME thing, and a
+                # compound Index cross-reference phrase can omit a listed
+                # connector word entirely while still requiring multiple
+                # independent clinical facts. So for a term reachable ONLY
+                # through a cross-reference redirect, the shortcut never
+                # applies at all -- full-phrase entailment (checked above)
+                # is the only way such a term counts as documented. Every
+                # OTHER term (inclusion terms, DIRECT Index entries, lexicon
+                # synonyms -- where the Morton's-eponym precedent actually
+                # applies) keeps the narrower connector-based guard.
+                if term in risky_terms:
+                    continue
                 if (len(toks) > 1
                         and self._QUALIFIER_CONNECTOR_RE.search(term)):
                     continue
@@ -2795,7 +2820,9 @@ class CodingValidator:
             return False
 
         def _terms_documented(c: str, min_level: int) -> bool:
-            return _any_term_documented(_incl_terms(c, min_level) | _index_terms(c))
+            return _any_term_documented(
+                _incl_terms(c, min_level) | _index_terms(c),
+                risky_terms=_index_terms_cross_reference_only(c))
 
         sites = self._site_lexicon()
 
@@ -2893,6 +2920,12 @@ class CodingValidator:
                 own_ix, sib_ix = _index_terms(norm), _index_terms(sib_code)
                 own_syn = _incl_terms(norm, common + 1) | (own_ix - sib_ix)
                 sib_syn = _incl_terms(sib_code, common + 1) | (sib_ix - own_ix)
+                # issue #6 F9-R12-D: which of own_syn/sib_syn's members are
+                # cross-reference-only -- an intersection, not a re-derivation,
+                # so it stays correct regardless of how own_syn/sib_syn were
+                # combined above.
+                own_syn_risky = own_syn & _index_terms_cross_reference_only(norm)
+                sib_syn_risky = sib_syn & _index_terms_cross_reference_only(sib_code)
                 # Condition-entity tokens (rare, lexicon-grade: 'lymphangitis')
                 # outrank qualifier tokens ('acute'): if the axis contains an
                 # entity, ITS documentation decides support — otherwise a
@@ -2919,14 +2952,17 @@ class CodingValidator:
                                 and self._icd_token_df.get(t, 0) <= 25)
                             for t in tt):
                             entity_syn.add(term)
-                    own_documented = direct_own or _any_term_documented(entity_syn)
+                    own_documented = direct_own or _any_term_documented(
+                        entity_syn, risky_terms=entity_syn & own_syn_risky)
                 else:
-                    own_documented = direct_own or _any_term_documented(own_syn)
+                    own_documented = direct_own or _any_term_documented(
+                        own_syn, risky_terms=own_syn_risky)
                 # swap-driving evidence: clinical view only (incidental
                 # tourniquet/positioning/prep anatomy never drives a swap)
                 sib_documented = (
                     all(self._desc_documented(t, clin_words, clin_low) for t in sib_only)
-                    or _any_term_documented(sib_syn, clin_words, clin_low))
+                    or _any_term_documented(sib_syn, clin_words, clin_low,
+                                            risky_terms=sib_syn_risky))
                 if sib_documented and not own_documented:
                     coverage = sum(1 for t in sib_toks
                                    if self._desc_documented(t, clin_words, clin_low))

@@ -67,7 +67,17 @@ class TerminologyIndex:
     PER-CODE EMBEDDING TEXT (`app/rag/vector_store.py`) can use `terms_by_code`
     alone and never flatten a broad redirect alias into a code's embedding
     vector -- this class itself does not embed anything, so it is safe to
-    merge both for its own exact-lookup purpose."""
+    merge both for its own exact-lookup purpose.
+
+    issue #6 F9-R12-A, REOPENED (Codex's re-review): merging both tiers into
+    ONE untyped lookup meant a caller had no way to tell a DIRECT hit from a
+    redirect-only hit -- `resolution.resolve()`'s single-hit deterministic
+    gate (`len(idx) == 1`) trusted a `seeAlso` hit exactly like a direct
+    one, even though a redirect is supplementary navigation, not proof the
+    note supports that code. `direct_candidates()` answers the SAME lookup
+    using ONLY `terms_by_code`, via a second, wholly separate index built
+    from direct terms alone -- so a caller can require a single-hit match to
+    ALSO be direct before trusting it deterministically."""
 
     def __init__(self, terms_by_code: dict[str, list[str]],
                 cross_reference_terms_by_code: dict[str, list[str]] | None = None):
@@ -75,6 +85,12 @@ class TerminologyIndex:
         self._despaced: dict[str, set[str]] = {}   # 'two words' <-> 'twowords'
         self._byset: dict[frozenset[str], set[str]] = {}   # order + plural independent
         self._index_terms(terms_by_code)
+        # A separate, direct-only index (issue #6 F9-R12-A, reopened) --
+        # recursing with no cross-reference argument terminates immediately
+        # (its own `_direct` becomes itself), so this never merges the two
+        # tiers' underlying sets.
+        self._direct = self if not cross_reference_terms_by_code \
+            else TerminologyIndex(terms_by_code)
         if cross_reference_terms_by_code:
             self._index_terms(cross_reference_terms_by_code)
 
@@ -106,6 +122,13 @@ class TerminologyIndex:
             return set(self._despaced[despaced])
         toks = frozenset(_sing(t) for t in n.split() if len(t) > 2)
         return set(self._byset.get(toks, set())) if toks else set()
+
+    def direct_candidates(self, description: str) -> set[str]:
+        """Like `candidates()`, but ONLY through a DIRECT Index entry --
+        never a `<see>`/`<seeAlso>` cross-reference redirect alias (issue #6
+        F9-R12-A, reopened). A caller uses this to require a hit be direct
+        before trusting a single-code match deterministically."""
+        return self._direct.candidates(description)
 
     @classmethod
     def load_snapshot(cls) -> tuple["TerminologyIndex", dict]:

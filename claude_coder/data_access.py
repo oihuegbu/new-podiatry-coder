@@ -192,6 +192,8 @@ class CodeSource(Protocol):
 
     def index_codes(self, description: str, system: str) -> set[str]: ...
 
+    def index_codes_direct(self, description: str, system: str) -> set[str]: ...
+
     def snomed_codes(self, description: str, system: str) -> set[str]: ...
 
     def cpt_index_codes(self, description: str, system: str) -> set[str]: ...
@@ -1127,11 +1129,7 @@ class AuthoritativeSource:
                 out.add(code)
         return out
 
-    def index_codes(self, description: str, system: str) -> set[str]:
-        """Authoritative ICD-10-CM codes for a clinician term, via the Alphabetic
-        Index. ICD-10-CM only; empty set otherwise or when the Index is absent."""
-        if system != "icd10":
-            return set()
+    def _terminology_index(self):
         if self._idx is None:
             try:
                 from .terminology import TerminologyIndex
@@ -1139,11 +1137,32 @@ class AuthoritativeSource:
                 self._bound_sources.bind(identity)
             except Exception:
                 self._idx = False
-        if not self._idx:
+        return self._idx
+
+    def index_codes(self, description: str, system: str) -> set[str]:
+        """Authoritative ICD-10-CM codes for a clinician term, via the Alphabetic
+        Index -- direct entries AND cross-reference redirect aliases alike.
+        ICD-10-CM only; empty set otherwise or when the Index is absent."""
+        if system != "icd10":
+            return set()
+        idx = self._terminology_index()
+        if not idx:
             return set()
         # Keep candidates that resolve to real billable code(s) — a valid leaf OR a
         # category with billable children (expanded downstream). Drops Index noise.
-        return {c for c in self._idx.candidates(description) if self.leaf_codes(c, "icd10")}
+        return {c for c in idx.candidates(description) if self.leaf_codes(c, "icd10")}
+
+    def index_codes_direct(self, description: str, system: str) -> set[str]:
+        """Like `index_codes`, but ONLY through a DIRECT Index entry -- never
+        a `<see>`/`<seeAlso>` cross-reference redirect alias (issue #6
+        F9-R12-A, reopened: `resolution.resolve()`'s single-hit deterministic
+        gate must never trust a hit reachable ONLY through a redirect)."""
+        if system != "icd10":
+            return set()
+        idx = self._terminology_index()
+        if not idx:
+            return set()
+        return {c for c in idx.direct_candidates(description) if self.leaf_codes(c, "icd10")}
 
     def leaf_codes(self, stem: str, system: str) -> set[str]:
         """The billable code(s) at/under a code stem: the code itself if it is a
@@ -1920,6 +1939,7 @@ class MockSource:
                  bilat: dict[str, str] | None = None,
                  status: dict[str, str] | None = None,
                  index: dict[str, set] | None = None,
+                 index_direct: dict[str, set] | None = None,
                  snomed: dict[str, set] | None = None,
                  proc_index: dict[str, set] | None = None,
                  cpt_index: dict[str, set] | None = None,
@@ -1948,6 +1968,15 @@ class MockSource:
         self._bilat = bilat or {}
         self._status = status or {}
         self._index = index or {}
+        # issue #6 F9-R12-A, reopened: DISTINCT from `_index` -- a test that
+        # wants to exercise "single-code hit reachable ONLY through a
+        # cross-reference redirect" configures `index_direct={}` explicitly
+        # (no direct route at all) while `index` still carries the full
+        # merged hit. Every EXISTING test that only configures `index=`
+        # gets `_index_direct` defaulting to the SAME dict -- i.e. every
+        # configured hit is trusted as direct, preserving prior deterministic
+        # behavior unchanged for every test that never mentions redirects.
+        self._index_direct = self._index if index_direct is None else index_direct
         self._snomed_map = snomed or {}
         self._proc_index = proc_index or {}
         self._cpt_index = cpt_index or {}
@@ -2010,6 +2039,9 @@ class MockSource:
 
     def index_codes(self, description, system):
         return set(self._index.get(description, set())) if system == "icd10" else set()
+
+    def index_codes_direct(self, description, system):
+        return set(self._index_direct.get(description, set())) if system == "icd10" else set()
 
     def snomed_codes(self, description, system):
         return set(self._snomed_map.get(description, set())) if system == "icd10" else set()

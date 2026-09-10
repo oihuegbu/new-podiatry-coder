@@ -429,28 +429,37 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
     # reached when the Index has no entry for the phrasing.
     if fact.kind is FactKind.DIAGNOSIS:
         idx = source.index_codes(fact.description, fact.system)
-        # Trust the Index only for an UNAMBIGUOUS single-code mapping (the clean
-        # authoritative wins, an unambiguous single code). A multi-code result is
-        # a laterality family OR Index noise; either way defer to the embedding +
-        # structured path, which disambiguates by documented evidence. This makes
-        # the deterministic Index path safe against parse noise.
-        if len(idx) == 1:
+        # issue #6 F9-R12-A, REOPENED: `idx` mixes direct Index entries with
+        # cross-reference (see/seeAlso) redirect aliases -- a redirect is
+        # supplementary navigation, not proof the note supports that code,
+        # so a single-code hit may close deterministically ONLY when that
+        # exact code is ALSO reachable through a DIRECT entry, never when
+        # the sole route to it is a redirect.
+        idx_direct = source.index_codes_direct(fact.description, fact.system)
+        # Trust the Index only for an UNAMBIGUOUS single-code, DIRECT mapping
+        # (the clean authoritative wins, an unambiguous single code). A
+        # multi-code result is a laterality family OR Index noise; either
+        # way defer to the embedding + structured path, which disambiguates
+        # by documented evidence. This makes the deterministic Index path
+        # safe against parse noise.
+        if len(idx) == 1 and next(iter(idx)) in idx_direct:
             pool = _authoritative_pool(next(iter(idx)), source)
             if pool:
                 r = _take(pool, "ICD-10-CM Alphabetic Index")
                 if r is not None:
                     return r
-        elif len(idx) > 1:
+        elif idx:
             # issue #6 F9-R12-A: a multi-code Index hit (a cross-reference
             # redirect spanning a laterality/site family -- e.g. "paronychia"
-            # covering both the toe and finger cellulitis leaves) is real
-            # candidate signal, not parse noise to discard. It is never
-            # trusted deterministically (the whole reason for the len==1
-            # gate above), but every stem's billable leaves are seeded into
-            # propose-then-verify so the documented facts (laterality,
-            # anatomy, descriptor entailment) narrow it exactly like any
-            # other candidate -- it is a candidate SOURCE only, never an
-            # independent approval.
+            # covering both the toe and finger cellulitis leaves), OR a
+            # single-code hit reachable ONLY through a redirect (never a
+            # direct entry), is real candidate signal, not parse noise to
+            # discard -- but never trusted deterministically (the whole
+            # reason for the direct-single-hit gate above). Every stem's
+            # billable leaves are seeded into propose-then-verify so the
+            # documented facts (laterality, anatomy, descriptor entailment)
+            # narrow it exactly like any other candidate -- it is a
+            # candidate SOURCE only, never an independent approval.
             seen_codes = {c.code for c in seeds}
             for stem in idx:
                 for c in _authoritative_pool(stem, source):
