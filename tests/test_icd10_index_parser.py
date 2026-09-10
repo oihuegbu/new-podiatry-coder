@@ -1,5 +1,5 @@
-"""issue #6 F9-R12-A: ICD-10-CM Alphabetic Index cross-reference resolution
-and its DOWNSTREAM consumers.
+"""issue #6 F9-R12-A/F9-R12-B: ICD-10-CM Alphabetic Index cross-reference
+resolution and its DOWNSTREAM consumers.
 
 `tools/parse_icd10cm_index.py`'s `subtree_codes` recursively follows a
 <see>/<seeAlso> redirect it meets WHILE walking a subtree (not just the
@@ -9,14 +9,26 @@ its own codeless "finger"/"toe" children -> see -> the direct "Cellulitis,
 finger"/"toe" entries that carry the real codes). The synthetic XML below
 mirrors that STRUCTURAL pattern only -- not the actual CMS content.
 
-A second, independent regression here: the parser now writes redirect
-aliases to their OWN `cross_reference_terms` map, kept separate from
-`terms` (direct Index entries) specifically so `app/rag/vector_store.py`
--- which only ever reads `terms` -- can never flatten a broad redirect
-alias into a per-code embedding vector (a redirect alias can span
-thousands of descendant codes; embedding it into every one pollutes
-retrieval for the whole family, displacing that code's own precise,
-Index-authored terms out of the capped per-code slot).
+F9-R12-A: the parser writes redirect aliases to their OWN
+`cross_reference_terms` map, kept separate from `terms` (direct Index
+entries) specifically so `app/rag/vector_store.py` -- which only ever
+reads `terms` -- can never flatten a broad redirect alias into a per-code
+embedding vector (a redirect alias can span thousands of descendant
+codes; embedding it into every one pollutes retrieval for the whole
+family, displacing that code's own precise, Index-authored terms out of
+the capped per-code slot).
+
+F9-R12-B (Codex's independent structural check against the real FY2026
+CDC/NCHS source archive): the alias-emission loop only ever scanned
+TOP-LEVEL <mainTerm> nodes, skipped any node that already had a direct
+<code>, and read only one of <see>/<seeAlso> when both were present --
+5,400 reference directives (104,823 source code associations) were
+silently dropped. Fixed by walking every node at every depth
+(`iter_index_nodes`), reading every directive on each node
+(`reference_texts`), letting a coded node ALSO contribute its own
+redirects, and classifying every directive (resolved / a known
+"Table of ..." external-reference convention / genuinely unresolved) so
+nothing is silently dropped.
 
 Previously untested: this whole module had no dedicated test file (fixed
 directly alongside the two-hop parser bug itself, discovered via CI's
@@ -109,13 +121,9 @@ def test_two_hop_seealso_redirect_resolves_to_the_real_codes():
     assert subtree_codes(target, main_terms) == {"L03011", "L03031"}
 
 
-def test_one_hop_only_walk_reproduces_the_original_bug():
-    """Omitting `main_terms` (the ORIGINAL, one-hop-only signature every other
-    caller still uses) must reproduce the exact silent-zero-codes bug this
-    fix closes -- proving the two-hop chase above is what actually changed."""
+def test_subtree_codes_of_a_missing_target_is_empty():
     main_terms = _main_terms(_TWO_HOP_XML)
-    target = navigate("Cellulitis, digit", main_terms)
-    assert subtree_codes(target) == set()
+    assert subtree_codes(None, main_terms) == set()
 
 
 def test_three_hop_redirect_chain_resolves():
@@ -134,6 +142,50 @@ def test_a_cyclical_reference_returns_no_codes_and_terminates():
     assert subtree_codes(main_terms["loopa"], main_terms) == set()
 
 
+_DUAL_DIRECTIVE_XML = """
+<index>
+  <letter>
+    <mainTerm>
+      <title>Dual</title>
+      <see>TargetA</see>
+      <seeAlso>TargetB</seeAlso>
+    </mainTerm>
+    <mainTerm><title>TargetA</title><code>D00.1</code></mainTerm>
+    <mainTerm><title>TargetB</title><code>D00.2</code></mainTerm>
+  </letter>
+</index>
+"""
+
+_CODED_WITH_REDIRECT_XML = """
+<index>
+  <letter>
+    <mainTerm>
+      <title>CodedRedirect</title>
+      <code>D10.0</code>
+      <seeAlso>OtherTarget</seeAlso>
+    </mainTerm>
+    <mainTerm><title>OtherTarget</title><code>D20.0</code></mainTerm>
+  </letter>
+</index>
+"""
+
+
+def test_a_node_with_both_see_and_seealso_unions_both():
+    """issue #6 F9-R12-B: a node reading only `see or seeAlso` silently
+    dropped the second directive when both were present (5 such nodes in
+    the real FY2026 source)."""
+    main_terms = _main_terms(_DUAL_DIRECTIVE_XML)
+    assert subtree_codes(main_terms["dual"], main_terms) == {"D001", "D002"}
+
+
+def test_a_coded_node_preserves_its_own_code_and_its_redirect():
+    """issue #6 F9-R12-B: the original `elif` treated "has a direct code" and
+    "has a redirect" as mutually exclusive, dropping the redirect entirely
+    (1,008 such nodes in the real FY2026 source). Both must survive."""
+    main_terms = _main_terms(_CODED_WITH_REDIRECT_XML)
+    assert subtree_codes(main_terms["codedredirect"], main_terms) == {"D100", "D200"}
+
+
 def test_cross_reference_aliases_are_kept_out_of_the_direct_terms_map(tmp_path, monkeypatch):
     """The parser's own `main()`, end to end: a redirect alias must land in
     `cross_reference_terms`, never merged into `terms` (issue #6 F9-R12-A --
@@ -150,6 +202,24 @@ def test_cross_reference_aliases_are_kept_out_of_the_direct_terms_map(tmp_path, 
     assert "paronychia" not in data["terms"].get("L03031", [])
     assert "paronychia" in data["cross_reference_terms"].get("L03011", [])
     assert "paronychia" in data["cross_reference_terms"].get("L03031", [])
+
+
+def test_a_nested_redirect_source_emits_its_own_full_path_alias(tmp_path, monkeypatch):
+    """issue #6 F9-R12-B: the alias loop previously only scanned TOP-LEVEL
+    mainTerms as redirect SOURCES -- a nested source node like 'Cellulitis >
+    digit > finger' (itself a <see> redirect, not just a hop `subtree_codes`
+    passes through while resolving SOMEONE ELSE's redirect) never got its
+    own alias emitted at all. It must now, carrying its FULL navigational
+    path ('cellulitis digit finger'), not just its bare leaf title."""
+    import tools.parse_icd10cm_index as mod
+    src = tmp_path / "index.xml"
+    src.write_text(_TWO_HOP_XML)
+    dst = tmp_path / "out.json"
+    monkeypatch.setattr(sys, "argv", ["parse_icd10cm_index.py", str(src), str(dst)])
+    mod.main()
+    data = json.loads(dst.read_text())
+    assert "cellulitis digit finger" in data["cross_reference_terms"].get("L03011", [])
+    assert "cellulitis digit toe" in data["cross_reference_terms"].get("L03031", [])
 
 
 def test_a_broad_cross_reference_alias_never_enters_per_code_embedding_text(
@@ -190,3 +260,49 @@ def test_a_broad_cross_reference_alias_never_enters_per_code_embedding_text(
     assert "paronychia" not in embedding_text
     for term in direct_terms:
         assert term in embedding_text, (term, embedding_text)
+
+
+_MIXED_CLASSIFICATION_XML = """
+<index>
+  <letter>
+    <mainTerm>
+      <title>Resolvable</title>
+      <see>RealTarget</see>
+    </mainTerm>
+    <mainTerm><title>RealTarget</title><code>M00.1</code></mainTerm>
+    <mainTerm>
+      <title>ExternalRef</title>
+      <see>Table of Drugs and Chemicals</see>
+    </mainTerm>
+    <mainTerm>
+      <title>Dangling</title>
+      <see>Nowhere, at all, not real</see>
+    </mainTerm>
+  </letter>
+</index>
+"""
+
+
+def test_every_reference_directive_is_classified_never_silently_dropped(tmp_path, monkeypatch):
+    """issue #6 F9-R12-B: a whole-source coverage property, not just a
+    hand-picked two-hop shape -- every <see>/<seeAlso> directive in the
+    document is accounted for in `reference_directives`, classified as
+    resolved / external_table_reference / unresolved, summing to the
+    document's actual total. None may vanish uncounted."""
+    import tools.parse_icd10cm_index as mod
+    src = tmp_path / "index.xml"
+    src.write_text(_MIXED_CLASSIFICATION_XML)
+    dst = tmp_path / "out.json"
+    monkeypatch.setattr(sys, "argv", ["parse_icd10cm_index.py", str(src), str(dst)])
+    mod.main()
+    data = json.loads(dst.read_text())
+    directives = data["reference_directives"]
+    assert directives["total"] == 3
+    assert directives["resolved"] == 1
+    assert directives["external_table_reference"] == 1
+    assert directives["unresolved"] == 1
+    assert (directives["resolved"] + directives["external_table_reference"]
+           + directives["unresolved"]) == directives["total"]
+    assert any("nowhere" in s.lower() for s in directives["unresolved_sample"])
+    # The resolved directive still produces a real alias; the other two must not.
+    assert "resolvable" in data["cross_reference_terms"].get("M001", [])

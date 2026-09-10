@@ -1984,6 +1984,15 @@ class CodingValidator:
 
     _EG_PAREN_RE = re.compile(r"\((?:eg|e\.g\.)[^)]*\)")
 
+    #: Generic English qualifier connectors (issue #6 F9-R12-B) -- not
+    #: clinical vocabulary, just the structural grammar an Index/inclusion
+    #: term uses to join TWO distinct findings into one compound phrase
+    #: ('X with Y', 'X due to Y'). `_any_term_documented`'s single-rare-
+    #: token shortcut must not fire on a term shaped like this: matching
+    #: only 'X' does not prove 'Y' was also documented.
+    _QUALIFIER_CONNECTOR_RE = re.compile(
+        r"\b(with|without|due to|secondary to|associated with|complicated by)\b")
+
     def _anatomy_lexicon(self) -> set:
         """Anatomy/site vocabulary mined from ICD-10-CM category headings:
         the words AFTER the 'of/at' pivot name sites ('Fracture OF foot and
@@ -2763,6 +2772,22 @@ class CodingValidator:
                 # though 'metatarsalgia' never appears).
                 if all(self._desc_documented(t, words, low) for t in toks):
                     return True
+                # issue #6 F9-R12-B: the single-rare-token shortcut below is
+                # only sound when the term names ONE entity by an alternate
+                # word -- an eponym vs. its descriptive name (Morton's
+                # example above), where either token alone is evidence of
+                # the SAME thing. A term whose own text joins two distinct
+                # clinical findings with a qualifying connector ('paronychia
+                # WITH lymphangitis', '... due to ...') names a compound,
+                # DIFFERENT condition -- each side must be independently
+                # documented, so a note mentioning only 'paronychia' must
+                # not "prove" a term that also requires lymphangitis. The
+                # richer Index cross-reference data (F9-R12-B's full-depth
+                # traversal) now surfaces real compound phrases like this
+                # one that the shortcut previously never saw.
+                if (len(toks) > 1
+                        and self._QUALIFIER_CONNECTOR_RE.search(term)):
+                    continue
                 if any(self._icd_token_df.get(t, 0) <= 25
                        and self._desc_documented(t, words, low)
                        for t in toks):

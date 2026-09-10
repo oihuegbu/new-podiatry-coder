@@ -3,7 +3,10 @@ icd10cm-index-*.xml) into data/codes/icd10cm_index_terms.json:
 
     {"version": "...",
      "terms": {"<dotless code>": ["phrase", ...]},
-     "cross_reference_terms": {"<dotless code>": ["alias phrase", ...]}}
+     "cross_reference_terms": {"<dotless code>": ["alias phrase", ...]},
+     "reference_directives": {"total": N, "resolved": N,
+                              "external_table_reference": N, "unresolved": N,
+                              "unresolved_sample": ["<raw ref text>", ...]}}
 
 Two DISTINCT trust tiers, kept in separate maps (issue #6 F9-R12-A) rather
 than merged, because they mean different things and downstream consumers
@@ -14,26 +17,36 @@ must not treat them alike:
    modifiers in <nemod> are dropped). Trailing '-' on codes (incomplete
    stems like L03.03-) is stripped; consumers prefix-match. This is a
    precise clinician-term -> code mapping, safe to embed per-code.
-2. `cross_reference_terms` -- redirect aliases: a mainTerm with NO code of
-   its own whose <see>/<seeAlso> points at another main term ("Paronychia
-   — see also Cellulitis, digit") contributes its own title as an alias
-   phrase on every code under the referenced main term's subtree. This is
-   what maps 'paronychia' to the L03.0x cellulitis family and NOT to the
-   L03.04x lymphangitis family (which lives under the 'Lymphangitis' main
-   term). The subtree walk itself follows a SECOND <see>/<seeAlso> hop too,
-   when a node inside that subtree also carries no code of its own:
-   'Cellulitis > digit > finger'/'toe' are themselves such codeless
-   redirects (each points back to the direct 'Cellulitis, finger'/
-   'Cellulitis, toe' entry that DOES carry a code), so a naive
-   one-hop-only walk finds zero codes under 'digit' and silently drops the
-   alias entirely.
-   A redirect means "keep navigating under this term", not "this bare word
-   is an equivalent synonym for every descendant code" -- a broad redirect
-   can fan out to hundreds of codes, so `cross_reference_terms` must never
-   be flattened into a per-code embedding vector (that pollutes retrieval
-   for every code in the family). It is only for exact Index lookup, which
-   already defers a multi-code hit to candidate narrowing rather than
-   trusting it blindly (see `claude_coder.resolution`).
+2. `cross_reference_terms` -- redirect aliases: any Index node (mainTerm OR
+   a nested <term> at ANY depth) whose <see>/<seeAlso> points elsewhere
+   contributes its own FULL navigational path as an alias phrase on every
+   code under the referenced target's subtree ("Paronychia — see also
+   Cellulitis, digit" maps 'paronychia' to the L03.0x cellulitis family,
+   not the L03.04x lymphangitis family). A redirect means "keep navigating
+   under this term", not "this bare word is an equivalent synonym for
+   every descendant code" -- a broad redirect can fan out to hundreds of
+   codes, so `cross_reference_terms` must never be flattened into a
+   per-code embedding vector (that pollutes retrieval for every code in
+   the family). It is only for exact Index lookup, which already defers a
+   multi-code hit to candidate narrowing rather than trusting it blindly
+   (see `claude_coder.resolution`).
+
+issue #6 F9-R12-B (Codex's independent structural check against the real
+FY2026 CDC/NCHS source archive): an earlier version of this compiler only
+scanned TOP-LEVEL <mainTerm> nodes for their OWN <see>/<seeAlso>, skipped
+any node that already carried a direct <code>, and read only ONE of
+<see>/<seeAlso> when a node had both. Measured against the real source:
+5,400 reference directives -- 104,823 source code associations -- were
+silently dropped this way. Fixed by walking EVERY node at every depth
+(`iter_index_nodes`), reading ALL <see>/<seeAlso> elements on each node
+(`reference_texts`), and letting a node contribute both its own direct
+code AND every one of its redirects (`subtree_codes` no longer treats
+"has a code" and "has a redirect" as mutually exclusive). Every directive
+is now classified (resolved / a known "Table of ..." external-reference
+convention this compiler has no table to navigate into / genuinely
+unresolved) and the counts persist in the artifact's own
+`reference_directives` block -- so a directive this compiler cannot
+resolve is a visible, counted gap, never a silent drop.
 
 Usage: python tools/parse_icd10cm_index.py <icd10cm-index-*.xml> [out.json]
 """
@@ -48,6 +61,15 @@ from collections import defaultdict
 from pathlib import Path
 
 CODE_RE = re.compile(r"^[A-Z][0-9][0-9A-Z](?:\.[0-9A-Za-z]{1,4})?-?$")
+
+#: The Index's OWN structural convention for a redirect that leaves this
+#: document entirely, into a separate table this compiler does not model
+#: (e.g. "see Table of Drugs and Chemicals", "see Table of Neoplasms") --
+#: a formatting/section-heading convention of the source, not a diagnosis
+#: name, matched the same way `_rvu_release_effective_from` elsewhere in
+#: this codebase matches a source's own declared convention rather than
+#: guessing.
+_EXTERNAL_TABLE_PREFIX = "table of"
 
 
 def plain_title(node) -> str:
@@ -79,12 +101,46 @@ def walk(node, path, out):
         walk(child, p, out)
 
 
+def iter_index_nodes(node, path=()):
+    """Every node in `node`'s own subtree (itself included), each paired with
+    its full navigational title path -- issue #6 F9-R12-B: the ONLY way to
+    find a redirect attached to a nested <term> rather than a top-level
+    <mainTerm>, which the alias-emission loop below previously never
+    visited at all."""
+    title = plain_title(node)
+    current = (*path, title) if title else path
+    yield node, current
+    for child in node.findall("term"):
+        yield from iter_index_nodes(child, current)
+
+
+def reference_texts(node):
+    """Every <see>/<seeAlso> directive on `node`, as (tag, ref text) pairs --
+    issue #6 F9-R12-B: a node reading only `findtext("see") or
+    findtext("seeAlso")` silently drops a second directive when both are
+    present (5 such nodes in the real FY2026 source); `findall` reads every
+    element of each tag."""
+    for tag in ("see", "seeAlso"):
+        for element in node.findall(tag):
+            value = (element.text or "").strip()
+            if value:
+                yield tag, value
+
+
+def _norm_ws(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
+
+
 def navigate(ref, main_terms):
     """Follow a full 'see' reference path ('Entity, part, qualifier') into the
     subtree, matching each comma part to a nested term title. Returns the precise
     target node — NOT the whole main term — so an alias lands only on the referenced
-    codes. Conservative: if any step can't be matched, returns None (no alias)."""
-    parts = [p.strip().lower() for p in ref.split(",") if p.strip()]
+    codes. Conservative: if any step can't be matched, returns None (no alias).
+    Whitespace-normalized on both sides (issue #6 F9-R12-B): the source XML's
+    <see>/<seeAlso> text occasionally carries doubled internal spacing
+    ('Abnormal,  diagnostic imaging') that a bare .strip() does not collapse,
+    which otherwise fails an exact title match that is genuinely present."""
+    parts = [_norm_ws(p).lower() for p in ref.split(",") if _norm_ws(p)]
     if not parts:
         return None
     node = main_terms.get(parts[0])
@@ -92,36 +148,51 @@ def navigate(ref, main_terms):
         if node is None:
             return None
         node = next((t for t in node.findall("term")
-                     if plain_title(t).lower() == part), None)
+                     if _norm_ws(plain_title(t)).lower() == part), None)
     return node
 
 
-def subtree_codes(node, main_terms=None, _visited=None) -> set[str]:
-    """Every code reachable under `node`'s subtree -- including through a
-    NESTED node's own <see>/<seeAlso> when that node carries no direct code
-    of its own. Some Index branches are themselves a second hop: e.g.
-    Cellulitis > digit > finger/toe each carry no code, only a <see> back to
-    the direct 'Cellulitis, finger'/'Cellulitis, toe' entries that do (this
-    is what previously made a one-hop alias like 'Paronychia -- see also
-    Cellulitis, digit' resolve to zero codes, silently, even though a real
-    two-hop path to L03.01-/L03.03- exists). `main_terms`/`_visited` are
-    only needed to chase that second hop; omitting `main_terms` reproduces
-    the original one-hop-only behavior for any other caller."""
-    if _visited is None:
-        _visited = set()
+def classify_reference(ref: str, main_terms) -> str:
+    """"resolved" (navigate finds a real target in this same Index),
+    "external_table_reference" (the Index's own "Table of ..." convention --
+    a real, known kind of redirect this compiler has no external table to
+    follow), or "unresolved" (neither -- a genuine, counted gap; issue #6
+    F9-R12-B requires every directive be classified, never silently
+    dropped)."""
+    if navigate(ref, main_terms) is not None:
+        return "resolved"
+    if ref.strip().lower().startswith(_EXTERNAL_TABLE_PREFIX):
+        return "external_table_reference"
+    return "unresolved"
+
+
+def subtree_codes(node, main_terms, visited=None) -> set[str]:
+    """Every code reachable under `node`'s subtree: `node`'s own direct code
+    (if any) UNION every code its own <see>/<seeAlso> directives resolve to
+    (a coded node may ALSO redirect -- issue #6 F9-R12-B: 1,008 such nodes
+    in the real source, previously excluded outright by an `elif` that
+    treated "has a code" and "has a redirect" as mutually exclusive) UNION
+    every descendant term's own codes, recursively (so a REDIRECT'S target
+    can itself be a codeless node whose own further redirect must be
+    chased -- the original two-hop fix, preserved). `visited` guards
+    against a cyclical reference by (tag, ref) identity so this always
+    terminates."""
+    if node is None:
+        return set()
+    visited = set() if visited is None else visited
     codes = set()
-    c = norm_code(node.findtext("code") or "")
-    if c:
-        codes.add(c)
-    elif main_terms is not None:
-        ref = (node.findtext("see") or node.findtext("seeAlso") or "").strip()
-        if ref and ref.lower() not in _visited:
-            _visited.add(ref.lower())
-            target = navigate(ref, main_terms)
-            if target is not None:
-                codes |= subtree_codes(target, main_terms, _visited)
+    direct = norm_code(node.findtext("code") or "")
+    if direct:
+        codes.add(direct)
+    for tag, ref in reference_texts(node):
+        key = (tag, ref.casefold())
+        if key in visited:
+            continue
+        target = navigate(ref, main_terms)
+        if target is not None:
+            codes |= subtree_codes(target, main_terms, visited | {key})
     for child in node.findall("term"):
-        codes |= subtree_codes(child, main_terms, _visited)
+        codes |= subtree_codes(child, main_terms, visited)
     return codes
 
 
@@ -134,42 +205,54 @@ def main():
     main_terms: dict[str, ET.Element] = {}
     for letter in root.findall("letter"):
         for mt in letter.findall("mainTerm"):
-            title = plain_title(mt).lower()
+            title = _norm_ws(plain_title(mt)).lower()
             if title:
                 main_terms.setdefault(title, mt)
             walk(mt, [], out)
 
-    # Cross-reference aliases for code-less main terms: kept in a SEPARATE map
-    # (issue #6 F9-R12-A) -- a redirect alias is exact-Index-lookup signal
-    # only, never per-code embedding text (see module docstring).
+    # Cross-reference aliases: kept in a SEPARATE map (issue #6 F9-R12-A) --
+    # a redirect alias is exact-Index-lookup signal only, never per-code
+    # embedding text (see module docstring). issue #6 F9-R12-B: walks EVERY
+    # node at every depth via `iter_index_nodes`, not just top-level
+    # mainTerms, and reads every directive on each via `reference_texts`.
     cross_ref: dict[str, set] = defaultdict(set)
-    aliases = 0
+    directive_counts = {"total": 0, "resolved": 0,
+                        "external_table_reference": 0, "unresolved": 0}
+    unresolved_sample: set[str] = set()
     for letter in root.findall("letter"):
         for mt in letter.findall("mainTerm"):
-            title = plain_title(mt).lower()
-            if not title or norm_code(mt.findtext("code") or ""):
-                continue
-            ref = (mt.findtext("see") or mt.findtext("seeAlso") or "").strip()
-            if not ref:
-                continue
-            target = navigate(ref, main_terms)
-            if target is None:
-                continue
-            for code in subtree_codes(target, main_terms):
-                cross_ref[code].add(title)
-                aliases += 1
+            for node, path in iter_index_nodes(mt):
+                phrase = " ".join(p for p in path if p).lower()
+                if not phrase:
+                    continue
+                for tag, ref in reference_texts(node):
+                    directive_counts["total"] += 1
+                    status = classify_reference(ref, main_terms)
+                    directive_counts[status] += 1
+                    if status != "resolved":
+                        if len(unresolved_sample) < 200:
+                            unresolved_sample.add(f"{tag}: {ref}")
+                        continue
+                    target = navigate(ref, main_terms)
+                    for code in subtree_codes(target, main_terms):
+                        cross_ref[code].add(phrase)
 
     version = root.findtext("version") or ""
     data = {"version": version.strip(),
             "source": src.name,
             "terms": {c: sorted(ps) for c, ps in sorted(out.items())},
-            "cross_reference_terms": {c: sorted(ps) for c, ps in sorted(cross_ref.items())}}
+            "cross_reference_terms": {c: sorted(ps) for c, ps in sorted(cross_ref.items())},
+            "reference_directives": {**directive_counts,
+                                    "unresolved_sample": sorted(unresolved_sample)}}
     dst.write_text(json.dumps(data, indent=1))
     n_phrases = sum(len(v) for v in out.values())
     n_xref = sum(len(v) for v in cross_ref.values())
     print(f"{len(out)} codes, {n_phrases} direct phrases, "
-          f"{len(cross_ref)} codes / {n_xref} cross-reference phrases "
-          f"({aliases} see/seeAlso aliases resolved) -> {dst}")
+          f"{len(cross_ref)} codes / {n_xref} cross-reference phrases -> {dst}")
+    print(f"reference directives: {directive_counts['total']} total, "
+          f"{directive_counts['resolved']} resolved, "
+          f"{directive_counts['external_table_reference']} external-table, "
+          f"{directive_counts['unresolved']} unresolved")
 
 
 if __name__ == "__main__":
