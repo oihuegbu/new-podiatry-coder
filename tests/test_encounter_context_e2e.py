@@ -193,6 +193,81 @@ def test_the_note_cannot_supply_or_override_a_resolved_identity(deployment,
     assert deployment.ingest()["recorded"] == 0
 
 
+def test_a_note_documented_dob_in_a_different_but_equivalent_format_is_not_a_conflict(
+        deployment, monkeypatch):
+    """The identity comparator is date-aware, not string-aware.
+
+    The roster stores this patient's birth date as `09/02/1982` (US
+    presentation). A note that extracts the SAME calendar date in ISO
+    presentation (`1982-09-02`) is not a disagreement, and must not hold an
+    otherwise-clean encounter over a presentation difference alone.
+    """
+    monkeypatch.setattr(entrypoint, "extract_from_pdf", lambda pdf_path:
+                        vision_extraction(
+                            [NOTE_TEXT],
+                            metadata={"date_of_service": DOS_ISO,
+                                      "date_of_birth": "1982-09-02"},
+                            pdf_path=pdf_path,
+                            extracted_text_sha256=EXTRACTED_TEXT_SHA))
+    assert _run(deployment) == 0
+    bundle = _bundle(deployment, STEM)
+
+    assert bundle.context.resolution.value == "RESOLVED"
+    assert bundle.context.conflicts == ()
+    assert bundle.release_blockers() == ()
+    assert deployment.ingest()["recorded"] == 1
+
+
+def test_a_note_documented_dob_that_is_a_genuinely_different_date_conflicts(
+        deployment, monkeypatch):
+    """A real disagreement, not a format artifact, must still hold.
+
+    One day off the roster's date, in the roster's OWN presentation format, so
+    a fix that merely tolerates format differences cannot be mistaken for one
+    that stopped comparing dates at all.
+    """
+    monkeypatch.setattr(entrypoint, "extract_from_pdf", lambda pdf_path:
+                        vision_extraction(
+                            [NOTE_TEXT],
+                            metadata={"date_of_service": DOS_ISO,
+                                      "date_of_birth": "09/03/1982"},
+                            pdf_path=pdf_path,
+                            extracted_text_sha256=EXTRACTED_TEXT_SHA))
+    assert _run(deployment) == 0
+    bundle = _bundle(deployment, STEM)
+
+    assert bundle.context.resolution.value == "CONFLICT"
+    assert any("patient.date_of_birth" in c for c in bundle.context.conflicts), \
+        bundle.context.conflicts
+    assert bundle.release_blockers()
+    assert deployment.ingest()["recorded"] == 0
+
+
+def test_an_unparseable_note_documented_dob_holds_instead_of_passing_silently(
+        deployment, monkeypatch):
+    """An unrecognized date presentation is a hold, not an assumed match.
+
+    Silently treating a value the comparator can't parse as "no disagreement"
+    would let a garbled extraction pass corroboration it never actually
+    passed.
+    """
+    monkeypatch.setattr(entrypoint, "extract_from_pdf", lambda pdf_path:
+                        vision_extraction(
+                            [NOTE_TEXT],
+                            metadata={"date_of_service": DOS_ISO,
+                                      "date_of_birth": "not-a-date"},
+                            pdf_path=pdf_path,
+                            extracted_text_sha256=EXTRACTED_TEXT_SHA))
+    assert _run(deployment) == 0
+    bundle = _bundle(deployment, STEM)
+
+    assert bundle.context.resolution.value == "CONFLICT"
+    assert any("patient.date_of_birth" in c for c in bundle.context.conflicts), \
+        bundle.context.conflicts
+    assert bundle.release_blockers()
+    assert deployment.ingest()["recorded"] == 0
+
+
 def test_a_resolved_context_may_not_carry_a_note_derived_required_field():
     """The invariant behind the test above, at the boundary that enforces it.
 

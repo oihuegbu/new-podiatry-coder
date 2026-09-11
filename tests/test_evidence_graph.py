@@ -1509,6 +1509,108 @@ class DependencyScopedPartialRelease(unittest.TestCase):
         self.assertTrue(blocking and blocking[0]["blocking"],
                         "an unread page's hold must be a BLOCKING routing item")
 
+    def test_a_noncanonical_relation_endpoint_can_never_scope_a_second_reading_gate(self):
+        """issue #6, Codex's independent re-review (round 3, P1 RC2): `autonomy.
+        decide` trusts a gate's `affected_fact_ids` as a safe scope with no
+        membership check of its own -- `bool(affected_fact_ids)` alone decides
+        whether a hold is scoped (non-blocking) or encounter-wide. Codex proved
+        that trusting a raw, unverified relation-endpoint id there is unsafe:
+        naming a nonexistent id reproduced `AUTO_READY` with the held service's
+        line simply missing. `pipeline._canonical_scope` (the actual function the
+        real dispatch site now calls before ever constructing such a gate) must
+        filter that id out -- proved here by feeding it a ghost id and driving the
+        resulting gate through the REAL `autonomy.decide()`, not a simulation of
+        it.
+        """
+        from claude_coder.models import CandidateCode, CodingResult, ResolutionMethod, ResolvedLine
+        from claude_coder.models import GateResult, Outcome
+        from claude_coder.autonomy import decide
+        from claude_coder.pipeline import _canonical_scope
+
+        proc_a = _fact("PA", FactKind.PROCEDURE, "procedure A",
+                      spans=[_span("procedure A performed", span_id="sp-PA")],
+                      attributes={"anatomy": "site-a"})
+        facts = [proc_a]
+        intents = eligibility.evaluate(facts, [], "enc", "2026-03-14")
+        episodes, _ = eligibility.build_episodes(facts, [], "enc", "2026-03-14")
+        compiled = graph.build_graph(facts, [], intents, encounter_id="enc",
+                                     date_of_service="2026-03-14", episodes=episodes,
+                                     extraction_schema_version="v1",
+                                     relation_grammar_version="v1")
+        lines = [
+            ResolvedLine(fact=proc_a, chosen=CandidateCode("CPT_A", "cpt", "procedure A"),
+                        method=ResolutionMethod.DETERMINISTIC),
+        ]
+        canonical_fact_ids = {f.fact_id for f in facts}
+        scope = _canonical_scope(("F_GHOST",), canonical_fact_ids)
+        self.assertEqual(scope, (), "a nonexistent id must never survive the filter")
+
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14",
+                              lines=lines, graph=compiled, claim_line_intents=list(intents),
+                              gates=[GateResult(
+                                  "second_reading_relation_unplaced:S1", Outcome.UNKNOWN,
+                                  "the second reading places this event in a relationship "
+                                  "this graph cannot reproduce faithfully",
+                                  "event-candidate union", retryable=False,
+                                  affected_fact_ids=scope)])
+        decide(result, source=None)
+        self.assertNotEqual(result.destination.value, "AUTO_READY", result.notes)
+        blocking = [r for r in result.routing
+                   if r["subject"] == "second_reading_relation_unplaced:S1"]
+        self.assertTrue(blocking and blocking[0]["blocking"],
+                        "an unresolvable scope must fall back to a BLOCKING hold, "
+                        "never a nonblocking one that silently excludes nothing")
+
+    def test_a_canonical_relation_endpoint_scopes_only_its_own_line_through_the_real_filter(
+            self):
+        """The positive counterpart, through the SAME real `_canonical_scope`
+        function: a genuinely canonical id is preserved (even alongside a ghost
+        id in the same tuple), and `autonomy.decide` excludes only the line it
+        names -- an unrelated, independently documented procedure must still
+        release."""
+        from claude_coder.models import CandidateCode, CodingResult, ResolutionMethod, ResolvedLine
+        from claude_coder.models import GateResult, Outcome
+        from claude_coder.autonomy import decide
+        from claude_coder.pipeline import _canonical_scope
+
+        proc_a = _fact("PA", FactKind.PROCEDURE, "procedure A",
+                      spans=[_span("procedure A performed", span_id="sp-PA")],
+                      attributes={"anatomy": "site-a"})
+        proc_b = _fact("PB", FactKind.PROCEDURE, "procedure B",
+                      spans=[_span("procedure B performed", span_id="sp-PB")],
+                      attributes={"anatomy": "site-b"})
+        facts = [proc_a, proc_b]
+        intents = eligibility.evaluate(facts, [], "enc", "2026-03-14")
+        episodes, _ = eligibility.build_episodes(facts, [], "enc", "2026-03-14")
+        compiled = graph.build_graph(facts, [], intents, encounter_id="enc",
+                                     date_of_service="2026-03-14", episodes=episodes,
+                                     extraction_schema_version="v1",
+                                     relation_grammar_version="v1")
+        lines = [
+            ResolvedLine(fact=proc_a, chosen=CandidateCode("CPT_A", "cpt", "procedure A"),
+                        method=ResolutionMethod.DETERMINISTIC),
+            ResolvedLine(fact=proc_b, chosen=CandidateCode("CPT_B", "cpt", "procedure B"),
+                        method=ResolutionMethod.DETERMINISTIC),
+        ]
+        canonical_fact_ids = {f.fact_id for f in facts}
+        scope = _canonical_scope(("PA", "F_GHOST"), canonical_fact_ids)
+        self.assertEqual(scope, ("PA",),
+                         "the real id survives, the ghost alongside it does not")
+
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14",
+                              lines=lines, graph=compiled, claim_line_intents=list(intents),
+                              gates=[GateResult(
+                                  "second_reading_relation_unplaced:S1", Outcome.UNKNOWN,
+                                  "the second reading places this event in a relationship "
+                                  "this graph cannot reproduce faithfully",
+                                  "event-candidate union", retryable=False,
+                                  affected_fact_ids=scope)])
+        decide(result, source=None)
+        self.assertEqual(result.destination.value, "AUTO_READY", result.notes)
+        self.assertEqual([ln.chosen.code for ln in result.billable_lines], ["CPT_B"])
+        self.assertIsNotNone(lines[0].excluded_reason)
+        self.assertIsNone(lines[1].excluded_reason)
+
     def test_an_isolated_unresolved_diagnosis_never_blocks_an_unrelated_justified_pair(self):
         """issue #6 F9-R9-A, Codex's independent re-review of 6ff2761: a
         diagnosis with NO documented relationship to anything else on the
@@ -2959,17 +3061,25 @@ class PhysicalLocationIdentityAcrossReadings(unittest.TestCase):
                          "same page must still be recovered, not merged away")
 
     def test_an_unplaceable_relation_strands_the_event_scoped_to_its_endpoint(self):
-        """issue #6, Codex's independent re-review, root cause 2 (P1 RC2-A): the
-        SAME shape as the test above (a genuinely distinct, disjointly-located
-        service that would otherwise ADMIT), but the second reading also
-        names a relation from this event to a target this graph never
-        resolves (never aligned, never a primary, never itself admitted) --
-        the edge cannot be carried faithfully, so the event is held instead
-        of admitted. This is a DIFFERENT cause than an unread page: tagged
-        `RELATION_UNPLACED`, with `affected_ids` naming the relation's own
-        (unplaceable) endpoint, so a caller can scope the hold instead of
-        treating it as an encounter-wide "might be anywhere" unread-page
-        hold."""
+        """issue #6, Codex's independent re-review, root cause 2 (P1 RC2-A, round 3):
+        the SAME shape as the test above (a genuinely distinct, disjointly-located
+        service that would otherwise ADMIT), but the second reading also names a
+        relation from this event to a target this graph never resolves (never
+        aligned, never a primary, never itself admitted) -- the edge cannot be
+        carried faithfully, so the event is held instead of admitted.
+
+        Codex's independent re-review, round 3: the FIRST version of this test
+        asserted `affected_ids == ("F_GHOST",)` -- the raw, unverified relation
+        endpoint, stored and trusted as if it were a real fact id. Codex proved
+        that is exactly the unsafe shape: a caller (`pipeline.py`) that treats any
+        non-empty `affected_fact_ids` as a safe scope would let a nonexistent id
+        make this gate LOOK scoped while excluding nothing real, silently
+        releasing the claim with this held service simply missing (reproduced by
+        Codex with `affected_fact_ids = ("GHOST",)` -> `AUTO_READY`). `F_GHOST`
+        never resolves through this graph's own canonical mapping, so the FIXED
+        behavior is an honestly EMPTY `affected_ids` -- forcing the caller to fall
+        back to an encounter-wide hold instead of trusting a label nothing backs.
+        """
         from claude_coder import event_union as _union
         from claude_coder.models import RelationAssertion, RelationPredicate, RelationState
 
@@ -2993,7 +3103,9 @@ class PhysicalLocationIdentityAcrossReadings(unittest.TestCase):
             "s1": ("AGREED", [3], (3, 400.0, 400.0, 450.0, 420.0)),
         })
         # Names S1 as PART_OF an event this graph never resolves (not a
-        # primary, not another admitted second-reading event, not aligned).
+        # primary, not another admitted second-reading event, not aligned) --
+        # a fabricated/typo'd reference, indistinguishable in shape from a
+        # real one without checking it against the graph.
         unplaceable = RelationAssertion(
             subject_event_id="S1", predicate=RelationPredicate.PART_OF,
             object_event_id="F_GHOST", state=RelationState.ASSERTED,
@@ -3006,10 +3118,122 @@ class PhysicalLocationIdentityAcrossReadings(unittest.TestCase):
         self.assertEqual(recovery.candidates[0].verdict, _union.HELD_UNVERIFIED)
         self.assertEqual(recovery.candidates[0].hold_cause,
                          _union.RecoveryHoldCause.RELATION_UNPLACED.value)
-        self.assertEqual(recovery.candidates[0].affected_ids, ("F_GHOST",))
+        self.assertEqual(recovery.candidates[0].affected_ids, (),
+                         "F_GHOST resolves to nothing in this graph -- it must "
+                         "never be trusted as a safe scope, so the honest result "
+                         "is empty, not the raw unverified label")
         self.assertEqual(recovery.facts, (),
                          "a stranded event must never become an independently "
                          "billable line")
+
+    def test_a_stranded_relations_real_canonical_endpoint_is_named_precisely(self):
+        """The sibling of the ghost-endpoint case above: when a stranded relation's
+        OTHER endpoint genuinely IS a live, canonical event (here, a second-reading
+        event `alignment` already identifies as primary event F1), the hold must
+        still be scoped to that real id -- the fix filters out only what is NOT
+        real, never what is. `S1`'s edge to `S2` fails to carry for an UNRELATED
+        reason (no evidence reference survives remapping), proving the id is
+        rejected on its own lack of evidence, not because a real endpoint got
+        swept away along with the ghost case above.
+        """
+        from claude_coder import event_union as _union
+        from claude_coder.models import RelationAssertion, RelationPredicate, RelationState
+
+        primary_span = EvidenceSpan(
+            text="Procedure one performed today", anchored=True,
+            start=0, end=10, span_id="p1", reading_channel_id="")
+        primary = [_fact("F1", FactKind.PROCEDURE, "procedure one performed",
+                         spans=[primary_span])]
+
+        candidate_span = EvidenceSpan(
+            text="Procedure two performed today", anchored=True,
+            start=0, end=10, span_id="s1", reading_channel_id="second-reading")
+        candidate_fact = _fact("S1", FactKind.PROCEDURE, "procedure two performed",
+                               spans=[candidate_span])
+
+        candidates = _union.propose(primary, [candidate_fact])
+        self.assertEqual(candidates[0].verdict, "")
+
+        reconciliation = self._reconciliation({
+            "p1": ("AGREED", [3], (3, 0.0, 0.0, 50.0, 20.0)),
+            "s1": ("AGREED", [3], (3, 400.0, 400.0, 450.0, 420.0)),
+        })
+        # S2 is not a candidate at all here -- it is the second reading's OWN
+        # event id, which `alignment` already resolves to primary event F1 (an
+        # ordinary corroborated identity, exactly like any other aligned pair).
+        # S1's relation names S2, but with no evidence reference left after
+        # remapping -- an uncarryable edge for a reason that has nothing to do
+        # with whether S2/F1 is real.
+        unplaceable = RelationAssertion(
+            subject_event_id="S1", predicate=RelationPredicate.PART_OF,
+            object_event_id="S2", state=RelationState.ASSERTED,
+            evidence_span_ids=[])
+        recovery = _union.admit(
+            candidates, reconciliation=reconciliation, alignment={"S2": "F1"},
+            second_relations=[unplaceable], taken_ids={"F1"}, id_prefix="second-",
+            primary_facts=primary)
+
+        self.assertEqual(recovery.candidates[0].verdict, _union.HELD_UNVERIFIED)
+        self.assertEqual(recovery.candidates[0].hold_cause,
+                         _union.RecoveryHoldCause.RELATION_UNPLACED.value)
+        self.assertEqual(recovery.candidates[0].affected_ids, ("F1",),
+                         "F1 is a real, live event -- the fix must not discard a "
+                         "genuinely canonical endpoint along with a ghost one")
+
+    def test_relation_validation_withdrawal_scopes_to_the_recovered_events_own_canonical_neighbors(
+            self):
+        """issue #6, Codex's independent re-review (round 3, P1 RC2): when the
+        recovered set's relations fail the trial-graph validation as a group,
+        `Recovery.withdraw` used to tag every admitted candidate
+        `RELATION_INVALID` with NO scoping data at all -- always encounter-wide,
+        even when the withdrawn edges themselves already name real, canonical
+        endpoints. `self.relations` at withdrawal time is exactly this
+        recovery's own edges, ALREADY remapped onto canonical ids by `admit`'s
+        `_remap` -- so a withdrawn candidate's neighbors in those edges are real
+        fact ids, safe to scope to.
+        """
+        from claude_coder import event_union as _union
+        from claude_coder.models import RelationAssertion, RelationPredicate, RelationState
+
+        admitted = _union.EventCandidate(
+            fact=_fact("second-S1", FactKind.PROCEDURE, "procedure two",
+                      spans=[EvidenceSpan(text="x", anchored=True, start=0, end=1,
+                                          span_id="s1", reading_channel_id="second-reading")]),
+            second_event_id="S1", verdict=_union.ADMITTED, node_id="second-S1")
+        edge = RelationAssertion(
+            subject_event_id="second-S1", predicate=RelationPredicate.PART_OF,
+            object_event_id="F1", state=RelationState.ASSERTED, evidence_span_ids=["s1"])
+        recovery = _union.Recovery(candidates=(admitted,), facts=(admitted.fact,),
+                                   relations=(edge,))
+        recovery.withdraw("the recovered set's relations failed validation")
+
+        self.assertEqual(recovery.candidates[0].verdict, _union.HELD_UNVERIFIED)
+        self.assertEqual(recovery.candidates[0].hold_cause,
+                         _union.RecoveryHoldCause.RELATION_INVALID.value)
+        self.assertEqual(recovery.candidates[0].affected_ids, ("F1",))
+        self.assertEqual(recovery.facts, ())
+        self.assertEqual(recovery.relations, ())
+
+    def test_relation_validation_withdrawal_with_no_edge_of_its_own_stays_unscoped(self):
+        """The conservative counterpart: a candidate withdrawn only because it
+        belonged to the admitted group as a whole -- no relation in the withdrawn
+        set names it at all -- gets no scoping data, and the caller must fall back
+        to an encounter-wide hold rather than guessing at a scope.
+        """
+        from claude_coder import event_union as _union
+
+        admitted = _union.EventCandidate(
+            fact=_fact("second-S1", FactKind.PROCEDURE, "procedure two",
+                      spans=[EvidenceSpan(text="x", anchored=True, start=0, end=1,
+                                          span_id="s1", reading_channel_id="second-reading")]),
+            second_event_id="S1", verdict=_union.ADMITTED, node_id="second-S1")
+        recovery = _union.Recovery(candidates=(admitted,), facts=(admitted.fact,), relations=())
+        recovery.withdraw("the recovered set's relations failed validation")
+
+        self.assertEqual(recovery.candidates[0].hold_cause,
+                         _union.RecoveryHoldCause.RELATION_INVALID.value)
+        self.assertEqual(recovery.candidates[0].affected_ids, (),
+                         "no edge names this candidate -- honestly unscoped, not a guess")
 
     def test_same_page_with_no_region_granularity_still_holds_ambiguous(self):
         """The same shape as above, but with no region on either side -- withholding

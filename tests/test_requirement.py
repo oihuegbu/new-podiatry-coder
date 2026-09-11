@@ -212,10 +212,19 @@ class SemanticConceptRequirementRemovedTest(unittest.TestCase):
     technique/approach word indistinguishable from real anatomy), AND a
     multi-token `expected` tuple that `asserted_status` treats as ANY-term-
     supported, letting an unrelated documented word "confirm" a requirement
-    whose real, unstated term was absent. Pinned here so this specific,
-    already-shown-unsafe shape can never silently reappear."""
+    whose real, unstated term was absent.
 
-    def test_no_semantic_action_or_anatomy_axis_is_ever_compiled(self):
+    Round 3: `_semantic_anatomy_requirements` (see `SemanticAnatomyRequirementTest`
+    below) is the governed replacement -- a `semantic_anatomy` axis CAN now be
+    compiled, but only from a target phrase resolved against a real SNOMED
+    concept graph. This test's OWN fixture (`MockSource` with no
+    `concept_lookup` configured for "lesion alpha") never resolves, so no
+    `semantic_anatomy` requirement is produced for it either -- pinned here so
+    an ungoverned structural token specifically can never silently reappear as
+    a requirement, without over-claiming that the axis itself stays forever
+    unpopulated in general."""
+
+    def test_an_ungoverned_structural_token_never_compiles_into_either_axis(self):
         source = MockSource(records={
             ("CAND_EXC", "cpt"): {"active": True, "long_description": "Excision, lesion alpha"},
             ("CAND_REP", "cpt"): {"active": True, "long_description": "Repair, lesion alpha"}})
@@ -224,6 +233,168 @@ class SemanticConceptRequirementRemovedTest(unittest.TestCase):
         reqs = req.compile_requirements([exc, rep], source=source)
         self.assertEqual(
             [r for r in reqs if r.axis in ("semantic_action", "semantic_anatomy")], [])
+
+
+class SemanticAnatomyRequirementTest(unittest.TestCase):
+    """issue #6, Codex's independent re-review (round 3): the governed
+    replacement for the anatomy half of the removed `_semantic_concept_
+    requirements` -- `requirement._semantic_anatomy_requirements`, wired into
+    `compile_requirements` so its output flows through the EXISTING
+    `validated_requirement`/`resolution._grounded_elimination` path. Reuses
+    the SAME governed SNOMED Body Structure concept index (`concept_lookup`)
+    and the SAME atomic target decomposition
+    `semantic_eligibility._anatomy_compatibility` already trusts -- never a
+    new capability invented here. Synthetic, agnostic vocabulary throughout
+    ("structure alpha/beta/gamma"), matching this file's existing convention."""
+
+    ALPHA = _cand("CAND_ALPHA", "assembly service, structure alpha")
+    BETA = _cand("CAND_BETA", "assembly service, structure beta")
+
+    def _records(self, *cands):
+        return {(c.code, c.system): {"active": True, "long_description": c.descriptor}
+               for c in cands}
+
+    def _reconciliation(self, statuses):
+        from app.contracts.source_evidence import (ReconciliationStatus,
+                                                    SourceReconciliation,
+                                                    SpanReconciliation)
+        return SourceReconciliation(spans=tuple(
+            SpanReconciliation(span_id=sid, status=ReconciliationStatus[status])
+            for sid, status in statuses.items()))
+
+    def _coverage(self, text):
+        import hashlib
+        return req.CoverageCorpus(channel_id="test-channel", text=text,
+                                  text_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                                  covered_pages=(1,), page_image_sha256=("stub-hash",))
+
+    def test_an_unresolved_technique_word_never_compiles_a_semantic_anatomy_requirement(self):
+        """The SAME defect-1 fixture as the removed-code pin above, through the
+        NEW mechanism this time: "powered"/"manual" are technique words this
+        repo's SNOMED Body Structure graph simply does not contain, so an
+        unconfigured `concept_lookup` (real behavior for an unrecognized term)
+        must still drop them -- never mistaken for anatomy just because a real
+        governed axis now exists."""
+        source = MockSource(records=self._records(POWERED, MANUAL))
+        reqs = req.compile_requirements([POWERED, MANUAL], source=source)
+        self.assertEqual([r for r in reqs if r.axis == "semantic_anatomy"], [])
+
+    def test_a_governed_distinguishing_anatomy_target_compiles_one_atomic_requirement_each(self):
+        source = MockSource(
+            records=self._records(self.ALPHA, self.BETA),
+            concept_lookup={
+                "structure alpha": {"candidates": ["C_ALPHA"], "unique": True, "expansions": []},
+                "structure beta": {"candidates": ["C_BETA"], "unique": True, "expansions": []}})
+        reqs = [r for r in req.compile_requirements([self.ALPHA, self.BETA], source=source)
+               if r.axis == "semantic_anatomy"]
+        by_code = {r.candidate_code: r for r in reqs}
+        self.assertEqual(set(by_code), {"CAND_ALPHA", "CAND_BETA"})
+        self.assertEqual(by_code["CAND_ALPHA"].expected, ("structure alpha",))
+        self.assertEqual(by_code["CAND_BETA"].expected, ("structure beta",))
+        self.assertEqual(by_code["CAND_ALPHA"].role, req.RequirementRole.MUST_SUPPORT)
+        self.assertTrue(by_code["CAND_ALPHA"].selectable)
+
+    def test_two_distinct_governed_targets_never_bundle_into_one_expected(self):
+        """issue #6, Codex's independent re-review, root cause 3, defect 2: the
+        direct regression pin. A candidate naming TWO alternative, DIFFERENT
+        governed concepts ("structure alpha OR structure beta") must compile
+        TWO separate requirements -- bundling both into one `expected` tuple is
+        exactly the shape that let `asserted_status`'s ANY-of-tuple semantics
+        "confirm" a requirement whose real, unstated term was absent."""
+        both = _cand("CAND_BOTH", "assembly service, structure alpha or structure beta")
+        other = _cand("CAND_OTHER", "assembly service, structure gamma")
+        source = MockSource(
+            records=self._records(both, other),
+            concept_lookup={
+                "structure alpha": {"candidates": ["C_ALPHA"], "unique": True, "expansions": []},
+                "structure beta": {"candidates": ["C_BETA"], "unique": True, "expansions": []},
+                "structure gamma": {"candidates": ["C_GAMMA"], "unique": True, "expansions": []}})
+        reqs = [r for r in req.compile_requirements([both, other], source=source)
+               if r.axis == "semantic_anatomy" and r.candidate_code == "CAND_BOTH"]
+        self.assertEqual(len(reqs), 2, "two distinct concepts must be TWO requirements")
+        all_expected = [set(r.expected) for r in reqs]
+        self.assertIn({"structure alpha"}, all_expected)
+        self.assertIn({"structure beta"}, all_expected)
+
+    def test_a_concept_shared_by_every_tied_candidate_is_never_a_requirement(self):
+        """A concept every tied candidate's OWN descriptor requires says nothing
+        about which one the record means -- validated NOT_DOCUMENTED on a
+        shared concept would otherwise let `_grounded_elimination` "confirm"
+        eliminating either one on a defect the other equally has."""
+        alpha2 = _cand("CAND_ALPHA2", "assembly service, structure alpha")
+        source = MockSource(
+            records=self._records(self.ALPHA, alpha2),
+            concept_lookup={
+                "structure alpha": {"candidates": ["C_ALPHA"], "unique": True, "expansions": []}})
+        reqs = [r for r in req.compile_requirements([self.ALPHA, alpha2], source=source)
+               if r.axis == "semantic_anatomy"]
+        self.assertEqual(reqs, [],
+                         "a concept every tied candidate shares says nothing about "
+                         "which one the record means")
+
+    def test_an_ambiguous_match_never_compiles_a_requirement(self):
+        """Fail-closed, the same discipline `_anatomy_compatibility` already
+        applies: a term resolving to MORE than one concept id is not governed
+        enough to eliminate anything on."""
+        source = MockSource(
+            records=self._records(self.ALPHA, self.BETA),
+            concept_lookup={
+                "structure alpha": {"candidates": ["C_ALPHA", "C_ALPHA2"], "unique": False,
+                                    "expansions": []},
+                "structure beta": {"candidates": ["C_BETA"], "unique": True, "expansions": []}})
+        reqs = [r for r in req.compile_requirements([self.ALPHA, self.BETA], source=source)
+               if r.axis == "semantic_anatomy" and r.candidate_code == "CAND_ALPHA"]
+        self.assertEqual(reqs, [], "an ambiguous concept match must never ground anything")
+
+    def test_a_governed_synonym_is_included_in_expected_and_validates_supported(self):
+        """`expected` carries the target phrase PLUS its own known governed
+        synonym for the SAME concept -- never a second, distinct concept's
+        words (that would be defect 2 again). A note using only the synonym
+        must still validate SUPPORTED, proving the tolerance is real, not
+        merely declared."""
+        source = MockSource(
+            records=self._records(self.ALPHA, self.BETA),
+            concept_lookup={
+                "structure alpha": {"candidates": ["C_ALPHA"], "unique": True,
+                                    "expansions": ["alpha structure synonym"]},
+                "structure beta": {"candidates": ["C_BETA"], "unique": True, "expansions": []}})
+        reqs = [r for r in req.compile_requirements([self.ALPHA, self.BETA], source=source)
+               if r.axis == "semantic_anatomy" and r.candidate_code == "CAND_ALPHA"]
+        self.assertEqual(len(reqs), 1)
+        r = reqs[0]
+        self.assertEqual(set(r.expected), {"structure alpha", "alpha structure synonym"})
+
+        judgement = req.RequirementJudgement(
+            requirement_id=r.requirement_id, status=req.RequirementStatus.SUPPORTED,
+            evidence_span_ids=("s1",))
+        span_text = "note documents the alpha structure synonym today"
+        self.assertTrue(req.validated_requirement(
+            r, judgement, evidence_by_span_id={"s1": span_text},
+            reconciliation=self._reconciliation({"s1": "AGREED"})))
+
+    def test_a_validated_not_documented_verdict_grounds_exactly_like_any_other_must_support_axis(
+            self):
+        """End-to-end proof this axis is wired through the EXISTING plumbing,
+        not a parallel one: its compiled requirement, run through the SAME
+        `validated_requirement` every other MUST_SUPPORT axis uses, correctly
+        validates NOT_DOCUMENTED against a corpus that truly never mentions
+        the target (nor its own synonyms) -- exactly the shape `resolution.
+        _grounded_elimination` consumes to eliminate a candidate."""
+        source = MockSource(
+            records=self._records(self.ALPHA, self.BETA),
+            concept_lookup={
+                "structure alpha": {"candidates": ["C_ALPHA"], "unique": True, "expansions": []},
+                "structure beta": {"candidates": ["C_BETA"], "unique": True, "expansions": []}})
+        reqs = [r for r in req.compile_requirements([self.ALPHA, self.BETA], source=source)
+               if r.axis == "semantic_anatomy" and r.candidate_code == "CAND_ALPHA"]
+        self.assertEqual(len(reqs), 1)
+        r = reqs[0]
+        self.assertEqual(r.role, req.RequirementRole.MUST_SUPPORT)
+
+        coverage = self._coverage("assembly service performed today, no anatomy stated")
+        judgement = req.RequirementJudgement(
+            requirement_id=r.requirement_id, status=req.RequirementStatus.NOT_DOCUMENTED)
+        self.assertTrue(req.validated_requirement(r, judgement, coverage=coverage))
 
 
 class CoverageCorpusValidationTest(unittest.TestCase):

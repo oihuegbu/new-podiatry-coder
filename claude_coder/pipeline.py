@@ -84,6 +84,30 @@ def _fingerprint_certifiable(fp) -> bool:
         return False
 
 
+def _canonical_scope(raw_ids: tuple[str, ...], canonical_fact_ids: set) -> tuple[str, ...]:
+    """`raw_ids` filtered to only the ids that are ACTUALLY this encounter's own fact
+    ids -- never trust a second-reading recovery's scoping data as safe on its own.
+
+    issue #6, Codex's independent re-review (round 3, P1 RC2): `autonomy.decide`
+    reads a gate's `affected_fact_ids` as proof the hold is SCOPED (excludes only
+    the named line(s), non-blocking to the rest of the claim) rather than
+    encounter-wide -- `bool(affected_fact_ids)` alone decides that, with no
+    membership check of its own. A non-canonical id there (a raw second-reading-
+    local label, a typo, a hallucinated relation endpoint `event_union` never had
+    an event for) would make a gate LOOK scoped while excluding nothing real,
+    silently releasing the claim with the held service simply missing --
+    reproduced exactly by naming a nonexistent id and watching the encounter
+    still reach AUTO_READY. `event_union.admit`/`Recovery.withdraw` now only ever
+    emit ids that resolved through their own canonical mapping, but this check
+    runs AGAIN here, independently, against the real fact ids this encounter's
+    graph holds -- defense in depth, not trust in a producer one call away, so a
+    future caller that skips that mapping can never silently defeat this control.
+    An id that fails this filter is simply dropped, never substituted or guessed:
+    an empty result correctly falls back to an encounter-wide, blocking hold.
+    """
+    return tuple(dict.fromkeys(fid for fid in raw_ids if fid in canonical_fact_ids))
+
+
 def _fingerprint_schema_ok(fp) -> bool:
     from app.release.source_manifest import (
         COMPLIANCE_DATABASE_SOURCE_ID, REQUIRED_SOURCE_SCHEMA_VERSION,
@@ -527,24 +551,55 @@ def code_encounter(
     # entangled line(s), never the whole encounter -- no parallel resolver, no
     # new mechanism.
     from . import event_union as _union
+    # issue #6, Codex's independent re-review (round 3, P1 RC2): a gate's
+    # `affected_fact_ids` is trusted by `autonomy.decide` as a SAFE scope --
+    # `bool(affected_fact_ids)` alone decides whether the hold is scoped
+    # (non-blocking to the rest of the claim) rather than encounter-wide. A
+    # non-canonical id there (a raw second-reading-local label, a typo, a
+    # hallucinated reference `event_union` never had an event for) would make
+    # the gate LOOK scoped while excluding nothing real, silently letting the
+    # claim proceed with the held service simply missing -- reproduced exactly
+    # by naming a nonexistent id and watching the encounter still reach
+    # AUTO_READY. `event_union.admit`/`Recovery.withdraw` now only ever emit
+    # ids that resolved through their own canonical mapping, but this is
+    # verified AGAIN here, independently, against the actual fact ids this
+    # encounter's graph holds -- defense in depth, not trust in a producer one
+    # call away, so a future caller of the union that skips that mapping can
+    # never silently defeat this control.
+    _canonical_fact_ids = {f.fact_id for f in facts if getattr(f, "fact_id", "")}
+
     for _held in (recovery.holds if recovery is not None else ()):
         if _held.hold_cause == _union.RecoveryHoldCause.COREFERENCE_AMBIGUOUS.value:
+            _scope = _canonical_scope(_held.possible_primary_ids, _canonical_fact_ids)
             pre_retrieval_gates.append(GateResult(
                 f"second_reading_coreference:{_held.second_event_id}",
                 Outcome.UNKNOWN, _held.reason,
                 "event-candidate union (product directive section 3)",
-                retryable=False, affected_fact_ids=_held.possible_primary_ids))
+                retryable=False, affected_fact_ids=_scope))
         elif _held.hold_cause == _union.RecoveryHoldCause.RELATION_UNPLACED.value:
+            _scope = _canonical_scope(_held.affected_ids, _canonical_fact_ids)
             pre_retrieval_gates.append(GateResult(
                 f"second_reading_relation_unplaced:{_held.second_event_id}",
                 Outcome.UNKNOWN, _held.reason,
                 "event-candidate union (product directive section 3)",
-                retryable=False, affected_fact_ids=_held.affected_ids))
+                retryable=False, affected_fact_ids=_scope))
+        elif _held.hold_cause == _union.RecoveryHoldCause.RELATION_INVALID.value:
+            # Round 3 (P1 RC2): `Recovery.withdraw` now names each withdrawn
+            # candidate's own canonical relation neighbors when its edges were
+            # among the ones the trial graph actually held -- scope to those
+            # when present; otherwise (withdrawn only as part of the group,
+            # with no edge of its own) fall back to the same encounter-wide,
+            # retryable default as before -- never a guess either way.
+            _scope = _canonical_scope(_held.affected_ids, _canonical_fact_ids)
+            pre_retrieval_gates.append(GateResult(
+                f"second_reading_relation_invalid:{_held.second_event_id}",
+                Outcome.UNKNOWN, _held.reason,
+                "event-candidate union (product directive section 3)",
+                retryable=not _scope, affected_fact_ids=_scope))
         else:
-            # SOURCE_UNREAD, RELATION_INVALID (best-effort, no scoping data at
-            # its call site -- see `Recovery.withdraw`'s own comment), or an
-            # older/unset cause -- stays encounter-wide/retryable exactly as
-            # before, the safe default for anything not explicitly scoped.
+            # SOURCE_UNREAD, or an older/unset cause -- stays encounter-wide/
+            # retryable exactly as before, the safe default for anything not
+            # explicitly scoped.
             pre_retrieval_gates.append(GateResult(
                 f"second_reading_event_unverified:{_held.second_event_id}",
                 Outcome.UNKNOWN, _held.reason,

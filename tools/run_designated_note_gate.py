@@ -56,9 +56,22 @@ def main(argv: list[str] | None = None) -> int:
 
     # Billing context: the SAME strict validation `extraction.extract_note`
     # itself runs before spending an extraction call -- never a duplicate.
+    #
+    # issue #6, Codex's independent re-review (round 3): the imports below used
+    # to sit INSIDE this try/except, so an import-time failure unrelated to
+    # billing validation at all (e.g. a missing optional dependency one of these
+    # modules pulls in transitively) was caught by the same bare `except
+    # Exception` and printed as "billing context is invalid" -- indistinguishable
+    # from a genuine validation failure to anything checking only the exit code
+    # or that message. A test asserting refusal on a MALFORMED billing context
+    # could then pass for the wrong reason: the import never even reached
+    # `_participant_index`, so the test proved nothing about billing validation.
+    # Imports now run outside the try, matching the encounter-context check
+    # below (which already only catches its own specific exception type) -- an
+    # import failure surfaces loudly and distinctly, never silently relabeled.
+    from run import load_billing_context
+    from claude_coder.extraction import _participant_index
     try:
-        from run import load_billing_context
-        from claude_coder.extraction import _participant_index
         billing = load_billing_context(str(BILLING_CONTEXT))
         _participant_index(billing)
     except Exception as exc:

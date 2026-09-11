@@ -10,14 +10,14 @@
   ],
 
   "schema": "encounter_context/2",
-  "version": "acceptance-fixture-2026-09-11-r3",
+  "version": "acceptance-fixture-2026-09-11-r4",
 
   "patients": {
     "PAT-ACCEPT-0001": {
-      "_note": "Name/DOB matched to the designated note's OWN documented (synthetic scenario) patient identity, in the SAME string format the note's own extraction produces (MM/DD/YYYY) -- the context-conflict check compares these fields as plain strings, so an ISO-formatted DOB for the identical date read as a false CONFLICT. A real production roster would carry the actual patient's real info instead.",
+      "_note": "Name/DOB matched to the designated note's OWN documented (synthetic scenario) patient identity. Stored here in ISO calendar-date form; app.contracts.encounter_context._canonical_identity_value now compares patient.date_of_birth as a parsed date (ISO, US, or compact) rather than as a punctuation-stripped string, so this no longer needs to match the note's own MM/DD/YYYY presentation byte-for-byte. A real production roster would carry the actual patient's real info instead.",
       "first_name": "Synthetic",
       "last_name": "Castellanos",
-      "date_of_birth": "09/02/1982",
+      "date_of_birth": "1982-09-02",
       "gender": "unspecified",
       "record_number": "ACCEPT-0001"
     }

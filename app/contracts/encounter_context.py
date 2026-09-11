@@ -75,7 +75,7 @@ authoritative CMS sets; this module never enumerates one.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Protocol, runtime_checkable
 
@@ -310,6 +310,36 @@ _OPTIONAL_SECTIONS: frozenset[str] = frozenset({"authorizations"})
 
 def _normalized(value: Any) -> str:
     return "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum())
+
+
+#: Calendar-date presentations this codebase's own note extraction and roster
+#: fixtures are known to emit. Not a medical-code list -- a format allowlist
+#: for a single identity field, extended if a real source needs another shape.
+_DOB_FORMATS: tuple[str, ...] = ("%Y-%m-%d", "%m/%d/%Y", "%Y%m%d")
+
+
+def _canonical_identity_value(path: str, value: Any) -> str | None:
+    """Normalize an identity field so cross-source comparison is by meaning,
+    not by presentation.
+
+    `patient.date_of_birth` compares as a calendar date: the roster and the
+    note can format the same date differently (ISO vs. US) without that being
+    a real disagreement. Returns None when `value` is non-empty but doesn't
+    parse under any known format -- distinct from "absent" (the caller already
+    filters out empty values before calling), and the caller must treat None
+    as an explicit conflict/hold rather than silently as a match or a miss.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if path == "patient.date_of_birth":
+        for fmt in _DOB_FORMATS:
+            try:
+                return datetime.strptime(text, fmt).date().isoformat()
+            except ValueError:
+                continue
+        return None
+    return _normalized(text)
 
 
 def _as_date(value: Any, label: str) -> date | None:
@@ -1196,13 +1226,24 @@ class VersionedRosterContextProvider:
         out: list[str] = []
         for meta_keys, path in _CORROBORATED:
             raw_value = next((meta.get(k) for k in meta_keys if meta.get(k)), None)
-            documented = _normalized(raw_value)
-            resolved = _normalized(context.field_value(path))
-            if documented and resolved and documented != resolved:
+            resolved_raw = context.field_value(path)
+            if not str(raw_value or "").strip() or not str(resolved_raw or "").strip():
+                continue
+            documented = _canonical_identity_value(path, raw_value)
+            resolved = _canonical_identity_value(path, resolved_raw)
+            if documented is None or resolved is None:
+                # Both sides stated a value but at least one didn't parse
+                # under this field's known formats -- can't confirm they
+                # describe the same patient, so this holds rather than
+                # silently passing as a match.
                 out.append(
-                    f"{path}: encounter context says "
-                    f"{context.field_value(path)!r}, the document says "
-                    f"{str(raw_value)!r}")
+                    f"{path}: encounter context says {resolved_raw!r}, the "
+                    f"document says {str(raw_value)!r} (could not confirm "
+                    f"these match -- unrecognized format)")
+            elif documented != resolved:
+                out.append(
+                    f"{path}: encounter context says {resolved_raw!r}, the "
+                    f"document says {str(raw_value)!r}")
         note_first, note_last = _split_name(meta.get("patient_name") or "")
         if note_last and context.patient.last_name and \
                 _normalized(note_last) != _normalized(context.patient.last_name):

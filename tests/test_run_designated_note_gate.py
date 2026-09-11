@@ -110,6 +110,36 @@ class ReleaseGateContextRequirementTest(unittest.TestCase):
                          "a billing participant with no 'id' must be refused")
         fake_call.assert_not_called()
 
+    def test_an_import_failure_during_billing_validation_is_never_relabeled_as_invalid_billing(
+            self):
+        """issue #6, Codex's independent re-review (round 3): a bare `except
+        Exception` used to wrap BOTH the `from run import ...` / `from
+        claude_coder.extraction import ...` statements AND the actual validation
+        calls, so an import-time failure with nothing to do with whether the
+        billing content is valid got printed as "billing context is invalid" and
+        exit 2 -- indistinguishable, to anything checking only the exit code,
+        from a genuine validation failure. That let a test assert refusal on
+        malformed billing content while validation never actually ran (Codex's
+        own environment hit exactly this: importing the production loader also
+        imports an unavailable PDF dependency, and the "invalid billing"-shaped
+        tests above passed on that import failure instead of `_participant_index`
+        ever running). Simulated here with an otherwise fully VALID billing
+        fixture and `run` failing to import -- this must surface as the import
+        failure itself, never a "billing context is invalid" refusal.
+        """
+        m = _mod()
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            billing = pathlib.Path(td) / "billing.json"
+            billing.write_text(json.dumps(_VALID_BILLING))
+            encounter = pathlib.Path(td) / "encounter.json"
+            encounter.write_text(json.dumps(_VALID_ENCOUNTER))
+            with mock.patch.object(m, "BILLING_CONTEXT", billing), \
+                    mock.patch.object(m, "ENCOUNTER_CONTEXT", encounter), \
+                    mock.patch.dict("sys.modules", {"run": None}):
+                with self.assertRaises(ImportError):
+                    m.main([])
+
     def test_valid_fixture_invokes_the_real_run_py_entrypoint_with_both_contexts(self):
         m = _mod()
         import tempfile

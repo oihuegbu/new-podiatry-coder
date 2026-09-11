@@ -304,18 +304,30 @@ class Recovery:
         relation kernel rejects takes the RECOVERED EVENTS out -- recorded and held --
         instead of failing the whole encounter closed. The primary encounter is
         unaffected either way; what is refused is the addition, not the note.
+
+        issue #6, Codex's independent re-review (round 3, P1 RC2): `self.relations`
+        at this point is exactly this recovery's own edges, ALREADY remapped onto
+        canonical graph ids by `admit`'s `_remap` -- so a withdrawn candidate's
+        neighbors in those edges are real, verifiable fact ids, never a guess and
+        never a raw second-reading-local label. A candidate the batch validation
+        failure touches through no edge of its own (withdrawn only because it
+        belonged to the admitted group as a whole) gets no scoping data here and the
+        caller must treat it as unscoped/encounter-wide -- honest best-effort, not a
+        parallel resolver.
         """
+        neighbors: dict[str, set[str]] = {}
+        for relation in self.relations:
+            subject = _clean(getattr(relation, "subject_event_id", ""))
+            obj = _clean(getattr(relation, "object_event_id", ""))
+            if subject and obj:
+                neighbors.setdefault(subject, set()).add(obj)
+                neighbors.setdefault(obj, set()).add(subject)
         for candidate in self.candidates:
             if candidate.verdict not in ADMITTING_VERDICTS:
                 continue
             candidate.verdict = HELD_UNVERIFIED
-            # issue #6, Codex's independent re-review, root cause 2 (P1 RC2-A):
-            # distinct from an unread page -- this is the recovered SET's
-            # relations failing validation together, so precise per-event
-            # scoping isn't available at this call site (no relation-endpoint
-            # data is threaded in here); best-effort cause tag, conservative
-            # (encounter-wide-equivalent) scope rather than a guess.
             candidate.hold_cause = RecoveryHoldCause.RELATION_INVALID.value
+            candidate.affected_ids = tuple(sorted(neighbors.get(candidate.node_id, set())))
             candidate.node_id = ""
             candidate.reason = reason
         self.facts = ()
@@ -811,13 +823,29 @@ def admit(candidates, *, reconciliation, alignment, second_relations,
             break
         stranded |= newly
 
+    # issue #6, Codex's independent re-review (round 3, P1 RC2): `stranded_endpoints`
+    # above holds the OTHER RAW relation-endpoint id -- second-reading-local, not a
+    # canonical graph/fact id, and possibly not real at all (a typo'd or hallucinated
+    # reference this graph never had any event for). Storing that raw id directly in
+    # `affected_ids` let a caller trust an unverified label as a safe scope, which
+    # `autonomy.decide` cannot tell apart from a genuine fact id -- a non-canonical
+    # "ghost" endpoint made a gate LOOK scoped (non-blocking) while excluding nothing,
+    # silently releasing the claim with the held service simply missing. `final_placed`
+    # is exactly this loop's own final verdict on what is still live and canonical, so
+    # an endpoint only counts here if IT resolves to something that final verdict
+    # actually kept -- anything else (a ghost id, or an endpoint that turned out to be
+    # stranded too) is dropped, and the candidate's `affected_ids` is honestly empty
+    # rather than wrong: the caller must then treat it as unscoped/encounter-wide.
+    final_placed = {second_id: node_id for second_id, node_id in mapping.items()
+                    if second_id not in stranded}
     for candidate in decided:
         if candidate.second_event_id not in stranded:
             continue
         candidate.verdict = HELD_UNVERIFIED
         candidate.hold_cause = RecoveryHoldCause.RELATION_UNPLACED.value
+        raw_others = stranded_endpoints.get(candidate.second_event_id, set())
         candidate.affected_ids = tuple(sorted(
-            stranded_endpoints.get(candidate.second_event_id, set())))
+            {final_placed[o] for o in raw_others if o in final_placed}))
         candidate.node_id = ""
         candidate.reason = (
             "the second reading places this event in a relationship this graph "
