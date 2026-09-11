@@ -10,14 +10,14 @@
   ],
 
   "schema": "encounter_context/2",
-  "version": "acceptance-fixture-2026-09-11-r2",
+  "version": "acceptance-fixture-2026-09-11-r3",
 
   "patients": {
     "PAT-ACCEPT-0001": {
-      "_note": "Name/DOB matched to the designated note's OWN documented (synthetic scenario) patient identity so this fixture's placeholder identity never CONFLICTS with what the note itself states -- a real production roster would carry the actual patient's real info instead.",
+      "_note": "Name/DOB matched to the designated note's OWN documented (synthetic scenario) patient identity, in the SAME string format the note's own extraction produces (MM/DD/YYYY) -- the context-conflict check compares these fields as plain strings, so an ISO-formatted DOB for the identical date read as a false CONFLICT. A real production roster would carry the actual patient's real info instead.",
       "first_name": "Synthetic",
       "last_name": "Castellanos",
-      "date_of_birth": "1982-09-02",
+      "date_of_birth": "09/02/1982",
       "gender": "unspecified",
       "record_number": "ACCEPT-0001"
     }
