@@ -47,6 +47,7 @@ from claude_coder import eligibility as elig
 from claude_coder import gates, resolution
 from claude_coder.autonomy import SHAKY_EXTRACTION, decide
 from claude_coder.data_access import MockSource
+from tests import shortlist_verdict as _sv
 from claude_coder.models import (
     AttributeEvidence,
     CandidateCode,
@@ -476,16 +477,22 @@ def test_model_disagreement_alone_never_names_a_coder_as_the_destination():
 
 def test_metamorphic_measurement_axis():
     """Vary ONLY the documented measurement. In range -> the interval-qualified code
-    resolves; out of range -> the same code is eliminated and nothing bills."""
+    resolves; out of range -> the same code is eliminated and nothing bills.
+
+    issue #6 F9-R12-E, third re-review: plain retrieval is now verification-required
+    by default -- a stub verifier stands in for the removed no-verifier shortcut so
+    the measurement-elimination mechanic under test (unrelated to verification
+    trust) can still release once the descriptor's interval is satisfied."""
     descriptor = "excision, area 16 sq. cm. or less"
     src = MockSource(
         records={("AREA_C", "cpt"): {"long_description": descriptor, "active": True}},
         retrieval={("*", "cpt"): [CandidateCode("AREA_C", "cpt", descriptor, 0.9)]})
+    llm = _sv.judge(entails=lambda d: True, reason="entailed")
 
     def code_for(size):
         fact = _fact(description="excision", attributes={"size_sqcm": size},
                      fact_id=f"m{size}")
-        return resolution.resolve(_request(fact), src).chosen
+        return resolution.resolve(_request(fact), src, llm=llm).chosen
 
     assert code_for(10) is not None and code_for(10).code == "AREA_C"
     assert code_for(30) is None, (
@@ -523,7 +530,12 @@ def test_metamorphic_performer_axis():
 def test_metamorphic_date_of_service_axis():
     """Vary ONLY the date of service. A candidate inactive on the claim's DOS must be
     eliminated before selection, and the SAME candidate on a date it is active must
-    survive -- so a one-character date misread cannot quietly change the code."""
+    survive -- so a one-character date misread cannot quietly change the code.
+
+    issue #6 F9-R12-E, third re-review: plain retrieval is now verification-required
+    by default -- a stub verifier stands in for the removed no-verifier shortcut so
+    the DOS-elimination mechanic under test (unrelated to verification trust) can
+    still release once the candidate is active on the claim's date."""
     class DatedSource(MockSource):
         def active_on(self, code, system, dos):
             if code == "OLDC" and str(dos) >= "2026-01-01":
@@ -534,10 +546,11 @@ def test_metamorphic_date_of_service_axis():
         records={("OLDC", "cpt"): {"long_description": "a retired service",
                                    "active": True}},
         retrieval={("*", "cpt"): [CandidateCode("OLDC", "cpt", "a retired service", 0.9)]})
+    llm = _sv.judge(entails=lambda d: True, reason="entailed")
 
     def code_for(dos):
         fact = _fact(description="a retired service", fact_id="d1")
-        return resolution.resolve(_request(fact), src, dos=dos).chosen
+        return resolution.resolve(_request(fact), src, dos=dos, llm=llm).chosen
 
     assert code_for("2025-06-01") is not None
     assert code_for("2026-06-01") is None

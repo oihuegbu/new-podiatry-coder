@@ -103,14 +103,24 @@ class SiblingSwapAsymmetryTest(unittest.TestCase):
         "M21.851": "Other specified acquired deformities of right thigh",
     }
 
-    def _icd_entry(self):
-        return {"code": "M21.6X1", "type": "secondary",
+    def _icd_entry(self, evidence_spans=None):
+        entry = {"code": "M21.6X1", "type": "secondary",
                 "description": self.ICD["M21.6X1"]}
+        if evidence_spans is not None:
+            entry["evidence_spans"] = evidence_spans
+        return entry
 
     def test_tourniquet_thigh_never_drives_a_swap(self):
+        # issue #6 F9-R12-D, fifth re-review (Codex): the diagnosis line's own
+        # verified evidence span is the exostosis sentence only -- the
+        # tourniquet sentence (where 'thigh' actually appears) was never cited
+        # as evidence for THIS diagnosis, so it must not drive a swap even
+        # though it is elsewhere in the same note. This is the precise shape
+        # of the sentence-splitting bug the evidence-span rewrite closes.
         v = _validator(icd10=self.ICD)
-        icd = [self._icd_entry()]
-        note = ("Retrocalcaneal exostosis of the right heel was resected. "
+        exostosis_span = "Retrocalcaneal exostosis of the right heel was resected."
+        icd = [self._icd_entry(evidence_spans=[exostosis_span])]
+        note = (exostosis_span + " "
                 "A well-padded thigh tourniquet was inflated to 300 mmHg.")
         v._check_icd_sibling_descriptor(icd, note)
         self.assertEqual(icd[0]["code"], "M21.6X1",
@@ -119,10 +129,15 @@ class SiblingSwapAsymmetryTest(unittest.TestCase):
                          {i.category for i in v.issues})
 
     def test_clinically_documented_sibling_still_swaps(self):
+        # issue #6 F9-R12-D, fifth re-review (Codex): the swap-driving
+        # evidence must be cited as THIS diagnosis line's own verified span --
+        # here the assessment sentence itself, which states the sibling's
+        # thigh attribute and (via negation scrubbing) never affirms the
+        # billed code's own foot attribute.
         v = _validator(icd10=self.ICD)
-        icd = [self._icd_entry()]
         note = ("Assessment: acquired deformity of the right thigh with "
                 "palpable prominence. No foot involvement.")
+        icd = [self._icd_entry(evidence_spans=[note])]
         v._check_icd_sibling_descriptor(icd, note)
         self.assertEqual(icd[0]["code"], "M21.851",
                          "clinically asserted sibling evidence still decides")

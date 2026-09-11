@@ -89,15 +89,22 @@ def _dressing_candidates():
 
 
 def test_same_dimension_measurement_still_eliminates():
-    """The valid case is preserved: 30 sq in eliminates the <=16 and >48 leaves and
-    deterministically selects the 16-48 leaf."""
+    """The valid case is preserved: 30 sq in eliminates the <=16 and >48 leaves.
+    issue #6 F9-R12-E, third re-review: plain retrieval is now
+    verification-required by default (Codex) -- with NO verifier supplied
+    (this test's own case; see `test_supply_retrieved_candidate_with_verifier_
+    resolves` below for the WITH-verifier case now that SUPPLY is an
+    entailment-eligible kind), the surviving leaf cannot auto-bill, but the
+    elimination itself must still be provably correct: it is the ONLY
+    remaining alternative on an honest abstention."""
     src = MockSource(retrieval={("*", "hcpcs"): _dressing_candidates()})
     fact = ClinicalFact(FactKind.SUPPLY, "wound dressing", attributes={"size_sqin": 30},
                         disposition=Disposition.PERFORMED,
                         evidence=[EvidenceSpan("wound dressing 30 sq in applied")],
                         confidence=0.99)
     line = resolve(_request(fact), src)
-    assert line.method is ResolutionMethod.DETERMINISTIC and line.chosen.code == "SUP_MED"
+    assert line.method is not ResolutionMethod.DETERMINISTIC and line.chosen is None
+    assert {c.code for c in (line.alternatives or [])} == {"SUP_MED"}
 
 
 def test_incompatible_dimension_measurement_does_not_eliminate():
@@ -171,6 +178,21 @@ def test_interval_unsupported_helper():
     assert _interval_unsupported(missing, parse_descriptor("plain dressing")) is False  # no interval
 
 
+# ---- issue #6 F9-R12-E, fourth re-review (self-discovered, adjacent to Codex's
+# ---- finding): a dosed-drug descriptor's "per <amount> <unit>" is a billing-unit
+# ---- DENOMINATOR, not a countable-variant cardinality claim -- ubiquitous across
+# ---- the whole CMS Table of Drugs & Biologicals, so treating it as one would
+# ---- force every drug hit through verification-deferral once DRUG became an
+# ---- entailment-eligible kind, defeating the "unqualified hit closes
+# ---- deterministic" case Codex's own fix explicitly preserves.
+def test_dose_denominator_per_is_not_cardinality():
+    from claude_coder.ontology import parse_descriptor
+    assert parse_descriptor("Injection, substance alpha, per 15 mg").cardinality is None
+    assert parse_descriptor("Injection, substance beta, per 1 mL").cardinality is None
+    # a genuine countable-variant "per" (no dose number following it) still counts
+    assert parse_descriptor("Application of cast, per extremity").cardinality == "per"
+
+
 def test_single_authoritative_interval_hit_without_supporting_measurement_abstains():
     """Codex F4-R1: a LONE authoritative interval-qualified SUPPLY (bypasses propose-then-
     verify) must NOT close deterministically when the documentation has no dimension-
@@ -188,15 +210,65 @@ def test_single_authoritative_interval_hit_without_supporting_measurement_abstai
 
 
 def test_supported_interval_hit_still_resolves():
+    """issue #6 F9-R12-E, third re-review: plain retrieval is now
+    verification-required by default -- a genuine direct descriptor-Index hit
+    (safe with no verifier, per Codex's regression #4: an exact, UNQUALIFIED
+    hit -- the measurement IS supported, so `_needs_verification`'s own
+    interval check does not flag it) replaces bare retrieval so this still
+    proves the interval-support check itself is not overly conservative."""
     area = CandidateCode("AREA_C", "hcpcs",
                          "wound dressing, sterile, size 16 sq. in. or less", 0.9)
-    src = MockSource(retrieval={("*", "hcpcs"): [area]})
+    src = MockSource(records={("AREA_C", "hcpcs"):
+                              {"active": True, "long_description":
+                               "wound dressing, sterile, size 16 sq. in. or less"}},
+                     retrieval={("*", "hcpcs"): [area]},
+                     proc_index={"wound dressing": {"AREA_C"}})
     fact = ClinicalFact(FactKind.SUPPLY, "wound dressing", attributes={"size_sqin": 10},
                         disposition=Disposition.PERFORMED,
                         evidence=[EvidenceSpan("wound dressing 10 sq in applied")],
                         confidence=0.99)
     line = resolve(_request(fact), src)
     assert line.chosen is not None and line.chosen.code == "AREA_C"
+
+
+# ---- issue #6 F9-R12-E, fourth re-review: Codex's required _ENTAILMENT_KINDS ----
+# ---- regressions -- SUPPLY specifically must now be admitted to propose-  ----
+# ---- then-verify, never permanently stuck abstaining just because a       ----
+# ---- verifier exists.                                                     ----
+def test_supply_retrieved_candidate_without_verifier_stays_a_candidate():
+    """Codex regression #2: a SUPPLY found only through vector retrieval, with no
+    verifier available, must not close deterministically -- it is retained as a
+    candidate for a coder, exactly like every other retrieval-only hit for an
+    entailment-eligible kind."""
+    only = CandidateCode("SUP_ONLY", "hcpcs", "wound dressing, sterile", 0.90,
+                         "retrieval")
+    src = MockSource(retrieval={("*", "hcpcs"): [only]})
+    fact = ClinicalFact(FactKind.SUPPLY, "wound dressing",
+                        disposition=Disposition.PERFORMED,
+                        evidence=[EvidenceSpan("wound dressing applied")],
+                        confidence=0.99)
+    line = resolve(_request(fact), src)
+    assert line.chosen is None
+    assert {c.code for c in (line.alternatives or [])} == {"SUP_ONLY"}
+
+
+def test_supply_retrieved_candidate_with_verifier_resolves():
+    """Codex regression #1: the SAME retrieval-only SUPPLY candidate, now WITH a
+    verifier available, resolves -- proving `_ENTAILMENT_KINDS` actually admits
+    SUPPLY into propose-then-verify. Before the fix, SUPPLY was omitted from the
+    entailment-eligible kinds entirely, so this candidate could never enter
+    propose-then-verify even with a verifier supplied -- permanently stuck
+    abstaining."""
+    only = CandidateCode("SUP_ONLY", "hcpcs", "wound dressing, sterile", 0.90,
+                         "retrieval")
+    src = MockSource(retrieval={("*", "hcpcs"): [only]})
+    fact = ClinicalFact(FactKind.SUPPLY, "wound dressing",
+                        disposition=Disposition.PERFORMED,
+                        evidence=[EvidenceSpan("wound dressing applied")],
+                        confidence=0.99)
+    llm = _sv.judge(entails=lambda d: True, reason="entailed")
+    line = resolve(_request(fact), src, llm=llm)
+    assert line.chosen is not None and line.chosen.code == "SUP_ONLY"
 
 
 def test_same_dimension_wrong_semantic_role_does_not_support_interval():
@@ -282,7 +354,11 @@ def test_supported_area_vocabulary_measurement_resolves_end_to_end():
     fact = ClinicalFact(FactKind.PROCEDURE, "excision", attributes={"size_sqcm": 10},
                         disposition=Disposition.PERFORMED,
                         evidence=[EvidenceSpan("excision performed")], confidence=0.99)
-    line = resolve(_request(fact), src)
+    # issue #6 F9-R12-E, third re-review: plain retrieval is now
+    # verification-required by default -- a stub verifier stands in for
+    # the removed no-verifier shortcut.
+    llm = _sv.judge(entails=lambda d: True, reason="entailed")
+    line = resolve(_request(fact), src, llm=llm)
     assert line.chosen is not None and line.chosen.code == "AREA_C"
 
 

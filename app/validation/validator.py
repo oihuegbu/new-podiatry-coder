@@ -1936,28 +1936,40 @@ class CodingValidator:
             return any(w.startswith(token) for w in note_words)
         return False
 
-    def _tokens_supported_in_one_span(self, required_tokens, text: str) -> bool:
-        """issue #6 F9-R12-D, fourth re-review (Codex): ALL required
-        evidence for one clinical term/axis must be co-located in ONE
-        source span (a clause/sentence), never assembled by conjunction
-        across the WHOLE note. `_desc_documented` against a whole-note word
-        set treats a token from an unrelated diagnosis, a different
-        section, or the patient's history as equally good as one actually
-        describing THIS condition -- exactly the same root defect as the
-        removed global-word-bag SNOMED check, just via the plain
-        `all(...)` conjunction instead of a concept-graph shortcut. Splits
-        `text` on sentence/clause boundaries (preserving a PDF hard-wrap,
-        which is not a real sentence break) and requires every token to be
-        documented within the SAME one span."""
+    def _line_evidence_spans(self, entry: dict, note_text: str) -> list:
+        """issue #6 F9-R12-D, fifth re-review (Codex): the diagnosis LINE's
+        own already-validated `evidence_spans` -- the exact quotations the
+        coder cited when asserting THIS diagnosis, contiguous verbatim
+        substrings of the note (`app/pipeline.py` ensures the field exists;
+        the code assigner already verifies each entry is a real substring).
+        Filtered here (not merely trusted) to entries that are STILL a
+        genuine substring of `note_text` -- an entry attached to a
+        different, no-longer-current note view is not evidence for this
+        one. Empty when the line carries no verified span at all, which is
+        the correct, SAFE input to `_tokens_supported_in_spans` below: no
+        span to check means no automatic correction may fire."""
+        raw = [str(s).strip() for s in (entry.get("evidence_spans") or []) if str(s).strip()]
+        note_norm = self._evidence_norm(note_text)
+        return [s for s in raw if self._evidence_norm(s) in note_norm]
+
+    def _tokens_supported_in_spans(self, required_tokens, spans: list) -> bool:
+        """issue #6 F9-R12-D, fifth re-review (Codex): ALL required evidence
+        for one clinical term/axis must be co-located in ONE of the LINE's
+        own verified evidence spans, never assembled by conjunction across
+        the whole note (or even across two DIFFERENT spans) -- replaces an
+        earlier attempt that reconstructed sentence boundaries from
+        flattened text instead of consuming the ClaimBundle's own already-
+        validated span contract (`"alpha here. beta there."` and
+        `"alpha here\\nbeta there"` are structurally the same "two separate
+        statements" shape; only genuine verified spans, not punctuation
+        guesses, decide what counts as "the same statement"). `spans=[]`
+        (no verified line evidence at all) correctly returns False --
+        exactly Codex's "no verified evidence span -> no mutation"
+        requirement, with no special-casing needed."""
         required = tuple(t for t in required_tokens if t)
-        if not required:
-            return False
-        normalized = (text or "").replace("\n", " ")
-        for span_text in re.split(r"(?<=[.;:])\s+", normalized):
-            span_words, span_low = self._note_evidence(span_text)
-            if all(self._desc_documented(t, span_words, span_low) for t in required):
-                return True
-        return False
+        return bool(required) and any(
+            all(self._desc_documented(t, *self._note_evidence(span)) for t in required)
+            for span in spans)
 
     # Incidental-context markers: operative-logistics language whose anatomy
     # words name equipment placement, positioning, or prep — never pathology.
@@ -2773,29 +2785,26 @@ class CodingValidator:
                 terms.update(r[0].lower() for r in rows)
             return terms
 
-        def _any_term_documented(terms, text=None) -> bool:
+        def _any_term_documented(terms, spans: list) -> bool:
             """issue #6 F9-R12-D: the prior (third re-review) SNOMED-based
             governed-equivalence fallback was itself invalid -- removed
             entirely; a term whose EVERY signature token is literally
-            documented is the only path. issue #6 F9-R12-D, FOURTH
-            re-review (Codex): checking each token against a whole-note
-            WORD SET had the exact same root defect the SNOMED removal
-            fixed for its own shortcut, just via `all(...)` conjunction
-            instead of a concept-graph guess -- tokens from an unrelated
-            diagnosis, a different section, or the patient's history could
-            be assembled together to "document" one compound term. Fixed
-            by requiring every token be documented within ONE source span
-            (`_tokens_supported_in_one_span`), never merely somewhere in
-            the note."""
-            text = low_note if text is None else text
+            documented is the only path. issue #6 F9-R12-D, fifth re-review
+            (Codex): "documented" now means documented within one of the
+            diagnosis LINE's own already-VERIFIED evidence spans
+            (`_line_evidence_spans`), never merely somewhere in the whole
+            note or clinical view -- tokens from an unrelated diagnosis, a
+            different section, or the patient's history could otherwise be
+            assembled together to "document" one compound term. `spans=[]`
+            (no verified line evidence) correctly authorizes nothing."""
             for term in terms:
                 toks = [t for t in self._tokens(term) if t not in self._DESC_STOPWORDS]
-                if self._tokens_supported_in_one_span(toks, text):
+                if self._tokens_supported_in_spans(toks, spans):
                     return True
             return False
 
-        def _terms_documented(c: str, min_level: int) -> bool:
-            return _any_term_documented(_incl_terms(c, min_level) | _index_terms(c))
+        def _terms_documented(c: str, min_level: int, spans: list) -> bool:
+            return _any_term_documented(_incl_terms(c, min_level) | _index_terms(c), spans)
 
         sites = self._site_lexicon()
 
@@ -2824,6 +2833,12 @@ class CodingValidator:
             own = self.db.validate_icd10(code)
             if not own:
                 continue
+            # issue #6 F9-R12-D, fifth re-review (Codex): the diagnosis
+            # LINE's own already-verified evidence spans -- everything
+            # that can DRIVE or PROTECT an automatic swap below is scoped
+            # to these, never the whole note or clinical view. Computed
+            # ONCE per entry (not per sibling candidate).
+            line_spans = self._line_evidence_spans(entry, note_full_text)
             # Ubiquitous tokens (df > 400 across the ICD corpus: 'acute',
             # 'chronic', 'unspecified'...) are excluded when BUILDING the
             # sets — they are severity/temporal qualifiers, not the
@@ -2869,15 +2884,20 @@ class CodingValidator:
                 own_site_toks = {t for t in own_only if t in sites}
                 sib_site_toks = {t for t in sib_only if t in sites}
                 if own_site_toks or sib_site_toks:
-                    # target site must be documented CLINICALLY (relocation-
-                    # driving); the billed site's protection reads the full
-                    # note — asymmetry is deliberate (see docstring)
-                    sib_site_doc = all(
-                        self._desc_documented(t, clin_words, clin_low)
-                        for t in sib_site_toks)
+                    # issue #6 F9-R12-D, fifth re-review: both site checks
+                    # now read the LINE's own verified evidence spans, not
+                    # the whole note/clinical view -- target site (sib) must
+                    # still ALL co-locate in one span (vacuously true when
+                    # there is no target-site token at all); billed site
+                    # (own) protection still only needs ANY one documented,
+                    # anywhere among the line's own spans.
+                    sib_site_doc = (not sib_site_toks) or any(
+                        all(self._desc_documented(t, *self._note_evidence(span))
+                            for t in sib_site_toks)
+                        for span in line_spans)
                     own_site_doc = any(
-                        self._desc_documented(t, note_words, low_note)
-                        for t in own_site_toks)
+                        self._desc_documented(t, *self._note_evidence(span))
+                        for t in own_site_toks for span in line_spans)
                     if not sib_site_doc or (own_site_toks and own_site_doc):
                         continue
                 # Synonym evidence must DISCRIMINATE between the two
@@ -2902,11 +2922,15 @@ class CodingValidator:
                               if t in self._cond_lex
                               and self._icd_token_df.get(t, 0) <= 150]
                 decisive = own_entity or own_only
-                # issue #6 F9-R12-D, fourth re-review: the billed code's OWN
-                # protective evidence must ALSO be co-located in one span --
-                # unrelated tokens scattered across the full note must not
-                # be assembled to "protect" a code either.
-                direct_own = self._tokens_supported_in_one_span(decisive, low_note)
+                # issue #6 F9-R12-D, fifth re-review (Codex): the billed
+                # code's OWN protective evidence, the sibling's swap-driving
+                # evidence, AND both sides' Index/inclusion-term synonym
+                # support are ALL scoped to this LINE's own verified
+                # evidence spans now -- never the whole note or clinical
+                # view, and never assembled by conjunction across two
+                # DIFFERENT spans. No verified span at all (`line_spans ==
+                # []`) correctly authorizes nothing, on either side.
+                direct_own = self._tokens_supported_in_spans(decisive, line_spans)
                 if own_entity:
                     # A branch-specific synonym may protect a rare billed entity only
                     # when the synonym itself contributes a documented condition entity.
@@ -2922,14 +2946,12 @@ class CodingValidator:
                                 and self._icd_token_df.get(t, 0) <= 25)
                             for t in tt):
                             entity_syn.add(term)
-                    own_documented = direct_own or _any_term_documented(entity_syn, low_note)
+                    own_documented = direct_own or _any_term_documented(entity_syn, line_spans)
                 else:
-                    own_documented = direct_own or _any_term_documented(own_syn, low_note)
-                # swap-driving evidence: clinical view only (incidental
-                # tourniquet/positioning/prep anatomy never drives a swap)
+                    own_documented = direct_own or _any_term_documented(own_syn, line_spans)
                 sib_documented = (
-                    self._tokens_supported_in_one_span(sib_only, clin_low)
-                    or _any_term_documented(sib_syn, clin_low))
+                    self._tokens_supported_in_spans(sib_only, line_spans)
+                    or _any_term_documented(sib_syn, line_spans))
                 if sib_documented and not own_documented:
                     coverage = sum(1 for t in sib_toks
                                    if self._desc_documented(t, clin_words, clin_low))

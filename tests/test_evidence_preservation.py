@@ -278,7 +278,13 @@ class AdvisoryProcedureSynonymRecallExpansion(unittest.TestCase):
                 "method": "retrieval_consistency_validated", "unique": True,
                 "expansions": ["removal of skin lesion"], "source_identity": {"v": 1}}})
         fact = ClinicalFact(FactKind.PROCEDURE, "excision of lesion", fact_id="fx")
-        line = resolve(_request(fact), source)
+        # issue #6 F9-R12-E, third re-review: plain retrieval is now
+        # verification-required by default -- a stub verifier stands in for
+        # the removed no-verifier shortcut so PROC_X (only reachable
+        # through the advisory-widened query, the thing under test) still
+        # reaches a chosen line.
+        llm = _sv.judge(entails=lambda d: True, reason="entailed")
+        line = resolve(_request(fact), source, llm=llm)
         self.assertEqual(line.chosen.code if line.chosen else None, "PROC_X",
                          "the advisory expansion query must actually widen recall")
         self.assertIsNotNone(line.advisory_terminology)
@@ -308,7 +314,11 @@ class AdvisoryProcedureSynonymRecallExpansion(unittest.TestCase):
             FactKind.PROCEDURE,
             "The surgeon proceeded with excision of lesion along the plantar "
             "surface, followed by routine wound closure.", fact_id="fx")
-        line = resolve(_request(fact), source)
+        # issue #6 F9-R12-E, third re-review: see the test above -- same
+        # reasoning, a stub verifier replaces the removed no-verifier
+        # retrieval shortcut.
+        llm = _sv.judge(entails=lambda d: True, reason="entailed")
+        line = resolve(_request(fact), source, llm=llm)
         self.assertEqual(line.chosen.code if line.chosen else None, "PROC_X",
                          "a phrase embedded mid-sentence must still widen recall")
         self.assertIsNotNone(line.advisory_terminology)

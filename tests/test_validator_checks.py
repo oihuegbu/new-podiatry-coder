@@ -508,7 +508,12 @@ def main():
     # the sibling's attributes ('hallux' → great toe), never 'lesser'.
     note6 = ("Left hallux nail pain after marathon. Black nail with subungual "
              "hematoma of the left hallux. Trephination performed x2 on the hallux.")
-    icd_sib = [{"code": "S90.122A", "type": "primary"}]
+    # issue #6 F9-R12-D, fifth re-review: the sibling-swap check now reads
+    # ONLY the diagnosis line's own verified `evidence_spans` (a real
+    # ClaimBundle/code-assigner-populated field), not the whole note --
+    # every fixture below needs one that's a genuine verbatim substring.
+    icd_sib = [{"code": "S90.122A", "type": "primary",
+               "evidence_spans": ["Black nail with subungual hematoma of the left hallux."]}]
     v.issues = []
     v._check_icd_sibling_descriptor(icd_sib, note6)
     check("S90.122A flagged, great-toe sibling suggested",
@@ -534,7 +539,8 @@ def main():
                   for i in v.issues))
     # billed-attribute-undocumented branch: documented paronychia billed as
     # L03.041 (acute LYMPHANGITIS — a rare entity the note never mentions)
-    icd_l03 = [{"code": "L03.041", "type": "secondary"}]
+    icd_l03 = [{"code": "L03.041", "type": "secondary",
+               "evidence_spans": ["Acute paronychia right hallux with purulence at nail fold."]}]
     v.issues = []
     v._check_icd_sibling_descriptor(
         icd_l03, "Acute paronychia right hallux with purulence at nail fold. "
@@ -545,7 +551,8 @@ def main():
     # ...and the Alphabetic Index rescues the CORRECT sibling: 'paronychia'
     # resolves to the L03.03x cellulitis family via its Index see-also, so
     # billing L03.031 on the same note is supported, not flagged.
-    icd_l03c = [{"code": "L03.031", "type": "secondary"}]
+    icd_l03c = [{"code": "L03.031", "type": "secondary",
+                "evidence_spans": ["Acute paronychia right hallux with purulence at nail fold."]}]
     v.issues = []
     v._check_icd_sibling_descriptor(
         icd_l03c, "Acute paronychia right hallux with purulence at nail fold. "
@@ -554,6 +561,39 @@ def main():
           not any(i.category in ("billed_attribute_undocumented",
                                  "sibling_matches_note_better")
                   and str(i.code) == "L03.031" for i in v.issues))
+
+    print("\n[evidence-span locality — _tokens_supported_in_spans]")
+    # issue #6 F9-R12-D, fifth re-review (Codex): the exact reproductions the
+    # reviewer supplied for the sentence-splitting predecessor
+    # (`_tokens_supported_in_one_span`) — pinned directly against the
+    # replacement, `_tokens_supported_in_spans`, over the diagnosis line's own
+    # verified `evidence_spans`, never the whole note.
+    span_a = "alpha finding documented here."
+    span_b = "beta finding documented there."
+    both_in_one_span = "alpha finding and beta finding documented together."
+    note_split = span_a + " " + span_b
+    check("tokens split across two evidence spans → not co-located, no swap support",
+          not v._tokens_supported_in_spans(
+              ["alpha", "beta"], v._line_evidence_spans(
+                  {"evidence_spans": [span_a, span_b]}, note_split)))
+    check("tokens co-located in ONE verified span → correction may proceed",
+          v._tokens_supported_in_spans(
+              ["alpha", "beta"], v._line_evidence_spans(
+                  {"evidence_spans": [both_in_one_span]}, both_in_one_span)))
+    # The words appear in the note (an unrelated history sentence), but the
+    # diagnosis LINE's own verified evidence span is a DIFFERENT sentence —
+    # proving the check reads only the line's cited span, never the whole note.
+    note_with_history = ("History: alpha finding and beta finding, resolved "
+                        "years ago. Current exam: gamma finding only.")
+    check("same words present only in an unrelated/history span → no correction",
+          not v._tokens_supported_in_spans(
+              ["alpha", "beta"], v._line_evidence_spans(
+                  {"evidence_spans": ["Current exam: gamma finding only."]},
+                  note_with_history)))
+    check("no verified evidence span at all → no mutation (fails closed)",
+          not v._tokens_supported_in_spans(
+              ["alpha", "beta"], v._line_evidence_spans(
+                  {"evidence_spans": []}, both_in_one_span)))
 
     print("\n[negated findings are not documentation]")
     # Live batch: 'No lymphangitis.' in the exam made the sibling check claim
@@ -2418,7 +2458,8 @@ def main():
         note_hallux = ("Left hallux nail pain after marathon — black nail. "
                        "Left hallux: subungual hematoma 70% of nail plate. "
                        "Subungual hematoma; onycholysis, left hallux.")
-        icd_side = [{"code": "S90.122A", "type": "primary"}]
+        icd_side = [{"code": "S90.122A", "type": "primary",
+                    "evidence_spans": ["Left hallux: subungual hematoma 70% of nail plate."]}]
         v.issues = []
         v._check_icd_sibling_descriptor(icd_side, note_hallux)
         check("S90.122A (left lesser) swaps to LEFT great-toe sibling, "

@@ -342,12 +342,18 @@ class NegatedAxisNarrowingTest(unittest.TestCase):
     the negated mention of RIGHT."""
 
     def test_a_negated_mention_of_one_side_never_grounds_that_side(self):
+        # issue #6 F9-R12-E, third re-review: plain retrieval is now
+        # verification-required by default -- a stub verifier stands in for
+        # the removed no-verifier shortcut so the negation-aware axis
+        # elimination under test (unrelated to verification trust) can
+        # still release CAND_LEFT once it uniquely survives.
         text = "assembly service performed, not on the right, but the left"
         fact = _fact("assembly service", text,
                      attributes={"laterality": "left"},
                      attribute_evidence=_lat_evidence(text, value="left", span_id="span-0"))
+        llm = _sv.judge(entails=lambda d: True, reason="entailed")
         line = resolve(_request(fact), _source(LAT_LEFT, LAT_RIGHT),
-                       reconciliation=_agreed("span-0"))
+                       reconciliation=_agreed("span-0"), llm=llm)
         self.assertEqual(line.chosen.code if line.chosen else None, "CAND_LEFT",
                          line.rationale)
 
@@ -726,25 +732,37 @@ class SimilarityMayOnlyWidenThePoolTest(unittest.TestCase):
     def test_widening_still_works_a_recalled_candidate_can_be_released(self):
         """The other half of the rule: retrieval must still SUPPLY candidates. A lone
         recalled candidate that contradicts nothing is released, so tightening selection
-        did not turn the resolver off."""
+        did not turn the resolver off.
+
+        issue #6 F9-R12-E, third re-review: plain retrieval is now
+        verification-required by default (Codex) -- a lone, unqualified
+        retrieval candidate that contradicts nothing is EXACTLY the shape
+        of the unsafe auto-release the fix closes, so a stub verifier now
+        stands in for the release this test proves."""
         only = _cand("CAND_ONLY", "assembly service", 0.90)
         fact = _fact("assembly service", "assembly service was completed today")
-        line = resolve(_request(fact), _source(only), reconciliation=_agreed("span-0"))
+        llm = _sv.judge(entails=lambda d: True, reason="entailed")
+        line = resolve(_request(fact), _source(only), reconciliation=_agreed("span-0"), llm=llm)
         self.assertTrue(line.resolved, line.rationale)
         self.assertEqual(line.chosen.code, "CAND_ONLY")
 
     def test_a_documented_axis_still_selects_uniquely(self):
         """Step 2 is untouched: a candidate that POSITIVELY satisfies a documented axis
         the others do not is still selected automatically, with no page re-inspection
-        needed. That is a documented-axis decision, not a similarity one."""
+        needed. That is a documented-axis decision, not a similarity one.
+
+        issue #6 F9-R12-E, third re-review: a stub verifier stands in for
+        the removed no-verifier retrieval shortcut (unrelated to the
+        documented-axis selection mechanic under test)."""
         sided = _cand("CAND_RIGHT", "assembly service, right structure", 0.90)
         plain = _cand("CAND_PLAIN", "assembly service, unspecified structure", 0.90)
         text = "assembly service on the right structure"
         fact = _fact("assembly service", text,
                      attributes={"laterality": "right"},
                      attribute_evidence=_lat_evidence(text, value="right", span_id="span-0"))
+        llm = _sv.judge(entails=lambda d: True, reason="entailed")
         line = resolve(_request(fact), _source(sided, plain),
-                       reconciliation=_agreed("span-0"))
+                       reconciliation=_agreed("span-0"), llm=llm)
         self.assertTrue(line.resolved, line.rationale)
         self.assertEqual(line.chosen.code, "CAND_RIGHT")
         self.assertNotIn("tie narrowed", line.rationale)

@@ -21,6 +21,16 @@ from dataclasses import dataclass, field
 _LATERALITY = {"left", "right", "bilateral"}
 _CARDINALITY = ("bilateral", "pair", "single", "each", "per")
 
+# "per" is ambiguous: it is a countable-variant qualifier ("application, per
+# extremity" — needs a documented COUNT) in some descriptors, but in a dosed
+# drug descriptor ("Injection, substance alpha, per 15 mg") it is the
+# per-unit-dose DENOMINATOR that `ontology.drug_billing_units` already governs
+# separately from any note-level "count" -- not a claim that a note must
+# additionally confirm a quantity for. Structural distinction, not a drug
+# name/code list: "per" immediately followed by a number+unit is a dose
+# expression; "per <word>" (no number) is the genuine countable-variant case.
+_DOSE_DENOMINATOR_PER_RE = re.compile(r"\bper\s+[\d.]+\s*[a-z]")
+
 # words that qualify (not the core concept) — stripped when comparing concepts
 _QUALIFIER = _LATERALITY | {
     "single", "each", "per", "pair", "sterile", "size", "sq", "in", "cm", "mm",
@@ -151,7 +161,10 @@ def parse_descriptor(descriptor: str) -> DescriptorFeatures:
     laterality = {w for w in _LATERALITY
                   if re.search(rf"\b{w}\b", descriptor.lower())}
     cardinality = next((c for c in _CARDINALITY
-                        if re.search(rf"\b{c}\b", descriptor.lower())), None)
+                        if re.search(rf"\b{c}\b", descriptor.lower())
+                        and not (c == "per"
+                                and _DOSE_DENOMINATOR_PER_RE.search(descriptor.lower()))),
+                       None)
     interval = _parse_interval(descriptor)
     core = _concept_tokens(descriptor)
     positions = [i for i in (descriptor.find(","), descriptor.find(";")) if i >= 0]

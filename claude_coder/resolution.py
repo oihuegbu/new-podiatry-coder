@@ -57,6 +57,25 @@ _LATERALITY = {"left", "right", "bilateral"}
 _RELEVANCE_FLOOR = 0.6     # policy dial: min recall similarity to ADMIT a candidate
 _RECALL_POOL = 40
 
+# issue #6 F9-R12-E, third re-review (Codex): the fact kinds eligible for
+# entailment confirmation (propose-then-verify with an LLM, or -- with none
+# -- deferred to `seeds` and excluded from the no-LLM fallback's own
+# selection rather than trusted blind) -- defined ONCE and used at BOTH
+# gates below (`_pv_kind` and the propose-then-verify dispatch), so they can
+# never drift apart. Previously omitted SUPPLY and DRUG entirely, which cut
+# both ways unsafely: a supply found through vector retrieval could never
+# enter propose-then-verify even with a verifier supplied (permanently
+# stuck abstaining), while a drug found through the authoritative drug
+# index bypassed `_needs_verification` altogether (a qualified hit closing
+# deterministic with no confirmation, no verifier gate at all). The
+# verification prompt itself already names "procedure, service, supply,
+# drug, or diagnosis" -- this only wires existing plumbing to the fact
+# kinds it already describes.
+_ENTAILMENT_KINDS = frozenset({
+    FactKind.DIAGNOSIS, FactKind.PROCEDURE, FactKind.IMAGING,
+    FactKind.SUPPLY, FactKind.DRUG,
+})
+
 
 # Generic coding-grammar qualifiers (like left/right/unspecified) that denote a
 # DISTINCT billable variant — a descriptor carrying one must have it supported by the
@@ -399,7 +418,7 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
     # after descriptor ENTAILMENT + independent corroboration — never on the hit
     # alone (which could carry an undocumented qualifier).
     seeds: list[CandidateCode] = []
-    _pv_kind = fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING, FactKind.DIAGNOSIS)
+    _pv_kind = fact.kind in _ENTAILMENT_KINDS
 
     def _take(cands, authority, always_verify=False):
         cands = [c for c in cands if c]
@@ -767,8 +786,7 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
         "measurement" in r for r in excluded_reasons)
     gap_summary = "; ".join(excluded_reasons)
 
-    if llm is not None and fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING,
-                                         FactKind.DIAGNOSIS):
+    if llm is not None and fact.kind in _ENTAILMENT_KINDS:
         # issue #6 F9-R11-H-D, sixth re-review: the UNFILTERED retrieval/index
         # universe, not the already-eligibility-narrowed `pool` -- passing the
         # narrowed pool silently dropped every candidate the FIRST eligibility

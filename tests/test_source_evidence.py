@@ -74,8 +74,14 @@ TRUE_LINES = [
     "Patient denies finding gamma.",
 ]
 
+# issue #6 F9-R12-E, third re-review: descriptor deliberately carries no
+# cardinality word ("each"/"single"/...) -- `_needs_verification` treats
+# those as a qualifier requiring an authorized documented count/quantity,
+# forcing this candidate to defer to a verifier this suite's own
+# no-verifier convention doesn't supply, unrelated to what this file
+# actually tests (source-evidence reconciliation).
 PROC = CandidateCode("PROC_ALPHA_EXC", "cpt",
-                     "Excision, lesion alpha, single, each", 0.9, "retrieval")
+                     "Excision, lesion alpha", 0.9, "retrieval")
 DX = CandidateCode("DX_ALPHA_RIGHT", "icd10",
                    "condition alpha, right side", 0.9, "retrieval")
 
@@ -85,10 +91,20 @@ BILLING_CONTEXT = {"billing_entity_id": "actor-1",
 
 
 def _source():
+    # issue #6 F9-R12-E, third re-review: PROC/DX must resolve through a
+    # genuine DIRECT authoritative route (not bare retrieval, which is
+    # verification-required with no LLM as of this round) so this whole
+    # source-evidence-reconciliation suite's no-verifier convention stays
+    # safe -- an unqualified exact CPT/ICD Index hit is exactly the route
+    # `_take()` still trusts with no LLM present.
     return MockSource(
-        records={("PROC_ALPHA_EXC", "cpt"): {"active": True},
-                 ("DX_ALPHA_RIGHT", "icd10"): {"active": True}},
-        retrieval={("*", "cpt"): [PROC], ("*", "icd10"): [DX]})
+        records={("PROC_ALPHA_EXC", "cpt"):
+                 {"active": True, "long_description": "Excision, lesion alpha"},
+                 ("DX_ALPHA_RIGHT", "icd10"):
+                 {"active": True, "long_description": "condition alpha, right side"}},
+        retrieval={("*", "cpt"): [PROC], ("*", "icd10"): [DX]},
+        cpt_index={"excision of lesion alpha": {"PROC_ALPHA_EXC"}},
+        index={"condition alpha of the right side": {"DX_ALPHA_RIGHT"}})
 
 
 def _facts_json(lines: list[str]) -> str:

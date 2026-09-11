@@ -1919,6 +1919,46 @@ class DrugTableTest(unittest.TestCase):
         self.assertIsNone(drug_billing_units("30 ml", {"amount": 15, "unit": "mg"}))             # unit clash
 
 
+class DrugEntailmentGateTest(unittest.TestCase):
+    """issue #6 F9-R12-E, fourth re-review: Codex's required `_ENTAILMENT_KINDS`
+    regressions for DRUG. Before the fix, a Table-of-Drugs hit bypassed
+    `_needs_verification` entirely for ANY drug candidate (qualified or not),
+    since DRUG was never in the entailment-eligible kinds -- a qualified hit
+    (here, a descriptor carrying a bundled-component 'with' clause) closed
+    DETERMINISTIC with zero confirmation, no verifier gate at all. See
+    `DrugTableTest.test_drug_resolves_by_name` for the companion unqualified
+    case, unaffected by this fix (it never needed verification in the first
+    place)."""
+
+    def _source(self):
+        from claude_coder.data_access import MockSource
+        return MockSource(
+            records={("DRUG_BETA", "hcpcs"):
+                     {"long_description":
+                      "Injection, substance beta, with preservative, per 10 mg",
+                      "active": True}},
+            drug_index={"substance beta": {"DRUG_BETA"}})
+
+    def _fact(self):
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        return ClinicalFact(kind=FactKind.DRUG, description="substance beta",
+                            evidence=[EvidenceSpan("substance beta 20 mg IV")],
+                            confidence=0.95)
+
+    def test_qualified_drug_hit_without_verifier_stays_a_candidate(self):
+        from claude_coder.resolution import resolve
+        line = resolve(_request(self._fact()), self._source())
+        self.assertIsNone(line.chosen)
+        self.assertIn("DRUG_BETA", {c.code for c in (line.alternatives or [])})
+
+    def test_qualified_drug_hit_with_verifier_resolves(self):
+        from claude_coder.resolution import resolve
+        llm = _sv.judge(entails=lambda d: True, reason="entailed")
+        line = resolve(_request(self._fact()), self._source(), llm=llm)
+        self.assertIsNotNone(line.chosen)
+        self.assertEqual(line.chosen.code, "DRUG_BETA")
+
+
 class DrugTableParserTest(unittest.TestCase):
     """tools/build_hcpcs_drug_table.py: a drug code is detected by descriptor
     grammar (substance-amount billing unit), never a code prefix; name + per-unit
