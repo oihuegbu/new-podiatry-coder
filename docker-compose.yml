@@ -47,6 +47,19 @@ services:
       # holds the release. It can never produce "silently running unanchored", which is
       # exactly the default the reviewer found and rejected.
       - PROVENANCE_CHECKPOINT_REQUIRED=1
+      # issue #6, Codex's independent re-review, root cause 1: the default run
+      # must always resolve encounter/billing context, never rely on
+      # note-extracted metadata alone -- and that default must live in TRACKED
+      # deployment config, not only a live/gitignored .env (which vanishes on
+      # a recreated deployment). ${VAR:-default} still lets a real deployment
+      # override either path (e.g. to a real production roster) without
+      # editing this file. The fixture default here is the versioned,
+      # non-PHI acceptance fixture (data/context/acceptance_encounter_context.json)
+      # -- interim until a real production roster exists at
+      # data/context/encounter_context.json (see .example.json for the schema);
+      # a real roster is a drop-in replacement, no code change needed.
+      - ENCOUNTER_CONTEXT_FILE=${ENCOUNTER_CONTEXT_FILE:-data/context/acceptance_encounter_context.json}
+      - BILLING_CONTEXT_FILE=${BILLING_CONTEXT_FILE:-data/context/billing_context.json}
     volumes:
       - ./doctors_notes:/app/attachments:ro
       - ./output:/app/output

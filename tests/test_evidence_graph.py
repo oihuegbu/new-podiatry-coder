@@ -2748,6 +2748,86 @@ class PhysicalLocationIdentityAcrossReadings(unittest.TestCase):
         # the whole encounter.
         self.assertEqual(recovery.candidates[0].possible_primary_ids, ("F1",))
 
+    def test_one_confirmed_same_plus_one_colocated_undetermined_stays_ambiguous(self):
+        """issue #6, Codex's independent re-review, root cause 2 (P1 RC2-B): a
+        candidate co-located with TWO primaries -- confirmed SAME_EVENT with
+        one (via a governed concept match, exactly like the passing test
+        above -- text alone leaves it undetermined, so it reaches `admit`'s
+        own physical-location check still undecided instead of being settled
+        early by `propose`'s text-only pre-check), UNDETERMINED with the
+        other -- must NOT silently merge into the confirmed one.
+        `len(same_event) == 1` alone let exactly this happen (reproduced
+        independently at the prior SHA: `duplicate_of_primary`, with the
+        second, genuinely ambiguous co-location simply discarded). The
+        correct outcome is AMBIGUOUS_COLOCATED naming BOTH primaries -- the
+        confirmed match is not proof the OTHER co-located, undetermined
+        mention isn't also (or instead) about this candidate."""
+        from claude_coder import event_union as _union
+        from claude_coder.data_access import MockSource
+
+        p1_span = EvidenceSpan(text="Achilles tendon insertion addressed today",
+                               anchored=True, start=0, end=10, span_id="p1",
+                               reading_channel_id="")
+        f1 = _fact("F1", FactKind.PROCEDURE,
+                  "debridement of the achilles tendon insertion", spans=[p1_span])
+        # F2: co-located, differently-worded, no governed mapping and no
+        # contradicting attributes -> UNDETERMINED.
+        p2_span = EvidenceSpan(text="a nearby structure addressed today",
+                               anchored=True, start=0, end=10, span_id="p2",
+                               reading_channel_id="")
+        f2 = _fact("F2", FactKind.PROCEDURE, "debridement of a nearby structure",
+                  spans=[p2_span])
+
+        candidate_span = EvidenceSpan(
+            text="Achilles tendon near its heel attachment addressed today",
+            anchored=True, start=0, end=10, span_id="s1",
+            reading_channel_id="second-reading")
+        candidate_fact = _fact("S1", FactKind.PROCEDURE,
+                               "debridement near the heel attachment",
+                               spans=[candidate_span])
+
+        candidates = _union.propose([f1, f2], [candidate_fact])
+        self.assertEqual(candidates[0].verdict, "",
+                         "the fixture must be genuinely undetermined by text alone "
+                         "against BOTH primaries, so admit()'s own physical-location "
+                         "check -- not propose()'s text-only pre-check -- is what "
+                         "resolves F1")
+
+        # Governed concept identity resolves the candidate and F1 to the SAME
+        # procedure concept -- F2 has no such mapping, so it stays UNDETERMINED
+        # via the ordinary text fallback.
+        source = MockSource(procedure_relation={
+            ("debridement of the achilles tendon insertion",
+             "debridement near the heel attachment"): {
+                "verdict": "same",
+                "term_a": {"term": "achilles tendon debridement",
+                          "candidates": ["179063005"], "method": "exact",
+                          "unique": True},
+                "term_b": {"term": "achilles tendon debridement",
+                          "candidates": ["179063005"], "method": "token_set",
+                          "unique": True},
+            },
+        })
+
+        # All three spans reconcile to the SAME page, with mutually overlapping
+        # regions -- genuinely co-located with both primaries.
+        reconciliation = self._reconciliation({
+            "p1": ("AGREED", [3], (3, 100.0, 200.0, 300.0, 260.0)),
+            "p2": ("AGREED", [3], (3, 105.0, 205.0, 295.0, 255.0)),
+            "s1": ("AGREED", [3], (3, 110.0, 210.0, 290.0, 250.0)),
+        })
+        recovery = _union.admit(
+            candidates, reconciliation=reconciliation, alignment={},
+            second_relations=[], taken_ids={"F1", "F2"}, id_prefix="second-",
+            primary_facts=[f1, f2], source=source)
+
+        self.assertEqual(recovery.candidates[0].verdict, _union.AMBIGUOUS_COLOCATED)
+        self.assertEqual(recovery.candidates[0].merged_into, "",
+                         "a confirmed match co-located alongside a genuinely "
+                         "undetermined one must never be silently merged")
+        self.assertEqual(set(recovery.candidates[0].possible_primary_ids), {"F1", "F2"})
+        self.assertEqual(recovery.facts, ())
+
     def test_a_governed_procedure_concept_match_merges_the_same_undetermined_fixture(self):
         """Codex F9-R4: the EXACT fixture above, unchanged, but with a `source` that
         supplies a governed SNOMED Procedure concept graph resolving both action
@@ -2877,6 +2957,59 @@ class PhysicalLocationIdentityAcrossReadings(unittest.TestCase):
         self.assertEqual(len(recovery.facts), 1,
                          "a genuinely distinct, disjointly-located service on the "
                          "same page must still be recovered, not merged away")
+
+    def test_an_unplaceable_relation_strands_the_event_scoped_to_its_endpoint(self):
+        """issue #6, Codex's independent re-review, root cause 2 (P1 RC2-A): the
+        SAME shape as the test above (a genuinely distinct, disjointly-located
+        service that would otherwise ADMIT), but the second reading also
+        names a relation from this event to a target this graph never
+        resolves (never aligned, never a primary, never itself admitted) --
+        the edge cannot be carried faithfully, so the event is held instead
+        of admitted. This is a DIFFERENT cause than an unread page: tagged
+        `RELATION_UNPLACED`, with `affected_ids` naming the relation's own
+        (unplaceable) endpoint, so a caller can scope the hold instead of
+        treating it as an encounter-wide "might be anywhere" unread-page
+        hold."""
+        from claude_coder import event_union as _union
+        from claude_coder.models import RelationAssertion, RelationPredicate, RelationState
+
+        primary_span = EvidenceSpan(
+            text="Procedure one performed today", anchored=True,
+            start=0, end=10, span_id="p1", reading_channel_id="")
+        primary = [_fact("F1", FactKind.PROCEDURE, "procedure one performed",
+                         spans=[primary_span])]
+
+        candidate_span = EvidenceSpan(
+            text="Procedure two performed today", anchored=True,
+            start=0, end=10, span_id="s1", reading_channel_id="second-reading")
+        candidate_fact = _fact("S1", FactKind.PROCEDURE, "procedure two performed",
+                               spans=[candidate_span])
+
+        candidates = _union.propose(primary, [candidate_fact])
+        self.assertEqual(candidates[0].verdict, "")
+
+        reconciliation = self._reconciliation({
+            "p1": ("AGREED", [3], (3, 0.0, 0.0, 50.0, 20.0)),
+            "s1": ("AGREED", [3], (3, 400.0, 400.0, 450.0, 420.0)),
+        })
+        # Names S1 as PART_OF an event this graph never resolves (not a
+        # primary, not another admitted second-reading event, not aligned).
+        unplaceable = RelationAssertion(
+            subject_event_id="S1", predicate=RelationPredicate.PART_OF,
+            object_event_id="F_GHOST", state=RelationState.ASSERTED,
+            evidence_span_ids=["s1"])
+        recovery = _union.admit(
+            candidates, reconciliation=reconciliation, alignment={},
+            second_relations=[unplaceable], taken_ids={"F1"}, id_prefix="second-",
+            primary_facts=primary)
+
+        self.assertEqual(recovery.candidates[0].verdict, _union.HELD_UNVERIFIED)
+        self.assertEqual(recovery.candidates[0].hold_cause,
+                         _union.RecoveryHoldCause.RELATION_UNPLACED.value)
+        self.assertEqual(recovery.candidates[0].affected_ids, ("F_GHOST",))
+        self.assertEqual(recovery.facts, (),
+                         "a stranded event must never become an independently "
+                         "billable line")
 
     def test_same_page_with_no_region_granularity_still_holds_ambiguous(self):
         """The same shape as above, but with no region on either side -- withholding

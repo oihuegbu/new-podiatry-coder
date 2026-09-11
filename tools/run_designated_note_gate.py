@@ -6,11 +6,21 @@ billing/encounter context makes every ownership/context hold inevitable --
 that is not release evidence, it is a code-path smoke test wearing release
 evidence's clothes, and it spends real model calls on a note predetermined to
 fail. This script refuses to start when the versioned, non-PHI acceptance
-context fixture is absent, prints its fingerprint, and then invokes the SAME
-`run.py` entrypoint every real deployment uses -- no parallel context logic,
-and production still resolves patient/payer/provider/billing-entity facts
-through the existing `EncounterContextProvider` interface, never from note
-prose.
+context fixture is absent OR malformed, prints both fixtures' fingerprints and
+the exact command, then invokes the SAME run.py entrypoint every real
+deployment uses -- no parallel context logic, and production still resolves
+patient/payer/provider/billing-entity facts through the existing
+EncounterContextProvider interface, never from note prose.
+
+Round 2 (Codex's independent re-review): validating only that the fixture
+FILES EXIST let a malformed billing context (e.g. `{}`) still start the paid
+note run. Validation now goes through the SAME loaders/validators the real
+pipeline uses -- `run.load_billing_context` + `claude_coder.extraction.
+_participant_index` (the exact check `extraction.extract_note` itself runs
+"BEFORE spending an extraction call"), and
+`app.contracts.encounter_context.build_provider(...).preflight()` (the real
+`VersionedRosterContextProvider`'s own schema/version/section validation) --
+never a duplicated, weaker re-implementation of either schema.
 """
 from __future__ import annotations
 
@@ -42,17 +52,43 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr)
         return 2
 
-    raw = json.loads(ENCOUNTER_CONTEXT.read_text())
-    if raw.get("schema") != "encounter_context/2":
-        print(f"release-gate run refused: {ENCOUNTER_CONTEXT} does not declare "
-             f"schema 'encounter_context/2'", file=sys.stderr)
-        return 2
-    version = str(raw.get("version") or "")
-    if not version:
-        print(f"release-gate run refused: {ENCOUNTER_CONTEXT} declares no version",
+    sys.path.insert(0, str(REPO_ROOT))
+
+    # Billing context: the SAME strict validation `extraction.extract_note`
+    # itself runs before spending an extraction call -- never a duplicate.
+    try:
+        from run import load_billing_context
+        from claude_coder.extraction import _participant_index
+        billing = load_billing_context(str(BILLING_CONTEXT))
+        _participant_index(billing)
+    except Exception as exc:
+        print(f"release-gate run refused: billing context is invalid: {exc}",
              file=sys.stderr)
         return 2
 
+    # Encounter context: the REAL provider's own preflight -- schema, version,
+    # every required section -- never a hand-rolled re-check of that schema.
+    try:
+        from app.contracts.encounter_context import (
+            EncounterContextUnavailable, build_provider)
+        provider = build_provider(str(ENCOUNTER_CONTEXT))
+        preflight = provider.preflight()
+    except EncounterContextUnavailable as exc:
+        print(f"release-gate run refused: encounter context is invalid: {exc}",
+             file=sys.stderr)
+        return 2
+
+    designated_id = Path(DESIGNATED_NOTE).stem
+    raw = json.loads(ENCOUNTER_CONTEXT.read_text())
+    if designated_id not in (raw.get("encounters") or {}):
+        print(
+            f"release-gate run refused: {ENCOUNTER_CONTEXT} declares no entry for "
+            f"the designated encounter {designated_id!r} -- this fixture cannot "
+            f"resolve context for the note this gate is meant to verify.",
+            file=sys.stderr)
+        return 2
+
+    version = preflight.get("version", "")
     print(f"context edition: {version!r}")
     print(f"encounter context fingerprint: sha256:{_fingerprint(ENCOUNTER_CONTEXT)}")
     print(f"billing context fingerprint:   sha256:{_fingerprint(BILLING_CONTEXT)}")

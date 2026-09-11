@@ -98,7 +98,34 @@ geometry; the admission test is the source-evidence contract.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from enum import Enum
 from typing import Any
+
+
+class RecoveryHoldCause(str, Enum):
+    """issue #6, Codex's independent re-review, root cause 2, P1 RC2-A: a typed
+    cause for a `HELD_UNVERIFIED`/`AMBIGUOUS_COLOCATED` verdict, not
+    reason-string matching. The prior round conflated three structurally
+    different failures under one verdict + free-text reason, so a caller
+    could not distinguish "an unread page could hide an omitted service
+    anywhere" (genuinely encounter-wide) from "this one recovered event's own
+    relation couldn't be placed/validated" (scoped to that event and its
+    reachable relation endpoints)."""
+    #: No independent reading covers the page this event is quoted from (or no
+    #: reconciliation was supplied at all) -- an omitted service could be
+    #: ANYWHERE on that unread page, so this stays encounter-wide/retryable.
+    SOURCE_UNREAD = "source_unread"
+    #: This event's documented relational context (a PART_OF/USES_DEVICE/etc.
+    #: edge) could not be carried into the canonical graph -- scoped to the
+    #: relation's own reachable endpoints, never the whole encounter.
+    RELATION_UNPLACED = "relation_unplaced"
+    #: The recovered set's relations failed validation on a trial graph and
+    #: were withdrawn as a group (`Recovery.withdraw`) -- the failure is about
+    #: the recovered set's relations collectively, so scoping is best-effort.
+    RELATION_INVALID = "relation_invalid"
+    #: Physically co-located with one or more primary events, never confirmed
+    #: SAME or proven DISTINCT -- scoped to `possible_primary_ids`.
+    COREFERENCE_AMBIGUOUS = "coreference_ambiguous"
 
 #: Identity of this union contract. A consumer that finds another value is reading a
 #: different contract and must say so rather than guess which fields exist.
@@ -206,6 +233,17 @@ class EventCandidate:
     #: encounter: one uncertain co-located mention must not erase every other,
     #: unrelated, independently defensible line.
     possible_primary_ids: tuple[str, ...] = ()
+    #: issue #6, Codex's independent re-review, root cause 2 (P1 RC2-A): WHY this
+    #: candidate holds -- a `RecoveryHoldCause` value, empty for a decided
+    #: non-holding verdict. Distinguishes an unread page (genuinely encounter-
+    #: wide) from a relation this graph could not place or validate (scoped).
+    hold_cause: str = ""
+    #: The relation-endpoint fact ids this hold is actually about, when
+    #: `hold_cause` is `RELATION_UNPLACED`/`RELATION_INVALID` -- the analog of
+    #: `possible_primary_ids` for a relation-shaped hold rather than a
+    #: coreference-shaped one. Empty means encounter-wide (no scoping data
+    #: available for this specific hold).
+    affected_ids: tuple[str, ...] = ()
 
     @property
     def kind(self) -> str:
@@ -229,6 +267,8 @@ class EventCandidate:
             "node_id": self.node_id,
             "evidence_span_ids": list(self.span_ids),
             "possible_primary_ids": list(self.possible_primary_ids),
+            "hold_cause": self.hold_cause,
+            "affected_ids": list(self.affected_ids),
         }
 
 
@@ -269,6 +309,13 @@ class Recovery:
             if candidate.verdict not in ADMITTING_VERDICTS:
                 continue
             candidate.verdict = HELD_UNVERIFIED
+            # issue #6, Codex's independent re-review, root cause 2 (P1 RC2-A):
+            # distinct from an unread page -- this is the recovered SET's
+            # relations failing validation together, so precise per-event
+            # scoping isn't available at this call site (no relation-endpoint
+            # data is threaded in here); best-effort cause tag, conservative
+            # (encounter-wide-equivalent) scope rather than a guess.
+            candidate.hold_cause = RecoveryHoldCause.RELATION_INVALID.value
             candidate.node_id = ""
             candidate.reason = reason
         self.facts = ()
@@ -537,7 +584,7 @@ def _physical_duplicates(candidates, primary_facts, reconciliation,
     test alone, exactly as before this fix.
     """
     if reconciliation is None:
-        return {}, set()
+        return {}, {}
     from . import coreference as _coref
 
     settled = reconciliation.by_span_id()
@@ -580,13 +627,27 @@ def _physical_duplicates(candidates, primary_facts, reconciliation,
                 possible.append(primary_id)
             # DISTINCT_EVENT contributes to neither list -- a co-located primary
             # the record proves distinct is not evidence of ambiguity at all.
-        if len(same_event) == 1:
+        # issue #6, Codex's independent re-review, root cause 2 (P1 RC2-B): a
+        # SINGLE confirmed SAME_EVENT match is only a safe merge when it is
+        # THE ONLY co-located candidate at all -- `len(same_event) == 1` alone
+        # let a candidate confirmed SAME with one primary but ALSO
+        # UNDETERMINED with a second co-located primary merge into the first,
+        # silently discarding a real ambiguity the second match raised
+        # (reproduced exactly: one governed SAME match + one co-located
+        # UNDETERMINED match wrongly returned a clean `duplicate_of_primary`).
+        # `possible` already contains BOTH the confirmed and the undetermined
+        # primary ids, so requiring `len(possible) == 1` too is the correct,
+        # narrower merge bar: exactly one co-located primary, and it is
+        # confirmed SAME.
+        if len(same_event) == 1 and len(possible) == 1:
             duplicates[candidate.second_event_id] = same_event[0]
         elif possible:
-            # More than one CONFIRMED match (contradictory), or at least one
-            # UNDETERMINED verdict among the co-located primaries -- genuinely
-            # ambiguous, never a guess. `possible` names exactly which primaries
-            # this ambiguity is about, so the caller can scope the hold to them.
+            # More than one CONFIRMED match (contradictory), a confirmed match
+            # alongside another co-located UNDETERMINED one, or at least one
+            # UNDETERMINED verdict among the co-located primaries with no
+            # confirmed match at all -- genuinely ambiguous, never a guess.
+            # `possible` names exactly which primaries this ambiguity is
+            # about, so the caller can scope the hold to them.
             ambiguous[candidate.second_event_id] = tuple(dict.fromkeys(possible))
         # else: co-located only with primaries the record proves DISTINCT --
         # not ambiguous, not a duplicate; falls through to ordinary admission.
@@ -673,6 +734,7 @@ def admit(candidates, *, reconciliation, alignment, second_relations,
                 f"worded it")
         elif candidate.second_event_id in physical_ambiguous:
             candidate.verdict = AMBIGUOUS_COLOCATED
+            candidate.hold_cause = RecoveryHoldCause.COREFERENCE_AMBIGUOUS.value
             candidate.possible_primary_ids = physical_ambiguous[candidate.second_event_id]
             candidate.reason = (
                 "this event's quotation reconciles to the same page/region as one "
@@ -686,6 +748,14 @@ def admit(candidates, *, reconciliation, alignment, second_relations,
         if candidate.decided:
             continue
         candidate.verdict, candidate.reason = _source_verdict(candidate, reconciliation)
+        if candidate.verdict == HELD_UNVERIFIED:
+            # issue #6, Codex's independent re-review, root cause 2 (P1 RC2-A):
+            # every hold `_source_verdict` itself can produce is genuinely about
+            # an unread/unreconciled page -- an omitted service could be
+            # anywhere on it, so this stays encounter-wide. The relation-
+            # stranding loop below assigns a DIFFERENT cause to the (disjoint)
+            # set of candidates it holds.
+            candidate.hold_cause = RecoveryHoldCause.SOURCE_UNREAD.value
 
     # Canonical ids first, so an edge can be remapped onto them below.
     taken = set(taken_ids or set())
@@ -714,6 +784,10 @@ def admit(candidates, *, reconciliation, alignment, second_relations,
     admitted_second_ids = {c.second_event_id for c in decided
                            if c.verdict in ADMITTING_VERDICTS}
     stranded: set[str] = set()
+    #: issue #6, Codex's independent re-review, root cause 2 (P1 RC2-A): the
+    #: reachable relation endpoints for each stranded event, so the caller can
+    #: scope RELATION_UNPLACED to them instead of holding the whole encounter.
+    stranded_endpoints: dict[str, set[str]] = {}
     relations: list[Any] = []
     while True:
         live = admitted_second_ids - stranded
@@ -729,6 +803,8 @@ def admit(candidates, *, reconciliation, alignment, second_relations,
             carried = _remap(relation, placed)
             if carried is None:
                 newly |= endpoints & live
+                for e in endpoints & live:
+                    stranded_endpoints.setdefault(e, set()).update(endpoints - {e})
                 continue
             relations.append(carried)
         if not newly:
@@ -739,6 +815,9 @@ def admit(candidates, *, reconciliation, alignment, second_relations,
         if candidate.second_event_id not in stranded:
             continue
         candidate.verdict = HELD_UNVERIFIED
+        candidate.hold_cause = RecoveryHoldCause.RELATION_UNPLACED.value
+        candidate.affected_ids = tuple(sorted(
+            stranded_endpoints.get(candidate.second_event_id, set())))
         candidate.node_id = ""
         candidate.reason = (
             "the second reading places this event in a relationship this graph "

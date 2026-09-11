@@ -216,88 +216,6 @@ def _find_clause(source_text: str, term: str) -> tuple[str, tuple[int, int]] | N
     return source_text[idx:end], (idx, end)
 
 
-def _semantic_concept_requirements(candidates: list[CandidateCode], source: Any
-                                   ) -> list[DescriptorRequirement]:
-    """MUST_SUPPORT requirements from each candidate's own compiled semantic
-    record (issue #6, Codex's independent re-review, root cause 3):
-    `semantics.compiled_record`'s `action_concepts`/`anatomy_concepts` are
-    typed, per-code identity fields already derived from the candidate's OWN
-    authoritative descriptor grammar -- unlike the raw, untyped
-    `AXIS_DESCRIPTOR_TERM` leftover-token bucket (which `discriminating_axes`
-    deliberately keeps non-selectable, see its own docstring), these carry
-    enough governed structure to eliminate a candidate on. Without this, a
-    documented action entailing several authoritative candidates that differ
-    only in WHICH tissue/structure they name has no governed basis to prove
-    any of them out -- confirmed live: eight current CPT candidates, all
-    "entailed", nothing in the requirement matrix distinguished them.
-
-    Only the DIFFERENCE across the tied candidate set becomes a requirement,
-    exactly the principle `discriminating_axes` already applies to laterality
-    and the descriptor-term bucket: a concept every candidate shares says
-    nothing about which one the record means, and compiling it as an
-    identical MUST_SUPPORT requirement across the whole set would eliminate
-    all-or-nothing, never discriminate.
-
-    SAFETY BOUNDARY, deliberately not closed further this round: `resolution.
-    _grounded_elimination` only ever CONFIRMS an elimination a judging model
-    has ALREADY named (`_uniqueness_view`'s own `named = [j.elimination_of(...)]`
-    gate runs first) -- this requirement can strengthen that confirmation with
-    document proof, but can never manufacture a NEW elimination a model itself
-    never made. That is intentional, not an oversight: `action_concepts`/
-    `anatomy_concepts` are a STRUCTURAL parse (`ontology.parse_descriptor`'s
-    comma "Action, Target" split), not a semantically-validated one -- a
-    descriptor whose post-comma phrase is a technique/approach word ("assembly
-    service, POWERED technique" vs "..., MANUAL technique") parses into
-    `anatomy_concepts` exactly like real anatomy would, and this repo has no
-    governed source (CUI, concept graph, or otherwise) to tell the two apart.
-    Making such a concept independently ELIMINATE (not merely confirm) would
-    resurrect the exact `_APPROACH_WORDS` mistake `discriminating_axes`'s own
-    docstring documents being reverted for once already: ordinary category/
-    technique wording treated as a governed, selecting axis. For the same
-    reason, this does NOT also exclude action/anatomy tokens from the raw
-    `AXIS_DESCRIPTOR_TERM` bucket the way laterality words are excluded --
-    doing so would let `tiebreak.narrow`'s OWN "every axis must settle" release
-    rule select purely off these same unvalidated tokens with no model
-    judgement in the loop at all, which is the more dangerous of the two paths.
-    Closing this for real needs either a governed action/anatomy concept
-    source this repo does not yet have, or an explicit, reviewed decision to
-    accept that risk -- not a heuristic invented here."""
-    if source is None or len(candidates) < 2:
-        return []
-    from . import semantics as _semantics
-    records: dict[str, dict] = {}
-    for c in candidates:
-        rec = _semantics.compiled_record(c.code, c.system, source)
-        if rec is not None:
-            records[c.code] = rec
-    if len(records) < 2:
-        return []
-    out: list[DescriptorRequirement] = []
-    for field_name, axis_name in (("action_concepts", "semantic_action"),
-                                  ("anatomy_concepts", "semantic_anatomy")):
-        toks = {code: set(rec.get(field_name) or ()) for code, rec in records.items()}
-        shared = set.intersection(*toks.values()) if toks else set()
-        for code, tokens in sorted(toks.items()):
-            distinct = sorted(tokens - shared)
-            if not distinct:
-                continue
-            candidate = next(c for c in candidates if c.code == code)
-            found = _find_clause(candidate.descriptor, distinct[0])
-            if found is None:
-                continue
-            clause, offset = found
-            out.append(DescriptorRequirement(
-                requirement_id=f"{axis_name}:{code}:{len(out)}",
-                axis=axis_name, candidate_code=code, required=True,
-                role=RequirementRole.MUST_SUPPORT,
-                expected=tuple(distinct), authority_clause=clause,
-                authority_offset=offset, authority_source_text=candidate.descriptor,
-                source_identity={"kind": "semantic_concept", "system": candidate.system,
-                                 "authority": dict(candidate.authority or {})},
-                selectable=True, queryable=False))
-    return out
-
-
 def compile_requirements(candidates: list[CandidateCode], source: Any = None
                          ) -> tuple[DescriptorRequirement, ...]:
     """Every typed requirement the tied candidates' own authoritative records
@@ -353,7 +271,26 @@ def compile_requirements(candidates: list[CandidateCode], source: Any = None
                                  "snapshot": snapshot},
                 selectable=probe.selectable, queryable=probe.queryable))
 
-    out.extend(_semantic_concept_requirements(candidates, source))
+    # issue #6, Codex's independent re-review, root cause 3: a prior round added
+    # `_semantic_concept_requirements`, projecting `semantics.compiled_record`'s
+    # `action_concepts`/`anatomy_concepts` into MUST_SUPPORT requirements.
+    # REMOVED, not merely disabled: Codex found two real defects, not a design
+    # nuance. (1) `action_concepts`/`anatomy_concepts` are `ontology.
+    # parse_descriptor`'s raw comma-split tokens -- a STRUCTURAL parse, not a
+    # semantically-validated one, so a technique/approach word ("assembly
+    # service, POWERED technique") parses into `anatomy_concepts` exactly like
+    # real anatomy would, with no governed source in this repo to tell them
+    # apart. (2) a candidate's several distinct tokens were compiled into ONE
+    # `expected` tuple, but `tiebreak.asserted_status` treats a multi-term
+    # `expected` as ANY-term-supported -- reproduced exactly: `expected =
+    # ("alpha", "powered")`, document states only "powered", and the WHOLE
+    # requirement (including the unstated "alpha") validated SUPPORTED. A
+    # governed replacement needs requirements compiled one-semantic-assertion-
+    # per-requirement (never mixing anatomy and technique tokens in one
+    # `expected`), classified only against a versioned SNOMED/UMLS concept
+    # identity, and a composite proof (descriptor + atomic fact's own
+    # reconciled span + governed equivalence + independent entailment) --  not
+    # invented here.
 
     if source is not None:
         resolver = getattr(source, "instructional_terms", None)

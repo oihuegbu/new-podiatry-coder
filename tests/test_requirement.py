@@ -203,69 +203,27 @@ class CompileRequirementsTest(unittest.TestCase):
         self.assertEqual([r for r in reqs if r.axis == "inclusion_term"], [])
 
 
-class SemanticConceptRequirementTest(unittest.TestCase):
-    """issue #6, Codex's independent re-review, root cause 3: `compile_requirements`
-    now also projects each candidate's compiled semantic record (`semantics.
-    compiled_record`'s `action_concepts`/`anatomy_concepts`) into MUST_SUPPORT
-    requirements -- a governed source beyond the untyped `AXIS_DESCRIPTOR_TERM`
-    bucket, but still only for the DIFFERENCE across the tied set, exactly the
-    principle every other axis here already follows."""
+class SemanticConceptRequirementRemovedTest(unittest.TestCase):
+    """issue #6, Codex's independent re-review, root cause 3: a prior round's
+    `_semantic_concept_requirements` (projecting `semantics.compiled_record`'s
+    raw `action_concepts`/`anatomy_concepts` tokens into MUST_SUPPORT
+    requirements) was REMOVED, not merely disabled -- Codex found it compiled
+    an ungoverned structural parse as if it were a validated concept (a
+    technique/approach word indistinguishable from real anatomy), AND a
+    multi-token `expected` tuple that `asserted_status` treats as ANY-term-
+    supported, letting an unrelated documented word "confirm" a requirement
+    whose real, unstated term was absent. Pinned here so this specific,
+    already-shown-unsafe shape can never silently reappear."""
 
-    def _source(self, *candidates):
-        return MockSource(records={(c.code, c.system):
-                                   {"active": True, "long_description": c.descriptor}
-                                   for c in candidates})
-
-    def test_differing_action_concept_produces_a_must_support_requirement(self):
+    def test_no_semantic_action_or_anatomy_axis_is_ever_compiled(self):
+        source = MockSource(records={
+            ("CAND_EXC", "cpt"): {"active": True, "long_description": "Excision, lesion alpha"},
+            ("CAND_REP", "cpt"): {"active": True, "long_description": "Repair, lesion alpha"}})
         exc = _cand("CAND_EXC", "Excision, lesion alpha")
         rep = _cand("CAND_REP", "Repair, lesion alpha")
-        reqs = req.compile_requirements([exc, rep], source=self._source(exc, rep))
-        action = {r.candidate_code: r for r in reqs if r.axis == "semantic_action"}
-        self.assertEqual(set(action), {"CAND_EXC", "CAND_REP"})
-        self.assertEqual(action["CAND_EXC"].expected, ("excision",))
-        self.assertEqual(action["CAND_REP"].expected, ("repair",))
-        self.assertTrue(all(r.role is req.RequirementRole.MUST_SUPPORT
-                            for r in action.values()))
-        # the SHARED anatomy target must never become a requirement -- it says
-        # nothing about which candidate the record means.
-        self.assertEqual([r for r in reqs if r.axis == "semantic_anatomy"], [])
-
-    def test_differing_anatomy_concept_produces_a_must_support_requirement(self):
-        alpha = _cand("CAND_ALPHA", "Excision, lesion alpha")
-        beta = _cand("CAND_BETA", "Excision, lesion beta")
-        reqs = req.compile_requirements([alpha, beta], source=self._source(alpha, beta))
-        anatomy = {r.candidate_code: r for r in reqs if r.axis == "semantic_anatomy"}
-        self.assertEqual(set(anatomy), {"CAND_ALPHA", "CAND_BETA"})
-        self.assertEqual(anatomy["CAND_ALPHA"].expected, ("alpha",))
-        self.assertEqual(anatomy["CAND_BETA"].expected, ("beta",))
-        # the SHARED action must never become a requirement either.
-        self.assertEqual([r for r in reqs if r.axis == "semantic_action"], [])
-
-    def test_identical_semantic_concepts_produce_no_semantic_requirement(self):
-        a = _cand("CAND_A2", "Excision, lesion alpha")
-        b = _cand("CAND_B2", "Excision, lesion alpha")
-        reqs = req.compile_requirements([a, b], source=self._source(a, b))
-        self.assertEqual([r for r in reqs if r.axis in ("semantic_action", "semantic_anatomy")], [])
-
-    def test_no_source_produces_no_semantic_requirement(self):
-        """Mirrors every other source-dependent projection here (inclusion terms,
-        snapshots): absent `source` degrades to nothing, never a guess."""
-        alpha = _cand("CAND_ALPHA3", "Excision, lesion alpha")
-        beta = _cand("CAND_BETA3", "Excision, lesion beta")
-        reqs = req.compile_requirements([alpha, beta], source=None)
-        self.assertEqual([r for r in reqs if r.axis in ("semantic_action", "semantic_anatomy")], [])
-
-    def test_a_code_not_in_the_authoritative_source_is_silently_excluded(self):
-        """`semantics.compiled_record` returns None for a code the source cannot
-        look up (issue #6, item 1's own contract) -- that candidate contributes no
-        semantic-concept requirement, but does not raise or block the OTHER
-        candidate's requirement either."""
-        known = _cand("CAND_KNOWN", "Excision, lesion alpha")
-        unknown = _cand("CAND_UNKNOWN", "Excision, lesion beta")
-        source = MockSource(records={("CAND_KNOWN", "cpt"):
-                                     {"active": True, "long_description": known.descriptor}})
-        reqs = req.compile_requirements([known, unknown], source=source)
-        self.assertEqual([r for r in reqs if r.axis in ("semantic_action", "semantic_anatomy")], [])
+        reqs = req.compile_requirements([exc, rep], source=source)
+        self.assertEqual(
+            [r for r in reqs if r.axis in ("semantic_action", "semantic_anatomy")], [])
 
 
 class CoverageCorpusValidationTest(unittest.TestCase):
@@ -645,128 +603,3 @@ class InstructionalTermsMockSourceTest(unittest.TestCase):
     def test_unconfigured_code_returns_empty_not_an_error(self):
         source = MockSource(instructional_terms={"A000": {"classical cholera"}})
         self.assertEqual(source.instructional_terms("Z99.9", "icd10"), ())
-
-
-class SemanticConceptEndToEndEliminationTest(unittest.TestCase):
-    """issue #6, Codex's independent re-review, root cause 3, end to end: a
-    documented action entailing several authoritative candidates that differ
-    only in WHICH tissue/structure they name previously had no governed basis
-    to eliminate any of them (Codex's exact reproduction: eight current CPT
-    candidates, all "entailed", nothing distinguished them). The new
-    semantic_anatomy requirement gives `_grounded_elimination` real material to
-    confirm a model-named elimination against the document -- reproduced here
-    with two candidates differing only in anatomy target, resolving uniquely
-    to the one the note actually documents."""
-
-    def _resolve(self, note_text):
-        import hashlib
-        from claude_coder.models import ClinicalFact, Disposition, EvidenceSpan, FactKind
-        from claude_coder.resolution import resolve
-        from claude_coder.eligibility import (ClaimComponent, ClaimLineIntent,
-                                              EligibilityState, RetrievalRequest,
-                                              fact_snapshot_digest)
-        from app.contracts.source_evidence import (ReconciliationStatus,
-                                                    SourceReconciliation,
-                                                    SpanReconciliation)
-        from tests import shortlist_verdict as _sv
-
-        alpha = _cand("CAND_ALPHA_E2E", "Excision, lesion alpha", 0.90)
-        beta = _cand("CAND_BETA_E2E", "Excision, lesion beta", 0.90)
-        source = MockSource(
-            records={(c.code, c.system): {"active": True, "long_description": c.descriptor}
-                     for c in (alpha, beta)},
-            retrieval={("*", "cpt"): [alpha, beta]})
-
-        span = EvidenceSpan(text=note_text, anchored=True, start=0, end=len(note_text),
-                            span_id="span-0")
-        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="excision",
-                            disposition=Disposition.PERFORMED, evidence=[span],
-                            confidence=0.99)
-        intent = ClaimLineIntent(
-            intent_id="t", encounter_id="test", component=ClaimComponent.SERVICE,
-            clinical_event_ids=[fact.fact_id], fact_kind=fact.kind.value,
-            clinical_action=fact.description, attributes=dict(fact.attributes),
-            date_of_service=None, billing_entity_id=None, source_span_ids=[],
-            state=EligibilityState.ELIGIBLE_FOR_RETRIEVAL,
-            fact_digest=fact_snapshot_digest(fact))
-        request = RetrievalRequest(intent, fact)
-
-        reconciliation = SourceReconciliation(spans=(
-            SpanReconciliation(span_id="span-0", status=ReconciliationStatus.AGREED,
-                              pages=(1,)),))
-        coverage = req.CoverageCorpus(
-            channel_id="primary", text=note_text,
-            text_sha256=hashlib.sha256(note_text.encode()).hexdigest(),
-            covered_pages=(1,), uncovered_pages=(), page_image_sha256=("imgsha",))
-
-        # The model judges beta NOT entailed (its own real judgement call --
-        # unaffected by this fix) and, asked about the compiled semantic_anatomy
-        # requirement, reports beta's own "beta" concept as not_documented --
-        # `_grounded_elimination` then CONFIRMS that named elimination against
-        # the document via the new requirement (never invents one the model
-        # itself never made).
-        llm = _sv.judge(entails=lambda d: "alpha" in d, reason="entailed",
-                        requirement_status={"semantic_anatomy:CAND_BETA_E2E":
-                                            "not_documented"})
-        return resolve(request, source, llm=llm, corroborate=llm,
-                       reconciliation=reconciliation, coverage=coverage)
-
-    def test_a_model_named_elimination_is_confirmed_by_the_semantic_requirement(self):
-        """The model itself already judged beta eliminated (a real judgement call,
-        not manufactured by this fix); `_grounded_elimination` uses the new
-        semantic_anatomy requirement to CONFIRM that elimination against the
-        document, releasing alpha uniquely. This is the mechanism's actual,
-        safe role: strengthening a model-named elimination with document proof,
-        never inventing one independently -- see the companion safety test
-        below for the case where the model names nothing."""
-        line = self._resolve("excision of lesion alpha performed")
-        self.assertIsNotNone(line.chosen, line.rationale)
-        self.assertEqual(line.chosen.code, "CAND_ALPHA_E2E")
-
-    def test_technique_only_difference_never_eliminates_on_its_own(self):
-        """Companion safety check: `_grounded_elimination` only ever CONFIRMS an
-        elimination a judging model itself already named
-        (`_uniqueness_view`'s `named = [j.elimination_of(...)]` gate) -- it can
-        never manufacture one purely from the compiled requirement. Two
-        candidates a model finds BOTH entailed, with NEITHER named eliminated,
-        must stay a tie regardless of what semantic_anatomy/semantic_action
-        requirements exist, exactly like the untyped descriptor-term axis
-        already never selects on its own."""
-        from tests import shortlist_verdict as _sv
-        from claude_coder.models import ResolutionMethod
-        alpha = _cand("CAND_ALPHA_TIE", "Excision, lesion alpha", 0.90)
-        beta = _cand("CAND_BETA_TIE", "Excision, lesion beta", 0.90)
-        source = MockSource(
-            records={(c.code, c.system): {"active": True, "long_description": c.descriptor}
-                     for c in (alpha, beta)},
-            retrieval={("*", "cpt"): [alpha, beta]})
-        import hashlib
-        from claude_coder.models import ClinicalFact, Disposition, EvidenceSpan, FactKind
-        from claude_coder.resolution import resolve
-        from claude_coder.eligibility import (ClaimComponent, ClaimLineIntent,
-                                              EligibilityState, RetrievalRequest,
-                                              fact_snapshot_digest)
-        note_text = "excision performed"
-        span = EvidenceSpan(text=note_text, anchored=True, start=0, end=len(note_text),
-                            span_id="span-0")
-        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="excision",
-                            disposition=Disposition.PERFORMED, evidence=[span],
-                            confidence=0.99)
-        intent = ClaimLineIntent(
-            intent_id="t2", encounter_id="test", component=ClaimComponent.SERVICE,
-            clinical_event_ids=[fact.fact_id], fact_kind=fact.kind.value,
-            clinical_action=fact.description, attributes=dict(fact.attributes),
-            date_of_service=None, billing_entity_id=None, source_span_ids=[],
-            state=EligibilityState.ELIGIBLE_FOR_RETRIEVAL,
-            fact_digest=fact_snapshot_digest(fact))
-        request = RetrievalRequest(intent, fact)
-        # entails both, names neither eliminated (declare=True with both entailed
-        # and no distinguishing preference -> no elimination reason offered).
-        llm = _sv.judge(entails=lambda d: True, reason="entailed")
-        line = resolve(request, source, llm=llm, corroborate=llm)
-        self.assertIsNone(line.chosen, line.rationale)
-        self.assertIsNot(line.method, ResolutionMethod.DETERMINISTIC)
-
-
-if __name__ == "__main__":
-    unittest.main()
