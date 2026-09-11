@@ -1959,6 +1959,157 @@ class DrugEntailmentGateTest(unittest.TestCase):
         self.assertEqual(line.chosen.code, "DRUG_BETA")
 
 
+class DrugUnitsAvailabilityTest(unittest.TestCase):
+    """issue #6 F9-R12-F (Codex): a KNOWN per-unit dose denominator with no
+    computable documented dose must never silently bill as 1 unit (the
+    count-based default) -- the drug's identity may be right but the billable
+    units are not. Enforced as a LINE-level disposition in pipeline.py (never
+    an encounter-wide erase: one held drug line must not remove a separate
+    defensible line), with `gates.drug_units_gate` as a fail-closed backstop
+    for any line that reaches `billable_lines` with `chosen` re-populated some
+    other way than that per-line check."""
+
+    GAMMA_DESC = "Injection, substance gamma, per 15 mg"
+
+    def _source(self):
+        return MockSource(
+            records={("DRUG_GAMMA", "hcpcs"):
+                     {"long_description": self.GAMMA_DESC, "active": True}},
+            drug_index={"substance gamma": {"DRUG_GAMMA"}})
+
+    def _facts(self, evidence_text):
+        import json
+        return json.dumps({"facts": [{
+            "fact_id": "F1", "kind": "drug", "description": "substance gamma",
+            "attributes": {"performer_id": "actor-1", "billing_entity_id": "actor-1"},
+            "disposition": "performed_today", "negated": False,
+            "evidence": [evidence_text], "confidence": 0.99,
+            "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
+                                "temporal": 0.99, "performer": 0.99,
+                                "relationship": 0.99}}]})
+
+    def _run(self, evidence_text, source=None):
+        from claude_coder.provenance import NullAuditRepository
+        # the note must literally contain the evidence quote verbatim (the
+        # source-evidence anchoring check requires this; unrelated to what
+        # this test exercises), so the note IS the exact evidence text.
+        note = evidence_text + "."
+        return code_encounter(
+            "enc-drug", note, "2026-03-14",
+            source=(source or self._source()),
+            extract_llm=lambda s, u: self._facts(evidence_text),
+            arbitrate_llm=lambda s, u: '{"choice":0,"confidence":0.0,"reason":"unused"}',
+            audit_repository=NullAuditRepository(),
+            billing_context={"billing_entity_id": "actor-1", "participants": [
+                {"id": "actor-1", "type": "person", "roles": ["performer"]}]})
+
+    def test_documented_compatible_dose_resolves_and_computes_units(self):
+        """Codex regression: direct drug hit + documented compatible dose
+        resolves and computes units (30 mg documented / 'per 15 mg' = 2)."""
+        from claude_coder.models import FactKind
+        result = self._run("substance gamma 30 mg administered")
+        (line,) = [ln for ln in result.lines if ln.fact.kind is FactKind.DRUG]
+        self.assertIsNotNone(line.chosen)
+        self.assertEqual(line.chosen.code, "DRUG_GAMMA")
+        self.assertEqual(line.units, 2)
+
+    def test_missing_dose_becomes_a_line_level_candidate_not_billed(self):
+        """Codex regression: direct drug hit + missing dose becomes a
+        line-level candidate with the one missing fact named -- never
+        silently billed at 1 unit."""
+        from claude_coder.models import FactKind
+        result = self._run("substance gamma administered")
+        (line,) = [ln for ln in result.lines if ln.fact.kind is FactKind.DRUG]
+        self.assertIsNone(line.chosen)
+        self.assertIn("DRUG_GAMMA", {c.code for c in (line.alternatives or [])})
+        self.assertIn("DRUG_GAMMA", line.documentation_gap or "")
+        self.assertNotIn(line, result.billable_lines)
+
+    def test_incompatible_dose_unit_becomes_a_line_level_candidate_not_billed(self):
+        """Codex regression: direct drug hit + a documented dose whose unit is
+        dimensionally incompatible with the code's denominator (mL vs. mg)
+        does the same -- held, not billed on an unconvertible guess."""
+        from claude_coder.models import FactKind
+        result = self._run("substance gamma 30 mL administered")
+        (line,) = [ln for ln in result.lines if ln.fact.kind is FactKind.DRUG]
+        self.assertIsNone(line.chosen)
+        self.assertIn("DRUG_GAMMA", {c.code for c in (line.alternatives or [])})
+        self.assertTrue(line.documentation_gap)
+
+    def test_one_held_drug_line_does_not_erase_a_separate_defensible_line(self):
+        """Codex regression: the hold is LINE-level -- a separate, independently
+        resolvable procedure in the SAME encounter is untouched and still
+        billable."""
+        import json
+        from claude_coder.models import FactKind
+        source = self._source()
+        source._records[("PROC_DELTA", "cpt")] = {
+            "active": True, "long_description": "Excision, lesion delta"}
+        source._cpt_index["excision of lesion delta"] = {"PROC_DELTA"}
+        facts = json.dumps({"facts": [
+            {"fact_id": "F1", "kind": "drug", "description": "substance gamma",
+             "attributes": {"performer_id": "actor-1", "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["substance gamma administered"], "confidence": 0.99,
+             "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
+                                 "temporal": 0.99, "performer": 0.99,
+                                 "relationship": 0.99}},
+            {"fact_id": "F2", "kind": "procedure",
+             "description": "excision of lesion delta",
+             "attributes": {"performer_id": "actor-1", "billing_entity_id": "actor-1"},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Excision of lesion delta performed"], "confidence": 0.99,
+             "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
+                                 "temporal": 0.99, "performer": 0.99,
+                                 "relationship": 0.99}},
+        ]})
+        from claude_coder.provenance import NullAuditRepository
+        result = code_encounter(
+            "enc-drug2",
+            "substance gamma administered. Excision of lesion delta performed.",
+            "2026-03-14", source=source, extract_llm=lambda s, u: facts,
+            arbitrate_llm=lambda s, u: '{"choice":0,"confidence":0.0,"reason":"unused"}',
+            audit_repository=NullAuditRepository(),
+            billing_context={"billing_entity_id": "actor-1", "participants": [
+                {"id": "actor-1", "type": "person", "roles": ["performer"]}]})
+        drug_line = next(ln for ln in result.lines if ln.fact.kind is FactKind.DRUG)
+        proc_line = next(ln for ln in result.lines if ln.fact.kind is FactKind.PROCEDURE)
+        self.assertIsNone(drug_line.chosen)
+        self.assertIsNotNone(proc_line.chosen)
+        self.assertEqual(proc_line.chosen.code, "PROC_DELTA")
+        self.assertIn(proc_line, result.billable_lines)
+        self.assertNotIn(drug_line, result.billable_lines)
+
+    def test_gate_catches_a_manually_constructed_chosen_drug_line(self):
+        """Codex regression: the gate is a fail-closed BACKSTOP -- a `chosen`
+        drug line built some other way than pipeline.py's own per-line check
+        (here, constructed directly) with a known per-unit denominator and no
+        computable dose must still BLOCK, never NOT_APPLICABLE."""
+        from claude_coder.gates import drug_units_gate
+        from claude_coder.models import (ClinicalFact, CodingResult, Disposition,
+                                         EvidenceSpan, FactKind, Outcome,
+                                         ResolutionMethod, ResolvedLine)
+        source = MockSource(
+            records={("DRUG_DELTA", "hcpcs"):
+                     {"long_description": "Injection, substance delta", "active": True}},
+            drug_units={"DRUG_DELTA": {"amount": 15, "unit": "mg"}})
+        fact = ClinicalFact(kind=FactKind.DRUG, description="substance delta",
+                            disposition=Disposition.PERFORMED,
+                            evidence=[EvidenceSpan("substance delta administered")],
+                            confidence=0.95)
+        line = ResolvedLine(
+            fact=fact,
+            chosen=CandidateCode("DRUG_DELTA", "hcpcs",
+                                 "Injection, substance delta", 1.0,
+                                 "cms-table-of-drugs"),
+            method=ResolutionMethod.DETERMINISTIC)
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14",
+                              lines=[line])
+        gate = drug_units_gate(result, source)
+        self.assertEqual(gate.outcome, Outcome.BLOCKED, gate.detail)
+        self.assertIn("DRUG_DELTA", gate.detail)
+
+
 class DrugTableParserTest(unittest.TestCase):
     """tools/build_hcpcs_drug_table.py: a drug code is detected by descriptor
     grammar (substance-amount billing unit), never a code prefix; name + per-unit

@@ -193,6 +193,26 @@ def test_dose_denominator_per_is_not_cardinality():
     assert parse_descriptor("Application of cast, per extremity").cardinality == "per"
 
 
+# ---- issue #6 F9-R12-F (Codex): the dose-denominator exception must recognize
+# ---- only the GOVERNED dose-unit vocabulary, never any alphabetic word --
+# ---- "per 15 minutes" is a TIME basis, not a dose, and must keep its ordinary
+# ---- cardinality/quantity requirement.
+def test_per_n_minutes_is_not_a_drug_denominator():
+    from claude_coder.ontology import parse_descriptor, parse_dose_denominator
+    assert parse_dose_denominator("Timed service, per 15 minutes") is None
+    # the ordinary countable-variant path still applies: a documented
+    # duration/count is still required before this can close
+    assert parse_descriptor("Timed service, per 15 minutes").cardinality == "per"
+
+
+def test_recognized_dose_unit_is_a_drug_denominator():
+    from claude_coder.ontology import parse_dose_denominator
+    assert parse_dose_denominator("Injection, substance alpha, per 15 mg") == (15.0, "mg")
+    assert parse_dose_denominator("Injection, substance beta, per 1 mL") == (1.0, "ml")
+    assert parse_dose_denominator("Injection, substance gamma, per 500 units") == (
+        500.0, "units")
+
+
 def test_single_authoritative_interval_hit_without_supporting_measurement_abstains():
     """Codex F4-R1: a LONE authoritative interval-qualified SUPPLY (bypasses propose-then-
     verify) must NOT close deterministically when the documentation has no dimension-

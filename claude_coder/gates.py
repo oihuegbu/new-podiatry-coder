@@ -257,16 +257,45 @@ def drug_units_gate(result: CodingResult, source: CodeSource) -> GateResult:
     an absent optional source changing a released claim, which is precisely what
     "optional" may never mean. Unavailable authority now HOLDS (retryable) instead.
     (Codex F6-R5, round 5.)
+
+    issue #6 F9-R12-F (Codex): a fail-closed BACKSTOP, not the primary control --
+    `pipeline.py`'s own per-line check already holds a drug line with a KNOWN
+    per-unit dose denominator and no computable documented dose (never letting it
+    reach `billable_lines` with `chosen` set). This gate catches the same shape
+    for any line that reaches `billable_lines` anyway (a resurrected/manually
+    constructed `chosen`, or a future caller bypassing that check) — BLOCKED,
+    never NOT_APPLICABLE, since "no drug line with a documented dose" must never
+    describe a billable line whose OWN descriptor states a real denominator.
     """
     from . import ontology
+    unconfirmed_billed = []
     dosed = []
     for ln in result.billable_lines:
         fact = getattr(ln, "fact", None)
         if fact is None or getattr(fact, "kind", None) is not FactKind.DRUG:
             continue
+        chosen = ln.chosen
+        per_unit = source.drug_unit(chosen.code) if chosen is not None else None
+        if per_unit is None and chosen is not None:
+            # Fail-closed fallback (matches pipeline.py): the table may carry
+            # no entry, but the code's own descriptor can still state a real
+            # denominator.
+            parsed = ontology.parse_dose_denominator(chosen.descriptor)
+            if parsed is not None:
+                per_unit = {"amount": parsed[0], "unit": parsed[1]}
+        if per_unit is not None and ontology.drug_billing_units(
+                ontology.documented_dose_text(fact), per_unit) is None:
+            unconfirmed_billed.append(chosen.code)
+            continue
         if ontology.parse_dose(ontology.documented_dose_text(fact)) is None:
             continue                            # no dose documented -> count-based units
         dosed.append(ln)
+    if unconfirmed_billed:
+        return GateResult(
+            "drug_units", Outcome.BLOCKED,
+            "billable drug line(s) with a known per-unit dose denominator but no "
+            "computable documented dose: " + ", ".join(sorted(unconfirmed_billed)),
+            "drug dosing (data)")
     if not dosed:
         return GateResult("drug_units", Outcome.NOT_APPLICABLE,
                           "no drug line with a documented dose", "drug dosing (data)")

@@ -22,14 +22,32 @@ _LATERALITY = {"left", "right", "bilateral"}
 _CARDINALITY = ("bilateral", "pair", "single", "each", "per")
 
 # "per" is ambiguous: it is a countable-variant qualifier ("application, per
-# extremity" — needs a documented COUNT) in some descriptors, but in a dosed
-# drug descriptor ("Injection, substance alpha, per 15 mg") it is the
-# per-unit-dose DENOMINATOR that `ontology.drug_billing_units` already governs
-# separately from any note-level "count" -- not a claim that a note must
-# additionally confirm a quantity for. Structural distinction, not a drug
-# name/code list: "per" immediately followed by a number+unit is a dose
-# expression; "per <word>" (no number) is the genuine countable-variant case.
-_DOSE_DENOMINATOR_PER_RE = re.compile(r"\bper\s+[\d.]+\s*[a-z]")
+# extremity" — needs a documented COUNT, and "per 15 minutes" — needs a
+# documented DURATION) in most descriptors, but in a dosed drug descriptor
+# ("Injection, substance alpha, per 15 mg") it is the per-unit-dose DENOMINATOR
+# that `drug_billing_units` already governs separately from any note-level
+# "count" -- not a claim that a note must additionally confirm a quantity for.
+#
+# issue #6 F9-R12-F (Codex): the exception must recognize only the existing
+# GOVERNED dose-unit vocabulary, never any alphabetic word -- "per 15 minutes"
+# is a time basis, not a dose, and must keep its ordinary cardinality/quantity
+# requirement. Shared with `parse_dose` below so the two can never drift.
+_DOSE_UNIT_PATTERN = (r"mg|milligram|mcg|microgram|ug|µg|g|gram|ml|milliliter|"
+                     r"cc|units?|iu|meq|mmol")
+_DOSE_DENOMINATOR_RX = re.compile(
+    rf"\bper\s+(\d+(?:\.\d+)?)\s*({_DOSE_UNIT_PATTERN})\b", re.I)
+
+
+def parse_dose_denominator(descriptor: str) -> tuple[float, str] | None:
+    """(amount, unit) for a descriptor's own 'per <amount> <unit>' DOSE
+    denominator (e.g. 'Injection, substance alpha, per 15 mg' -> (15.0, 'mg')).
+    None when the descriptor states no such clause -- including a non-dose
+    basis like 'per 15 minutes', which must keep the ordinary 'per'
+    cardinality check (a documented duration/count is still required)."""
+    m = _DOSE_DENOMINATOR_RX.search(str(descriptor or ""))
+    if not m:
+        return None
+    return float(m.group(1)), m.group(2).lower()
 
 # words that qualify (not the core concept) — stripped when comparing concepts
 _QUALIFIER = _LATERALITY | {
@@ -163,7 +181,7 @@ def parse_descriptor(descriptor: str) -> DescriptorFeatures:
     cardinality = next((c for c in _CARDINALITY
                         if re.search(rf"\b{c}\b", descriptor.lower())
                         and not (c == "per"
-                                and _DOSE_DENOMINATOR_PER_RE.search(descriptor.lower()))),
+                                and parse_dose_denominator(descriptor) is not None)),
                        None)
     interval = _parse_interval(descriptor)
     core = _concept_tokens(descriptor)
@@ -284,9 +302,7 @@ def support_score(descriptor: str, text: str) -> int:
 # 'iu') only convert to themselves. Generic dosing vocabulary, not codes.
 _MASS_TO_MG = {"mg": 1.0, "milligram": 1.0, "g": 1000.0, "gram": 1000.0,
                "mcg": 0.001, "microgram": 0.001, "ug": 0.001, "µg": 0.001}
-_DOSE_RX = re.compile(
-    r"(\d+(?:\.\d+)?)\s*(mg|milligram|mcg|microgram|ug|µg|g|gram|ml|milliliter|"
-    r"cc|units?|iu|meq|mmol)\b", re.I)
+_DOSE_RX = re.compile(rf"(\d+(?:\.\d+)?)\s*({_DOSE_UNIT_PATTERN})\b", re.I)
 
 
 def parse_dose(text: str) -> tuple[float, str] | None:

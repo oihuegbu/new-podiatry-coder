@@ -814,11 +814,47 @@ def code_encounter(
                 # = 2 units). Falls back to the count-based units above when the
                 # dose or per-unit is unavailable.
                 if line.fact.kind is FactKind.DRUG:
-                    du = ontology.drug_billing_units(
-                        ontology.documented_dose_text(line.fact),
-                        source.drug_unit(line.chosen.code))
-                    if du is not None:
-                        line.units = du
+                    per_unit = source.drug_unit(line.chosen.code)
+                    if per_unit is None:
+                        # issue #6 F9-R12-F (Codex): the authoritative table may
+                        # carry no entry for this code, but the code's OWN
+                        # descriptor can still state a real dose denominator
+                        # ('per 15 mg') -- a fail-closed FALLBACK, never license
+                        # to skip a denominator the descriptor itself asserts.
+                        parsed = ontology.parse_dose_denominator(line.chosen.descriptor)
+                        if parsed is not None:
+                            per_unit = {"amount": parsed[0], "unit": parsed[1]}
+                    if per_unit is not None:
+                        du = ontology.drug_billing_units(
+                            ontology.documented_dose_text(line.fact), per_unit)
+                        if du is not None:
+                            line.units = du
+                        else:
+                            # A KNOWN per-unit dose denominator with no
+                            # computable documented dose must never silently
+                            # bill as 1 unit (the count-based default) -- the
+                            # drug's identity may be right but the units are
+                            # not. Hold the LINE, not the whole encounter: keep
+                            # the code as a candidate, not billable, with the
+                            # one missing fact named; unrelated lines are
+                            # untouched.
+                            unconfirmed = line.chosen
+                            existing = {c.code for c in (line.alternatives or [])}
+                            if unconfirmed.code not in existing:
+                                line.alternatives = (list(line.alternatives or [])
+                                                     + [unconfirmed])
+                            line.chosen = None
+                            line.method = ResolutionMethod.ABSTAINED
+                            line.documentation_gap = (
+                                f"document the administered total dose and unit for "
+                                f"{unconfirmed.code} (per-unit dose "
+                                f"{per_unit.get('amount')} {per_unit.get('unit')}) -- "
+                                f"billing units cannot be computed without it")
+                            line.rationale = (
+                                f"{line.rationale} -- {unconfirmed.code} has a known "
+                                f"per-unit dose denominator but no compatible "
+                                f"documented dose to convert into billing units; "
+                                f"retained as a candidate, not billed").strip(" -")
         # issue #6 items 7/8: stamped here, LAST, after every helper above that may
         # reconstruct `line` (`arbitration.arbitrate`,
         # `resolution.refine_diagnosis_specificity`) rather than mutate it in place
