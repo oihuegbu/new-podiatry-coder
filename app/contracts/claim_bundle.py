@@ -467,6 +467,16 @@ class LineStatus(str, Enum):
     #: `blocking_reason` -- never re-categorized by guessing which specific
     #: rule fired from the free text alone.
     EXCLUDED_BY_RULE = "EXCLUDED_BY_RULE"
+    #: issue #6, Codex's independent re-review (F9-R13-A): a second-reading
+    #: event the union recovered, proven against the original document, but
+    #: whose documented relational context (a PART_OF/USES_DEVICE/etc. edge)
+    #: could not be carried into the canonical graph -- and a bounded
+    #: automatic repair attempt still could not place it. Distinct from
+    #: EXCLUDED_BY_RULE: this event never entered `facts`/the canonical graph
+    #: at all, so it carries no resolved code and no `clinical_event_id` --
+    #: carried here, with its own evidence, rather than disappearing merely
+    #: because it never reached that stage.
+    EVIDENCE_RELATION_UNRESOLVED = "EVIDENCE_RELATION_UNRESOLVED"
 
 
 #: issue #6 F9-R10-B, Codex's independent re-review of 9038a83: `_CodedLine`
@@ -526,6 +536,7 @@ _EXTERNAL_DISPOSITION_BY_STATUS: dict[LineStatus, tuple[ExternalDisposition, str
     LineStatus.UNCERTAIN_EVENT: (ExternalDisposition.EXCLUDED, "eligibility"),
     LineStatus.NON_PATIENT_EVENT: (ExternalDisposition.EXCLUDED, "eligibility"),
     LineStatus.EXCLUDED_BY_RULE: (ExternalDisposition.EXCLUDED, "pipeline"),
+    LineStatus.EVIDENCE_RELATION_UNRESOLVED: (ExternalDisposition.EXCLUDED, "recovery"),
 }
 
 
@@ -2439,6 +2450,30 @@ def bundle_from_coding_result(
             candidates=candidates,
             blocking_reason=blocking_reason,
             evidence=_evidence_of(fact),
+        ))
+
+    # issue #6, Codex's independent re-review (F9-R13-A): a second-reading
+    # event the union recovered and proved against the original document, but
+    # whose documented relational context could not be carried into the graph
+    # -- and a bounded automatic repair attempt still could not place -- never
+    # entered `facts`/`result.lines` at all, so the loop above can never see
+    # it. Read directly from `result.unresolved_recovered_lines` instead, so
+    # it is carried here, with its own evidence, rather than disappearing
+    # merely because it never reached that stage.
+    for entry in (getattr(result, "unresolved_recovered_lines", None) or ()):
+        status = LineStatus.EVIDENCE_RELATION_UNRESOLVED
+        disposition, stage, reason_code = external_disposition_of(status)
+        candidate_lines.append(CandidateLine(
+            clinical_event_id="",
+            kind=str(getattr(entry, "kind", "") or ""),
+            subject=str(getattr(entry, "description", "") or ""),
+            status=status,
+            external_disposition=disposition,
+            blocking_stage=stage,
+            reason_code=reason_code,
+            candidates=(),
+            blocking_reason=str(getattr(entry, "reason", "") or ""),
+            evidence=_evidence_of(entry),
         ))
 
     gates = list(getattr(result, "gates", None) or [])

@@ -1551,7 +1551,7 @@ class DependencyScopedPartialRelease(unittest.TestCase):
                                   "second_reading_relation_unplaced:S1", Outcome.UNKNOWN,
                                   "the second reading places this event in a relationship "
                                   "this graph cannot reproduce faithfully",
-                                  "event-candidate union", retryable=False,
+                                  "event-candidate union", retryable=True,
                                   affected_fact_ids=scope)])
         decide(result, source=None)
         self.assertNotEqual(result.destination.value, "AUTO_READY", result.notes)
@@ -1603,13 +1603,62 @@ class DependencyScopedPartialRelease(unittest.TestCase):
                                   "second_reading_relation_unplaced:S1", Outcome.UNKNOWN,
                                   "the second reading places this event in a relationship "
                                   "this graph cannot reproduce faithfully",
-                                  "event-candidate union", retryable=False,
+                                  "event-candidate union", retryable=True,
                                   affected_fact_ids=scope)])
         decide(result, source=None)
         self.assertEqual(result.destination.value, "AUTO_READY", result.notes)
         self.assertEqual([ln.chosen.code for ln in result.billable_lines], ["CPT_B"])
         self.assertIsNotNone(lines[0].excluded_reason)
         self.assertIsNone(lines[1].excluded_reason)
+        # issue #6, Codex's independent re-review (F9-R13-A): this is a SYSTEM
+        # reconciliation problem, never a coding judgement -- the routing item
+        # itself must say SYSTEM_HOLD, not REVIEW, even though it is scoped
+        # and non-blocking here.
+        held = next(r for r in result.routing if r["subject"] == "second_reading_relation_unplaced:S1")
+        self.assertEqual(held["destination"], "SYSTEM_HOLD")
+        self.assertFalse(held["blocking"])
+
+    def test_an_unscoped_relation_unplaced_hold_is_system_hold_not_review(self):
+        """issue #6, Codex's independent re-review (F9-R13-A): a `second_
+        reading_relation_unplaced` hold with no safe scope must remain an
+        encounter-wide BLOCKING hold (nothing here proves the rest of the
+        claim is safe to release), but its destination is SYSTEM_HOLD -- "a
+        malformed/unmappable extraction relation is initially a system
+        reconciliation problem, not a coding judgement or provider
+        documentation gap" -- never REVIEW, which would send it to a human
+        coder for a question no coder can actually answer.
+        """
+        from claude_coder.models import CandidateCode, CodingResult, ResolutionMethod, ResolvedLine
+        from claude_coder.models import GateResult, Outcome
+        from claude_coder.autonomy import decide
+
+        proc_a = _fact("PA", FactKind.PROCEDURE, "procedure A",
+                      spans=[_span("procedure A performed", span_id="sp-PA")],
+                      attributes={"anatomy": "site-a"})
+        facts = [proc_a]
+        intents = eligibility.evaluate(facts, [], "enc", "2026-03-14")
+        episodes, _ = eligibility.build_episodes(facts, [], "enc", "2026-03-14")
+        compiled = graph.build_graph(facts, [], intents, encounter_id="enc",
+                                     date_of_service="2026-03-14", episodes=episodes,
+                                     extraction_schema_version="v1",
+                                     relation_grammar_version="v1")
+        lines = [
+            ResolvedLine(fact=proc_a, chosen=CandidateCode("CPT_A", "cpt", "procedure A"),
+                        method=ResolutionMethod.DETERMINISTIC),
+        ]
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14",
+                              lines=lines, graph=compiled, claim_line_intents=list(intents),
+                              gates=[GateResult(
+                                  "second_reading_relation_unplaced:S1", Outcome.UNKNOWN,
+                                  "the second reading places this event in a relationship "
+                                  "this graph cannot reproduce faithfully",
+                                  "event-candidate union", retryable=True,
+                                  affected_fact_ids=())])
+        decide(result, source=None)
+        self.assertNotEqual(result.destination.value, "AUTO_READY", result.notes)
+        held = next(r for r in result.routing if r["subject"] == "second_reading_relation_unplaced:S1")
+        self.assertEqual(held["destination"], "SYSTEM_HOLD")
+        self.assertTrue(held["blocking"])
 
     def test_an_isolated_unresolved_diagnosis_never_blocks_an_unrelated_justified_pair(self):
         """issue #6 F9-R9-A, Codex's independent re-review of 6ff2761: a
@@ -3179,6 +3228,169 @@ class PhysicalLocationIdentityAcrossReadings(unittest.TestCase):
         self.assertEqual(recovery.candidates[0].affected_ids, ("F1",),
                          "F1 is a real, live event -- the fix must not discard a "
                          "genuinely canonical endpoint along with a ghost one")
+
+    def test_a_relation_naming_a_primary_events_own_id_directly_repairs_instead_of_stranding(
+            self):
+        """issue #6, Codex's independent re-review (F9-R13-A): a bounded,
+        non-inventive repair for one real cause of a stranded relation -- the
+        second reading's own relation names an endpoint using a PRIMARY
+        event's OWN canonical fact_id directly (e.g. echoed back during
+        corroboration), never through this reading's local numbering/
+        `alignment`. Before this fix, `mapping` only ever resolved endpoints
+        through `alignment` or admission, so this endpoint could never
+        resolve even though it already IS a real, canonical id -- the whole
+        recovered event would strand for no reason but a lookup gap. This is
+        NOT inventing an endpoint: F1 is checked directly against the
+        primary reading's own fact list, never guessed.
+        """
+        from claude_coder import event_union as _union
+        from claude_coder.models import RelationAssertion, RelationPredicate, RelationState
+
+        primary_span = EvidenceSpan(
+            text="Procedure one performed today", anchored=True,
+            start=0, end=10, span_id="p1", reading_channel_id="")
+        primary = [_fact("F1", FactKind.PROCEDURE, "procedure one performed",
+                         spans=[primary_span])]
+
+        candidate_span = EvidenceSpan(
+            text="Procedure two performed today", anchored=True,
+            start=0, end=10, span_id="s1", reading_channel_id="second-reading")
+        candidate_fact = _fact("S1", FactKind.PROCEDURE, "procedure two performed",
+                               spans=[candidate_span])
+
+        candidates = _union.propose(primary, [candidate_fact])
+        self.assertEqual(candidates[0].verdict, "")
+
+        reconciliation = self._reconciliation({
+            "p1": ("AGREED", [3], (3, 0.0, 0.0, 50.0, 20.0)),
+            "s1": ("AGREED", [3], (3, 400.0, 400.0, 450.0, 420.0)),
+        })
+        # Names S1 as PART_OF "F1" DIRECTLY -- the primary's own canonical
+        # fact_id, never aligned or mapped -- with real evidence, so only the
+        # endpoint-recognition repair (not evidence) is under test.
+        repairable = RelationAssertion(
+            subject_event_id="S1", predicate=RelationPredicate.PART_OF,
+            object_event_id="F1", state=RelationState.ASSERTED,
+            evidence_span_ids=["s1"])
+        recovery = _union.admit(
+            candidates, reconciliation=reconciliation, alignment={},
+            second_relations=[repairable], taken_ids={"F1"}, id_prefix="second-",
+            primary_facts=primary)
+
+        self.assertEqual(recovery.candidates[0].verdict, _union.ADMITTED,
+                         "a relation naming a REAL primary id directly must repair, "
+                         "not strand the event for a lookup gap")
+        self.assertEqual(recovery.candidates[0].hold_cause, "")
+        self.assertEqual(len(recovery.facts), 1)
+        self.assertEqual(len(recovery.relations), 1)
+        self.assertEqual(recovery.relations[0].object_event_id, "F1")
+
+    def test_a_related_but_different_kind_component_no_longer_contaminates_a_lines_role_control(
+            self):
+        """issue #6, Codex's independent re-review (F9-R13-B): `pipeline.py`
+        used to build `RetrievalRequest.intent_facts` from `composition.
+        service_intents` -- the BROAD PART_OF-connected service episode
+        (procedure + anesthesia + supply + imaging, etc.), not the narrow
+        canonical `ClaimLineIntent` membership (duplicate mentions of ONE
+        event). A related-but-different-service-role component sharing that
+        episode mixed its own role into the procedure line's OWN semantic
+        eligibility, producing a `FACT_ROLE_CONFLICT`/`blocks_line=True` that
+        stops candidate selection entirely -- even though the procedure line
+        has no genuine role ambiguity of its own.
+
+        This pins the DOWNSTREAM property the fix guarantees, through the
+        real `semantic_eligibility._service_role_control`: passed the BROAD,
+        contaminated fact list (the procedure plus its anesthesia component --
+        what `intent_facts` used to be), the role control blocks; passed the
+        NARROW fact list (the procedure alone -- what `intent_facts` is now,
+        since `pipeline.py` builds it from `ClaimLineIntent.clinical_event_ids`
+        rather than the broader composition grouping), it does not.
+        """
+        from claude_coder import semantic_eligibility as _semelig
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import AttributeEvidence, CandidateCode
+
+        # `service_role` must be a claim-AUTHORIZED value (`graph_consensus.
+        # claim_authorized_value` -- a reconciled, ASSERTED `attribute_evidence`
+        # entry bound to it), never a raw `attributes` value alone -- the same
+        # bar every other claim-affecting axis in this codebase is held to.
+        op_span = _span("procedure performed today", span_id="sp-F1")
+        procedure = _fact(
+            "F1", FactKind.PROCEDURE, "procedure performed", spans=[op_span],
+            attributes={"service_role": "operative"},
+            attribute_evidence={"service_role": (
+                AttributeEvidence(span=op_span, assertion_state=RelationState.ASSERTED,
+                                  value="operative"),)})
+        anes_span = _span("anesthesia administered today", span_id="sp-F2")
+        anesthesia = _fact(
+            "F2", FactKind.PROCEDURE, "anesthesia administered", spans=[anes_span],
+            attributes={"service_role": "anesthesia"},
+            attribute_evidence={"service_role": (
+                AttributeEvidence(span=anes_span, assertion_state=RelationState.ASSERTED,
+                                  value="anesthesia"),)})
+
+        source = MockSource(semantic_class={"CODE_OP": "surgical_procedure",
+                                            "CODE_ANES": "anesthesia"})
+        candidates = [
+            CandidateCode(code="CODE_OP", system="cpt", descriptor="operative service",
+                         score=0.9, source="retrieval"),
+            CandidateCode(code="CODE_ANES", system="cpt", descriptor="anesthesia service",
+                         score=0.9, source="retrieval"),
+        ]
+
+        broad_control = _semelig._service_role_control(
+            [procedure, anesthesia], candidates, source, reconciliation=None, dos=None)
+        self.assertTrue(
+            any(d.blocks_line for d in broad_control.values()),
+            "the OLD, contaminated input (procedure + its related anesthesia "
+            "component) must reproduce the role-conflict block")
+
+        narrow_control = _semelig._service_role_control(
+            [procedure], candidates, source, reconciliation=None, dos=None)
+        self.assertFalse(
+            any(d.blocks_line for d in narrow_control.values()),
+            "the FIXED, narrow input (the procedure's own ClaimLineIntent "
+            "membership only) must never see the unrelated component's role")
+
+    def test_a_relation_naming_an_unresolvable_endpoint_is_visible_as_an_unresolved_line(self):
+        """issue #6, Codex's independent re-review (F9-R13-A): a RELATION_
+        UNPLACED hold the repair above cannot place must remain visible in the
+        ClaimBundle as a typed candidate line, never merely a gate -- "must not
+        silently omit the recovered event from the bundle." Exercises the real
+        `pipeline.py` dispatch by constructing the exact `recovery.holds` shape
+        `admit()` produces for a genuinely unresolvable (ghost) endpoint, then
+        proving `bundle_from_coding_result` carries it.
+        """
+        from app.contracts.claim_bundle import (
+            AuthorityBinding, EncounterContext, LineStatus, SourceDocument,
+            bundle_from_coding_result)
+        from claude_coder.models import CodingResult, UnresolvedRecoveredLine
+
+        stranded_fact = _fact(
+            "second-S1", FactKind.PROCEDURE, "procedure two performed",
+            spans=[EvidenceSpan(text="Procedure two performed today", anchored=True,
+                                start=0, end=10, span_id="s1",
+                                reading_channel_id="second-reading")])
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14")
+        result.unresolved_recovered_lines = (UnresolvedRecoveredLine(
+            description="procedure two performed",
+            kind="procedure",
+            evidence=tuple(stranded_fact.evidence),
+            reason=("the second reading places this event in a relationship this "
+                    "graph cannot reproduce faithfully"),
+            affected_fact_ids=()),)
+
+        bundle = bundle_from_coding_result(
+            result, source_document=SourceDocument(filename="n"),
+            context=EncounterContext(), authority=AuthorityBinding())
+
+        self.assertEqual(len(bundle.candidate_lines), 1)
+        line = bundle.candidate_lines[0]
+        self.assertEqual(line.status, LineStatus.EVIDENCE_RELATION_UNRESOLVED)
+        self.assertEqual(line.subject, "procedure two performed")
+        self.assertEqual(line.kind, "procedure")
+        self.assertEqual(len(line.evidence), 1)
+        self.assertIn("cannot reproduce faithfully", line.blocking_reason)
 
     def test_relation_validation_withdrawal_scopes_to_the_recovered_events_own_canonical_neighbors(
             self):

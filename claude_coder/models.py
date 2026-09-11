@@ -416,6 +416,22 @@ class Destination(str, Enum):
     BLOCKED = "BLOCKED"                # a hard release gate failed
 
 
+@dataclass(frozen=True)
+class UnresolvedRecoveredLine:
+    """A second-reading-recovered event whose documented relational context
+    could not be carried into the canonical graph, and a bounded automatic
+    repair attempt still could not place it (issue #6, Codex's independent
+    re-review, F9-R13-A). Never a `ResolvedLine` -- it never entered `facts`,
+    never went through retrieval -- but must still be VISIBLE in the artifact,
+    not merely a system gate.
+    """
+    description: str
+    kind: str
+    evidence: tuple = ()
+    reason: str = ""
+    affected_fact_ids: tuple[str, ...] = ()
+
+
 @dataclass
 class CodingResult:
     encounter_id: str
@@ -496,6 +512,16 @@ class CodingResult:
     # ({"intent_id", "component_event_ids"} per group) -- preserved for the audit
     # trail regardless of whether any grouped event ended up billed.
     service_intents: list[dict] = field(default_factory=list)
+    # issue #6, Codex's independent re-review (F9-R13-A): a second-reading event
+    # the union recovered but whose documented relational context could not be
+    # carried into the graph -- and a bounded automatic repair attempt (see
+    # `event_union.admit`) still could not place -- must be VISIBLE, never
+    # merely a gate. One `UnresolvedRecoveredLine` per such event, read by
+    # `app.contracts.claim_bundle.bundle_from_coding_result` into
+    # `ClaimBundle.candidate_lines` with `LineStatus.EVIDENCE_RELATION_
+    # UNRESOLVED` -- carried, not erased, even though it never entered the
+    # canonical graph.
+    unresolved_recovered_lines: tuple = ()
 
     @property
     def billable_lines(self) -> list[ResolvedLine]:

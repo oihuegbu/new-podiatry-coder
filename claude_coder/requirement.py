@@ -263,6 +263,15 @@ def _semantic_anatomy_requirements(candidates: list[CandidateCode], source: Any
     every other tied candidate -- including whichever one a model separately
     named as the winner -- equally has, which proves nothing about which one
     the record actually means.
+
+    issue #6, Codex's independent re-review (round 4, RC3 provenance gap):
+    `source_identity` now carries `concept_lookup`'s OWN `source_identity` (the
+    terminology index's snapshot identity the concept id was actually matched
+    against) and this candidate's `record_snapshot_identity` (the descriptor
+    table snapshot the target phrase was read from) -- the same two bindings
+    the descriptor axis above already attaches. Independent reproduction
+    without these caught it: a requirement naming a real concept id with no
+    terminology source/version behind it is not yet defensible lineage.
     """
     if source is None or len(candidates) < 2:
         return []
@@ -271,12 +280,13 @@ def _semantic_anatomy_requirements(candidates: list[CandidateCode], source: Any
         return []
     from . import ontology as _ontology
     from . import semantic_eligibility as _semeli
+    snap_fn = getattr(source, "record_snapshot_identity", None)
 
-    # code -> {target phrase: (concept_id, *governed synonym expansions)}
-    resolved: dict[str, dict[str, tuple[str, ...]]] = {}
+    # code -> {target phrase: {"concept_id", "expansions", "terminology_identity"}}
+    resolved: dict[str, dict[str, dict[str, Any]]] = {}
     for c in candidates:
         feats = _ontology.parse_descriptor(c.descriptor)
-        entries: dict[str, tuple[str, ...]] = {}
+        entries: dict[str, dict[str, Any]] = {}
         for target in _semeli._candidate_anatomy_targets(feats):
             try:
                 match = lookup("anatomy", target)
@@ -289,13 +299,15 @@ def _semantic_anatomy_requirements(candidates: list[CandidateCode], source: Any
                 continue    # unresolved or ambiguous -- never governed enough
             expansions = tuple(str(e).strip() for e in (match.get("expansions") or ())
                                if str(e).strip())
-            entries[target] = (ids[0],) + expansions
+            entries[target] = {
+                "concept_id": ids[0], "expansions": expansions,
+                "terminology_identity": dict(match.get("source_identity") or {})}
         if entries:
             resolved[c.code] = entries
     if len(resolved) < 2:
         return []
 
-    concept_sets = {code: {ids[0] for ids in entries.values()}
+    concept_sets = {code: {e["concept_id"] for e in entries.values()}
                     for code, entries in resolved.items()}
     shared = set.intersection(*concept_sets.values())
 
@@ -303,8 +315,14 @@ def _semantic_anatomy_requirements(candidates: list[CandidateCode], source: Any
     by_code = {c.code: c for c in candidates}
     for code in sorted(resolved):
         candidate = by_code[code]
-        for target, ids in sorted(resolved[code].items()):
-            concept_id, expansions = ids[0], ids[1:]
+        descriptor_snapshot: dict[str, Any] = {}
+        if callable(snap_fn):
+            try:
+                descriptor_snapshot = snap_fn(code, candidate.system) or {}
+            except Exception:
+                descriptor_snapshot = {}
+        for target, entry in sorted(resolved[code].items()):
+            concept_id = entry["concept_id"]
             if concept_id in shared:
                 continue
             found = _find_clause(candidate.descriptor, target)
@@ -315,12 +333,14 @@ def _semantic_anatomy_requirements(candidates: list[CandidateCode], source: Any
                 requirement_id=f"semantic_anatomy:{code}:{len(out)}",
                 axis="semantic_anatomy", candidate_code=code, required=True,
                 role=RequirementRole.MUST_SUPPORT,
-                expected=(target,) + expansions,
+                expected=(target,) + entry["expansions"],
                 authority_clause=clause, authority_offset=offset,
                 authority_source_text=candidate.descriptor,
                 source_identity={"kind": "semantic_concept", "system": candidate.system,
                                  "authority": dict(candidate.authority or {}),
-                                 "concept_axis": "anatomy", "concept_id": concept_id},
+                                 "concept_axis": "anatomy", "concept_id": concept_id,
+                                 "terminology_identity": entry["terminology_identity"],
+                                 "descriptor_snapshot": descriptor_snapshot},
                 selectable=True, queryable=False))
     return out
 

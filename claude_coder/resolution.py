@@ -399,10 +399,22 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
         raise TypeError("code retrieval requires an eligible RetrievalRequest")
     fact = request.fact
     # issue #6 item 5/F8-R2: semantic eligibility reads what the whole documented
-    # SERVICE states (every fact `composition.service_intents` grouped with this
-    # one), not just this one isolated fact -- falls back to the fact alone when
-    # the caller supplied no grouping (or the fact belongs to no multi-member
-    # intent), which is exactly today's behavior.
+    # EVENT states -- every fact the canonical `ClaimLineIntent` this fact belongs
+    # to also names (duplicate mentions of the SAME documented event), not just
+    # this one isolated fact -- falls back to the fact alone when the caller
+    # supplied no grouping (or the fact belongs to no multi-member intent), which
+    # is exactly today's behavior.
+    #
+    # issue #6, Codex's independent re-review (F9-R13-B): this used to be every
+    # fact `composition.service_intents` grouped with this one -- the BROAD
+    # PART_OF/USES_DEVICE-connected service episode (procedure + anesthesia +
+    # supply + imaging, etc.), not just duplicate mentions of ONE event. A
+    # related-but-different-KIND component sharing that episode mixed its own
+    # fact kind and `service_role` into this line's semantic eligibility,
+    # contaminating it -- the broad composition grouping still exists and is
+    # exactly right for bundling/necessity/code-relationship controls elsewhere
+    # in this module; it is simply never the semantic input to ONE claim line's
+    # own candidate eligibility again.
     elig_facts = list(request.intent_facts) or [fact]
     if not fact.billable:
         return ResolvedLine(

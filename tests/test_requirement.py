@@ -268,6 +268,31 @@ class SemanticAnatomyRequirementTest(unittest.TestCase):
                                   text_sha256=hashlib.sha256(text.encode()).hexdigest(),
                                   covered_pages=(1,), page_image_sha256=("stub-hash",))
 
+    def test_provenance_carries_the_terminology_source_and_descriptor_snapshot(self):
+        """issue #6, Codex's independent re-review (round 4): independent
+        reproduction with a terminology version in the lookup returned a
+        requirement carrying the concept id but NO terminology source/version
+        or descriptor snapshot -- not yet defensible lineage. Both must now
+        survive into `source_identity`, exactly like the descriptor axis above
+        already carries `record_snapshot_identity`."""
+        source = MockSource(
+            records=self._records(self.ALPHA, self.BETA),
+            snapshot={"source_id": "cpt_codes", "sha256": "deadbeef", "size": 123},
+            concept_lookup={
+                "structure alpha": {"candidates": ["C_ALPHA"], "unique": True,
+                                    "expansions": [],
+                                    "source_identity": {"source_id": "snomed_concept_terms",
+                                                        "sha256": "abc123", "size": 456}},
+                "structure beta": {"candidates": ["C_BETA"], "unique": True, "expansions": []}})
+        reqs = [r for r in req.compile_requirements([self.ALPHA, self.BETA], source=source)
+               if r.axis == "semantic_anatomy" and r.candidate_code == "CAND_ALPHA"]
+        self.assertEqual(len(reqs), 1)
+        identity = reqs[0].source_identity
+        self.assertEqual(identity["terminology_identity"],
+                         {"source_id": "snomed_concept_terms", "sha256": "abc123", "size": 456})
+        self.assertEqual(identity["descriptor_snapshot"],
+                         {"source_id": "cpt_codes", "sha256": "deadbeef", "size": 123})
+
     def test_an_unresolved_technique_word_never_compiles_a_semantic_anatomy_requirement(self):
         """The SAME defect-1 fixture as the removed-code pin above, through the
         NEW mechanism this time: "powered"/"manual" are technique words this

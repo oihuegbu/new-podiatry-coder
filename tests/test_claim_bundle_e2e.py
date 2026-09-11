@@ -1511,6 +1511,11 @@ def test_every_internal_status_maps_to_the_correct_external_disposition():
         LineStatus.UNCERTAIN_EVENT: ExternalDisposition.EXCLUDED,
         LineStatus.NON_PATIENT_EVENT: ExternalDisposition.EXCLUDED,
         LineStatus.EXCLUDED_BY_RULE: ExternalDisposition.EXCLUDED,
+        # issue #6, Codex's independent re-review (F9-R13-A): a second-reading
+        # event the union recovered and proved against the original document,
+        # but whose documented relational context could not be carried into
+        # the graph even after a bounded automatic repair attempt.
+        LineStatus.EVIDENCE_RELATION_UNRESOLVED: ExternalDisposition.EXCLUDED,
     }
     assert set(expected) == set(LineStatus), "every LineStatus must be mapped"
     for status, disposition in expected.items():

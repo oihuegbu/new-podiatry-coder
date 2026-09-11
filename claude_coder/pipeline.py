@@ -23,7 +23,7 @@ from . import requirement as _requirement
 from .arbitration import LLMFn
 from .autonomy import decide
 from .data_access import AuthoritativeSource, CodeSource
-from .models import CodingResult, ResolutionMethod, ResolvedLine
+from .models import CodingResult, ResolutionMethod, ResolvedLine, UnresolvedRecoveredLine
 
 
 logger = logging.getLogger(__name__)
@@ -567,6 +567,11 @@ def code_encounter(
     # call away, so a future caller of the union that skips that mapping can
     # never silently defeat this control.
     _canonical_fact_ids = {f.fact_id for f in facts if getattr(f, "fact_id", "")}
+    # issue #6, Codex's independent re-review (F9-R13-A): a RELATION_UNPLACED
+    # hold the bounded repair above (event_union.admit's primary-id recognition
+    # step) still could not place must remain VISIBLE as a candidate line, not
+    # only a gate -- see `models.UnresolvedRecoveredLine`.
+    _unresolved_recovered_lines: list = []
 
     for _held in (recovery.holds if recovery is not None else ()):
         if _held.hold_cause == _union.RecoveryHoldCause.COREFERENCE_AMBIGUOUS.value:
@@ -578,11 +583,25 @@ def code_encounter(
                 retryable=False, affected_fact_ids=_scope))
         elif _held.hold_cause == _union.RecoveryHoldCause.RELATION_UNPLACED.value:
             _scope = _canonical_scope(_held.affected_ids, _canonical_fact_ids)
+            # issue #6, Codex's independent re-review (F9-R13-A): this is a
+            # SYSTEM reconciliation problem (the second reading asserted a
+            # relation this graph -- after a bounded, non-inventive repair
+            # attempt -- still cannot place), never a coding judgement or a
+            # provider documentation gap. `retryable=True` unconditionally
+            # (not only when unscoped) routes it to SYSTEM_HOLD, never to a
+            # human coder's REVIEW queue -- `autonomy.decide` still narrows to
+            # `_scope` when one is known and only falls back to an
+            # encounter-wide hold when it is not, exactly as before.
             pre_retrieval_gates.append(GateResult(
                 f"second_reading_relation_unplaced:{_held.second_event_id}",
                 Outcome.UNKNOWN, _held.reason,
                 "event-candidate union (product directive section 3)",
-                retryable=False, affected_fact_ids=_scope))
+                retryable=True, affected_fact_ids=_scope))
+            _unresolved_recovered_lines.append(UnresolvedRecoveredLine(
+                description=str(getattr(_held.fact, "description", "") or ""),
+                kind=str(getattr(getattr(_held.fact, "kind", None), "value", "") or ""),
+                evidence=tuple(getattr(_held.fact, "evidence", None) or ()),
+                reason=_held.reason, affected_fact_ids=_scope))
         elif _held.hold_cause == _union.RecoveryHoldCause.RELATION_INVALID.value:
             # Round 3 (P1 RC2): `Recovery.withdraw` now names each withdrawn
             # candidate's own canonical relation neighbors when its edges were
@@ -681,11 +700,25 @@ def code_encounter(
     # it once, here, and reusing it there removes the duplicate work.
     _service_intents = _compose.service_intents(facts, relations)
     _facts_by_id = {f.fact_id: f for f in facts if f.fact_id}
+    # issue #6, Codex's independent re-review (F9-R13-B): `_service_intents`
+    # groups every fact a PART_OF/USES_DEVICE/etc. edge connects into ONE broad
+    # service episode -- correct for bundling, necessity and code-relationship
+    # controls (still used for exactly that below and in the audit record), but
+    # NOT a safe semantic input for one claim line's own candidate eligibility.
+    # A related-but-DIFFERENT-kind component (an anesthesia event, a supply,
+    # imaging) sharing the episode used to be handed into `RetrievalRequest.
+    # intent_facts` alongside the procedure itself, mixing distinct fact kinds
+    # and (frequently conflicting) `service_role` values into one line's
+    # semantic eligibility -- the downstream role gate then only blocks,
+    # producing no code at all. `intents` (the canonical `ClaimLineIntent`
+    # list `_elig.evaluate` already computed) groups ONLY duplicate mentions of
+    # the SAME documented event -- the narrow membership a line's own semantic
+    # eligibility may safely read.
     _intent_facts_by_event: dict[str, tuple] = {}
-    for _si in _service_intents:
-        _members = tuple(_facts_by_id[eid] for eid in _si.component_event_ids
+    for _cli in intents:
+        _members = tuple(_facts_by_id[eid] for eid in _cli.clinical_event_ids
                          if eid in _facts_by_id)
-        for eid in _si.component_event_ids:
+        for eid in _cli.clinical_event_ids:
             _intent_facts_by_event[eid] = _members
 
     lines = []
@@ -989,6 +1022,7 @@ def code_encounter(
         consensus=(consensus.as_record() if consensus is not None else None),
         terminology_normalizations=tuple(terminology_normalizations),
         service_intents=service_intents,
+        unresolved_recovered_lines=tuple(_unresolved_recovered_lines),
     )
     # Mechanic 4 — collapse duplicate resolved codes into one line before anything
     # downstream reasons about the claim as a set.

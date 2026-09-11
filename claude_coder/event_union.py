@@ -784,6 +784,26 @@ def admit(candidates, *, reconciliation, alignment, second_relations,
             candidate.node_id = _unique_id(id_prefix, candidate.second_event_id, taken)
             mapping[candidate.second_event_id] = candidate.node_id
 
+    # issue #6, Codex's independent re-review (F9-R13-A): a bounded, NON-
+    # INVENTIVE repair for one real cause of a stranded relation -- the second
+    # reading's own relation names an endpoint using a PRIMARY event's OWN
+    # canonical fact_id directly (e.g. echoed back during corroboration)
+    # rather than through this reading's local numbering/`alignment`.
+    # `mapping` above only ever keys off second-reading-local ids, so such an
+    # endpoint would never resolve even though it already IS a real, canonical
+    # id -- a relation naming it would strand its whole recovered event for no
+    # reason but a lookup gap. Recognizing it is not inventing an endpoint:
+    # every one added here is an ACTUAL, already-existing primary fact id,
+    # checked directly against the primary reading's own fact list -- never a
+    # guess, and never overriding an existing (second-reading-local) mapping
+    # entry.
+    primary_ids = {str(getattr(f, "fact_id", "") or "") for f in (primary_facts or ())}
+    for relation in (second_relations or []):
+        for endpoint in (_clean(getattr(relation, "subject_event_id", "")),
+                         _clean(getattr(relation, "object_event_id", ""))):
+            if endpoint and endpoint not in mapping and endpoint in primary_ids:
+                mapping[endpoint] = endpoint
+
     # An event whose documented relational context cannot be reproduced is held, not
     # admitted: an unplaced event is exactly the one a lost PART_OF would have demoted.
     #
