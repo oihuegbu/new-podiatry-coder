@@ -242,6 +242,15 @@ def _openai_chat_completion(
     client = get_openai_client()
     mdl = model or OPENAI_MODEL
 
+    # The GPT-5/o-series reasoning models spend hidden "thinking" tokens out of
+    # the SAME completion-token budget as the final answer (the same reason
+    # `_claude_chat_completion` pads its own budget below) -- without headroom,
+    # a real structured-extraction call routinely burns the whole default
+    # budget on reasoning before writing any JSON, truncating on the first
+    # attempt and only recovering through several slow doubling retries.
+    # Harmless for a non-reasoning model: it simply never uses the extra room.
+    effective_max_tokens = max(max_tokens * 3, 16384)
+
     def _build(unsupported: set[str]) -> dict:
         kw: dict = {
             "model": mdl,
@@ -253,7 +262,8 @@ def _openai_chat_completion(
         if "temperature" not in unsupported:
             kw["temperature"] = temperature
         # `max_tokens` was renamed to `max_completion_tokens` on newer models.
-        kw["max_completion_tokens" if "max_tokens" in unsupported else "max_tokens"] = max_tokens
+        kw["max_completion_tokens" if "max_tokens" in unsupported
+          else "max_tokens"] = effective_max_tokens
         if json_schema is not None:
             # strict=True is what makes OpenAI grammar-enforce the schema; without
             # it the schema is advisory only. Our schemas already satisfy strict
@@ -288,7 +298,7 @@ def _openai_chat_completion(
     assert response is not None  # loop only exits via break or a raise
 
     if response.choices[0].finish_reason == "length":
-        raise _TruncatedResponse(f"finish_reason=length at {max_tokens} tokens")
+        raise _TruncatedResponse(f"finish_reason=length at {effective_max_tokens} tokens")
     content = response.choices[0].message.content or ""
     usage = {
         "prompt_tokens": response.usage.prompt_tokens,
