@@ -1432,12 +1432,63 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
     return remaining, eliminated
 
 
+#: issue #6, Codex's independent re-review (F9-R13-C): these two axes are
+#: `role=MUST_SUPPORT` like any other compiled requirement, but they select
+#: only -- through `_select_by_semantic_axes`/`requirement.semantic_axis_
+#: status`'s own concept-equivalence and typed-attribute tests -- and must
+#: never reach either pre-existing generic path that would otherwise treat
+#: them like ordinary literal-text axes: `resolution._grounded_elimination`
+#: (groups by ROLE alone, not axis name) and `tiebreak._axes_from_
+#: requirements`/`tiebreak.narrow` (derives a reportable, blocking "unsettled"
+#: axis for ANY requirement whose axis isn't already governed, regardless of
+#: `selectable`).
+_SEMANTIC_AXES = frozenset({"semantic_action", "semantic_qualifier"})
+
+
+def _select_by_semantic_axes(fact: ClinicalFact, remaining: list[CandidateCode],
+                             requirements: tuple, reconciliation, source
+                             ) -> CandidateCode | None:
+    """One additional candidate-selection condition (issue #6, Codex's
+    independent re-review, F9-R13-C), tried only among candidates several
+    OTHER independent eliminations already left standing: select the ONE
+    remaining candidate for which EVERY one of its own compiled
+    `semantic_action`/`semantic_qualifier` requirements reads SUPPORTED via
+    `requirement.semantic_axis_status` -- never eliminates a candidate,
+    never guesses. A candidate with no compiled semantic requirement of its
+    own is never selectable through this path (no positive evidence to
+    select it on), but its presence never blocks another candidate that DOES
+    have full support -- exactly the same non-blocking discipline this
+    codebase already applies elsewhere. Zero or more than one fully-supported
+    candidate returns None, deferring to the existing tie policy
+    (`tiebreak.narrow`, then a provider/coder tie question) completely
+    unchanged.
+    """
+    from . import requirement as _requirement
+    semantic_reqs = [r for r in requirements
+                    if r.axis in ("semantic_action", "semantic_qualifier")]
+    if not semantic_reqs:
+        return None
+    fully_supported: list[CandidateCode] = []
+    for cand in remaining:
+        own = [r for r in semantic_reqs if r.candidate_code == cand.code]
+        if not own:
+            continue
+        statuses = [_requirement.semantic_axis_status(r, fact, reconciliation, source)
+                   for r in own]
+        if all(s == _requirement.RequirementStatus.SUPPORTED for s in statuses):
+            fully_supported.append(cand)
+    if len(fully_supported) == 1:
+        return fully_supported[0]
+    return None
+
+
 def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
                        shortlist: list[CandidateCode], judgements: list,
                        eliminated_earlier: dict[str, str], why: str,
                        corroboration: str, reconciliation,
                        requirements: tuple = (),
-                       coverage: "_requirement.CoverageCorpus | None" = None
+                       coverage: "_requirement.CoverageCorpus | None" = None,
+                       source: Any = None
                        ) -> ResolvedLine:
     """Release ONLY when exactly one shortlisted candidate is still entailed; otherwise
     hand the survivors to the tie policy the deterministic path already uses.
@@ -1448,9 +1499,25 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
     features, here it is two models' named eliminations. Nothing about "the first model
     picked this one" is allowed to stand in for uniqueness.
     """
+    # issue #6, Codex's independent re-review (F9-R13-C): `semantic_action`/
+    # `semantic_qualifier` requirements are `role=MUST_SUPPORT` like any other
+    # -- `_grounded_elimination` groups purely by ROLE, never by axis name, so
+    # passing them in unfiltered would let a judge's generic NOT_DOCUMENTED
+    # verdict (validated only by `requirement.validated_requirement`'s
+    # LITERAL-TEXT search, never by the concept-equivalence/typed-attribute
+    # test `semantic_axis_status` actually applies) eliminate a candidate
+    # through a path neither this round's design nor Codex's spec intended:
+    # these two axes select, they do not eliminate. Excluded here from both
+    # elimination and `tiebreak.narrow`'s literal-text axis reporting
+    # (`_axes_from_requirements` derives an axis for ANY requirement whose
+    # name isn't already governed, regardless of `selectable`) -- the full,
+    # unfiltered `requirements` (below and in `_select_by_semantic_axes`)
+    # still carries them for audit completeness and for the one path that IS
+    # meant to read them.
+    _elimination_requirements = tuple(r for r in requirements if r.axis not in _SEMANTIC_AXES)
     remaining, eliminated = _uniqueness_view(fact, shortlist, chosen, judgements,
                                              eliminated_earlier, reconciliation,
-                                             requirements, coverage)
+                                             _elimination_requirements, coverage)
     # Candidates eliminated BEFORE the shortlist existed (a failed deterministic
     # constraint) belong in the same accounting: the record has to show the whole
     # retrieved pool being disposed of, not only the part the models were shown.
@@ -1481,9 +1548,28 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
         return _entailed_line(fact, chosen, shortlist, why, corroboration,
                               uniqueness=record)
 
+    # issue #6, Codex's independent re-review (F9-R13-C): one additional
+    # selection condition, tried BEFORE the original-document tie policy --
+    # never in place of its own entailment/DOS/measurement controls. A
+    # semantic-axis winner must still clear every one of them, exactly like a
+    # `tiebreak.narrow` winner does two lines below; this never lowers that
+    # bar, only adds one more way to reach it.
+    semantic_winner = _select_by_semantic_axes(fact, remaining, requirements,
+                                               reconciliation, source)
+    if (semantic_winner is not None
+            and all(j.entails(semantic_winner.code) for j in judgements)
+            and _evaluate(fact, semantic_winner, reconciliation=reconciliation) is not None
+            and not _interval_unsupported(fact, parse_descriptor(semantic_winner.descriptor))):
+        note = (f"{len(remaining)} candidates remained entailed; {semantic_winner.code}'s "
+                f"own action/qualifier requirements are the only ones fully supported by "
+                f"this fact's own reconciled evidence")
+        return _entailed_line(fact, semantic_winner, shortlist,
+                              (f"{why}; {note}" if why else note), corroboration,
+                              uniqueness={**record, "semantic_axis_selection": semantic_winner.code})
+
     # STEPS 3 and 4 -- several candidates are independently entailed, so the ORIGINAL
     # DOCUMENT decides, exactly as it does for a deterministic tie.
-    tie = _tiebreak.narrow(fact, remaining, reconciliation, requirements)
+    tie = _tiebreak.narrow(fact, remaining, reconciliation, _elimination_requirements)
     winner = tie.winner
     if (winner is not None and all(j.entails(winner.code) for j in judgements)
             and _evaluate(fact, winner, reconciliation=reconciliation) is not None
@@ -1772,7 +1858,7 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
             return _settle_uniqueness(fact, chosen, shortlist, judgements,
                                       {**constraint_eliminated, **tried}, why,
                                       corroboration, reconciliation, requirements,
-                                      coverage)
+                                      coverage, source)
         if missing:
             # The code is the right KIND of service but its descriptor requires an
             # element the note does not state. Re-selecting a code that omits the
@@ -1933,6 +2019,7 @@ def _decide(fact: ClinicalFact, pool: list[CandidateCode],
     # re-inspect ONLY the axes that distinguish them against the ORIGINAL DOCUMENT and
     # release the one the page uniquely entails.
     tie = None
+    semantic_note = ""
     if top is None and len(admitted) > 1:
         # issue #6 F9-R6 Phase 4: this deterministic path never calls a verifier, so
         # there are no requirement JUDGEMENTS to validate -- but the compiled
@@ -1945,10 +2032,29 @@ def _decide(fact: ClinicalFact, pool: list[CandidateCode],
         from . import requirement as _requirement
         tie_requirements = _requirement.compile_requirements(
             [m.candidate for m in admitted], source)
-        tie = _tiebreak.narrow(fact, [m.candidate for m in admitted], reconciliation,
-                               tie_requirements)
-        if tie.winner is not None:
-            top = next(m for m in admitted if m.candidate.code == tie.winner.code)
+        # issue #6, Codex's independent re-review (F9-R13-C): the same
+        # additional selection condition `_settle_uniqueness` tries on the
+        # judged path, tried here too before `tiebreak.narrow` -- never in
+        # place of the interval/DOS controls immediately below, which still
+        # run unconditionally against whichever candidate `top` ends up.
+        semantic_winner = _select_by_semantic_axes(
+            fact, [m.candidate for m in admitted], tie_requirements,
+            reconciliation, source)
+        if semantic_winner is not None:
+            top = next(m for m in admitted if m.candidate.code == semantic_winner.code)
+            semantic_note = (f"{semantic_winner.code}'s own action/qualifier "
+                             f"requirements are the only ones fully supported by "
+                             f"this fact's own reconciled evidence")
+        else:
+            # `semantic_action`/`semantic_qualifier` must never reach
+            # `tiebreak.narrow`'s literal-text axis reporting either -- see
+            # the matching comment in `_settle_uniqueness`.
+            _narrow_requirements = tuple(r for r in tie_requirements
+                                         if r.axis not in _SEMANTIC_AXES)
+            tie = _tiebreak.narrow(fact, [m.candidate for m in admitted], reconciliation,
+                                   _narrow_requirements)
+            if tie.winner is not None:
+                top = next(m for m in admitted if m.candidate.code == tie.winner.code)
 
     if top is not None and top.interval_unsupported:
         # Codex F4-R1: the leader's descriptor requires a bounded measurement its
@@ -1965,9 +2071,13 @@ def _decide(fact: ClinicalFact, pool: list[CandidateCode],
             rationale="bounded-interval code not supported by a dimension-compatible "
                       "documented measurement -- not billed deterministically")
     if top is not None:
-        why = ("; ".join(top.rationale) if tie is None else
-               f"{'; '.join(top.rationale)}; tie narrowed against the original "
-               f"document ({tie.proof}): {tie.detail}")
+        if semantic_note:
+            why = f"{'; '.join(top.rationale)}; {semantic_note}"
+        elif tie is not None:
+            why = (f"{'; '.join(top.rationale)}; tie narrowed against the original "
+                   f"document ({tie.proof}): {tie.detail}")
+        else:
+            why = "; ".join(top.rationale)
         return ResolvedLine(
             fact=fact, chosen=top.candidate,
             alternatives=[m.candidate for m in survivors if m is not top][:3],

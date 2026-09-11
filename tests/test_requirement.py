@@ -422,6 +422,172 @@ class SemanticAnatomyRequirementTest(unittest.TestCase):
         self.assertTrue(req.validated_requirement(r, judgement, coverage=coverage))
 
 
+class SemanticActionAndQualifierRequirementTest(unittest.TestCase):
+    """issue #6, Codex's independent re-review (F9-R13-C): the action and
+    qualifier halves of the governed semantic-requirement system, wired
+    through `compile_requirements()` (compile time) and the new
+    `requirement.semantic_axis_status()` (judgement time) -- never a raw
+    literal-text or blind-selectable path. `selectable=False` on both keeps
+    them out of `tiebreak._axes_from_requirements`'s generic narrowing;
+    selection happens only via `resolution._select_by_semantic_axes`,
+    exercised separately in tests/test_tie_policy.py."""
+
+    ACTION_A = _cand("CAND_ACTION_A", "assembly procedure, structure alpha")
+    ACTION_B = _cand("CAND_ACTION_B", "installation procedure, structure alpha")
+
+    def _records(self, *cands):
+        return {(c.code, c.system): {"active": True, "long_description": c.descriptor}
+               for c in cands}
+
+    def test_an_unmapped_action_phrase_never_compiles_a_requirement(self):
+        """Fail-closed, the same discipline the anatomy axis already applies:
+        a phrase this graph does not recognize even against ITSELF (no
+        `procedure_relation` entry configured at all) is not governed enough
+        to require anything on."""
+        source = MockSource(records=self._records(self.ACTION_A, self.ACTION_B))
+        reqs = req.compile_requirements([self.ACTION_A, self.ACTION_B], source=source)
+        self.assertEqual([r for r in reqs if r.axis == "semantic_action"], [])
+
+    def test_a_governed_action_compiles_one_atomic_selectable_false_requirement(self):
+        source = MockSource(
+            records=self._records(self.ACTION_A, self.ACTION_B),
+            procedure_relation={
+                ("assembly procedure", "assembly procedure"): {
+                    "verdict": "same", "source_identity": {"source_id": "snomed_procedure_terms",
+                                                            "sha256": "abc"}},
+                ("installation procedure", "installation procedure"): {"verdict": "same"}})
+        reqs = [r for r in req.compile_requirements([self.ACTION_A, self.ACTION_B], source=source)
+               if r.axis == "semantic_action"]
+        by_code = {r.candidate_code: r for r in reqs}
+        self.assertEqual(set(by_code), {"CAND_ACTION_A", "CAND_ACTION_B"})
+        self.assertEqual(by_code["CAND_ACTION_A"].expected, ("assembly procedure",))
+        self.assertEqual(by_code["CAND_ACTION_A"].role, req.RequirementRole.MUST_SUPPORT)
+        self.assertFalse(by_code["CAND_ACTION_A"].selectable,
+                         "must never enter tiebreak's generic literal narrowing")
+        self.assertEqual(by_code["CAND_ACTION_A"].source_identity["terminology_identity"],
+                         {"source_id": "snomed_procedure_terms", "sha256": "abc"})
+
+    def test_qualifier_requirements_compile_only_when_candidates_differ(self):
+        same_tail_a = _cand("CAND_SAME_A", "assembly procedure, structure alpha")
+        same_tail_b = _cand("CAND_SAME_B", "installation procedure, structure alpha")
+        source = MockSource(records=self._records(same_tail_a, same_tail_b))
+        reqs = req.compile_requirements([same_tail_a, same_tail_b], source=source)
+        self.assertEqual([r for r in reqs if r.axis == "semantic_qualifier"], [])
+
+        differing_a = _cand("CAND_DIFF_A", "assembly procedure, open approach")
+        differing_b = _cand("CAND_DIFF_B", "assembly procedure, percutaneous approach")
+        reqs2 = [r for r in req.compile_requirements([differing_a, differing_b], source=source)
+                if r.axis == "semantic_qualifier"]
+        self.assertEqual({r.candidate_code for r in reqs2}, {"CAND_DIFF_A", "CAND_DIFF_B"})
+        self.assertFalse(reqs2[0].selectable)
+
+
+class SemanticAxisStatusTest(unittest.TestCase):
+    """`requirement.semantic_axis_status()` -- the judgement-time truth test
+    for `semantic_action`/`semantic_qualifier` requirements (issue #6,
+    Codex's independent re-review, F9-R13-C)."""
+
+    def _action_req(self, phrase, code="CAND_A"):
+        return req.DescriptorRequirement(
+            requirement_id=f"semantic_action:{code}:0", axis="semantic_action",
+            candidate_code=code, required=True, role=req.RequirementRole.MUST_SUPPORT,
+            expected=(phrase,), authority_clause=phrase, authority_offset=(0, len(phrase)),
+            authority_source_text=phrase, selectable=False, queryable=False)
+
+    def _qualifier_req(self, phrase, code="CAND_A"):
+        return req.DescriptorRequirement(
+            requirement_id=f"semantic_qualifier:{code}:0", axis="semantic_qualifier",
+            candidate_code=code, required=True, role=req.RequirementRole.MUST_SUPPORT,
+            expected=(phrase,), authority_clause=phrase, authority_offset=(0, len(phrase)),
+            authority_source_text=phrase, selectable=False, queryable=False)
+
+    def _fact(self, description, *, attributes=None, attribute_evidence=None):
+        from claude_coder.models import ClinicalFact, Disposition, EvidenceSpan, FactKind
+        span = EvidenceSpan(text=description, start=0, end=len(description),
+                           anchored=True, span_id="s1")
+        return ClinicalFact(kind=FactKind.PROCEDURE, description=description,
+                            attributes=dict(attributes or {}),
+                            disposition=Disposition.PERFORMED, evidence=[span],
+                            confidence=0.9, fact_id="F1",
+                            attribute_evidence=dict(attribute_evidence or {}))
+
+    def _approach_evidence(self, value, text="documented approach text"):
+        """A claim-AUTHORIZED `approach` value -- `graph_consensus.
+        claim_authorized_value` requires a reconciled, ASSERTED, value-bound
+        `attribute_evidence` entry, never a bare `attributes` read (the same
+        bar laterality/service_role are already held to)."""
+        from claude_coder.models import AttributeEvidence, EvidenceSpan, RelationState
+        span = EvidenceSpan(text=text, start=0, end=len(text), anchored=True, span_id="s1")
+        return {"approach": (AttributeEvidence(span=span, scope="local",
+                                               assertion_state=RelationState.ASSERTED,
+                                               value=value),)}
+
+    def test_action_synonym_with_unique_governed_identity_is_supported(self):
+        """The fact's OWN description uses a governed SYNONYM of the
+        candidate's descriptor action phrase -- never a literal match --
+        proving equivalence is established via the concept graph, not text
+        presence."""
+        source = MockSource(procedure_relation={
+            ("fitting procedure performed", "assembly procedure"): {"verdict": "same"}})
+        r = self._action_req("assembly procedure")
+        fact = self._fact("fitting procedure performed")
+        self.assertEqual(req.semantic_axis_status(r, fact, None, source),
+                         req.RequirementStatus.SUPPORTED)
+
+    def test_ambiguous_or_unmapped_action_abstains(self):
+        """No configured relation at all -- CONCEPT_UNRESOLVED -- must read as
+        UNRESOLVED, never SUPPORTED and never CONTRADICTED (no typed opposite
+        signal exists for a documented action)."""
+        source = MockSource()   # nothing configured -> CONCEPT_UNRESOLVED
+        r = self._action_req("assembly procedure")
+        fact = self._fact("an unrelated procedure was performed")
+        self.assertEqual(req.semantic_axis_status(r, fact, None, source),
+                         req.RequirementStatus.UNRESOLVED)
+
+    def test_qualifier_is_supported_only_by_its_own_typed_approach_attribute(self):
+        r = self._qualifier_req("open approach")
+        fact = self._fact("procedure performed", attributes={"approach": "open approach"},
+                          attribute_evidence=self._approach_evidence("open approach"))
+        self.assertEqual(req.semantic_axis_status(r, fact, None, MockSource()),
+                         req.RequirementStatus.SUPPORTED)
+
+    def test_qualifier_cannot_borrow_anatomy_or_other_attribute_evidence(self):
+        """issue #6, Codex's independent re-review (F9-R13-C): qualifier
+        support must come ONLY from this fact's own typed `approach` value --
+        never from a DIFFERENT attribute (here, `anatomy`) that happens to
+        carry the identical text, even with equally real, reconciled
+        evidence behind IT. Proves no silent fallback/borrowing across
+        attribute keys."""
+        from claude_coder.models import AttributeEvidence, EvidenceSpan, RelationState
+        span = EvidenceSpan(text="open approach documented", start=0, end=10,
+                           anchored=True, span_id="s1")
+        r = self._qualifier_req("open approach")
+        fact = self._fact(
+            "procedure performed", attributes={"anatomy": "open approach"},
+            attribute_evidence={"anatomy": (AttributeEvidence(
+                span=span, scope="local", assertion_state=RelationState.ASSERTED,
+                value="open approach"),)})
+        self.assertEqual(req.semantic_axis_status(r, fact, None, MockSource()),
+                         req.RequirementStatus.UNRESOLVED)
+
+    def test_qualifier_with_no_typed_evidence_at_all_is_unresolved(self):
+        r = self._qualifier_req("open approach")
+        fact = self._fact("procedure performed")
+        self.assertEqual(req.semantic_axis_status(r, fact, None, MockSource()),
+                         req.RequirementStatus.UNRESOLVED)
+
+    def test_qualifier_with_a_different_documented_approach_is_contradicted(self):
+        """A genuinely different, positively documented approach is an
+        explicit typed CONTRADICTED -- not silent UNRESOLVED -- since the
+        fact affirmatively states something else."""
+        r = self._qualifier_req("open approach")
+        fact = self._fact(
+            "procedure performed", attributes={"approach": "percutaneous approach"},
+            attribute_evidence=self._approach_evidence("percutaneous approach"))
+        self.assertEqual(req.semantic_axis_status(r, fact, None, MockSource()),
+                         req.RequirementStatus.CONTRADICTED)
+
+
 class CoverageCorpusValidationTest(unittest.TestCase):
     """issue #6 F9-R6-R4, fourth re-review: `CoverageCorpus` self-validates at
     construction. The old `.complete` property never checked `channel_id`/

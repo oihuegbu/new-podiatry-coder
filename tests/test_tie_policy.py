@@ -1423,5 +1423,74 @@ class MustSupportGroundedEliminationTest(unittest.TestCase):
                          line.rationale)
 
 
+class SemanticAxisSelectionTest(unittest.TestCase):
+    """issue #6, Codex's independent re-review (F9-R13-C): the governed
+    action/qualifier composite selection, exercised through the REAL
+    deterministic `resolve()` path (`resolution._decide` ->
+    `_select_by_semantic_axes`) -- never a parallel selector. Synthetic,
+    agnostic vocabulary throughout, matching this file's own convention."""
+
+    ACTION_A = _cand("CAND_ACTION_A", "assembly procedure, structure alpha", 0.9)
+    ACTION_B = _cand("CAND_ACTION_B", "installation procedure, structure alpha", 0.9)
+
+    def _action_source(self, cands, relation):
+        return MockSource(
+            records={(c.code, "cpt"): {"active": True, "long_description": c.descriptor}
+                    for c in cands},
+            retrieval={("*", "cpt"): list(cands)},
+            procedure_relation=relation)
+
+    def test_one_fully_supported_action_candidate_selects(self):
+        """A governed SYNONYM of CAND_ACTION_A's own action phrase is what the
+        fact documents -- never a literal match -- and CAND_ACTION_B's own
+        action phrase is never confirmed at all, so exactly one candidate
+        ends up fully supported."""
+        fact = _fact("assembly procedure",
+                     "fitting procedure performed on structure alpha")
+        source = self._action_source(
+            (self.ACTION_A, self.ACTION_B),
+            {("assembly procedure", "assembly procedure"): {"verdict": "same"},
+             ("installation procedure", "installation procedure"): {"verdict": "same"},
+             ("fitting procedure performed", "assembly procedure"): {"verdict": "same"}})
+        llm = _sv.judge(entails=lambda d: True, reason="entailed")
+        line = resolve(_request(fact), source, reconciliation=_agreed("span-0"), llm=llm)
+        self.assertTrue(line.resolved, line.rationale)
+        self.assertEqual(line.chosen.code, "CAND_ACTION_A")
+
+    def test_two_fully_supported_action_candidates_remain_a_precise_tie(self):
+        """The fact's own description happens to be governed-equivalent to
+        BOTH candidates' action phrases -- neither is uniquely confirmed, so
+        this must never select either one; the existing tie policy still
+        holds the line."""
+        fact = _fact("assembly procedure", "fitting procedure performed")
+        source = self._action_source(
+            (self.ACTION_A, self.ACTION_B),
+            {("assembly procedure", "assembly procedure"): {"verdict": "same"},
+             ("installation procedure", "installation procedure"): {"verdict": "same"},
+             ("fitting procedure performed", "assembly procedure"): {"verdict": "same"},
+             ("fitting procedure performed", "installation procedure"): {"verdict": "same"}})
+        line = resolve(_request(fact), source, reconciliation=_agreed("span-0"))
+        self.assertFalse(line.resolved, line.rationale)
+        self.assertIsNone(line.chosen)
+
+    def test_same_governed_action_but_differing_unevidenced_qualifier_does_not_select(self):
+        """Both candidates share the IDENTICAL action phrase (so action alone
+        cannot discriminate) and differ only in qualifier text the fact
+        never documents via a typed `approach` attribute -- action support
+        alone must never be enough; this must stay a tie, not a false
+        selection."""
+        same_action_a = _cand("CAND_QUAL_A", "assembly procedure, open approach", 0.9)
+        same_action_b = _cand("CAND_QUAL_B", "assembly procedure, percutaneous approach", 0.9)
+        fact = _fact("assembly procedure", "assembly procedure performed today")
+        source = self._action_source(
+            (same_action_a, same_action_b),
+            {("assembly procedure", "assembly procedure"): {"verdict": "same"},
+             ("assembly procedure performed today", "assembly procedure"):
+                 {"verdict": "same"}})
+        line = resolve(_request(fact), source, reconciliation=_agreed("span-0"))
+        self.assertFalse(line.resolved, line.rationale)
+        self.assertIsNone(line.chosen)
+
+
 if __name__ == "__main__":
     unittest.main()
