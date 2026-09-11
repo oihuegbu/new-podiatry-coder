@@ -10,13 +10,14 @@
   ],
 
   "schema": "encounter_context/2",
-  "version": "acceptance-fixture-2026-09-11",
+  "version": "acceptance-fixture-2026-09-11-r2",
 
   "patients": {
     "PAT-ACCEPT-0001": {
+      "_note": "Name/DOB matched to the designated note's OWN documented (synthetic scenario) patient identity so this fixture's placeholder identity never CONFLICTS with what the note itself states -- a real production roster would carry the actual patient's real info instead.",
       "first_name": "Synthetic",
-      "last_name": "Patient",
-      "date_of_birth": "1970-01-01",
+      "last_name": "Castellanos",
+      "date_of_birth": "1982-09-02",
       "gender": "unspecified",
       "record_number": "ACCEPT-0001"
     }
