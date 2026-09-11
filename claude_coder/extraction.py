@@ -170,7 +170,22 @@ facts the note does not support. For a DIAGNOSIS, the "description" must be the
 concise clinical name of ONE condition — when a note phrase lists several
 conditions together, emit a SEPARATE diagnosis fact for each, and keep severity
 prose, counts, and functional-limitation wording OUT of the description (put
-them in attributes or omit). Return JSON only:
+them in attributes or omit).
+
+The SAME atomicity applies to every other fact kind: a "description" names ONE
+performed action on ONE principal target, with the SHORTEST verbatim evidence
+that names it. When one sentence documents several independently nameable
+actions/targets — "removal of the bone prominence with tendon debridement and
+reattachment" is THREE atomic facts (the bone-prominence removal; the
+debridement; the reattachment), not one — emit a SEPARATE fact for each,
+linked by the applicable directional relation (part_of / uses_device /
+repairs / removes). A fact's own
+"description" and "evidence" must NEVER fold in the words that belong to a
+sibling fact you already emitted separately for the same sentence — quote only
+what identifies THIS fact's own action and target; the sibling fact's own
+evidence is what proves the sibling, and a downstream candidate-matching step
+must never be able to treat one fact's evidence as if it also proved a
+different, separately-emitted fact. Return JSON only:
 {"schema_version": "extraction-wire-v1", "facts": [ ... ], "relations": [ ... ]}."""
 
 

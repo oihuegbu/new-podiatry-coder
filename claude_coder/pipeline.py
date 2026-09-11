@@ -505,11 +505,35 @@ def code_encounter(
     # claim -- that is the silent omission this control exists to prevent, one step
     # later. It is SYSTEM work, not coding work and not a documentation gap: what is
     # missing is a reading of the page, so it is retryable and never routed to a coder.
+    #
+    # issue #6 F9-R11-C, Codex's independent re-review: this used to treat EVERY hold
+    # the same way -- an empty `affected_fact_ids` on the resulting gate, which
+    # `autonomy.decide` correctly reads as encounter-wide, so one ambiguous co-located
+    # mention erased every other, unrelated, independently defensible line (mandatory
+    # item 8). The two hold shapes are not the same claim: an UNREAD PAGE (`HELD_
+    # UNVERIFIED`) could hide an omitted service ANYWHERE in the encounter, so it
+    # stays a genuine encounter-wide retry. An `AMBIGUOUS_COLOCATED` mention is
+    # already scoped BY THE UNION ITSELF to the specific primary event(s) it
+    # physically overlaps and was never proven distinct from
+    # (`possible_primary_ids`) -- it is a coding judgement about THAT episode, not
+    # a system failure, and not retryable (retrying the same second reading would
+    # not resolve a genuine textual/positional ambiguity). Naming those fact ids
+    # lets `autonomy.decide`'s existing dependency-scoped exclusion (the same
+    # mechanism `medical_necessity_gate` already uses) exclude only the entangled
+    # line(s), never the whole encounter -- no parallel resolver, no new mechanism.
+    from . import event_union as _union
     for _held in (recovery.holds if recovery is not None else ()):
-        pre_retrieval_gates.append(GateResult(
-            f"second_reading_event_unverified:{_held.second_event_id}",
-            Outcome.UNKNOWN, _held.reason,
-            "event-candidate union (product directive section 3)", retryable=True))
+        if _held.verdict == _union.AMBIGUOUS_COLOCATED:
+            pre_retrieval_gates.append(GateResult(
+                f"second_reading_coreference:{_held.second_event_id}",
+                Outcome.UNKNOWN, _held.reason,
+                "event-candidate union (product directive section 3)",
+                retryable=False, affected_fact_ids=_held.possible_primary_ids))
+        else:
+            pre_retrieval_gates.append(GateResult(
+                f"second_reading_event_unverified:{_held.second_event_id}",
+                Outcome.UNKNOWN, _held.reason,
+                "event-candidate union (product directive section 3)", retryable=True))
     # Codex F7-R3, exact-SHA re-review, defect A: a page no independent reading could
     # cover used to be RECORDED (`recall_uncovered_pages`) but never BLOCKED anything --
     # a failed proactive read, or a reader that covered no page, still let the encounter

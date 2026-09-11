@@ -1,0 +1,11 @@
+{
+  "billing_entity_id": "cascade-foot-ankle-pllc",
+  "participants": [
+    {
+      "id": "cascade-foot-ankle-pllc",
+      "type": "person",
+      "roles": ["performer", "rendering_provider", "surgeon"],
+      "function": "operating surgeon"
+    }
+  ]
+}

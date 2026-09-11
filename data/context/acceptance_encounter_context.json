@@ -1,0 +1,101 @@
+{
+  "_README": [
+    "Versioned, non-PHI acceptance/release-gate context fixture for issue #6's",
+    "designated note (Right_Retrocalcaneal_Exostectomy_Operative_Note.pdf).",
+    "Every identifier here is synthetic -- no real patient, payer, provider or",
+    "facility. This is release-gate evidence, not a production roster: a real",
+    "deployment's ENCOUNTER_CONTEXT_FILE points at data/context/encounter_context.json",
+    "instead (see data/context/encounter_context.example.json).",
+    "Consumed by tools/run_designated_note_gate.py, which refuses to run without it."
+  ],
+
+  "schema": "encounter_context/2",
+  "version": "acceptance-fixture-2026-09-11",
+
+  "patients": {
+    "PAT-ACCEPT-0001": {
+      "first_name": "Synthetic",
+      "last_name": "Patient",
+      "date_of_birth": "1970-01-01",
+      "gender": "unspecified",
+      "record_number": "ACCEPT-0001"
+    }
+  },
+
+  "payers": {
+    "PAYER-ACCEPT-0001": {
+      "name": "Synthetic Acceptance Payer",
+      "payer_id": "PAYER-ACCEPT-0001",
+      "kind": "commercial",
+      "plan": "Synthetic PPO"
+    }
+  },
+
+  "coverages": [
+    {
+      "coverage_id": "COV-ACCEPT-0001",
+      "patient_id": "PAT-ACCEPT-0001",
+      "payer_id": "PAYER-ACCEPT-0001",
+      "member_id": "MEMBER-ACCEPT-0001",
+      "group_number": "GROUP-ACCEPT-0001",
+      "relationship_to_patient": "self",
+      "effective_start": "2026-01-01",
+      "effective_end": ""
+    }
+  ],
+
+  "authorizations": [],
+
+  "providers": {
+    "1000000001": {
+      "first_name": "Synthetic",
+      "last_name": "Surgeon",
+      "display_name": "Dr. Synthetic Surgeon",
+      "taxonomy_code": "213ES0131X",
+      "specialty": "podiatry"
+    }
+  },
+
+  "billing_entities": {
+    "cascade-foot-ankle-pllc": {
+      "name": "Synthetic Acceptance Practice PLLC",
+      "npi": "1000000002",
+      "tax_id": "00-0000000",
+      "taxonomy_code": "213ES0131X"
+    }
+  },
+
+  "affiliations": [
+    {
+      "affiliation_id": "AFF-ACCEPT-0001",
+      "provider_npi": "1000000001",
+      "billing_entity_id": "cascade-foot-ankle-pllc",
+      "effective_start": "2026-01-01",
+      "effective_end": ""
+    }
+  ],
+
+  "facilities": {
+    "FAC-ACCEPT-0001": {
+      "name": "Synthetic Acceptance Surgery Center",
+      "npi": "1000000003",
+      "address1": "1 Synthetic Way",
+      "city": "Testville",
+      "state": "WA",
+      "postal_code": "00000",
+      "place_of_service": "24",
+      "jurisdiction": "synthetic-jurisdiction-0"
+    }
+  },
+
+  "encounters": {
+    "Right_Retrocalcaneal_Exostectomy_Operative_Note": {
+      "patient_id": "PAT-ACCEPT-0001",
+      "coverage_id": "COV-ACCEPT-0001",
+      "rendering_provider_npi": "1000000001",
+      "facility_id": "FAC-ACCEPT-0001",
+      "authorization_id": "",
+      "date_of_service": "2026-08-01"
+    }
+  }
+}

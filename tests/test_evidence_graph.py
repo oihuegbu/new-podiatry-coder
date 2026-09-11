@@ -1418,6 +1418,97 @@ class DependencyScopedPartialRelease(unittest.TestCase):
                         "diagnosis B must still surface as an open question, "
                         "just a non-blocking one")
 
+    def test_ambiguous_colocated_second_reading_hold_affects_only_its_episode(self):
+        """issue #6 F9-R11-C, Codex's independent re-review: an `AMBIGUOUS_COLOCATED`
+        second-reading hold names the specific primary event it is about
+        (`affected_fact_ids`), so `autonomy.decide`'s existing dependency-scoped
+        exclusion -- the SAME mechanism `medical_necessity_gate` already uses --
+        excludes only that entangled line. A second, wholly unrelated procedure
+        with no documented relationship to it must stay independently billable
+        and the encounter must reach AUTO_READY, exactly like the analogous
+        `medical_necessity` case above."""
+        from claude_coder.models import CandidateCode, CodingResult, ResolutionMethod, ResolvedLine
+        from claude_coder.models import GateResult, Outcome
+        from claude_coder.autonomy import decide
+
+        proc_a = _fact("PA", FactKind.PROCEDURE, "procedure A",
+                      spans=[_span("procedure A performed", span_id="sp-PA")],
+                      attributes={"anatomy": "site-a"})
+        proc_b = _fact("PB", FactKind.PROCEDURE, "procedure B",
+                      spans=[_span("procedure B performed", span_id="sp-PB")],
+                      attributes={"anatomy": "site-b"})
+        facts = [proc_a, proc_b]
+        intents = eligibility.evaluate(facts, [], "enc", "2026-03-14")
+        episodes, _ = eligibility.build_episodes(facts, [], "enc", "2026-03-14")
+        compiled = graph.build_graph(facts, [], intents, encounter_id="enc",
+                                     date_of_service="2026-03-14", episodes=episodes,
+                                     extraction_schema_version="v1",
+                                     relation_grammar_version="v1")
+        lines = [
+            ResolvedLine(fact=proc_a, chosen=CandidateCode("CPT_A", "cpt", "procedure A"),
+                        method=ResolutionMethod.DETERMINISTIC),
+            ResolvedLine(fact=proc_b, chosen=CandidateCode("CPT_B", "cpt", "procedure B"),
+                        method=ResolutionMethod.DETERMINISTIC),
+        ]
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14",
+                              lines=lines, graph=compiled, claim_line_intents=list(intents),
+                              gates=[GateResult(
+                                  "second_reading_coreference:S1", Outcome.UNKNOWN,
+                                  "co-located with PA, never confirmed same or distinct",
+                                  "event-candidate union", retryable=False,
+                                  affected_fact_ids=("PA",))])
+        decide(result, source=None)
+        self.assertEqual(result.destination.value, "AUTO_READY", result.notes)
+        self.assertEqual([ln.chosen.code for ln in result.billable_lines], ["CPT_B"],
+                         "procedure B has no documented relationship to the ambiguous "
+                         "mention and must release; procedure A, named by the gate, "
+                         "must not")
+        self.assertIsNotNone(lines[0].excluded_reason)
+        self.assertIsNone(lines[1].excluded_reason)
+
+    def test_unread_page_second_reading_hold_stays_encounter_wide(self):
+        """The mirror case: `HELD_UNVERIFIED` (an unread page) names no fact ids at
+        all, because an omitted service from that page could be ANYWHERE in the
+        encounter -- it must keep blocking the whole claim, even when every
+        currently-resolved line is otherwise independently defensible. This is
+        the existing, unchanged behavior for the shape `second_reading_event_
+        unverified` still uses; pinned here so RC2's new AMBIGUOUS_COLOCATED
+        scoping can never be mistaken for a relaxation of this one."""
+        from claude_coder.models import CandidateCode, CodingResult, ResolutionMethod, ResolvedLine
+        from claude_coder.models import GateResult, Outcome
+        from claude_coder.autonomy import decide
+
+        proc_a = _fact("PA", FactKind.PROCEDURE, "procedure A",
+                      spans=[_span("procedure A performed", span_id="sp-PA")],
+                      attributes={"anatomy": "site-a"})
+        facts = [proc_a]
+        intents = eligibility.evaluate(facts, [], "enc", "2026-03-14")
+        episodes, _ = eligibility.build_episodes(facts, [], "enc", "2026-03-14")
+        compiled = graph.build_graph(facts, [], intents, encounter_id="enc",
+                                     date_of_service="2026-03-14", episodes=episodes,
+                                     extraction_schema_version="v1",
+                                     relation_grammar_version="v1")
+        lines = [
+            ResolvedLine(fact=proc_a, chosen=CandidateCode("CPT_A", "cpt", "procedure A"),
+                        method=ResolutionMethod.DETERMINISTIC),
+        ]
+        result = CodingResult(encounter_id="enc", date_of_service="2026-03-14",
+                              lines=lines, graph=compiled, claim_line_intents=list(intents),
+                              gates=[GateResult(
+                                  "second_reading_event_unverified:S1", Outcome.UNKNOWN,
+                                  "no independent reading covers the page this event is "
+                                  "quoted from", "event-candidate union", retryable=True)])
+        decide(result, source=None)
+        # Unlike the scoped AMBIGUOUS_COLOCATED case, an unscoped gate names no
+        # fact ids, so it never touches any individual line's `excluded_reason`
+        # (that mechanism only ever narrows) -- what it must do instead is keep
+        # the ENCOUNTER as a whole from presenting as releasable.
+        self.assertNotEqual(result.destination.value, "AUTO_READY", result.notes)
+        blocking = [r for r in result.routing
+                   if r["subject"] == "second_reading_event_unverified:S1"]
+        self.assertTrue(blocking and blocking[0]["blocking"],
+                        "an unread page's hold must be a BLOCKING routing item")
+
     def test_an_isolated_unresolved_diagnosis_never_blocks_an_unrelated_justified_pair(self):
         """issue #6 F9-R9-A, Codex's independent re-review of 6ff2761: a
         diagnosis with NO documented relationship to anything else on the
@@ -2652,6 +2743,10 @@ class PhysicalLocationIdentityAcrossReadings(unittest.TestCase):
         self.assertEqual(recovery.facts, (),
                          "an ambiguous co-located mention must never become an "
                          "independently billable event either")
+        # issue #6 F9-R11-C, Codex's independent re-review: the implicated primary
+        # is named, so the caller can scope a hold to this one episode instead of
+        # the whole encounter.
+        self.assertEqual(recovery.candidates[0].possible_primary_ids, ("F1",))
 
     def test_a_governed_procedure_concept_match_merges_the_same_undetermined_fixture(self):
         """Codex F9-R4: the EXACT fixture above, unchanged, but with a `source` that

@@ -198,6 +198,14 @@ class EventCandidate:
     #: The id this event carries IN THE CANONICAL GRAPH, when admitted.
     node_id: str = ""
     span_ids: tuple[str, ...] = ()
+    #: issue #6 F9-R11-C, Codex's independent re-review: which PRIMARY event ids
+    #: this candidate is physically co-located with and not proven DISTINCT from
+    #: (a confirmed SAME_EVENT match, or an UNDETERMINED one) -- set only when
+    #: `verdict` is `AMBIGUOUS_COLOCATED`. Lets the caller scope a hold to the
+    #: specific episode this ambiguity actually touches instead of the whole
+    #: encounter: one uncertain co-located mention must not erase every other,
+    #: unrelated, independently defensible line.
+    possible_primary_ids: tuple[str, ...] = ()
 
     @property
     def kind(self) -> str:
@@ -220,6 +228,7 @@ class EventCandidate:
             "coreference": self.coreference,
             "node_id": self.node_id,
             "evidence_span_ids": list(self.span_ids),
+            "possible_primary_ids": list(self.possible_primary_ids),
         }
 
 
@@ -482,10 +491,17 @@ def _reconciled_location(fact, settled: dict) -> tuple[set[int], list]:
 
 
 def _physical_duplicates(candidates, primary_facts, reconciliation,
-                         source=None) -> tuple[dict[str, str], set[str]]:
-    """`({second_event_id -> primary fact_id}, {second_event_id, ...})` -- confirmed
-    duplicates, and CANDIDATES CO-LOCATED BUT NEVER CONFIRMED (issue #6 F9-R1, third
-    pass).
+                         source=None) -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
+    """`({second_event_id -> primary fact_id}, {second_event_id -> possible primary
+    fact_ids})` -- confirmed duplicates, and CANDIDATES CO-LOCATED BUT NEVER
+    CONFIRMED (issue #6 F9-R1, third pass).
+
+    issue #6 F9-R11-C, Codex's independent re-review: the second dict's values are
+    the PRIMARY ids that ambiguity is actually about (any primary co-located and not
+    proven DISTINCT -- a confirmed SAME_EVENT, or an UNDETERMINED verdict), not just
+    the fact that something is ambiguous. The caller uses this to scope a hold to
+    the specific episode implicated, instead of the whole encounter -- one
+    uncertain co-located mention must not erase every other, unrelated line.
 
     Location alone is a real identity SIGNAL, never proof by itself: a page or even
     one coarse, OCR-derived bounding box can legitimately hold several distinct
@@ -531,7 +547,7 @@ def _physical_duplicates(candidates, primary_facts, reconciliation,
         for fid in [_clean(getattr(f, "fact_id", ""))] if fid]
 
     duplicates: dict[str, str] = {}
-    ambiguous: set[str] = set()
+    ambiguous: dict[str, tuple[str, ...]] = {}
     for candidate in candidates:
         cand_pages, cand_regions = _reconciled_location(candidate.fact, settled)
         if not cand_pages:
@@ -547,7 +563,7 @@ def _physical_duplicates(candidates, primary_facts, reconciliation,
         if not colocated:
             continue
         same_event = []
-        any_undetermined = False
+        possible: list[str] = []          # co-located, not proven DISTINCT
         for primary_id, primary_fact in colocated:
             verdict, _reason = _coref.event_verdict(
                 left_kind=getattr(candidate.fact, "kind", None),
@@ -559,17 +575,19 @@ def _physical_duplicates(candidates, primary_facts, reconciliation,
                 source=source)
             if verdict == _coref.SAME_EVENT:
                 same_event.append(primary_id)
+                possible.append(primary_id)
             elif verdict == _coref.UNDETERMINED:
-                any_undetermined = True
+                possible.append(primary_id)
             # DISTINCT_EVENT contributes to neither list -- a co-located primary
             # the record proves distinct is not evidence of ambiguity at all.
         if len(same_event) == 1:
             duplicates[candidate.second_event_id] = same_event[0]
-        elif same_event or any_undetermined:
+        elif possible:
             # More than one CONFIRMED match (contradictory), or at least one
             # UNDETERMINED verdict among the co-located primaries -- genuinely
-            # ambiguous, never a guess.
-            ambiguous.add(candidate.second_event_id)
+            # ambiguous, never a guess. `possible` names exactly which primaries
+            # this ambiguity is about, so the caller can scope the hold to them.
+            ambiguous[candidate.second_event_id] = tuple(dict.fromkeys(possible))
         # else: co-located only with primaries the record proves DISTINCT --
         # not ambiguous, not a duplicate; falls through to ordinary admission.
     return duplicates, ambiguous
@@ -655,6 +673,7 @@ def admit(candidates, *, reconciliation, alignment, second_relations,
                 f"worded it")
         elif candidate.second_event_id in physical_ambiguous:
             candidate.verdict = AMBIGUOUS_COLOCATED
+            candidate.possible_primary_ids = physical_ambiguous[candidate.second_event_id]
             candidate.reason = (
                 "this event's quotation reconciles to the same page/region as one "
                 "or more primary events' quotations, but the record never "
