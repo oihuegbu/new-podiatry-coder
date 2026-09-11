@@ -108,17 +108,34 @@ def _facts_json(*, link_evidence=True):
 FACTS_JSON = _facts_json()
 
 # Synthetic (non-code) identifiers — no real medical code anywhere in this test.
+# issue #6 F9-R12-E, third re-review: descriptor deliberately carries no
+# cardinality word ("each"/"single"/...) -- `_needs_verification` treats
+# those as a qualifier requiring an authorized documented count/quantity,
+# forcing this candidate to defer to a verifier this end-to-end suite's
+# own no-verifier convention doesn't supply. Not what this fixture is
+# testing (evidence linking, certificates, gates), so kept out of it.
 PROC = CandidateCode("PROC_ALPHA_EXC", "cpt",
-                     "Excision, lesion alpha, single, each", 0.9, "retrieval")
+                     "Excision, lesion alpha", 0.9, "retrieval")
 DX = CandidateCode("DX_ALPHA_RIGHT", "icd10",
                    "condition alpha, right side", 0.9, "retrieval")
 
 
 def _source():
+    # issue #6 F9-R12-E, third re-review: PROC/DX must resolve through a
+    # genuine DIRECT authoritative route (not bare retrieval, which is
+    # verification-required with no LLM as of this round) so this whole
+    # end-to-end suite keeps its deliberate "stub LLMs -> deterministic
+    # path, no verifier" testing convention safely -- an unqualified exact
+    # CPT/ICD Index hit is exactly the route `_take()` still trusts with no
+    # LLM present.
     return MockSource(
-        records={("PROC_ALPHA_EXC", "cpt"): {"active": True},
-                 ("DX_ALPHA_RIGHT", "icd10"): {"active": True}},
+        records={("PROC_ALPHA_EXC", "cpt"):
+                 {"active": True, "long_description": "Excision, lesion alpha"},
+                 ("DX_ALPHA_RIGHT", "icd10"):
+                 {"active": True, "long_description": "condition alpha, right side"}},
         retrieval={("*", "cpt"): [PROC], ("*", "icd10"): [DX]},
+        cpt_index={"excision of lesion alpha": {"PROC_ALPHA_EXC"}},
+        index={"condition alpha of the right side": {"DX_ALPHA_RIGHT"}},
     )
 
 
@@ -291,6 +308,17 @@ class OntologyResolutionTest(unittest.TestCase):
     hardcoded code table."""
 
     def test_measurement_range_selects_leaf(self):
+        """issue #6 F9-R12-E, third re-review: `SYSTEM_FOR_KIND` fixes
+        SUPPLY to the "hcpcs" system these candidates need, and SUPPLY is
+        (by design) never eligible for propose-then-verify -- so there is
+        no verifier path available at all for this fact kind, and plain
+        retrieval is now verification-required by default (Codex). The
+        elimination mechanic under test (two candidates structurally
+        eliminated by an out-of-range measurement) still runs -- `_decide`
+        is still called over the full pool, exactly as before -- but its
+        survivor cannot auto-bill with no verifier available to confirm
+        it, so it correctly surfaces as the sole remaining ALTERNATIVE on
+        an honest abstention rather than closing DETERMINISTIC."""
         from claude_coder.data_access import MockSource
         from claude_coder.models import (ClinicalFact, Disposition, EvidenceSpan,
                                          FactKind, ResolutionMethod)
@@ -309,13 +337,18 @@ class OntologyResolutionTest(unittest.TestCase):
                             evidence=[EvidenceSpan("wound dressing 30 sq in applied")],
                             confidence=0.99)
         line = resolve(_request(fact), src)
-        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
-        self.assertEqual(line.chosen.code, "SUP_MED", line.rationale)
+        self.assertNotEqual(line.method, ResolutionMethod.DETERMINISTIC, line.rationale)
+        self.assertIsNone(line.chosen, line.rationale)
+        alt_codes = {c.code for c in (line.alternatives or [])}
+        self.assertEqual(alt_codes, {"SUP_MED"}, line.rationale)   # eliminated to the one leaf
 
     def test_laterality_contradiction_eliminated(self):
+        """issue #6 F9-R12-E, third re-review: see
+        test_measurement_range_selects_leaf above -- same reasoning, a stub
+        verifier replaces the removed no-verifier retrieval shortcut."""
         from claude_coder.data_access import MockSource
         from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,
-                                         FactKind, RelationState, ResolutionMethod)
+                                         FactKind, RelationState)
         from claude_coder.resolution import resolve
 
         left = CandidateCode("DX_LEFT", "icd10", "some condition, left foot", 0.9)
@@ -329,8 +362,8 @@ class OntologyResolutionTest(unittest.TestCase):
                                 AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
                                                   value="right"),)},
                             confidence=0.99)
-        line = resolve(_request(fact), src)
-        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
+        llm = _sv.judge(entails=lambda d: "right" in d.lower(), reason="entailed")
+        line = resolve(_request(fact), src, llm=_from(llm, "provider-a"))
         self.assertEqual(line.chosen.code, "DX_RIGHT", line.rationale)
 
     def test_unbound_lexical_text_never_authorizes_a_deterministic_selection(self):
@@ -367,12 +400,21 @@ class BundlingExclusionTest(unittest.TestCase):
     named code) while remaining in the audit trail."""
 
     def test_non_separately_billable_code_excluded(self):
+        """issue #6 F9-R12-E, third re-review: this test exercises the
+        PIPELINE'S bundling-exclusion stage, which needs the candidate to
+        actually resolve first -- a genuine, unqualified descriptor-index
+        hit (safe with no verifier, per Codex's regression #4) replaces
+        the bare retrieval candidate, which is now verification-required
+        and would abstain before bundling exclusion ever got a chance to
+        run."""
         from claude_coder.data_access import MockSource
         from claude_coder.pipeline import code_encounter
 
         cand = CandidateCode("BUNDLED_X", "hcpcs", "bundled add-on service", 0.9)
-        src = MockSource(records={("BUNDLED_X", "hcpcs"): {"active": True}},
+        src = MockSource(records={("BUNDLED_X", "hcpcs"): {"active": True,
+                                                           "long_description": "bundled add-on service"}},
                          retrieval={("*", "hcpcs"): [cand]},
+                         proc_index={"bundled service": {"BUNDLED_X"}},
                          nonbillable={"BUNDLED_X"})
         facts = ('{"facts":[{"fact_id":"F1","kind":"supply",'
                  '"description":"bundled service",'
@@ -1765,9 +1807,11 @@ class SupportRankingTest(unittest.TestCase):
     def test_support_never_eliminates_terse_code(self):
         # a correct but terse/generic descriptor sharing no tokens with the phrasing
         # must still resolve (support is ranking-only, not a floor).
+        # issue #6 F9-R12-E, third re-review: plain retrieval is now
+        # verification-required by default -- a stub verifier stands in
+        # for the removed no-verifier shortcut.
         from claude_coder.data_access import MockSource
-        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
-                                         ResolutionMethod)
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
         from claude_coder.resolution import resolve
         terse = CandidateCode("P_TERSE", "cpt",
                               "Complete bilateral noninvasive physiologic studies", 0.82)
@@ -1777,8 +1821,8 @@ class SupportRankingTest(unittest.TestCase):
                             description="ankle brachial index with doppler",
                             evidence=[EvidenceSpan("ABI with Doppler waveforms")],
                             confidence=0.9)
-        line = resolve(_request(fact), src)
-        self.assertEqual(line.method, ResolutionMethod.DETERMINISTIC)
+        llm = _sv.judge(entails=lambda d: True, reason="entailed")
+        line = resolve(_request(fact), src, llm=_from(llm, "provider-a"))
         self.assertEqual(line.chosen.code, "P_TERSE")
 
 
@@ -2497,9 +2541,19 @@ class CorroborationIndependenceEndToEndTest(unittest.TestCase):
     inspecting `resolution` in isolation."""
 
     def _run(self, primary_provider, second_provider):
-        """The suite's OWN auto-releasable encounter (`NOTE` + `_source`), driven through
+        """The suite's OWN auto-releasable encounter (`NOTE`), driven through
         propose-then-verify instead of the deterministic path, so the corroborating call's
-        ORIGIN is the only variable between the two runs below."""
+        ORIGIN is the only variable between the two runs below.
+
+        issue #6 F9-R12-E, third re-review: uses a PLAIN-retrieval source
+        (no direct CPT/ICD Index route), deliberately NOT the shared
+        `_source()` -- that helper now configures a direct authoritative
+        hit so AutonomousCoderTest's no-verifier convention stays safe,
+        but a direct hit would close PROC/DX via `_take()` before ever
+        reaching propose-then-verify, defeating this test's whole premise
+        (it needs the candidates to actually reach verification so the
+        corroborating call's origin is what decides the outcome)."""
+        from claude_coder.data_access import MockSource
         seen = []
 
         class _Capture:
@@ -2510,8 +2564,12 @@ class CorroborationIndependenceEndToEndTest(unittest.TestCase):
         sel = _sv.judge(pick=1, reason="documented act")
         corr = _sv.judge(entails=lambda d: True, reason="second opinion")
 
+        plain_retrieval_source = MockSource(
+            records={("PROC_ALPHA_EXC", "cpt"): {"active": True},
+                    ("DX_ALPHA_RIGHT", "icd10"): {"active": True}},
+            retrieval={("*", "cpt"): [PROC], ("*", "icd10"): [DX]})
         result = code_encounter(
-            "enc-independence", NOTE, "2026-03-14", source=_source(),
+            "enc-independence", NOTE, "2026-03-14", source=plain_retrieval_source,
             extract_llm=_extract_stub,
             verify_llm=_from(sel, primary_provider),
             corroborate_llm=_from(corr, second_provider),
@@ -2941,6 +2999,10 @@ class LateralityUpgradeTest(unittest.TestCase):
     when the authoritative family has one (validated by descriptor, not a code)."""
 
     def test_unspecified_upgraded_to_documented_side(self):
+        """issue #6 F9-R12-E, third re-review: plain retrieval is now
+        verification-required by default -- a stub verifier stands in for
+        the removed no-verifier shortcut so `resolve()` still produces a
+        `chosen` line for `upgrade_diagnosis_laterality` to operate on."""
         from claude_coder.data_access import MockSource
         from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,
                                          FactKind, RelationState)
@@ -2957,7 +3019,8 @@ class LateralityUpgradeTest(unittest.TestCase):
                             attribute_evidence={"laterality": (
                                 AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
                                                   value="right"),)}, confidence=0.98)
-        line = resolve(_request(fact), src)
+        llm = _sv.judge(entails=lambda d: True, reason="entailed")
+        line = resolve(_request(fact), src, llm=_from(llm, "provider-a"))
         self.assertEqual(line.chosen.code, "DX9")           # retrieval gives unspecified
         line = upgrade_diagnosis_laterality(line, src)
         self.assertEqual(line.chosen.code, "DX1")           # upgraded to the right sibling
@@ -3005,13 +3068,20 @@ class DiagnosisModifierTest(unittest.TestCase):
     code's descriptor is unspecified."""
 
     def test_icd10_diagnosis_gets_no_laterality_modifier(self):
+        """issue #6 F9-R12-E, third re-review: a genuine direct Index hit
+        (safe with no verifier, per Codex's regression #4) replaces bare
+        retrieval, which is now verification-required by default and would
+        abstain with no verifier configured on this pipeline run."""
         from claude_coder.data_access import MockSource
         from claude_coder.modifiers import ModifierEngine
         from claude_coder.pipeline import code_encounter
         dx = CandidateCode("DX_UNSPEC", "icd10", "some condition, unspecified site",
                            0.9, "retrieval")
-        src = MockSource(records={("DX_UNSPEC", "icd10"): {"active": True}},
-                         retrieval={("*", "icd10"): [dx]})
+        src = MockSource(records={("DX_UNSPEC", "icd10"):
+                                  {"active": True, "long_description":
+                                   "some condition, unspecified site"}},
+                         retrieval={("*", "icd10"): [dx]},
+                         index={"some condition": {"DX_UNSPEC"}})
         facts = ('{"facts":[{"fact_id":"F1","kind":"diagnosis",'
                  '"description":"some condition",'
                  '"attributes":{"laterality":"right"},"disposition":"performed_today",'

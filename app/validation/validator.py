@@ -1936,6 +1936,29 @@ class CodingValidator:
             return any(w.startswith(token) for w in note_words)
         return False
 
+    def _tokens_supported_in_one_span(self, required_tokens, text: str) -> bool:
+        """issue #6 F9-R12-D, fourth re-review (Codex): ALL required
+        evidence for one clinical term/axis must be co-located in ONE
+        source span (a clause/sentence), never assembled by conjunction
+        across the WHOLE note. `_desc_documented` against a whole-note word
+        set treats a token from an unrelated diagnosis, a different
+        section, or the patient's history as equally good as one actually
+        describing THIS condition -- exactly the same root defect as the
+        removed global-word-bag SNOMED check, just via the plain
+        `all(...)` conjunction instead of a concept-graph shortcut. Splits
+        `text` on sentence/clause boundaries (preserving a PDF hard-wrap,
+        which is not a real sentence break) and requires every token to be
+        documented within the SAME one span."""
+        required = tuple(t for t in required_tokens if t)
+        if not required:
+            return False
+        normalized = (text or "").replace("\n", " ")
+        for span_text in re.split(r"(?<=[.;:])\s+", normalized):
+            span_words, span_low = self._note_evidence(span_text)
+            if all(self._desc_documented(t, span_words, span_low) for t in required):
+                return True
+        return False
+
     # Incidental-context markers: operative-logistics language whose anatomy
     # words name equipment placement, positioning, or prep — never pathology.
     # Measured live (note routine_00001): 'a well-padded THIGH tourniquet
@@ -2750,27 +2773,24 @@ class CodingValidator:
                 terms.update(r[0].lower() for r in rows)
             return terms
 
-        def _any_term_documented(terms, words=None, low=None) -> bool:
-            """issue #6 F9-R12-D, third re-review (Codex): the prior round's
-            SNOMED-based governed-equivalence fallback was itself invalid --
-            `ConceptRelationIndex`'s default source is Body Structure
-            (anatomy) concepts, which cannot govern condition/diagnosis or
-            eponym equivalence, and its predicate compared isolated missing
-            tokens against the NOTE'S WHOLE WORD BAG rather than one
-            evidence span, so a single coincidentally-matching word anywhere
-            in the note could still authorize an automatic diagnosis swap.
-            Removed entirely rather than patched: until a correct
-            diagnosis-term identity source (e.g. a UMLS CUI-based view,
-            comparing complete normalized phrases within ONE evidence span,
-            unique-CUI-only) is compiled and wired in, only a term whose
-            EVERY signature token is literally, independently documented
-            may authorize this automatic correction. No rarity shortcut, no
-            concept-graph fallback, no exceptions by source."""
-            words = note_words if words is None else words
-            low = low_note if low is None else low
+        def _any_term_documented(terms, text=None) -> bool:
+            """issue #6 F9-R12-D: the prior (third re-review) SNOMED-based
+            governed-equivalence fallback was itself invalid -- removed
+            entirely; a term whose EVERY signature token is literally
+            documented is the only path. issue #6 F9-R12-D, FOURTH
+            re-review (Codex): checking each token against a whole-note
+            WORD SET had the exact same root defect the SNOMED removal
+            fixed for its own shortcut, just via `all(...)` conjunction
+            instead of a concept-graph guess -- tokens from an unrelated
+            diagnosis, a different section, or the patient's history could
+            be assembled together to "document" one compound term. Fixed
+            by requiring every token be documented within ONE source span
+            (`_tokens_supported_in_one_span`), never merely somewhere in
+            the note."""
+            text = low_note if text is None else text
             for term in terms:
                 toks = [t for t in self._tokens(term) if t not in self._DESC_STOPWORDS]
-                if toks and all(self._desc_documented(t, words, low) for t in toks):
+                if self._tokens_supported_in_one_span(toks, text):
                     return True
             return False
 
@@ -2882,8 +2902,11 @@ class CodingValidator:
                               if t in self._cond_lex
                               and self._icd_token_df.get(t, 0) <= 150]
                 decisive = own_entity or own_only
-                direct_own = any(
-                    self._desc_documented(t, note_words, low_note) for t in decisive)
+                # issue #6 F9-R12-D, fourth re-review: the billed code's OWN
+                # protective evidence must ALSO be co-located in one span --
+                # unrelated tokens scattered across the full note must not
+                # be assembled to "protect" a code either.
+                direct_own = self._tokens_supported_in_one_span(decisive, low_note)
                 if own_entity:
                     # A branch-specific synonym may protect a rare billed entity only
                     # when the synonym itself contributes a documented condition entity.
@@ -2899,14 +2922,14 @@ class CodingValidator:
                                 and self._icd_token_df.get(t, 0) <= 25)
                             for t in tt):
                             entity_syn.add(term)
-                    own_documented = direct_own or _any_term_documented(entity_syn)
+                    own_documented = direct_own or _any_term_documented(entity_syn, low_note)
                 else:
-                    own_documented = direct_own or _any_term_documented(own_syn)
+                    own_documented = direct_own or _any_term_documented(own_syn, low_note)
                 # swap-driving evidence: clinical view only (incidental
                 # tourniquet/positioning/prep anatomy never drives a swap)
                 sib_documented = (
-                    all(self._desc_documented(t, clin_words, clin_low) for t in sib_only)
-                    or _any_term_documented(sib_syn, clin_words, clin_low))
+                    self._tokens_supported_in_one_span(sib_only, clin_low)
+                    or _any_term_documented(sib_syn, clin_low))
                 if sib_documented and not own_documented:
                     coverage = sum(1 for t in sib_toks
                                    if self._desc_documented(t, clin_words, clin_low))

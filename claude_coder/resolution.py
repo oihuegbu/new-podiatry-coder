@@ -630,17 +630,18 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
         if not q.strip():
             continue
         for c in source.retrieve(q, fact.system, top_k=top_k):
-            # issue #6 F9-R12-E: plain retrieval is the established RECALL
-            # foundation this whole architecture is built on -- `_decide`'s
-            # own axis-satisfaction tie policy against DOCUMENTED facts
-            # (below) is ITS verification, unlike a SNOMED crosswalk's
-            # best-fit-default mapping or a bare redirect, which route
-            # around that check entirely and need an independent
-            # entailment confirmation instead. Not `requires_verification`
-            # by default (unlike those), so an unambiguous retrieval hit
-            # keeps closing deterministically with no LLM, exactly as
-            # before this round.
-            c = _dc_replace(c, requires_verification=False)
+            # issue #6 F9-R12-E, second re-review (Codex): vector retrieval
+            # is RECALL, not verification -- `_decide`'s own axis-matching
+            # only eliminates a candidate on a known laterality/measurement
+            # CONTRADICTION and ranks survivors by documented-axis coverage;
+            # it never independently confirms that a similarity-ranked hit
+            # is the medically correct code for an otherwise-unqualified
+            # descriptor. `CandidateCode`'s safe default
+            # (`requires_verification=True`) is left untouched here -- a
+            # retrieval-only candidate needs entailment confirmation (an
+            # LLM) or an independent direct authoritative route
+            # (`_take()`'s own unqualified-hit path) before it may close,
+            # exactly like every other non-authoritative source.
             if c.code not in best or c.score > best[c.code].score:
                 best[c.code] = c
     # UMLS RECALL SEED (issue #6 F9-R7 item 2): the SAME normalized-phrase set
@@ -821,31 +822,36 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                             documentation_gap=(gap_summary if measurement_gap else None))
         line.candidate_eligibility = _candidate_eligibility
     else:
+        # `_decide` runs on the FULL pool, exactly as before F9-R12-E -- its
+        # own elimination/tie-policy diagnostics (`tie_record`, the complete
+        # `alternatives` list on a genuine tie) must still be produced and
+        # reported even when no candidate is trustworthy; a TIE is already
+        # safe (nothing bills), so there is nothing to gate there.
+        line = _decide(fact, pool, source=source, dos=dos, reconciliation=reconciliation)
         # issue #6 F9-R12-E (Codex): a candidate this resolver itself marked
         # verification-required (SNOMED/redirect/learned/UMLS/embedding/
-        # model-proposal seeds -- everything except a plain, unqualified
-        # direct Index/descriptor hit `_take` already confirmed needs no
-        # further check) must not close deterministically just because it
-        # happens to be `_decide`'s sole survivor here. With an LLM
-        # available, `_propose_then_verify` above already re-verifies every
-        # candidate through entailment regardless of provenance; this
-        # NO-LLM fallback is the one path with no such check, so it is the
-        # one that must refuse an unconfirmed candidate from ever being the
-        # thing `_decide` auto-selects. `requires_verification` survives on
-        # the candidate itself through every merge above.
-        trusted_pool = [c for c in pool if not c.requires_verification]
-        if not trusted_pool and pool:
-            line = ResolvedLine(
-                fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
-                alternatives=pool[:5],
-                rationale=("every remaining candidate needs independent "
-                    "entailment/verification confirmation and no LLM is "
-                    "available to perform it -- a coder classification "
-                    "decision, requiring independent confirmation before "
-                    "billing"))
-        else:
-            line = _decide(fact, trusted_pool, source=source, dos=dos,
-                           reconciliation=reconciliation)
+        # model-proposal seeds, and now plain RETRIEVAL too -- everything
+        # except a plain, unqualified direct Index/descriptor hit `_take`
+        # already confirmed needs no further check) must not close
+        # deterministically just because `_decide` picked it as the sole
+        # survivor or tie-breaker. With an LLM available, `_propose_then_
+        # verify` above already re-verifies every candidate through
+        # entailment regardless of provenance; this NO-LLM fallback is the
+        # one path with no such check, so an unconfirmed SELECTION here
+        # (not a tie -- `_decide` itself already declines those) is
+        # downgraded to an honest abstention, keeping `_decide`'s own
+        # diagnostics (tie_record, rationale) and adding the unconfirmed
+        # code back as a candidate rather than silently vanishing it.
+        if line.resolved and line.chosen.requires_verification:
+            unconfirmed = line.chosen
+            line.chosen = None
+            line.method = ResolutionMethod.ABSTAINED
+            line.rationale = (f"{line.rationale} -- but {unconfirmed.code} still needs "
+                              f"independent entailment/verification and no LLM is "
+                              f"available to perform it; retained as a candidate, not billed")
+            existing = {c.code for c in (line.alternatives or [])}
+            if unconfirmed.code not in existing:
+                line.alternatives = list(line.alternatives or []) + [unconfirmed]
         line.candidate_eligibility = _candidate_eligibility
     # NOTE: the `if llm is not None and fact.kind in (...)` branch above sets
     # `line.candidate_eligibility` itself, INSIDE `_propose_then_verify` --
