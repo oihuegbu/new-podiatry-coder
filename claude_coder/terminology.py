@@ -404,15 +404,24 @@ class ConceptRelationIndex:
         `relation_detail` for the full auditable basis behind it."""
         return self.relation_detail(term_a, term_b).verdict
 
-    def normalize(self, term: str) -> tuple[ConceptMatch, tuple[str, ...]]:
+    def normalize(self, term: str, *, embedded: bool = False
+                 ) -> tuple[ConceptMatch, tuple[str, ...]]:
         """This ONE term's match, plus every OTHER term the SAME concept is known by
         (issue #6 F7-R3-C4) -- independent of any comparison against a second value,
         so a single mention (or an abbreviation both readings used identically) is
         still normalized. `expansions` is empty unless the match is UNIQUE: an
         ambiguous term's "other names" would be a guess at which of several real
         concepts it actually meant.
+
+        `embedded=True` (issue #6, F9-R13-D architectural-gap follow-up): matches via
+        `match_longest` instead of the strict whole-string `match`, for a
+        DESCRIPTIVE value that contains a governed term rather than being one in its
+        entirety -- the same widening `relation_detail(..., embedded=True)` already
+        applies to a two-value comparison, extended here to the single-value
+        normalization/retrieval-expansion path so a verbose phrase can still expand
+        under its governed synonyms.
         """
-        m = self.match(term)
+        m = (self.match_longest if embedded else self.match)(term)
         expansions = self.terms_for_concept(m.candidates[0]) if m.unique else ()
         return m, tuple(t for t in expansions if t != _norm(term))
 

@@ -5211,10 +5211,20 @@ class WholeEncounterGovernedTerminology(unittest.TestCase):
         self.assertTrue(any(d.outcome is Outcome.UNKNOWN for d in axis_decisions),
                         axis_decisions)
 
-    def test_an_ancestor_descendant_relation_holds_not_progresses(self):
-        """The acceptance criterion's ambiguity/overlap case: a RELATED (not SAME)
-        concept relation is real evidence, but never a confirmed match -- it must hold,
-        exactly like an unresolved pair, never be promoted to autonomous progress."""
+    def test_an_ancestor_descendant_relation_widens_retrieval_never_merges(self):
+        """issue #6, Codex's independent re-review, F9-R13-D architectural-gap
+        follow-up: a RELATED (not SAME) concept relation is real evidence -- the
+        graph actually found something -- but never a confirmed match, so it must
+        never be called "same" and never overwrite either reading's own phrase.
+        That no longer means an automatic pre-retrieval hold, though: choosing
+        between the two readings' STRINGS is the wrong task when the actual task is
+        choosing a CODE. Both phrasings are preserved as non-authorizing
+        retrieval-widening observations, and the fact proceeds to the SAME
+        retrieval/candidate-requirement path any other fact does -- here, with only
+        one retrievable candidate and nothing that requires a specific anatomy, it
+        is fully entailed and selects; a real note with candidates that DO
+        distinguish by anatomy would instead hold just that line, per the existing
+        candidate-requirement machinery, never a new one."""
         from claude_coder.terminology import CONCEPT_RELATED
 
         primary, second = self._readings("great toe", "hallux")
@@ -5224,7 +5234,24 @@ class WholeEncounterGovernedTerminology(unittest.TestCase):
 
         result = _run_union(primary, second, note_text=note, source=src)
 
-        self.assertEqual(result.billable_lines, [], result.billable_lines)
+        # Neither reading's own phrase was overwritten or merged...
+        self.assertEqual(result.graph.nodes["F1"].attributes["anatomy"], "great toe")
+        self.assertEqual(result.graph.nodes["F1"].axis_conflicts, (),
+                         "a RELATED (not SAME) governed relation must never become "
+                         "a pre-retrieval axis-consensus hold")
+        # ...but the second reading's phrase widened retrieval (never authorized
+        # anything by itself), recorded honestly as OBSERVED, not CONFIRMED SAME.
+        self.assertEqual(result.consensus["governed_matches"], [],
+                         "a RELATED relation must never be recorded as a confirmed "
+                         "SAME match")
+        alternates = result.consensus["observed_alternates"]
+        self.assertEqual(len(alternates), 1, alternates)
+        self.assertEqual(alternates[0]["axis"], "anatomy")
+        self.assertEqual(alternates[0]["value_second"], "hallux")
+        # And the line reaches retrieval instead of holding -- selecting here only
+        # because nothing in THIS shortlist actually requires a specific anatomy.
+        self.assertEqual([ln.chosen.code for ln in result.billable_lines], ["PROC_X"],
+                         result.billable_lines)
 
     def test_a_reported_disjoint_relation_still_holds_not_splits(self):
         """Defense in depth for the acceptance criterion's distinct-events case: even a

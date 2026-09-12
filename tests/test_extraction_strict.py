@@ -102,42 +102,36 @@ def test_a_persistently_malformed_draw_still_raises_after_bounded_retries():
 # and "attribute_evidence" do not actually agree with each other used to reach
 # resolution as a silently unresolved axis instead of retrying -- the prompt already
 # documents this contract, `_parse_extraction_response` just never enforced it.
-def test_an_emitted_attribute_without_matching_evidence_retries_extraction():
-    """An axis in "attributes" with no same-name, same-value "attribute_evidence"
-    entry (here: the entry's own value is the WRONG side) is a malformed draw, not a
-    genuinely undocumented axis -- it must retry exactly like any other schema
-    defect, and recover once a later draw actually binds the claimed value."""
-    bad = {"facts": [_fact(
+def test_an_emitted_attribute_without_matching_evidence_is_sanitized_not_retried():
+    """issue #6, Codex's independent re-review, F9-R13-D: an axis in "attributes"
+    with no same-name, same-value "attribute_evidence" entry (here: the entry's own
+    value is the WRONG side) is a FACT-LOCAL defect, never proof the whole response
+    is corrupt -- it is sanitized (the unsupported value removed, a gap recorded),
+    never a whole-response retry that could exhaust every attempt on one
+    persistently ungrounded fact and lose an otherwise-clean encounter."""
+    result = extract_note("note", _stub({"facts": [_fact(
         attributes={"laterality": "right"},
         attribute_evidence={"laterality": [
             {"text": "performed on the right side", "scope": "local",
-             "value": "left"}]})]}
-    good = {"facts": [_fact(
-        attributes={"laterality": "right"},
-        attribute_evidence={"laterality": [
-            {"text": "performed on the right side", "scope": "local",
-             "value": "right"}]})]}
-    llm = _sequenced_llm(bad, good)
-    result = extract_note("note", llm)
-    assert len(llm.call_count) == 2
-    assert result.facts[0].attributes["laterality"] == "right"
-    assert result.facts[0].attribute_evidence["laterality"][0].value == "right"
+             "value": "left"}]})]}))
+    fact = result.facts[0]
+    assert "laterality" not in fact.attributes
+    assert fact.attribute_evidence == {}
+    assert fact.attribute_evidence_gaps["laterality"].axis == "laterality"
 
 
-def test_orphan_attribute_evidence_retries_extraction():
-    """An "attribute_evidence" entry naming an axis absent from "attributes" is
-    equally a malformed contract -- the model claims to have evidence for
-    something it never actually emitted a value for."""
-    bad = {"facts": [_fact(
+def test_orphan_attribute_evidence_is_discarded_not_retried():
+    """issue #6, Codex's independent re-review, F9-R13-D: an "attribute_evidence"
+    entry naming an axis absent from "attributes" is equally FACT-LOCAL --
+    discarded silently (nothing to authorize, nothing claimed), never a
+    whole-response retry."""
+    result = extract_note("note", _stub({"facts": [_fact(
         attributes={},
         attribute_evidence={"laterality": [
             {"text": "performed on the right side", "scope": "local",
-             "value": "right"}]})]}
-    good = {"facts": [_fact(attributes={})]}
-    llm = _sequenced_llm(bad, good)
-    result = extract_note("note", llm)
-    assert len(llm.call_count) == 2
+             "value": "right"}]})]}))
     assert result.facts[0].attribute_evidence == {}
+    assert result.facts[0].attribute_evidence_gaps == {}
 
 
 # ---------------------------------------------------------------- F6-R2 actor from context
@@ -625,13 +619,12 @@ def test_an_inherited_entrys_value_survives_the_second_pass():
 
 
 def test_an_inherited_entry_with_no_matching_relation_is_dropped_not_kept_unproven():
-    """The claimed parent exists as a fact, but NO part_of relation was actually
-    emitted connecting the two -- the entry is dropped entirely, never kept as an
-    unproven inheritance claim. issue #6, Codex's independent re-review, F9-R13-C1,
-    reopened P1: dropping it leaves "attributes" claiming a value with NO surviving
-    evidence at all -- the same malformed shape the contract check exists to catch,
-    reached through the second pass instead of the first -- so this must now retry
-    and ultimately raise, never silently return a fact in that state."""
+    """issue #6, Codex's independent re-review, F9-R13-D: the claimed parent exists
+    as a fact, but NO part_of relation was actually emitted connecting the two -- the
+    entry is dropped entirely, never kept as an unproven inheritance claim. Dropping
+    it leaves "attributes" claiming a value with no surviving evidence, which is now
+    a FACT-LOCAL sanitize (unsupported axis removed, gap recorded), never a
+    whole-response raise."""
     payload = {
         "facts": [
             _fact(fact_id="F1", description="parent step"),
@@ -643,15 +636,19 @@ def test_an_inherited_entry_with_no_matching_relation_is_dropped_not_kept_unprov
         ],
         "relations": [],
     }
-    with pytest.raises(ExtractionSchemaError):
-        extract_note("note", _stub(payload))
+    result = extract_note("note", _stub(payload))
+    f2 = next(f for f in result.facts if f.fact_id == "F2")
+    assert "laterality" not in f2.attributes
+    assert f2.attribute_evidence == {}
+    assert f2.attribute_evidence_gaps["laterality"].axis == "laterality"
 
 
 def test_same_episode_as_is_never_a_candidate_relation_for_inheritance():
     """Issue #6 F9-R5-A: same_episode_as does not imply the same laterality/anatomy/
     product/count/approach -- only part_of may even become a CANDIDATE relation for
-    an inherited attribute, regardless of direction. The dropped entry leaves
-    "attributes" unsupported (F9-R13-C1 reopened P1), so this retries and raises."""
+    an inherited attribute, regardless of direction. F9-R13-D: the dropped entry is
+    a fact-local sanitize (unsupported axis removed, gap recorded), never a
+    whole-response raise."""
     payload = {
         "facts": [
             _fact(fact_id="F1", description="parent step"),
@@ -665,15 +662,18 @@ def test_same_episode_as_is_never_a_candidate_relation_for_inheritance():
                        "object_event_id": "F1", "state": "asserted",
                        "evidence_fact_ids": ["F1", "F2"]}],
     }
-    with pytest.raises(ExtractionSchemaError):
-        extract_note("note", _stub(payload))
+    result = extract_note("note", _stub(payload))
+    f2 = next(f for f in result.facts if f.fact_id == "F2")
+    assert "laterality" not in f2.attributes
+    assert f2.attribute_evidence_gaps["laterality"].axis == "laterality"
 
 
 def test_a_reversed_part_of_direction_is_never_a_candidate_relation():
     """Issue #6 F9-R5-A: the relation exists, but runs the WRONG way (the named
     parent is asserted part_of the component instead of the reverse) -- must never
-    even become a candidate, let alone validate later. The dropped entry leaves
-    "attributes" unsupported (F9-R13-C1 reopened P1), so this retries and raises."""
+    even become a candidate, let alone validate later. F9-R13-D: the dropped entry
+    is a fact-local sanitize (unsupported axis removed, gap recorded), never a
+    whole-response raise."""
     payload = {
         "facts": [
             _fact(fact_id="F1", description="parent step"),
@@ -687,15 +687,18 @@ def test_a_reversed_part_of_direction_is_never_a_candidate_relation():
                        "object_event_id": "F2", "state": "asserted",
                        "evidence_fact_ids": ["F1", "F2"]}],
     }
-    with pytest.raises(ExtractionSchemaError):
-        extract_note("note", _stub(payload))
+    result = extract_note("note", _stub(payload))
+    f2 = next(f for f in result.facts if f.fact_id == "F2")
+    assert "laterality" not in f2.attributes
+    assert f2.attribute_evidence_gaps["laterality"].axis == "laterality"
 
 
 def test_an_inherited_entry_naming_an_unknown_parent_is_dropped():
     """An unknown parent_fact_id is not itself a schema error (a claimed parent that
     is not any fact's real id simply can never resolve against a relation) -- the
-    entry is dropped, not kept and not a crash. The dropped entry leaves
-    "attributes" unsupported (F9-R13-C1 reopened P1), so this retries and raises."""
+    entry is dropped, not kept and not a crash. F9-R13-D: the drop is a fact-local
+    sanitize (unsupported axis removed, gap recorded), never a whole-response
+    raise."""
     payload = {
         "facts": [_fact(fact_id="F1", description="component step",
                         attributes={"laterality": "right"},
@@ -704,19 +707,20 @@ def test_an_inherited_entry_naming_an_unknown_parent_is_dropped():
                              "parent_fact_id": "GHOST", "value": "right"}]})],
         "relations": [],
     }
-    with pytest.raises(ExtractionSchemaError):
-        extract_note("note", _stub(payload))
+    result = extract_note("note", _stub(payload))
+    f1 = next(f for f in result.facts if f.fact_id == "F1")
+    assert "laterality" not in f1.attributes
+    assert f1.attribute_evidence_gaps["laterality"].axis == "laterality"
 
 
 def test_an_inherited_entry_dropped_holds_only_its_own_fact_not_the_batch():
-    """issue #6, Codex's independent re-review, F9-R13-C1, required regression: a
-    fact whose only "inherited" evidence turns out ungrounded retries and (since
-    the SAME malformed draw repeats) eventually raises -- but a SEPARATE, cleanly
-    evidenced fact in the SAME response is not what failed. This proves the retry
-    is scoped to the actual malformed draw, not a design that could take down an
-    otherwise-clean batch: a later, corrected draw recovers the WHOLE response,
-    including the clean fact, exactly like any other retried malformed draw."""
-    bad = {
+    """issue #6, Codex's independent re-review, F9-R13-D: a fact whose only
+    "inherited" evidence turns out ungrounded is sanitized (its own unsupported axis
+    removed, a gap recorded) -- but a SEPARATE, cleanly evidenced fact in the SAME
+    response is completely unaffected, on the very first call. This proves the
+    sanitize is scoped to the actual ungrounded fact, never a design that could
+    take down an otherwise-clean batch."""
+    payload = {
         "facts": [
             _fact(fact_id="F1", description="parent step"),
             _fact(fact_id="F2", description="component step",
@@ -733,28 +737,13 @@ def test_an_inherited_entry_dropped_holds_only_its_own_fact_not_the_batch():
         ],
         "relations": [],
     }
-    good = {
-        "facts": [
-            _fact(fact_id="F1", description="parent step"),
-            _fact(fact_id="F2", description="component step",
-                 attributes={"laterality": "right"},
-                 attribute_evidence={"laterality": [
-                     {"text": "performed on the right side", "scope": "local",
-                      "assertion_state": "asserted", "value": "right"}]}),
-            _fact(fact_id="F3", description="a separately documented, clean step",
-                 attributes={"anatomy": "site two"},
-                 attribute_evidence={"anatomy": [
-                     {"text": "a separately documented, clean step at site two",
-                      "scope": "local", "assertion_state": "asserted",
-                      "value": "site two"}]}),
-        ],
-        "relations": [],
-    }
-    llm = _sequenced_llm(bad, good)
-    result = extract_note("note", llm)
-    assert len(llm.call_count) == 2
+    result = extract_note("note", _stub(payload))
+    f2 = next(f for f in result.facts if f.fact_id == "F2")
     f3 = next(f for f in result.facts if f.fact_id == "F3")
+    assert "laterality" not in f2.attributes
+    assert f2.attribute_evidence_gaps["laterality"].axis == "laterality"
     assert f3.attributes["anatomy"] == "site two"
+    assert f3.attribute_evidence_gaps == {}
 
 
 def test_inherited_scope_without_a_parent_fact_id_is_malformed():

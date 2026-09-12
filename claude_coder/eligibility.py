@@ -198,10 +198,37 @@ def _gate_occurrence(fact: ClinicalFact) -> EligibilityDecision:
                                f"experiencer={fact.experiencer})", "occurrence")
 
 
-def _gate_actor_ownership(fact: ClinicalFact) -> EligibilityDecision:
+def _gate_actor_ownership(fact: ClinicalFact, relations: list | None = None,
+                          facts_by_id: dict | None = None) -> EligibilityDecision:
     o = fact_ownership(fact)
     st = classify_ownership(o.performer_id, o.billing_entity_id,
                             o.organization_id, o.performer_function)
+    inherited = False
+    if st is Outcome.UNKNOWN and relations and facts_by_id:
+        # issue #6, Codex's independent re-review, F9-R13-D follow-up (found live on
+        # the designated note): a fact the note documents as an INTEGRAL COMPONENT of
+        # another event -- the SAME asserted PART_OF relationship `_gate_part_of_
+        # demotion` already reads -- was performed by whoever performed that parent
+        # event. A real operative note states the performer once and does not repeat
+        # "same surgeon" for every step of one continuous procedure; nothing here
+        # infers ownership from anywhere else, and a parent whose OWN ownership does
+        # not already PASS never propagates anything (no chaining through an
+        # unresolved or blocked parent).
+        for r in relations:
+            if not (r.predicate is RelationPredicate.PART_OF
+                   and r.state is RelationState.ASSERTED
+                   and r.subject_event_id == fact.fact_id):
+                continue
+            parent = facts_by_id.get(r.object_event_id)
+            if parent is None:
+                continue
+            p = fact_ownership(parent)
+            parent_st = classify_ownership(p.performer_id, p.billing_entity_id,
+                                          p.organization_id, p.performer_function)
+            if parent_st is Outcome.PASS:
+                st = Outcome.PASS
+                inherited = True
+                break
     if st is Outcome.BLOCKED:
         return EligibilityDecision("actor_ownership", Outcome.BLOCKED,
                                    "performed by a different actor than the billing entity",
@@ -210,8 +237,11 @@ def _gate_actor_ownership(fact: ClinicalFact) -> EligibilityDecision:
         return EligibilityDecision("actor_ownership", Outcome.UNKNOWN,
                                    "ownership identity/organization is not fully resolved",
                                    "claim ownership")
-    return EligibilityDecision("actor_ownership", Outcome.PASS, "owned by billing entity",
-                               "claim ownership")
+    return EligibilityDecision(
+        "actor_ownership", Outcome.PASS,
+        ("owned by billing entity (inherited from an asserted integral parent event)"
+         if inherited else "owned by billing entity"),
+        "claim ownership")
 
 
 _SYMMETRIC_PREDICATES = {RelationPredicate.SEPARATE_FROM,
@@ -568,6 +598,7 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
     conflict check."""
     relations = relations or []
     _episodes, _ep_map = build_episodes(facts, relations, encounter_id, date_of_service)
+    _facts_by_id = {f.fact_id: f for f in facts}
     intents: list[ClaimLineIntent] = []
     for f in facts:
         span_ids = [s.span_id for s in (f.evidence or []) if getattr(s, "span_id", None)]
@@ -597,7 +628,8 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
             component = ClaimComponent.DIAGNOSIS_SUPPORT
         elif f.kind in _SERVICE_KINDS:
             decisions = [_gate_evidence_required(f), _gate_occurrence(f),
-                         _gate_actor_ownership(f), _gate_part_of_demotion(f, relations),
+                         _gate_actor_ownership(f, relations, _facts_by_id),
+                         _gate_part_of_demotion(f, relations),
                          _gate_conflict(f, relations), _gate_documentation_minimum(f),
                          _gate_axis_consensus(f)]
             state = _classify(decisions)

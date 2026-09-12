@@ -20,8 +20,9 @@ from dataclasses import dataclass, field
 from typing import Any
 from typing import Callable
 
-from .models import (AttributeEvidence, ClinicalFact, Disposition, EvidenceSpan,
-                     FactKind, RelationAssertion, RelationPredicate, RelationState)
+from .models import (AttributeEvidence, AttributeEvidenceGap, ClinicalFact, Disposition,
+                     EvidenceSpan, FactKind, RelationAssertion, RelationPredicate,
+                     RelationState)
 
 # A callable (system_prompt, user_prompt) -> JSON string. Injectable for tests.
 LLMFn = Callable[[str, str], str]
@@ -902,38 +903,6 @@ def _norm_attribute_value(value: Any) -> str:
     return str(value).strip().casefold()
 
 
-def _validate_attribute_evidence(attributes: dict[str, Any],
-                                 bound_values_by_axis: dict[str, list[str]],
-                                 where: str) -> None:
-    """Enforces the extraction contract the prompt already documents (issue #6, Codex's
-    independent re-review, F9-R13-C release-gate root cause 1): every axis name emitted
-    anywhere in "attributes" needs at least one "attribute_evidence" entry naming it
-    with the SAME value, and every "attribute_evidence" entry must name an axis actually
-    emitted in "attributes" -- a schema-valid but contract-incomplete response used to
-    reach resolution as a silently unresolved axis instead of retrying here, which is
-    what let `graph_consensus.resolve()`'s fallback path be reached far more often than
-    the note's own documentation actually warranted.
-
-    `_ACTOR_IDENTITY_AXES` (performer_id, performer_function, organization_id,
-    billing_entity_id) are exempt: their final value always comes from the encounter
-    context, never from a note quotation, regardless of what the model wrote here."""
-    for axis, value in attributes.items():
-        if str(axis) in _ACTOR_IDENTITY_AXES:
-            continue
-        norm_value = _norm_attribute_value(value)
-        bound = bound_values_by_axis.get(str(axis), ())
-        if not any(_norm_attribute_value(v) == norm_value for v in bound):
-            raise ExtractionSchemaError(
-                f"{where} attribute {axis!r}={value!r} has no attribute_evidence entry "
-                f"whose own 'value' matches it -- every emitted attribute needs at "
-                f"least one same-name, same-value evidence entry")
-    orphans = sorted(set(bound_values_by_axis) - {str(axis) for axis in attributes})
-    if orphans:
-        raise ExtractionSchemaError(
-            f"{where} attribute_evidence names attribute(s) absent from 'attributes': "
-            f"{orphans}")
-
-
 #: A malformed-shape response (invalid JSON, a fact missing a required field, an
 #: attribute_evidence entry that isn't the object the prompt specifies, ...) is a
 #: single bad draw from the model, not a deterministic property of the note -- the
@@ -963,7 +932,19 @@ _RETRY_VALIDATION_FEEDBACK = (
     "at least one \"attribute_evidence\" entry naming that SAME axis with a \"value\" "
     "that equals, verbatim, the value you wrote in \"attributes\" -- and every "
     "\"attribute_evidence\" entry must name an axis you actually emitted in "
-    "\"attributes\", never one you did not."
+    "\"attributes\", never one you did not. (4) when an axis (e.g. laterality) is "
+    "stated ONCE for the whole note or section and applies to several facts without "
+    "being repeated in each one's own sentence, do not leave the other facts' "
+    "attribute_evidence for that axis unbacked: either (a) quote the actual sentence "
+    "each fact itself appears in if it happens to restate the value there too "
+    "(scope \"local\"), or (b) mark it scope \"inherited\", set \"parent_fact_id\" to "
+    "the exact fact_id of the ONE fact whose OWN sentence states the value, and ALSO "
+    "emit a \"part_of\" relation with THIS fact as subject_event_id and that parent as "
+    "object_event_id (never the reverse, and never same_episode_as) -- an inherited "
+    "entry with no matching part_of relation in the exact right direction is dropped "
+    "entirely and leaves the axis unsupported, which is exactly what was rejected. If "
+    "you are unsure a fact truly shares the parent's value, do not emit the axis for "
+    "that fact at all rather than guessing."
 )
 
 
@@ -1173,9 +1154,24 @@ def _parse_extraction_response(
             if prec["function"]:
                 attributes["performer_function"] = prec["function"]
             org = str(attributes.get("organization_id", "")).strip()
-            if (org and org in prec["affiliations"]
-                    and participants.get(org, {}).get("type") == "organization"):
+            valid_orgs = {o for o in prec["affiliations"]
+                         if participants.get(o, {}).get("type") == "organization"}
+            if org and org in valid_orgs:
                 attributes["organization_id"] = org
+            elif not org and len(valid_orgs) == 1:
+                # issue #6, Codex's independent re-review, F9-R13-D follow-up (found
+                # live on the designated note): a real operative note states
+                # organizational affiliation ONCE, for the practice as a whole, and
+                # does not repeat it for every individual documented step the SAME
+                # already-validated performer performed -- the identical "stated
+                # once, applies throughout" shape `performer_function` above already
+                # gets from context regardless of what the model wrote. When the
+                # validated performer has exactly ONE known organizational
+                # affiliation, using it is not a guess between competing options;
+                # a performer affiliated with MORE than one organization is left
+                # unset here rather than guessed at (ownership then resolves to
+                # UNKNOWN, not silently assigned to either).
+                attributes["organization_id"] = next(iter(valid_orgs))
             else:
                 attributes.pop("organization_id", None)
         else:
@@ -1236,29 +1232,54 @@ def _parse_extraction_response(
                 attr_name: fact.attribute_evidence.get(attr_name, ()) + (entry,),
             }
     # THE contract check, on the FINAL facts (issue #6, Codex's independent re-review,
-    # F9-R13-C1, reopened P1): an "inherited" entry that named a real fact but no
-    # matching part_of relation was just silently dropped above, which can leave a
-    # fact's "attributes" claiming a value its (now empty) "attribute_evidence" no
-    # longer backs at all -- the identical malformed shape the per-fact check earlier
-    # in this function exists to catch, reached through a different route. Checking
-    # here, once, on the settled `fact.attribute_evidence`, is the only point that
-    # reflects what actually survived.
-    require_final_attribute_evidence(facts)
+    # F9-R13-D): an "inherited" entry that named a real fact but no matching part_of
+    # relation was just silently dropped above, which can leave a fact's "attributes"
+    # claiming a value its (now empty) "attribute_evidence" no longer backs at all.
+    # This is a FACT-LOCAL defect -- never proof the whole response is corrupt (round
+    # 8's `require_final_attribute_evidence` raised here, which discarded facts that
+    # extracted perfectly fine whenever even ONE unrelated fact's axis failed this
+    # check, and could exhaust every retry attempt on a single persistently
+    # ungrounded fact, losing the entire encounter). Sanitized, never raised: the
+    # unauthorized axis is removed from THIS fact only, with a typed gap recorded so
+    # eligibility/resolution can hold just that fact's line while every other fact
+    # proceeds normally.
+    finalize_attribute_evidence(facts)
     return ExtractionResult(facts=facts, relations=relations, origin=origin)
 
 
-def require_final_attribute_evidence(facts: list[ClinicalFact]) -> None:
-    """`_validate_attribute_evidence`, applied to each FINAL fact's own settled
-    `attribute_evidence` -- never the pre-resolution accumulator, which can still
+def finalize_attribute_evidence(facts: list[ClinicalFact]) -> None:
+    """Sanitize each FINAL fact's "attributes" against its own settled
+    "attribute_evidence" -- never the pre-resolution accumulator, which can still
     count an "inherited" entry the second pass above goes on to drop for naming no
-    real relation. Raises `ExtractionSchemaError`, which `extract_note`'s existing
-    bounded retry loop already catches -- no second retry mechanism."""
-    for i, fact in enumerate(facts):
-        bound_values_by_axis = {
-            axis: [entry.value for entry in entries]
-            for axis, entries in fact.attribute_evidence.items()
-        }
-        _validate_attribute_evidence(fact.attributes, bound_values_by_axis, f"fact #{i}")
+    real relation (issue #6, Codex's independent re-review, F9-R13-D). An axis whose
+    claimed value has no surviving, value-bound evidence is FACT-LOCAL corruption,
+    never proof the whole response is unusable: the fact and its evidence are kept,
+    only the unauthorized axis is removed, and a typed `AttributeEvidenceGap` records
+    why -- so eligibility/resolution can hold just that one line (or restore it, if
+    the independent second reading and adjudication later source-prove the axis)
+    while every other, genuinely evidenced fact continues normally. Never raises;
+    `extraction.py`'s bounded retry loop remains for genuinely STRUCTURAL failures
+    (malformed JSON/types, duplicate/unknown fact ids, unusable relation endpoints)
+    only -- a missing proof for one attribute is not one of those."""
+    for fact in facts:
+        for axis, value in list(fact.attributes.items()):
+            if axis in _ACTOR_IDENTITY_AXES:
+                continue
+            entries = fact.attribute_evidence.get(axis, ())
+            supported = any(_norm_attribute_value(entry.value) == _norm_attribute_value(value)
+                           for entry in entries)
+            if supported:
+                continue
+            # Never authorize the unsupported value, but preserve the documented event.
+            fact.attributes.pop(axis, None)
+            fact.attribute_evidence.pop(axis, None)
+            fact.attribute_evidence_gaps[axis] = AttributeEvidenceGap(
+                axis=axis,
+                reason="extraction supplied no relation-valid, value-bound evidence")
+        # Orphan evidence (names an axis absent from "attributes") cannot authorize
+        # anything either -- discard it rather than leave it dangling, unaudited.
+        for axis in set(fact.attribute_evidence) - set(fact.attributes):
+            fact.attribute_evidence.pop(axis, None)
 
 
 def extract_facts(note_text: str, llm: LLMFn | None = None) -> list[ClinicalFact]:

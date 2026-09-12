@@ -68,7 +68,29 @@ _STRUCTURAL_AXES = ("occurrence_status", "assertion_certainty", "beneficiary")
 #: Attribute keys that are not a reading of the document at all: they are resolved from
 #: the authoritative encounter context and are therefore identical in both readings by
 #: construction. Comparing them would compare the roster to itself.
-_CONTEXT_RESOLVED_AXES = ("billing_entity_id",)
+#:
+#: issue #6, Codex's independent re-review, F9-R13-D follow-up (found live on the
+#: designated note, not flagged by name in the round-8 review): `performer_id`/
+#: `performer_function`/`organization_id` -- the SAME "actor identity" category
+#: `extraction._ACTOR_IDENTITY_AXES` already exempts from requiring a note quotation,
+#: for the identical reason -- were still being COMPARED here like ordinary
+#: document-read axes. Since neither reading's extraction call is required (or able)
+#: to quote a "performer_id" or "organization_id" verbatim from the note text, a
+#: reading that simply omitted the axis for a given fact (extraction thoroughness
+#: noise, not a document disagreement) produced an unsettleable "only one reading
+#: recorded a value" hold on nearly every secondary fact in a real operative note --
+#: never resolvable by source confirmation, because there is no quotable source for
+#: a context-matched id in the first place. `performer_function` is ALWAYS the
+#: context's own value regardless of what either reading wrote (never trusted from
+#: the model); `organization_id` is validated against the SAME roster/affiliation
+#: rule on both readings. Only `performer_id` can, in principle, legitimately differ
+#: per fact in a genuine multi-performer encounter -- but that is a documented
+#: DIFFERENT ACTOR for that specific service, which is what this axis-comparison
+#: mechanism cannot correctly detect anyway (it has no quotable evidence to
+#: reconcile), so excluding it here loses no real signal this mechanism could ever
+#: honestly have provided.
+_CONTEXT_RESOLVED_AXES = ("billing_entity_id", "performer_id", "performer_function",
+                          "organization_id")
 
 
 class AxisVerdict(str, Enum):
@@ -317,6 +339,16 @@ class ConsensusReport:
     #: exact-SHA re-review: "the decisive terminology action is not defensible from
     #: the final audit").
     governed_matches: tuple[dict[str, Any], ...] = ()
+    #: Every axis pair a governed concept source RELATED but did NOT confirm
+    #: identical (issue #6, Codex's independent re-review, F9-R13-D architectural-
+    #: gap follow-up) -- an ancestor/descendant relation or a real but ambiguous
+    #: shared candidate, e.g. a specific anatomical site and its containing
+    #: structure. Real evidence, never a confirmed synonym: kept SEPARATE from
+    #: `governed_matches` so an audit reader can never mistake "both phrasings were
+    #: preserved to widen retrieval" for "the graph confirmed these are the same
+    #: real-world value". Neither phrase authorizes a candidate by itself; the
+    #: existing candidate-requirement/descriptor-verification machinery decides.
+    observed_alternates: tuple[dict[str, Any], ...] = ()
 
     @property
     def unresolved(self) -> tuple[AxisResolution, ...]:
@@ -344,6 +376,7 @@ class ConsensusReport:
             "escalated_pages": list(self.escalated_pages),
             "escalation_detail": self.escalation_detail,
             "governed_matches": [dict(m) for m in self.governed_matches],
+            "observed_alternates": [dict(m) for m in self.observed_alternates],
         }
 
 
@@ -428,7 +461,8 @@ def align(primary: list, second: list, source: Any = None
 
 def compare_axes(pairs: list[tuple[Any, Any]],
                  source: Any = None
-                 ) -> tuple[list[AxisDisagreement], int, list[dict[str, Any]]]:
+                 ) -> tuple[list[AxisDisagreement], int, list[dict[str, Any]],
+                           list[dict[str, Any]]]:
     """Every code-changing axis the two readings did not read the same way, plus
     every axis a governed concept source POSITIVELY confirmed as the same value
     despite differing wording.
@@ -441,22 +475,40 @@ def compare_axes(pairs: list[tuple[Any, Any]],
     pair used to become an unsettleable cross-reading conflict -- routed to
     `eligibility._gate_axis_consensus` as AUTO_HOLD -- before claim assembly's own
     concept-aware comparison ever ran, because this comparison is upstream of it and
-    used only raw string equality. A relation the graph cannot confirm (ancestor/
-    descendant, ambiguous overlap, or unresolved) still raises a disagreement,
-    exactly as before -- this only removes disagreements the graph POSITIVELY
-    confirms are not real, never adds new tolerance beyond that.
+    used only raw string equality.
 
-    Every axis suppressed this way is recorded in the third return value (issue #6
-    F7-R3-C4, exact-SHA re-review: a verified expansion must not "remove a hold
-    without improving candidate recall", and "the decisive terminology action" must
-    be "defensible from the final audit"). The caller applies these onto the
-    surviving fact (`ClinicalFact.governed_terms`) so retrieval can query under the
-    confirmed alternate wording too, and binds the raw record into the consensus
-    report for audit visibility.
+    Every axis suppressed this way (a confirmed SAME) is recorded in the third
+    return value (issue #6 F7-R3-C4, exact-SHA re-review: a verified expansion must
+    not "remove a hold without improving candidate recall", and "the decisive
+    terminology action" must be "defensible from the final audit"). The caller
+    applies these onto the surviving fact (`ClinicalFact.governed_terms`) so
+    retrieval can query under the confirmed alternate wording too, and binds the raw
+    record into the consensus report for audit visibility.
+
+    issue #6, Codex's independent re-review, F9-R13-D architectural-gap follow-up:
+    a governed axis the concept graph relates but does NOT confirm identical
+    (`CONCEPT_RELATED` -- an ancestor/descendant pair, e.g. a specific anatomical
+    site and its containing structure) is DIFFERENT from both of the above. It is
+    real evidence -- something the authoritative graph actually found, not lexical
+    noise -- but it is also not a confirmed synonym, so it must never be called
+    "same," never overwrite either reading's own phrase, and never by itself
+    authorize a candidate. Codex's exact framing: choosing between the two readings'
+    STRINGS is the wrong task when the actual task is choosing a CODE. So this is
+    the fourth return value: both phrases are preserved as non-authorizing
+    retrieval-widening observations (via the SAME `ClinicalFact.governed_terms`
+    mechanism the confirmed-SAME path already writes to, just recorded separately
+    in the audit so a reader can never mistake "widened" for "confirmed identical")
+    -- retrieval proceeds under both, and the EXISTING candidate-requirement/
+    descriptor-verification machinery (never a new one) decides which candidate the
+    documentation actually supports. Only a genuinely UNRESOLVED relation (neither
+    side matched any concept at all -- nothing for the graph to relate) still raises
+    an ordinary disagreement, exactly as before.
     """
     from . import coreference as _coref
+    from . import terminology as _term
     out: list[AxisDisagreement] = []
     governed: list[dict[str, Any]] = []
+    observed_alternates: list[dict[str, Any]] = []
     compared = 0
     for left, right in pairs:
         left_axes = _axis_values(left)
@@ -508,6 +560,29 @@ def compare_axes(pairs: list[tuple[Any, Any]],
                     "axis": axis, "value_primary": a, "value_second": b,
                     "evidence_span_ids": list(span_ids), **detail})
                 continue
+            # issue #6, Codex's independent re-review, F9-R13-D architectural-gap
+            # follow-up: the concept graph actually found something -- an
+            # ancestor/descendant relation, or a real but ambiguous shared
+            # candidate -- for a governed axis both readings genuinely stated. That
+            # is real evidence, never confirmed identity, so it must never be
+            # called "same" and must never authorize a candidate by itself; but it
+            # is also not the "nothing to relate" case an ordinary disagreement
+            # exists for. Both phrases are preserved as non-authorizing
+            # retrieval-widening observations instead of a pre-retrieval hold --
+            # the EXISTING candidate-requirement/descriptor-verification machinery
+            # decides which candidate the documentation actually supports.
+            if (axis in _coref._CONCEPT_GOVERNED_AXES and a and b
+                    and detail.get("verdict") == _term.CONCEPT_RELATED):
+                span_ids = tuple(dict.fromkeys(
+                    str(getattr(s, "span_id", "") or "")
+                    for f in (left, right)
+                    for s in (getattr(f, "evidence", None) or [])
+                    if getattr(s, "span_id", None)))
+                observed_alternates.append({
+                    "node_id": str(getattr(left, "fact_id", "") or ""),
+                    "axis": axis, "value_primary": a, "value_second": b,
+                    "evidence_span_ids": list(span_ids), **detail})
+                continue
             if a and b:
                 basis = "the two readings recorded different values"
             else:
@@ -516,7 +591,7 @@ def compare_axes(pairs: list[tuple[Any, Any]],
                 node_id=str(getattr(left, "fact_id", "") or ""), axis=axis,
                 value_primary=a, value_second=b, basis=basis,
                 action=str(getattr(left, "description", "") or "")))
-    return out, compared, governed
+    return out, compared, governed, observed_alternates
 
 
 # ------------------------------------------------------------------ resolution
@@ -1172,10 +1247,23 @@ def apply_resolutions(primary_by_id: dict, second_by_node: dict,
         fact = primary_by_id.get(resolution.node_id)
         if fact is None:
             continue
+        is_gap = resolution.axis in (getattr(fact, "attribute_evidence_gaps", None) or {})
         if resolution.unresolved:
-            # An unresolved axis with no question is one the SOURCE-EVIDENCE control
-            # owns (see `resolve`): recording a conflict here would hold the event
-            # before retrieval and hide the misreading from that control.
+            # issue #6, Codex's independent re-review, F9-R13-D: a GAPPED axis --
+            # extraction itself never established a claim-authorized value for it
+            # (`extraction.finalize_attribute_evidence` already removed it from
+            # "attributes") -- must NEVER be forced into `axis_conflicts` here even
+            # when unresolved: that holds the event BEFORE retrieval and would
+            # suppress its candidate set, exactly what this fix exists to stop. It
+            # stays exactly as extraction left it (absent from `attributes`, gap
+            # recorded), and resolution/eligibility downstream holds only this
+            # fact's LINE, after candidates are computed, naming the gapped axis.
+            if is_gap:
+                continue
+            # An unresolved GENUINE two-reading disagreement with no question is one
+            # the SOURCE-EVIDENCE control owns (see `resolve`): recording a conflict
+            # here would hold the event before retrieval and hide the misreading
+            # from that control.
             if not resolution.provider_question:
                 continue
             conflicts = list(getattr(fact, "axis_conflicts", None) or [])
@@ -1187,6 +1275,7 @@ def apply_resolutions(primary_by_id: dict, second_by_node: dict,
             _write_axis(fact, resolution.axis, resolution.accepted_value)
             _record_axis_adjudication(fact, resolution.axis, resolution.accepted_value,
                                       resolution.proof, resolution.evidence_span_ids)
+            _clear_attribute_evidence_gap(fact, resolution.axis)
             continue
         if resolution.accepted_from != "second":
             continue                      # the primary reading already holds this value
@@ -1195,6 +1284,19 @@ def apply_resolutions(primary_by_id: dict, second_by_node: dict,
         if source_fact is not None:
             _carry_evidence(fact, source_fact, resolution.evidence_span_ids)
             _carry_attribute_evidence(fact, source_fact, resolution.axis)
+        _clear_attribute_evidence_gap(fact, resolution.axis)
+
+
+def _clear_attribute_evidence_gap(fact, axis: str) -> None:
+    """The independent second reading (or cross-vendor adjudication) just
+    source-proved a GAPPED axis (issue #6, Codex's independent re-review,
+    F9-R13-D) -- clear the recorded gap so downstream resolution stops holding
+    this fact's line for an axis that is, as of this resolution, genuinely
+    authorized again."""
+    gaps = dict(getattr(fact, "attribute_evidence_gaps", None) or {})
+    if axis in gaps:
+        gaps.pop(axis)
+        fact.attribute_evidence_gaps = gaps
 
 
 def _write_axis(fact, axis: str, value: str) -> None:
@@ -1330,21 +1432,38 @@ def compare(primary_facts: list, second_facts: list, *,
     """
     pairs, unmatched_primary, unmatched_second = (
         alignment if alignment is not None else align(primary_facts, second_facts))
-    disagreements, compared, governed_matches = compare_axes(pairs, source)
+    disagreements, compared, governed_matches, observed_alternates = compare_axes(
+        pairs, source)
     primary_by_id = {str(getattr(f, "fact_id", "") or ""): f for f in primary_facts}
     second_by_node = {str(getattr(left, "fact_id", "") or ""): right
                       for left, right in pairs}
-    # Apply every governed match onto the surviving PRIMARY fact (issue #6 F7-R3-C4):
-    # retrieval reads `ClinicalFact.governed_terms` to query under the confirmed
-    # alternate wording too, so a code indexed only under the SECOND reading's
-    # synonym is not silently unreachable once the two readings merge with no
-    # disagreement raised.
+    # Apply every governed match (confirmed SAME) AND every observed alternate
+    # (related, not confirmed -- issue #6, Codex's independent re-review, F9-R13-D
+    # architectural-gap follow-up) onto the surviving PRIMARY fact's
+    # `governed_terms`: retrieval reads this to query under the alternate wording
+    # too, so a code indexed only under the SECOND reading's phrasing is not
+    # silently unreachable. Both write to the SAME retrieval-widening field --
+    # `governed_terms` was never itself a "confirmed identical" claim, only ever a
+    # set of phrasings to also query under -- but only `governed_matches` is
+    # recorded in the report as a CONFIRMED identity; `observed_alternates` is kept
+    # separately so a reader of the audit trail can never mistake "widened
+    # retrieval" for "confirmed the same real-world value".
     for match in governed_matches:
         fact = primary_by_id.get(match["node_id"])
         alt = str(match.get("value_second") or "").strip()
         if fact is None or not alt:
             continue
         axis = match["axis"]
+        current = dict(getattr(fact, "governed_terms", None) or {})
+        if alt not in current.get(axis, ()):
+            current[axis] = current.get(axis, ()) + (alt,)
+        fact.governed_terms = current
+    for alt_match in observed_alternates:
+        fact = primary_by_id.get(alt_match["node_id"])
+        alt = str(alt_match.get("value_second") or "").strip()
+        if fact is None or not alt:
+            continue
+        axis = alt_match["axis"]
         current = dict(getattr(fact, "governed_terms", None) or {})
         if alt not in current.get(axis, ()):
             current[axis] = current.get(axis, ()) + (alt,)
@@ -1358,5 +1477,6 @@ def compare(primary_facts: list, second_facts: list, *,
         unmatched_primary=tuple(_event_record(f) for f in unmatched_primary),
         unmatched_second=tuple(_event_record(f) for f in unmatched_second),
         governed_matches=tuple(governed_matches),
+        observed_alternates=tuple(observed_alternates),
     )
     return report, primary_by_id, second_by_node

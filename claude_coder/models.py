@@ -239,6 +239,18 @@ class ClinicalFact:
     # never by mutating an existing `AttributeEvidence` entry's scope or assertion
     # state.
     axis_adjudications: dict[str, "AxisAdjudication"] = field(default_factory=dict)
+    # An axis extraction claimed in "attributes" but could not back with relation-
+    # valid, value-bound evidence (issue #6, Codex's independent re-review,
+    # F9-R13-D) -- `extraction.finalize_attribute_evidence` removes the unauthorized
+    # value from `attributes`/`attribute_evidence` and records the gap here instead
+    # of raising and discarding the WHOLE response: this is a FACT-LOCAL defect, not
+    # proof every other fact is corrupt. The independent second reading and
+    # cross-vendor adjudication may still source-prove the axis and clear the gap
+    # (`graph_consensus.apply_resolutions`); otherwise resolution must hold only
+    # THIS fact's line at final disposition (never before retrieval, which would
+    # suppress its candidate set), naming the exact gapped axis.
+    attribute_evidence_gaps: dict[str, "AttributeEvidenceGap"] = field(
+        default_factory=dict)
     fact_id: str = ""
 
     @property
@@ -287,6 +299,19 @@ class AxisAdjudication:
     value: str
     proof: str
     evidence_span_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class AttributeEvidenceGap:
+    """One code-changing axis extraction claimed a value for but could not back
+    with relation-valid, value-bound evidence (issue #6, Codex's independent
+    re-review, F9-R13-D). Recorded on the fact that carried the unauthorized
+    claim, keyed by axis, so downstream resolution can name the EXACT missing
+    fact/axis rather than a generic hold -- and so a later independent
+    second-reading/adjudication proof can find and clear exactly this gap."""
+
+    axis: str
+    reason: str
 
 
 @dataclass(frozen=True)

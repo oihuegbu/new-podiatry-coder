@@ -451,7 +451,7 @@ class AuthoritativeSource:
         index = self._ensure_concept_relation_index()
         if not index:
             return _term.CONCEPT_UNRESOLVED
-        return index.relation(term_a, term_b)
+        return index.relation_detail(term_a, term_b, embedded=True).verdict
 
     def concept_relation_detail(self, term_a: str, term_b: str) -> dict:
         """The full auditable basis (issue #6 F7-R3-C4) behind `concept_relation`'s
@@ -461,12 +461,33 @@ class AuthoritativeSource:
         and certificate, not just a bare string. `concept_relation`'s string verdict
         alone cannot answer "which concept, from which release, decided this" --
         this can.
+
+        `embedded=True` (issue #6, F9-R13-D architectural-gap follow-up, found live
+        on the designated note -- extending the SAME `embedded` matching
+        `data_access.procedure_relation_detail` already opts into for the semantic
+        action axis, per `ConceptRelationIndex.relation_detail`'s own documented
+        design: "Only the caller ... opts into this"): the "anatomy" axis's actual
+        values are usually a DESCRIPTIVE PHRASE extracted from the note's own
+        prose (e.g. a positional/qualifier phrase describing a body-structure
+        region), not, in their entirety, one governed synonym term the way a
+        short structured VALUE naming that same structure directly would be --
+        the strict whole-string `match` this used to rely on (`embedded=False`)
+        could never find ANY candidate concept for such a phrase, so two
+        readings of the identical real anatomy, worded at different levels of
+        descriptive detail, could never even reach a SAME/RELATED verdict and
+        fell through to the open-vocabulary UNDETERMINED default every time --
+        the exact gap that made a genuine synonym pair here indistinguishable
+        from an unresolvable one. `match_longest` still requires an EXACT,
+        token-boundary governed phrase (never fuzzy/edit-distance) and still
+        requires a UNIQUE resolution on both sides before SAME, so this widens
+        WHERE a governed term can be found inside free text, not what counts as
+        a match once found.
         """
         from . import terminology as _term
         index = self._ensure_concept_relation_index()
         if not index:
             return {"verdict": _term.CONCEPT_UNRESOLVED, "source_identity": None}
-        detail = index.relation_detail(term_a, term_b)
+        detail = index.relation_detail(term_a, term_b, embedded=True)
         return {
             "verdict": detail.verdict,
             "confidence": detail.confidence,
@@ -880,7 +901,11 @@ class AuthoritativeSource:
         index = self._ensure_concept_relation_index()
         if not index:
             return dict(self._EMPTY_CONCEPT_LOOKUP)
-        match, expansions = index.normalize(term)
+        # embedded=True (issue #6, F9-R13-D architectural-gap follow-up): the SAME
+        # widening `concept_relation_detail` now applies to a two-value comparison,
+        # extended to this single-value normalization/expansion path -- see
+        # `ConceptRelationIndex.normalize`'s own docstring.
+        match, expansions = index.normalize(term, embedded=True)
         return {
             "term": match.term,
             "candidates": list(match.candidates),
