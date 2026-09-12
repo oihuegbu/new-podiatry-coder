@@ -24,6 +24,7 @@ WHAT THIS PROVES
 
 Everything runs through the real modules. No medical code appears anywhere in this file.
 """
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -45,6 +46,39 @@ NOTE = (
     "The documented condition addressed today is the reason for it. "
     "A second, separately documented procedure was also performed today."
 )
+
+
+def _autofill_attribute_evidence(payload_json: str) -> str:
+    """Test-only convenience (issue #6, Codex's independent re-review, F9-R13-C
+    release-gate root cause 1): `extraction._parse_extraction_response` now requires
+    every "attributes" axis to carry a matching "attribute_evidence" entry. Most
+    fixtures in this file predate that contract and test something else entirely
+    (dedup, union, governed terminology, ...), so rather than hand-edit every
+    literal, synthesize one ASSERTED, value-bound, local-scope entry per
+    non-actor-identity attribute that doesn't already have one, quoting the fact's
+    OWN first evidence string -- the contract's SHAPE is still genuinely exercised
+    (a real extractor call goes through the exact same parser), just not
+    hand-authored per fixture. The contract's ENFORCEMENT itself is exercised
+    deliberately by `tests/test_extraction_strict.py`."""
+    import json as _json
+    payload = _json.loads(payload_json)
+    for fact in payload.get("facts", []):
+        attrs = fact.get("attributes") or {}
+        if not attrs:
+            continue
+        existing = dict(fact.get("attribute_evidence") or {})
+        quote = next(iter(fact.get("evidence") or []), "") or fact.get("description", "")
+        for axis, value in attrs.items():
+            if axis in ("performer_id", "performer_function", "organization_id",
+                       "billing_entity_id"):
+                continue
+            if axis in existing:
+                continue
+            existing[axis] = [{"text": quote, "scope": "local",
+                               "assertion_state": "asserted", "value": str(value)}]
+        if existing:
+            fact["attribute_evidence"] = existing
+    return _json.dumps(payload)
 
 
 def _span(text, *, anchored=True, span_id=None):
@@ -352,6 +386,138 @@ class TwoReadingAxisConsensus(unittest.TestCase):
         self.assertFalse(
             any(r["destination"] == Destination.REVIEW.value for r in result.routing),
             f"model disagreement must never reach a coder queue: {result.routing}")
+
+
+class IndependentAxisAdjudication(unittest.TestCase):
+    """issue #6, Codex's independent re-review, F9-R13-C release-gate root cause 2:
+    when neither reading's own confirmed quotation settles a disagreeing axis,
+    `resolve(..., llm=...)` gets ONE more chance via `adjudicate_axis` -- judged only
+    from the reconciled quotations either reading already attached to the axis,
+    never a preference between the two readings' own claims, never a value or
+    citation the reconciled record does not contain."""
+
+    def _disagreement(self):
+        from claude_coder.models import AttributeEvidence
+        p1 = _span("The record notes a right-sided finding on exam", span_id="p1")
+        s1 = _span("A separate note references the left side in passing", span_id="s1")
+        primary = [_fact(
+            "F1", FactKind.PROCEDURE, "procedure performed", spans=[p1],
+            attributes={"laterality": "right"},
+            attribute_evidence={"laterality": (
+                AttributeEvidence(span=p1, scope="local",
+                                  assertion_state=RelationState.UNCERTAIN,
+                                  value="right"),)})]
+        second = [_fact(
+            "S1", FactKind.PROCEDURE, "performed procedure", spans=[s1],
+            attributes={"laterality": "left"},
+            attribute_evidence={"laterality": (
+                AttributeEvidence(span=s1, scope="local",
+                                  assertion_state=RelationState.UNCERTAIN,
+                                  value="left"),)})]
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "laterality")
+        return disagreement, primary, second, primary_by_id, second_by_node
+
+    def test_a_uniquely_supported_value_resolves_and_authorizes_the_fact(self):
+        """The positive case: an independent verifier, shown only the reconciled
+        quotations, finds exactly one candidate value supported -- the axis
+        settles, and the value is genuinely AUTHORIZED downstream, not merely
+        written onto attributes."""
+        disagreement, primary, _second, primary_by_id, second_by_node = self._disagreement()
+
+        def llm(system, user):
+            return json.dumps({"values": [
+                {"value": "right", "status": "supported", "span_ids": ["e1"]},
+                {"value": "left", "status": "not_documented", "span_ids": []}]})
+
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None, llm=llm)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.RESOLVED_FROM_SOURCE)
+        self.assertEqual(laterality.accepted_from, "adjudicated")
+        self.assertEqual(laterality.accepted_value, "right")
+        self.assertEqual(laterality.proof, graph_consensus.PROOF_ADJUDICATED)
+        graph_consensus.apply_resolutions(primary_by_id, second_by_node, resolutions)
+        self.assertEqual(primary[0].attributes["laterality"], "right")
+        self.assertEqual(
+            graph_consensus.claim_authorized_value(primary[0], "laterality", None),
+            "right",
+            "the adjudicated value must be genuinely authorized downstream, not "
+            "merely written onto attributes")
+
+    def test_both_values_supported_remains_a_precise_unresolved_candidate(self):
+        """Agreement is not the test: the verifier finding BOTH sides supported is
+        still not a unique answer, and must remain a provider question, never a
+        guess at either value."""
+        disagreement, _primary, _second, primary_by_id, second_by_node = self._disagreement()
+
+        def llm(system, user):
+            return json.dumps({"values": [
+                {"value": "right", "status": "supported", "span_ids": ["e1"]},
+                {"value": "left", "status": "supported", "span_ids": ["e2"]}]})
+
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None, llm=llm)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
+        self.assertIn("laterality", laterality.provider_question)
+
+    def test_neither_value_supported_remains_a_precise_unresolved_candidate(self):
+        """The record genuinely does not settle it -- neither candidate value is
+        supported by the reconciled quotations, so this stays a documentation gap,
+        not a default to either reading."""
+        disagreement, _primary, _second, primary_by_id, second_by_node = self._disagreement()
+
+        def llm(system, user):
+            return json.dumps({"values": [
+                {"value": "right", "status": "not_documented", "span_ids": []},
+                {"value": "left", "status": "not_documented", "span_ids": []}]})
+
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None, llm=llm)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
+
+    def test_an_invented_value_from_the_adjudicator_is_rejected(self):
+        """A value never offered as a candidate (neither reading's own claim) must
+        never be accepted, no matter how confidently the verifier asserts it."""
+        disagreement, _primary, _second, primary_by_id, second_by_node = self._disagreement()
+
+        def llm(system, user):
+            return json.dumps({"values": [
+                {"value": "bilateral", "status": "supported", "span_ids": ["e1"]}]})
+
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None, llm=llm)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
+
+    def test_an_invented_citation_from_the_adjudicator_is_rejected(self):
+        """A citation naming an evidence id this call never showed the model must
+        never be accepted as proof -- not even by silently dropping just the bad
+        citation and keeping the verdict."""
+        disagreement, _primary, _second, primary_by_id, second_by_node = self._disagreement()
+
+        def llm(system, user):
+            return json.dumps({"values": [
+                {"value": "right", "status": "supported", "span_ids": ["e99"]}]})
+
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None, llm=llm)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED,
+                      "an invented citation must invalidate the whole verdict, not "
+                      "just the bad citation")
+
+    def test_no_llm_supplied_falls_back_to_the_prior_unresolved_behavior(self):
+        """`resolve()` without an `llm` (every caller before this round, and every
+        test that does not pass one) must behave exactly as before -- adjudication
+        is additive, never a silent behavior change for an existing caller."""
+        disagreement, _primary, _second, primary_by_id, second_by_node = self._disagreement()
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
 
 
 class PerAttributeSourceEvidence(unittest.TestCase):
@@ -1804,19 +1970,30 @@ def _reading(description, laterality, quote, *, evidence_value=None):
     fact-text lexical fallback `resolve()` used to settle this kind of case
     through is gone, proven exploitable by the same far-distance-negation
     class Codex's re-review of 92f4596 found for `claim_authorized_value`.
+
     Omitted (the default, unchanged for every other caller) when a test's own
-    point is that the reading is UNSTATED/ungrounded/unresolved."""
+    point is that the reading does not really PROVE the axis -- but (issue #6,
+    Codex's independent re-review, F9-R13-C release-gate root cause 1) every
+    axis this reading emits in "attributes" still needs SOME same-name,
+    same-value `attribute_evidence` entry to be a valid extraction response at
+    all, so the default case still binds one, deliberately "uncertain" rather
+    than "asserted": a real extractor that recorded a value but could not
+    confidently back it would emit exactly this, and `asserted_attribute_
+    support` still correctly refuses to authorize an "uncertain" entry -- the
+    original test intent (this reading does not settle the axis) is
+    unchanged, only the previously-nonexistent evidence entry a well-formed
+    response always carries now actually exists."""
     import json
     fact = {
         "fact_id": "F1", "kind": "procedure", "description": description,
         "attributes": {"laterality": laterality, "performer_id": "actor-1",
                        "billing_entity_id": "actor-1"},
         "disposition": "performed_today", "negated": False,
-        "evidence": [quote], "confidence": 0.99}
-    if evidence_value is not None:
-        fact["attribute_evidence"] = {"laterality": [
-            {"text": quote, "scope": "local", "assertion_state": "asserted",
-             "value": evidence_value}]}
+        "evidence": [quote], "confidence": 0.99,
+        "attribute_evidence": {"laterality": [
+            {"text": quote, "scope": "local",
+             "assertion_state": "asserted" if evidence_value is not None else "uncertain",
+             "value": evidence_value if evidence_value is not None else laterality}]}}
     return json.dumps({"facts": [fact]})
 
 
@@ -1841,6 +2018,8 @@ def _null_audit():
 
 def _run(primary_reading, second_reading, **kwargs):
     from claude_coder.pipeline import code_encounter
+    primary_reading = _autofill_attribute_evidence(primary_reading)
+    second_reading = _autofill_attribute_evidence(second_reading)
     return code_encounter(
         "enc", kwargs.pop("note_text", NOTE_E2E), "2026-03-14",
         source=_mock_source(),
@@ -2443,6 +2622,8 @@ def _union_source():
 
 def _run_union(primary_reading, second_reading, **kwargs):
     from claude_coder.pipeline import code_encounter
+    primary_reading = _autofill_attribute_evidence(primary_reading)
+    second_reading = _autofill_attribute_evidence(second_reading)
     return code_encounter(
         "enc", kwargs.pop("note_text", NOTE_UNION), "2026-03-14",
         source=kwargs.pop("source", None) or _union_source(),
@@ -2823,6 +3004,56 @@ class EndToEndEventCandidateUnion(unittest.TestCase):
         self.assertIsNot(result.destination, Destination.SYSTEM_HOLD)
         self.assertFalse(any(g.name == "pre_retrieval_integrity" for g in result.gates),
                          [g.name for g in result.gates])
+
+
+class LineScopedHoldsPreserveOtherLines(unittest.TestCase):
+    """issue #6, Codex's independent re-review, F9-R13-C required regression: an
+    axis the two readings genuinely cannot settle must hold only its OWN affected
+    fact -- a separately documented, clean service in the SAME encounter still
+    reaches retrieval and bills, never erased by an unrelated line's hold."""
+
+    def _two_facts(self, f1_laterality):
+        return json.dumps({"facts": [
+            {"fact_id": "F1", "kind": "procedure",
+             "description": "excision procedure alpha performed",
+             "attributes": {"laterality": f1_laterality, "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "attribute_evidence": {"laterality": [
+                 {"text": "Procedure alpha performed today", "scope": "local",
+                  "assertion_state": "uncertain", "value": f1_laterality}]},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Procedure alpha performed today"], "confidence": 0.99},
+            {"fact_id": "F2", "kind": "procedure",
+             "description": "removal of separate lesion beta",
+             "attributes": {"laterality": "left", "performer_id": "actor-1",
+                            "billing_entity_id": "actor-1"},
+             "attribute_evidence": {"laterality": [
+                 {"text": "Removal of separate lesion beta on the left side",
+                  "scope": "local", "assertion_state": "asserted", "value": "left"}]},
+             "disposition": "performed_today", "negated": False,
+             "evidence": ["Removal of separate lesion beta on the left side"],
+             "confidence": 0.99},
+        ]})
+
+    def test_an_unresolved_fact_does_not_erase_a_separately_defensible_line(self):
+        note = ("Procedure alpha performed today. "
+                "Removal of separate lesion beta on the left side.")
+        result = _run_union(self._two_facts("right"), self._two_facts("left"),
+                            note_text=note)
+
+        laterality_disagreements = [d for d in result.consensus["disagreements"]
+                                   if d["axis"] == "laterality"]
+        self.assertTrue(laterality_disagreements, result.consensus["disagreements"])
+
+        lines_by_desc = {ln.fact.description: ln for ln in result.lines}
+        f1_line = lines_by_desc["excision procedure alpha performed"]
+        f2_line = lines_by_desc["removal of separate lesion beta"]
+        self.assertIsNone(f1_line.chosen, "the genuinely unresolved fact must not bill")
+        self.assertIsNotNone(
+            f2_line.chosen,
+            "a separately documented, clean fact must still reach retrieval and "
+            "bill even though a DIFFERENT fact in the same encounter is held")
+        self.assertEqual(f2_line.chosen.code, "PROC_Y")
 
 
 class PhysicalLocationIdentityAcrossReadings(unittest.TestCase):
@@ -3714,11 +3945,12 @@ def _run_recall(primary_reading, second_llm, **kwargs):
     """`_run_union`, but with a CALLABLE second extractor so the test can see the text
     it was actually given."""
     from claude_coder.pipeline import code_encounter
+    primary_reading = _autofill_attribute_evidence(primary_reading)
     return code_encounter(
         "enc", kwargs.pop("note_text", NOTE_UNION), "2026-03-14",
         source=kwargs.pop("source", None) or _union_source(),
         extract_llm=lambda s, u: primary_reading,
-        extract_llm_b=second_llm,
+        extract_llm_b=lambda s, u: _autofill_attribute_evidence(second_llm(s, u)),
         verify_llm=_stub_llm, corroborate_llm=_stub_llm,
         billing_context=_BILLING, audit_repository=_null_audit(), **kwargs)
 

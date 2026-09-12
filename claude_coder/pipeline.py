@@ -368,7 +368,7 @@ def code_encounter(
                 note_text, facts, billing_context, extract_llm_b, profiles,
                 document_version, source_evidence, source_reader,
                 enforce_independence=enforce_second_reading_independence,
-                source=source)
+                source=source, verify_llm=verify_llm)
             # Every reading a fact may now be anchored in. The relation kernel re-reads
             # the document between two endpoint mentions to prove an edge's DIRECTION,
             # and it can only do that against the string those mentions were verified
@@ -1311,7 +1311,8 @@ def _reconcile_readings(document, facts, recall, *, only=None):
 def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profiles,
                          document_version, source_evidence, source_reader, *,
                          enforce_independence: bool = False,
-                         source: CodeSource | None = None):
+                         source: CodeSource | None = None,
+                         verify_llm: LLMFn | None = None):
     """Second reading -> EVENT-CANDIDATE UNION + axis comparison -> TARGETED
     original-page verification.
 
@@ -1560,7 +1561,7 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
                         "disagreeing axes and candidate events verified against a paid "
                         "independent read of the original pages")
     resolutions = _gc.resolve(list(report.disagreements), primary_by_id, second_by_node,
-                              reconciliation)
+                              reconciliation, llm=verify_llm)
     _gc.apply_resolutions(primary_by_id, second_by_node, resolutions)
     report.resolutions = tuple(resolutions)
     recovery = _union.admit(

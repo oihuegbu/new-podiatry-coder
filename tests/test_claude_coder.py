@@ -81,13 +81,22 @@ def _facts_json(*, link_evidence=True):
         {"fact_id": "F1", "kind": "procedure", "description": "excision of lesion alpha",
          "attributes": {"laterality": "right", "anatomy": "site two",
                         "performer_id": "actor-1", "billing_entity_id": "actor-1"},
+         "attribute_evidence": {
+             "laterality": [{"text": proc_ev[0], "scope": "local",
+                            "assertion_state": "asserted", "value": "right"}],
+             "anatomy": [{"text": proc_ev[0], "scope": "local",
+                         "assertion_state": "asserted", "value": "site two"}]},
          "disposition": "performed_today", "negated": False, "evidence": proc_ev,
          "confidence": 0.97,
          "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
                              "temporal": 0.99, "performer": 0.99, "relationship": 0.99}},
         {"fact_id": "F2", "kind": "diagnosis",
          "description": "condition alpha of the right side",
-         "attributes": {"laterality": "right"}, "disposition": "performed_today",
+         "attributes": {"laterality": "right"},
+         "attribute_evidence": {
+             "laterality": [{"text": dx_ev[0], "scope": "local",
+                            "assertion_state": "asserted", "value": "right"}]},
+         "disposition": "performed_today",
          "negated": False, "evidence": dx_ev, "confidence": 0.98,
          "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
                              "temporal": 0.99, "assertion": 0.99, "experiencer": 0.99}},
@@ -3275,7 +3284,11 @@ class DiagnosisModifierTest(unittest.TestCase):
                          index={"some condition": {"DX_UNSPEC"}})
         facts = ('{"facts":[{"fact_id":"F1","kind":"diagnosis",'
                  '"description":"some condition",'
-                 '"attributes":{"laterality":"right"},"disposition":"performed_today",'
+                 '"attributes":{"laterality":"right"},'
+                 '"attribute_evidence":{"laterality":[{"text":'
+                 '"some condition, right side","scope":"local",'
+                 '"assertion_state":"asserted","value":"right"}]},'
+                 '"disposition":"performed_today",'
                  '"negated":false,"evidence":["some condition, right side"],'
                  '"confidence":0.98}]}')
         r = code_encounter("e", "some condition, right side documented", "2026-03-14",

@@ -454,6 +454,13 @@ def test_extraction_preserves_attributes():
     from claude_coder.extraction import extract_facts
     payload = {"facts": [{"fact_id": "F1", "kind": "diagnosis", "description": "bursitis",
                           "attributes": {"laterality": "left", "anatomy": "heel"},
+                          "attribute_evidence": {
+                              "laterality": [{"text": "left heel bursitis",
+                                             "scope": "local", "assertion_state": "asserted",
+                                             "value": "left"}],
+                              "anatomy": [{"text": "left heel bursitis",
+                                          "scope": "local", "assertion_state": "asserted",
+                                          "value": "heel"}]},
                           "evidence": ["left heel bursitis"]}]}
     (fact,) = extract_facts("note", llm=lambda s, u: json.dumps(payload))
     assert fact.attributes == {"laterality": "left", "anatomy": "heel"}

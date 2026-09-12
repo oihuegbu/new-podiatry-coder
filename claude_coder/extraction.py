@@ -791,6 +791,17 @@ _PARTICIPANT_TYPES = ("person", "organization")
 # this graph exists to prevent. (Codex F6-R2.)
 _PERFORMER_ROLE = "performer"
 
+#: These four axes are never proven by a note quotation -- their FINAL value always
+#: comes from the structured encounter context (`_participant_index`), overwriting or
+#: discarding whatever the model wrote (see the performer/organization/billing_entity_id
+#: resolution block below), regardless of what evidence the model attempted to cite.
+#: Excluded from `_validate_attribute_evidence` for exactly that reason: requiring a
+#: verbatim quote for an internal id the note would only ever name a PERSON for (never
+#: the id itself) would make the contract impossible to satisfy, not tighter. (issue #6,
+#: Codex's independent re-review, F9-R13-C release-gate root cause 1.)
+_ACTOR_IDENTITY_AXES = frozenset(
+    {"performer_id", "performer_function", "organization_id", "billing_entity_id"})
+
 
 def _string_list(value: Any, where: str) -> list[str]:
     """A strictly typed list of non-blank strings, or a typed error.
@@ -879,6 +890,50 @@ def _participant_index(billing_context: dict[str, Any] | None) -> dict[str, dict
     return idx
 
 
+def _norm_attribute_value(value: Any) -> str:
+    """Canonical string form for comparing an `attributes[axis]` value (string, number,
+    or bool per the wire's three typed arrays) against an `attribute_evidence` entry's
+    always-string `.value` -- e.g. `3` and `"3"` are the same depth, `True` and `"true"`
+    are the same boolean."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)) and float(value).is_integer():
+        return str(int(value))
+    return str(value).strip().casefold()
+
+
+def _validate_attribute_evidence(attributes: dict[str, Any],
+                                 bound_values_by_axis: dict[str, list[str]],
+                                 where: str) -> None:
+    """Enforces the extraction contract the prompt already documents (issue #6, Codex's
+    independent re-review, F9-R13-C release-gate root cause 1): every axis name emitted
+    anywhere in "attributes" needs at least one "attribute_evidence" entry naming it
+    with the SAME value, and every "attribute_evidence" entry must name an axis actually
+    emitted in "attributes" -- a schema-valid but contract-incomplete response used to
+    reach resolution as a silently unresolved axis instead of retrying here, which is
+    what let `graph_consensus.resolve()`'s fallback path be reached far more often than
+    the note's own documentation actually warranted.
+
+    `_ACTOR_IDENTITY_AXES` (performer_id, performer_function, organization_id,
+    billing_entity_id) are exempt: their final value always comes from the encounter
+    context, never from a note quotation, regardless of what the model wrote here."""
+    for axis, value in attributes.items():
+        if str(axis) in _ACTOR_IDENTITY_AXES:
+            continue
+        norm_value = _norm_attribute_value(value)
+        bound = bound_values_by_axis.get(str(axis), ())
+        if not any(_norm_attribute_value(v) == norm_value for v in bound):
+            raise ExtractionSchemaError(
+                f"{where} attribute {axis!r}={value!r} has no attribute_evidence entry "
+                f"whose own 'value' matches it -- every emitted attribute needs at "
+                f"least one same-name, same-value evidence entry")
+    orphans = sorted(set(bound_values_by_axis) - {str(axis) for axis in attributes})
+    if orphans:
+        raise ExtractionSchemaError(
+            f"{where} attribute_evidence names attribute(s) absent from 'attributes': "
+            f"{orphans}")
+
+
 #: A malformed-shape response (invalid JSON, a fact missing a required field, an
 #: attribute_evidence entry that isn't the object the prompt specifies, ...) is a
 #: single bad draw from the model, not a deterministic property of the note -- the
@@ -904,7 +959,11 @@ _RETRY_VALIDATION_FEEDBACK = (
     "exactly name the fact_id of a fact YOU ALSO EMIT in this same response as a "
     "RETAINED fact -- a fact you mark \"negated\": true, or \"certainty\": "
     "\"ruled_out\", is not retained and must never be a relation endpoint or "
-    "evidence reference."
+    "evidence reference. (3) every axis name you emit anywhere in \"attributes\" needs "
+    "at least one \"attribute_evidence\" entry naming that SAME axis with a \"value\" "
+    "that equals, verbatim, the value you wrote in \"attributes\" -- and every "
+    "\"attribute_evidence\" entry must name an axis you actually emitted in "
+    "\"attributes\", never one you did not."
 )
 
 
@@ -1063,6 +1122,12 @@ def _parse_extraction_response(
         if attr_ev_in is not None and not isinstance(attr_ev_in, dict):
             raise ExtractionSchemaError(f"fact #{i} 'attribute_evidence' must be an object")
         attribute_evidence: dict[str, list[AttributeEvidence]] = {}
+        # Every entry's bound value, regardless of local/inherited scope -- the ONLY
+        # thing `_validate_attribute_evidence` below needs to confirm the model's own
+        # "attributes" are backed by ITS OWN cited evidence; whether an "inherited"
+        # entry's claimed relation actually validates is a separate, later question
+        # (the second pass below), not a precondition for this contract check.
+        _bound_values_by_axis: dict[str, list[str]] = {}
         for attr_name, entries in (attr_ev_in or {}).items():
             if not isinstance(entries, list):
                 raise ExtractionSchemaError(
@@ -1074,6 +1139,7 @@ def _parse_extraction_response(
                         f"fact #{i} attribute_evidence[{attr_name!r}] has an "
                         f"empty/malformed entry")
                 text, scope, parent, assertion_state, bound_value = parsed
+                _bound_values_by_axis.setdefault(str(attr_name), []).append(bound_value)
                 if scope == "local":
                     attribute_evidence.setdefault(str(attr_name), []).append(
                         AttributeEvidence(span=EvidenceSpan(text=text), scope="local",
@@ -1082,6 +1148,7 @@ def _parse_extraction_response(
                 else:
                     pending_inherited.append(
                         (fid, str(attr_name), text, parent, assertion_state, bound_value))
+        _validate_attribute_evidence(attributes, _bound_values_by_axis, f"fact #{i}")
         # R2: actor identity is resolved EXCLUSIVELY from the structured encounter context.
         # A model-supplied performer/organization id absent from the authoritative roster is
         # invented/unauthorized and is discarded (ownership then resolves to UNKNOWN and

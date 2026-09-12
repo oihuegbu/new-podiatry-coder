@@ -97,6 +97,49 @@ def test_a_persistently_malformed_draw_still_raises_after_bounded_retries():
     assert len(llm.call_count) == 3        # bounded -- never retried a 4th time
 
 
+# ------------------------------------------------- F9-R13-C release-gate root cause 1
+# issue #6, Codex's independent re-review: a schema-VALID response whose "attributes"
+# and "attribute_evidence" do not actually agree with each other used to reach
+# resolution as a silently unresolved axis instead of retrying -- the prompt already
+# documents this contract, `_parse_extraction_response` just never enforced it.
+def test_an_emitted_attribute_without_matching_evidence_retries_extraction():
+    """An axis in "attributes" with no same-name, same-value "attribute_evidence"
+    entry (here: the entry's own value is the WRONG side) is a malformed draw, not a
+    genuinely undocumented axis -- it must retry exactly like any other schema
+    defect, and recover once a later draw actually binds the claimed value."""
+    bad = {"facts": [_fact(
+        attributes={"laterality": "right"},
+        attribute_evidence={"laterality": [
+            {"text": "performed on the right side", "scope": "local",
+             "value": "left"}]})]}
+    good = {"facts": [_fact(
+        attributes={"laterality": "right"},
+        attribute_evidence={"laterality": [
+            {"text": "performed on the right side", "scope": "local",
+             "value": "right"}]})]}
+    llm = _sequenced_llm(bad, good)
+    result = extract_note("note", llm)
+    assert len(llm.call_count) == 2
+    assert result.facts[0].attributes["laterality"] == "right"
+    assert result.facts[0].attribute_evidence["laterality"][0].value == "right"
+
+
+def test_orphan_attribute_evidence_retries_extraction():
+    """An "attribute_evidence" entry naming an axis absent from "attributes" is
+    equally a malformed contract -- the model claims to have evidence for
+    something it never actually emitted a value for."""
+    bad = {"facts": [_fact(
+        attributes={},
+        attribute_evidence={"laterality": [
+            {"text": "performed on the right side", "scope": "local",
+             "value": "right"}]})]}
+    good = {"facts": [_fact(attributes={})]}
+    llm = _sequenced_llm(bad, good)
+    result = extract_note("note", llm)
+    assert len(llm.call_count) == 2
+    assert result.facts[0].attribute_evidence == {}
+
+
 # ---------------------------------------------------------------- F6-R2 actor from context
 def _person_ctx():
     # actor-1 is a person, context-designated performer, affiliated to org-1 (an organization)
@@ -395,7 +438,8 @@ def test_a_local_scope_entry_needs_no_parent_and_is_kept():
     result = extract_note("note", _stub({"facts": [_fact(
         attributes={"laterality": "right"},
         attribute_evidence={"laterality": [
-            {"text": "performed on the right side", "scope": "local"}]})]}))
+            {"text": "performed on the right side", "scope": "local",
+             "value": "right"}]})]}))
     entries = result.facts[0].attribute_evidence["laterality"]
     assert len(entries) == 1
     assert entries[0].scope == "local"
@@ -410,7 +454,7 @@ def test_assertion_state_asserted_parses_onto_the_entry():
         attributes={"laterality": "right"},
         attribute_evidence={"laterality": [
             {"text": "performed on the right side", "scope": "local",
-             "assertion_state": "asserted"}]})]}))
+             "assertion_state": "asserted", "value": "right"}]})]}))
     entry = result.facts[0].attribute_evidence["laterality"][0]
     assert entry.assertion_state is RelationState.ASSERTED
 
@@ -421,7 +465,7 @@ def test_assertion_state_negated_parses_onto_the_entry():
         attributes={"laterality": "right"},
         attribute_evidence={"laterality": [
             {"text": "right side was ultimately ruled out", "scope": "local",
-             "assertion_state": "negated"}]})]}))
+             "assertion_state": "negated", "value": "right"}]})]}))
     entry = result.facts[0].attribute_evidence["laterality"][0]
     assert entry.assertion_state is RelationState.NEGATED
 
@@ -433,7 +477,8 @@ def test_missing_assertion_state_defaults_to_uncertain_never_asserted():
     result = extract_note("note", _stub({"facts": [_fact(
         attributes={"laterality": "right"},
         attribute_evidence={"laterality": [
-            {"text": "performed on the right side", "scope": "local"}]})]}))
+            {"text": "performed on the right side", "scope": "local",
+             "value": "right"}]})]}))
     entry = result.facts[0].attribute_evidence["laterality"][0]
     assert entry.assertion_state is RelationState.UNCERTAIN
 
@@ -460,7 +505,7 @@ def test_an_inherited_entry_resolves_only_against_a_real_relation():
                  attributes={"laterality": "right"},
                  attribute_evidence={"laterality": [
                      {"text": "performed on the right side", "scope": "inherited",
-                      "parent_fact_id": "F1"}]}),
+                      "parent_fact_id": "F1", "value": "right"}]}),
         ],
         "relations": [{"subject_event_id": "F2", "predicate": "part_of",
                        "object_event_id": "F1", "state": "asserted",
@@ -490,7 +535,8 @@ def test_an_inherited_entrys_assertion_state_survives_the_second_pass():
                  attributes={"laterality": "right"},
                  attribute_evidence={"laterality": [
                      {"text": "performed on the right side", "scope": "inherited",
-                      "parent_fact_id": "F1", "assertion_state": "negated"}]}),
+                      "parent_fact_id": "F1", "assertion_state": "negated",
+                      "value": "right"}]}),
         ],
         "relations": [{"subject_event_id": "F2", "predicate": "part_of",
                        "object_event_id": "F1", "state": "asserted",
@@ -519,7 +565,7 @@ def test_missing_value_defaults_to_empty_string_never_the_axis_value():
     exactly the un-bound state graph_consensus.claim_authorized_value treats as
     proof of nothing."""
     result = extract_note("note", _stub({"facts": [_fact(
-        attributes={"laterality": "right"},
+        attributes={"laterality": ""},
         attribute_evidence={"laterality": [
             {"text": "performed on the right side", "scope": "local",
              "assertion_state": "asserted"}]})]}))
@@ -589,7 +635,7 @@ def test_an_inherited_entry_with_no_matching_relation_is_dropped_not_kept_unprov
                  attributes={"laterality": "right"},
                  attribute_evidence={"laterality": [
                      {"text": "performed on the right side", "scope": "inherited",
-                      "parent_fact_id": "F1"}]}),
+                      "parent_fact_id": "F1", "value": "right"}]}),
         ],
         "relations": [],
     }
@@ -609,7 +655,7 @@ def test_same_episode_as_is_never_a_candidate_relation_for_inheritance():
                  attributes={"laterality": "right"},
                  attribute_evidence={"laterality": [
                      {"text": "performed on the right side", "scope": "inherited",
-                      "parent_fact_id": "F1"}]}),
+                      "parent_fact_id": "F1", "value": "right"}]}),
         ],
         "relations": [{"subject_event_id": "F2", "predicate": "same_episode_as",
                        "object_event_id": "F1", "state": "asserted",
@@ -631,7 +677,7 @@ def test_a_reversed_part_of_direction_is_never_a_candidate_relation():
                  attributes={"laterality": "right"},
                  attribute_evidence={"laterality": [
                      {"text": "performed on the right side", "scope": "inherited",
-                      "parent_fact_id": "F1"}]}),
+                      "parent_fact_id": "F1", "value": "right"}]}),
         ],
         "relations": [{"subject_event_id": "F1", "predicate": "part_of",
                        "object_event_id": "F2", "state": "asserted",
@@ -651,7 +697,7 @@ def test_an_inherited_entry_naming_an_unknown_parent_is_dropped():
                         attributes={"laterality": "right"},
                         attribute_evidence={"laterality": [
                             {"text": "right side", "scope": "inherited",
-                             "parent_fact_id": "GHOST"}]})],
+                             "parent_fact_id": "GHOST", "value": "right"}]})],
         "relations": [],
     }
     result = extract_note("note", _stub(payload))
@@ -792,6 +838,8 @@ def test_wire_inherited_evidence_survives_the_existing_relation_validation_path(
                              "scope": "local", "parent_fact_id": "",
                              "assertion_state": "asserted", "value": "right"}])
     child = _wire_fact(fact_id="F2", description="component",
+                       attributes={"strings": [{"name": "laterality", "value": "right"}],
+                                  "numbers": [], "booleans": []},
                        attribute_evidence=[{"name": "laterality",
                                             "text": "the component step",
                                             "scope": "inherited",

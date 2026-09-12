@@ -132,6 +132,13 @@ FACTS_JSON = json.dumps({
     "facts": [
         {"fact_id": "F1", "kind": "procedure", "description": "excision of lesion alpha",
          "attributes": {"laterality": "right", "anatomy": "site two"},
+         "attribute_evidence": {
+             "laterality": [{"text": "excision of lesion alpha, right site two",
+                            "scope": "local", "assertion_state": "asserted",
+                            "value": "right"}],
+             "anatomy": [{"text": "excision of lesion alpha, right site two",
+                         "scope": "local", "assertion_state": "asserted",
+                         "value": "site two"}]},
          "disposition": "performed_today", "negated": False,
          "evidence": ["excision of lesion alpha, right site two",
                       "Excision of lesion alpha was performed"],
@@ -140,7 +147,12 @@ FACTS_JSON = json.dumps({
                              "temporal": 0.99, "performer": 0.99, "relationship": 0.99}},
         {"fact_id": "F2", "kind": "diagnosis",
          "description": "condition alpha of the right side",
-         "attributes": {"laterality": "right"}, "disposition": "performed_today",
+         "attributes": {"laterality": "right"},
+         "attribute_evidence": {
+             "laterality": [{"text": "condition alpha, right side",
+                            "scope": "local", "assertion_state": "asserted",
+                            "value": "right"}]},
+         "disposition": "performed_today",
          "negated": False,
          "evidence": ["condition alpha, right side",
                       "condition alpha of the right side"],

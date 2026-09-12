@@ -39,12 +39,17 @@ extraction schema and from the record itself.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
-from .models import Disposition, RelationState
+from .models import AttributeEvidence, Disposition, RelationState
+
+#: A callable (system_prompt, user_prompt) -> JSON string -- the SAME shape
+#: `extraction.LLMFn`/`verify`'s judging calls already use.
+LLMFn = Callable[[str, str], str]
 
 #: Identity of this comparison contract.
 CONSENSUS_SCHEMA_VERSION = "graph-consensus-v1"
@@ -75,6 +80,13 @@ class AxisVerdict(str, Enum):
 #: ORIGINAL PAGE settled something when only the transcription was available.
 PROOF_ORIGINAL_PAGE = "original_page_reconciliation"
 PROOF_ANCHORED_TEXT = "anchored_source_text"
+#: Neither reading's own confirmed quotation stated its value verbatim, but an
+#: INDEPENDENT verifier -- shown only the reconciled quotations either reading already
+#: attached to this axis -- found exactly one of the candidate values uniquely
+#: supported (issue #6, Codex's independent re-review, F9-R13-C release-gate root
+#: cause 2). Distinct from the two proofs above so an artifact can never imply the
+#: document itself settled an axis the verifier had to adjudicate.
+PROOF_ADJUDICATED = "independent_verifier_adjudication"
 
 
 def _norm(value: Any) -> str:
@@ -197,8 +209,8 @@ class AxisResolution:
     axis: str
     verdict: AxisVerdict
     accepted_value: str = ""
-    accepted_from: str = ""        # primary | second | (empty when unresolved)
-    proof: str = ""                # PROOF_ORIGINAL_PAGE | PROOF_ANCHORED_TEXT
+    accepted_from: str = ""        # primary | second | adjudicated | (empty when unresolved)
+    proof: str = ""                # PROOF_ORIGINAL_PAGE | PROOF_ANCHORED_TEXT | PROOF_ADJUDICATED
     detail: str = ""
     evidence_span_ids: tuple[str, ...] = ()
     #: The precise, self-contained question to send when the document cannot settle it.
@@ -215,6 +227,21 @@ class AxisResolution:
                 "detail": self.detail,
                 "evidence_span_ids": list(self.evidence_span_ids),
                 "provider_question": self.provider_question}
+
+
+@dataclass(frozen=True)
+class AxisSupport:
+    """One candidate value's verdict from `adjudicate_axis`'s independent verifier call
+    (issue #6, Codex's independent re-review, F9-R13-C release-gate root cause 2):
+    "supported" (a shown, reconciled quotation states this exact value), "contradicted"
+    (a shown quotation states a different value that rules this one out), or
+    "not_documented" (the shown quotations are silent on it). `span_ids` are the cited
+    quotations' REAL span ids -- already validated to be a subset of what was actually
+    shown, never an invented citation."""
+
+    value: str
+    status: str
+    span_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -699,8 +726,170 @@ def _question(disagreement: AxisDisagreement) -> str:
             f"either. Please document {disagreement.axis!r} explicitly for this event.")
 
 
+# --------------------------------------------------------- independent axis verifier
+# issue #6, Codex's independent re-review, F9-R13-C release-gate root cause 2:
+# `resolve()`'s own per-reading entailment check settles an axis only when ONE
+# reading's OWN confirmed quotation states its value verbatim. When neither does --
+# both readings genuinely disagree, or one is silent -- the record may still settle
+# it: an independent verifier, shown ONLY the reconciled (source-confirmed)
+# quotations either reading already attached to this axis, may find that exactly one
+# of the candidate values is what those quotations actually say. This is NOT a
+# second vote between the two readings and NEVER lets the verifier prefer one
+# reading over the other on its own say-so -- it can only point at a quotation
+# already proven to come from the original document.
+def _json(text: str) -> dict:
+    text = (text or "").strip()
+    if not text.startswith("{"):
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        text = m.group(0) if m else "{}"
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+
+
+_AXIS_JUDGE_SYSTEM = """You judge which candidate value(s) for one documentation
+attribute are supported by quoted, already-reconciled evidence from the original
+clinical document. You are given the attribute name, a NUMBERED list of candidate
+values, and a list of verbatim quotations from the document, each tagged with a
+bracketed evidence id. Judge EACH candidate value independently, using ONLY the
+quotations shown -- never outside medical knowledge, never a value not listed, never
+a quotation not shown.
+For EACH numbered candidate value, decide:
+  - "supported": at least one shown quotation explicitly states this exact value for
+    this attribute.
+  - "contradicted": a shown quotation explicitly states a DIFFERENT value for this
+    attribute that rules this one out.
+  - "not_documented": the quotations shown are simply silent about this value.
+Cite the EXACT bracketed evidence id(s) whose text supports a supported/contradicted
+verdict; leave span ids empty for not_documented. Never invent a value not in the
+numbered list, and never cite an id not shown above.
+Return JSON only:
+{"values": [{"value": "<candidate value, copied exactly from the numbered list>",
+             "status": "supported"|"contradicted"|"not_documented",
+             "span_ids": ["<id>", ...]}, ...]}"""
+
+
+def reconciled_attribute_spans(primary, second, axis: str, reconciliation) -> tuple:
+    """Every span, from EITHER reading, that is (a) `attribute_evidence` scoped to
+    `axis` (a "local" entry, or an "inherited" one already `scope_validated`) and (b)
+    CONFIRMED by the original document per `reconciliation` -- the ONLY quotations
+    `adjudicate_axis` may show the verifier or accept a citation against. Never the
+    fact's whole undifferentiated evidence pool: that would let the verifier settle an
+    axis from a quotation that never actually named it."""
+    spans: list = []
+    seen: set[str] = set()
+    for fact in (primary, second):
+        if fact is None:
+            continue
+        entries = (getattr(fact, "attribute_evidence", None) or {}).get(axis) or ()
+        usable = [e for e in entries if e.scope == "local" or e.scope_validated]
+        for e in usable:
+            span = e.span
+            span_id = str(getattr(span, "span_id", "") or "")
+            if not span_id or span_id in seen:
+                continue
+            ok, _proof, _text, _ids = _spans_support([span], reconciliation)
+            if ok:
+                seen.add(span_id)
+                spans.append(span)
+    return tuple(spans)
+
+
+def _axis_judge_prompt(axis: str, options: tuple[str, ...], spans: tuple
+                       ) -> tuple[str, dict[str, str]]:
+    id_to_span: dict[str, str] = {}
+    lines = []
+    for i, s in enumerate(spans):
+        tag = f"e{i + 1}"
+        lines.append(f"[{tag}] {s.text}")
+        id_to_span[tag] = str(getattr(s, "span_id", "") or "")
+    numbered = "\n".join(f"{i + 1}. {v!r}" for i, v in enumerate(options))
+    user = (f"ATTRIBUTE: {axis}\nCANDIDATE VALUES:\n{numbered}\n\n"
+           f"QUOTATIONS:\n" + (" | ".join(lines) if lines else "(none)"))
+    return user, id_to_span
+
+
+def _parse_axis_judgement(ans: dict, options: tuple[str, ...],
+                          id_to_span: dict[str, str]) -> tuple[AxisSupport, ...]:
+    """Fail-closed exactly like `verify._requirement_judgements`: an unlisted value, a
+    malformed status, or a cited evidence id this call never showed the model are all
+    dropped rather than trusted.
+
+    A citation naming an id this call never showed is not merely stripped down to a
+    weaker, uncited verdict for the SAME value -- the entire entry is dropped. Silently
+    keeping "supported" while discarding only its invented citation would let a model
+    claim support with no real proof behind it at all, exactly the "trust me" shape
+    the whole point of citation is to rule out."""
+    raw = ans.get("values")
+    if not isinstance(raw, list):
+        return ()
+    valid_statuses = {"supported", "contradicted", "not_documented"}
+    out: list[AxisSupport] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        value = str(item.get("value") or "").strip()
+        if not value or value not in options or value in seen:
+            continue
+        status = str(item.get("status") or "").strip().lower()
+        if status not in valid_statuses:
+            continue
+        raw_spans = item.get("span_ids")
+        if raw_spans is None:
+            raw_spans = []
+        if not isinstance(raw_spans, list):
+            continue
+        span_ids: list[str] = []
+        invented_citation = False
+        for tag in raw_spans:
+            real = id_to_span.get(str(tag).strip())
+            if real is None:
+                invented_citation = True
+                break
+            if real not in span_ids:
+                span_ids.append(real)
+        if invented_citation:
+            continue
+        seen.add(value)
+        out.append(AxisSupport(value=value, status=status, span_ids=tuple(span_ids)))
+    return tuple(out)
+
+
+def adjudicate_axis(disagreement: AxisDisagreement, primary, second, reconciliation,
+                    llm: LLMFn) -> AxisSupport | None:
+    """Ask an INDEPENDENT verifier to judge EVERY candidate value a disagreement
+    raised, using ONLY the reconciled (source-confirmed) quotations either reading
+    already attached to this axis -- never a preference between the two readings,
+    never a value or citation the reconciled record does not contain. Returns the
+    SINGLE uniquely supported value, or `None` when zero or more than one candidate is
+    supported -- either is still a genuine documentation gap, never guessed past."""
+    options = tuple(dict.fromkeys(
+        v for v in (disagreement.value_primary, disagreement.value_second) if v))
+    if not options:
+        return None
+    spans = reconciled_attribute_spans(primary, second, disagreement.axis, reconciliation)
+    if not spans:
+        return None
+    user, id_to_span = _axis_judge_prompt(disagreement.axis, options, spans)
+    answer = _parse_axis_judgement(_json(llm(_AXIS_JUDGE_SYSTEM, user)), options, id_to_span)
+    # Deterministic acceptance boundary: every returned value must be one of the
+    # options actually offered and every cited span id one actually shown to the
+    # model -- `_parse_axis_judgement` already enforces both, but re-asserted here as
+    # the boundary this function itself promises callers, not an incidental property
+    # of today's implementation.
+    allowed_span_ids = {str(getattr(s, "span_id", "") or "") for s in spans}
+    if any(item.value not in options or not set(item.span_ids) <= allowed_span_ids
+           for item in answer):
+        return None
+    supported = [item for item in answer if item.status == "supported"]
+    return supported[0] if len(supported) == 1 else None
+
+
 def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
-            second_by_node: dict, reconciliation) -> list[AxisResolution]:
+            second_by_node: dict, reconciliation, llm: LLMFn | None = None
+            ) -> list[AxisResolution]:
     """Settle each disagreeing axis against the ORIGINAL DOCUMENT, never by vote.
 
     A reading wins only when its OWN value is LITERALLY PRESENT in its own
@@ -711,7 +900,15 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
     previously accepted whenever the OTHER reading's event simply wasn't
     confirmed -- event-level confirmation is not value-level confirmation,
     regardless of how many readings had a confirmed event). Anything else is
-    unresolved, which is a provider question, never a coder queue.
+    unresolved, which is a provider question, never a coder queue --
+
+    UNLESS `llm` is supplied (issue #6, Codex's independent re-review, F9-R13-C
+    release-gate root cause 2): when neither reading's own confirmed quotation
+    settles it, `adjudicate_axis` gets ONE more chance to settle it from the SAME
+    reconciled quotations, before falling back to a provider question. This is not
+    a second vote between the readings' own claims -- it is asking whether the
+    record itself, already proven genuine, actually says one of the two things
+    being argued about.
 
     Proof is now PER-ATTRIBUTE ONLY (issue #6 F9-R5, tightened by F9-R7-A): a
     reading's value is accepted only when its OWN `attribute_evidence` for this
@@ -787,6 +984,7 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
         proof = ""
         spans: tuple[str, ...] = ()
         detail = ""
+        source_integrity_problem = False
         if p_says and not s_says:
             winner, proof, spans = "primary", p_proof, p_spans
             detail = "the confirmed quotation states this value verbatim"
@@ -794,6 +992,7 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
             winner, proof, spans = "second", s_proof, s_spans
             detail = "the confirmed quotation states this value verbatim"
         elif not p_ok and not s_ok:
+            source_integrity_problem = True
             detail = ("neither reading rests on quotations the source confirms, so "
                       "this event has a source-integrity problem, not a documentation "
                       "gap")
@@ -832,6 +1031,24 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
             # quotation out of the reach of the very gate that must block it, silently
             # downgrading a BLOCK to a query. So no question is raised, the fact is left
             # untouched, and the control that owns the failure sees it.
+            #
+            # The SAME precedence gates whether an independent verifier gets a turn
+            # below: a source-integrity problem is never handed to it either -- it
+            # would be asked to adjudicate quotations that are themselves the thing
+            # in question, not a genuine documentation gap.
+            adjudicated = None
+            if llm is not None and not source_integrity_problem:
+                adjudicated = adjudicate_axis(item, primary, second, reconciliation, llm)
+            if adjudicated is not None:
+                out.append(AxisResolution(
+                    node_id=item.node_id, axis=item.axis,
+                    verdict=AxisVerdict.RESOLVED_FROM_SOURCE,
+                    accepted_value=adjudicated.value, accepted_from="adjudicated",
+                    proof=PROOF_ADJUDICATED,
+                    detail=("an independent verifier judged this the only candidate "
+                           "value the reconciled quotations support"),
+                    evidence_span_ids=adjudicated.span_ids))
+                continue
             settleable = p_ok or s_ok
             out.append(AxisResolution(
                 node_id=item.node_id, axis=item.axis,
@@ -866,6 +1083,16 @@ def apply_resolutions(primary_by_id: dict, second_by_node: dict,
             if resolution.provider_question not in conflicts:
                 conflicts.append(resolution.provider_question)
             fact.axis_conflicts = conflicts
+            continue
+        if resolution.accepted_from == "adjudicated":
+            # No pre-existing ASSERTED, value-bound `attribute_evidence` exists on
+            # EITHER reading for this value -- that is exactly why it needed
+            # adjudication -- so there is nothing to copy, only a NEW entry to
+            # synthesize from the verifier's own cited, already-reconciled spans.
+            _write_axis(fact, resolution.axis, resolution.accepted_value)
+            _attach_adjudicated_evidence(
+                fact, second_by_node.get(resolution.node_id), resolution.axis,
+                resolution.accepted_value, resolution.evidence_span_ids)
             continue
         if resolution.accepted_from != "second":
             continue                      # the primary reading already holds this value
@@ -948,6 +1175,52 @@ def _carry_attribute_evidence(fact, source_fact, axis: str) -> None:
         **(getattr(fact, "attribute_evidence", None) or {}),
         axis: tuple(merged),
     }
+
+
+def _find_span(fact, span_id: str):
+    """The actual `EvidenceSpan` object named by `span_id` on `fact` -- checked
+    against both its whole-fact evidence pool and every axis's attribute_evidence,
+    since an adjudicated span may have come from either. `None` when `fact` is
+    absent or does not carry that span (never invented)."""
+    if fact is None or not span_id:
+        return None
+    for s in (getattr(fact, "evidence", None) or []):
+        if str(getattr(s, "span_id", "") or "") == span_id:
+            return s
+    for entries in (getattr(fact, "attribute_evidence", None) or {}).values():
+        for e in entries:
+            if str(getattr(e.span, "span_id", "") or "") == span_id:
+                return e.span
+    return None
+
+
+def _attach_adjudicated_evidence(fact, second_fact, axis: str, value: str,
+                                 span_ids: tuple[str, ...]) -> None:
+    """An axis an independent verifier adjudicated has no pre-existing ASSERTED,
+    value-bound `attribute_evidence` on EITHER reading (that is exactly why it
+    needed adjudication) -- so, unlike a "second reading wins" resolution, there is
+    nothing to copy, only a NEW entry to synthesize from the verifier's own cited
+    quotations. `scope="local"` and `assertion_state=ASSERTED`: the cited spans are
+    already proven source-reconciled by `reconciled_attribute_spans` before the
+    verifier ever saw them, not a claim inherited from an unvalidated relation."""
+    have_spans = {str(getattr(s, "span_id", "") or "") for s in (fact.evidence or [])}
+    attribute_evidence = dict(getattr(fact, "attribute_evidence", None) or {})
+    entries = list(attribute_evidence.get(axis, ()))
+    added_any = False
+    for span_id in span_ids:
+        span = _find_span(fact, span_id) or _find_span(second_fact, span_id)
+        if span is None:
+            continue
+        entries.append(AttributeEvidence(span=span, scope="local",
+                                         assertion_state=RelationState.ASSERTED,
+                                         value=value))
+        added_any = True
+        if span_id not in have_spans:
+            fact.evidence.append(span)
+            have_spans.add(span_id)
+    if added_any:
+        attribute_evidence[axis] = tuple(entries)
+        fact.attribute_evidence = attribute_evidence
 
 
 def _event_record(fact) -> dict[str, Any]:
