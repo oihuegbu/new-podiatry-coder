@@ -39,12 +39,27 @@ def _requirements():
 class ShortlistPromptTest(unittest.TestCase):
 
     def test_empty_requirements_render_byte_identical_to_before(self):
+        # issue #6, Codex's independent re-review (F9-R15-B): a single-candidate
+        # shortlist has nothing to disambiguate -- neither the REQUIREMENTS
+        # section nor bracketed evidence ids (needed for the candidate-
+        # disposition contract, which also does not apply with 1 candidate)
+        # ever render for it, exactly as before either field existed.
         fact = _fact("performed on the left")
-        with_empty, id_map = _verify._shortlist_prompt(fact, [LEFT, RIGHT], _Source(), ())
+        with_empty, id_map = _verify._shortlist_prompt(fact, [LEFT], _Source(), ())
         self.assertNotIn("REQUIREMENTS:", with_empty)
         self.assertNotIn("[e1]", with_empty)          # plain evidence text, no bracketed ids
         self.assertIn("performed on the left", with_empty)
         self.assertEqual(id_map, {})
+
+    def test_two_or_more_candidates_always_render_bracketed_evidence_ids(self):
+        """issue #6, Codex's independent re-review (F9-R15-B): the candidate-
+        disposition contract applies whenever 2+ candidates are shown (there is
+        something to disambiguate), regardless of whether descriptor
+        requirements were compiled -- it needs citable evidence ids too."""
+        fact = _fact("performed on the left")
+        prompt, id_map = _verify._shortlist_prompt(fact, [LEFT, RIGHT], _Source(), ())
+        self.assertIn("[e1]", prompt)
+        self.assertEqual(id_map, {"e1": "s0"})
 
     def test_nonempty_requirements_render_a_requirements_section(self):
         fact = _fact("performed on the left")

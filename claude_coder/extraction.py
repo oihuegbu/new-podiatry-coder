@@ -1273,9 +1273,23 @@ def finalize_attribute_evidence(facts: list[ClinicalFact]) -> None:
             # Never authorize the unsupported value, but preserve the documented event.
             fact.attributes.pop(axis, None)
             fact.attribute_evidence.pop(axis, None)
+            # issue #6, Codex's independent re-review (F9-R15-A): preserve WHAT was
+            # rejected, not only that something was -- the claimed value, every
+            # popped entry's own evidence span id, and (for an "inherited" entry)
+            # the relation it claimed to ride on, so a retry/adjudication pass and
+            # the audit trail can tell "never documented" apart from "claimed a
+            # value the cited evidence didn't actually bind".
+            span_ids = tuple(dict.fromkeys(
+                str(getattr(getattr(e, "span", None), "span_id", "") or "")
+                for e in entries if getattr(getattr(e, "span", None), "span_id", None)))
+            relation_id = next(
+                (str(getattr(e, "source_relation_id", "") or "") for e in entries
+                 if getattr(e, "source_relation_id", None)), "")
             fact.attribute_evidence_gaps[axis] = AttributeEvidenceGap(
                 axis=axis,
-                reason="extraction supplied no relation-valid, value-bound evidence")
+                reason="extraction supplied no relation-valid, value-bound evidence",
+                rejected_value=str(value), rejected_evidence_span_ids=span_ids,
+                rejected_relation_id=relation_id)
         # Orphan evidence (names an axis absent from "attributes") cannot authorize
         # anything either -- discard it rather than leave it dangling, unaudited.
         for axis in set(fact.attribute_evidence) - set(fact.attributes):

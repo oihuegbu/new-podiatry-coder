@@ -394,23 +394,37 @@ def _apply_attribute_evidence_gap_guard(line: ResolvedLine, coverage) -> Resolve
     own candidate -- never duplicated per code path, and never a parallel
     selector: it only ever withdraws a selection `_resolve_core` already made.
 
-    The withdrawn code moves to `alternatives` (never silently dropped -- an
-    auditor must still see what would have released); `chosen` becomes `None`;
-    and the typed disposition on `ResolvedLine.attribute_evidence_gap` names the
-    exact fact and axes, so this cannot be lost between here and the certificate/
-    ClaimBundle.
+    issue #6, Codex's independent re-review (F9-R15-A), two corrections to the
+    first version of this guard:
 
-    `documentation_gap` (which `autonomy.decide` reads as a PROVIDER_QUERY) is set
-    ONLY when `coverage.complete` -- a complete, independently-read whole-document
-    search already looked and found nothing, the same bar `requirement.
-    deterministic_status`'s NOT_DOCUMENTED already requires. Anything short of
-    that (no coverage supplied, or an incomplete one) means this gap could just as
-    easily be an extraction defect as a genuine documentation absence -- it is
-    never labelled a provider question on that weaker basis; it stays a line-local
-    technical hold a retry can revisit instead.
+    1. The typed disposition is now stamped on EVERY gapped fact's line,
+       whether or not `_resolve_core` selected a candidate -- an already-
+       abstained line (e.g. held on a genuine tie) used to return early and
+       lose the gap entirely, so the line's OWN record never named this as one
+       of its reasons. `chosen` is withdrawn only when one was actually set.
+    2. `documentation_gap` (which `autonomy.decide` reads as a PROVIDER_QUERY)
+       is NEVER set here anymore. `coverage.complete` proves only that every
+       PAGE was read -- it does not prove the SPECIFIC AXIS is absent from
+       what was read, and treating it as if it did relabels a possible
+       EXTRACTION failure (evidence that does not bind to the claimed value)
+       as a documentation question, exactly the category error the guard was
+       built to avoid one level up. The only signal allowed to promote a gap
+       into a provider question is a validated `NOT_DOCUMENTED` result from
+       the EXISTING candidate requirement machinery for that SAME axis (e.g. a
+       real `laterality` MUST_SUPPORT requirement `_grounded_elimination`
+       already validated) -- a genuinely different, already-reviewed
+       mechanism this guard does not reach into and must not approximate.
+       Until that specific integration exists, an extraction-origin gap stays
+       a line-local, technical hold -- never a provider or coder question on
+       its own.
+
+    The withdrawn code (when one existed) moves to `alternatives` (never
+    silently dropped -- an auditor must still see what would have released);
+    the typed disposition on `ResolvedLine.attribute_evidence_gap` names the
+    exact fact, axes, and (per axis) the rejected value/evidence/relation
+    `AttributeEvidenceGap` now carries, so this cannot be lost between here
+    and the certificate/ClaimBundle.
     """
-    if line.chosen is None:
-        return line
     fact = line.fact
     gaps = getattr(fact, "attribute_evidence_gaps", None) or {}
     if not gaps:
@@ -419,14 +433,22 @@ def _apply_attribute_evidence_gap_guard(line: ResolvedLine, coverage) -> Resolve
     reason = (f"axis {axes[0]!r} has no relation-valid, value-bound evidence"
              if len(axes) == 1 else
              f"axes {axes} have no relation-valid, value-bound evidence")
-    proven_absent = bool(coverage is not None and getattr(coverage, "complete", False))
+    per_axis = {axis: {"reason": str(getattr(gap, "reason", "") or ""),
+                       "rejected_value": str(getattr(gap, "rejected_value", "") or ""),
+                       "rejected_evidence_span_ids": sorted(
+                           getattr(gap, "rejected_evidence_span_ids", None) or ()),
+                       "rejected_relation_id": str(
+                           getattr(gap, "rejected_relation_id", "") or "")}
+               for axis, gap in gaps.items()}
+    disposition = {"fact_id": fact.fact_id, "axes": axes, "reason": reason,
+                   "per_axis": per_axis}
+    if line.chosen is None:
+        return _dc_replace(line, attribute_evidence_gap=disposition)
     withdrawn = [line.chosen] + [c for c in line.alternatives if c.code != line.chosen.code]
     return _dc_replace(
         line, chosen=None, alternatives=withdrawn[:5], method=ResolutionMethod.ABSTAINED,
         rationale=f"selected code withdrawn for {fact.fact_id}: {reason}",
-        documentation_gap=(reason if proven_absent else None),
-        attribute_evidence_gap={"fact_id": fact.fact_id, "axes": axes, "reason": reason,
-                               "coverage_complete": proven_absent})
+        attribute_evidence_gap=disposition)
 
 
 def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
@@ -1494,6 +1516,122 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
     return remaining, eliminated
 
 
+def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: CandidateCode,
+                                      judgements: list, reconciliation, coverage
+                                      ) -> tuple[list[CandidateCode], dict[str, str]] | None:
+    """The candidate-level SEMANTIC entailment record (issue #6, Codex's
+    independent re-review, F9-R15-B), replacing the reverted `requirement.
+    _descriptor_term_requirements` (which promoted raw descriptor TOKENS into
+    literal-text MUST_SUPPORT requirements -- proven unsafe: a synonym/
+    paraphrase could make a literal token correctly absent while the actual
+    requirement was fully documented, grounding a false elimination).
+
+    Tried in ADDITION to (never instead of) `_uniqueness_view`'s existing
+    axis/requirement-based elimination -- this only ever narrows `shortlist`
+    further, on its OWN, independent, stricter bar; it is never a parallel
+    selector and never lowers what `_uniqueness_view` already required.
+
+    Returns `None` when this shortlist cannot be settled this way at all
+    (fewer than two judgements, or either judgement did not answer EVERY
+    candidate) -- the caller falls back to the existing tie-narrowing/
+    escalation path completely unchanged. Otherwise returns
+    `(remaining, eliminated)` exactly like `_uniqueness_view`: `remaining` is
+    every candidate this mechanism could not validly dispose of (a candidate
+    BOTH evaluators call "entailed" is a SELECTION candidate, never treated as
+    eliminated here), `eliminated` maps every other candidate to why.
+
+    `chosen` is NEVER eliminated by this function, mirroring `_uniqueness_view`'s
+    own identical guard: this mechanism exists to rule OTHER candidates out so
+    an already-entailed `chosen` can release with confidence, never to
+    re-litigate `chosen` itself through a second, independent path -- doing so
+    could otherwise eliminate `chosen` while leaving a DIFFERENT single
+    candidate standing, and the caller's `len(remaining) == 1` check would then
+    incorrectly release `chosen` anyway (it does not re-check membership).
+
+    A candidate is validly disposed only when BOTH judgements' own
+    `CandidateDispositionEvidence` for it:
+      - has an `authority_clause` that reproduces VERBATIM from THIS
+        candidate's own current official descriptor (defense in depth --
+        `verify._candidate_dispositions` already checked this at parse time
+        against the descriptor it was shown; re-checked here against the
+        actual shortlist descriptor so a stale/mismatched entry can never
+        slip through a caller that reused a judgement across shortlists),
+      - agrees with the OTHER judgement on the exact same status, and that
+        status is:
+          * "contradicted"/"different_concept": ONLY with validated,
+            reconciled evidence spans on BOTH sides -- a genuine semantic
+            judgement backed by real source text, never a bare claim.
+          * "not_documented": ONLY when `coverage is not None and
+            coverage.complete` -- a complete, independently-read whole-
+            document search -- ON TOP OF both evaluators' own independent
+            semantic reading. Exact token absence alone (what the reverted
+            mechanism relied on) is never treated as semantic proof here;
+            this requires the SAME evaluator judgement layer Codex's contract
+            asks for, not a re-derivation of it from raw text.
+    Anything short of that (a missing entry, an unreproduced clause, an
+    uncited contradiction/different_concept, disagreement between the two
+    evaluators on status or clause, or incomplete coverage for
+    not_documented) leaves the candidate standing.
+    """
+    if len(judgements) < 2:
+        return None
+    per_judgement: list[dict] = []
+    for j in judgements:
+        entries = {d.candidate_code: d for d in
+                  getattr(j, "candidate_dispositions", ())}
+        if not all(c.code in entries for c in shortlist):
+            return None      # this evaluator did not answer every candidate
+        per_judgement.append(entries)
+    j0, j1 = per_judgement[0], per_judgement[1]
+
+    from app.contracts.source_evidence import ReconciliationStatus
+    settled = reconciliation.by_span_id() if reconciliation is not None else {}
+    permitted = {ReconciliationStatus.AGREED, ReconciliationStatus.VACUOUS}
+
+    def _clause_reproduces(cand: CandidateCode, d) -> bool:
+        start, end = d.authority_offset
+        return bool(d.authority_clause) and cand.descriptor[start:end] == d.authority_clause
+
+    def _spans_validated(d) -> bool:
+        if not d.evidence_span_ids or reconciliation is None:
+            return False
+        return all(sid in settled and settled[sid].status in permitted
+                  for sid in d.evidence_span_ids)
+
+    remaining: list[CandidateCode] = []
+    eliminated: dict[str, str] = {}
+    for cand in shortlist:
+        if cand.code == chosen.code:
+            remaining.append(cand)
+            continue
+        d0, d1 = j0[cand.code], j1[cand.code]
+        if (d0.status != d1.status or not _clause_reproduces(cand, d0)
+                or not _clause_reproduces(cand, d1)):
+            remaining.append(cand)
+            continue
+        status = d0.status
+        if status in ("contradicted", "different_concept"):
+            if _spans_validated(d0) and _spans_validated(d1):
+                eliminated[cand.code] = (
+                    f"both independent evaluators, on {cand.code}'s own official "
+                    f"descriptor clause {d0.authority_clause!r}, judged it {status} "
+                    f"with source-confirmed evidence")
+            else:
+                remaining.append(cand)
+        elif status == "not_documented":
+            if coverage is not None and getattr(coverage, "complete", False):
+                eliminated[cand.code] = (
+                    f"both independent evaluators judged {cand.code}'s own official "
+                    f"descriptor clause {d0.authority_clause!r} not documented, "
+                    f"against a complete, independently-read search of the whole "
+                    f"document")
+            else:
+                remaining.append(cand)
+        else:
+            remaining.append(cand)     # "entailed" (or unknown) -- never eliminated here
+    return remaining, eliminated
+
+
 #: issue #6, Codex's independent re-review (F9-R13-C): these two axes are
 #: `role=MUST_SUPPORT` like any other compiled requirement, but they select
 #: only -- through `_select_by_semantic_axes`/`requirement.semantic_axis_
@@ -1585,6 +1723,18 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
     remaining, eliminated = _uniqueness_view(fact, shortlist, chosen, judgements,
                                              eliminated_earlier, reconciliation,
                                              _elimination_requirements, coverage)
+    # issue #6, Codex's independent re-review (F9-R15-B): tried in ADDITION to
+    # (never instead of) the axis/requirement-based elimination just above --
+    # narrows `remaining` further only when both independent evaluators'
+    # structured, semantic per-candidate dispositions agree a candidate is
+    # validly disposed. Operates on the ALREADY-narrowed `remaining` set (never
+    # re-admits anything `_uniqueness_view` already eliminated), so this can
+    # only shrink the standing set further, never widen or replace it.
+    _disposition_verdict = _candidate_disposition_uniqueness(
+        remaining, chosen, judgements, reconciliation, coverage)
+    if _disposition_verdict is not None:
+        remaining, _further_eliminated = _disposition_verdict
+        eliminated.update(_further_eliminated)
     # Candidates eliminated BEFORE the shortlist existed (a failed deterministic
     # constraint) belong in the same accounting: the record has to show the whole
     # retrieved pool being disposed of, not only the part the models were shown.

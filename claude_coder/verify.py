@@ -298,6 +298,134 @@ shown above. Add to your JSON:
  "span_ids": ["<id>", ...], "quote": "<verbatim quoted text, or empty>"}]"""
 
 
+# issue #6, Codex's independent re-review (F9-R15-B): the candidate-level SEMANTIC
+# disposition contract replacing the reverted `requirement._descriptor_term_
+# requirements` -- that mechanism promoted every residual distinguishing DESCRIPTOR
+# TOKEN into a literal-text MUST_SUPPORT requirement, and `deterministic_status`'s
+# NOT_DOCUMENTED path proved only that the literal token was absent from the
+# corpus, never that the requirement's CONCEPT was. A synonym/paraphrase (the
+# document says "motorized", the candidate's own word is "powered") made the
+# literal check correctly fire while the actual meaning was fully documented --
+# a false elimination the two-model layer never caught, because it re-asked the
+# same literal-token question rather than a genuine semantic one.
+#
+# This contract instead asks each evaluator for ONE holistic, semantic disposition
+# per candidate -- read for MEANING (synonym/paraphrase counts), never a bare
+# word-presence scan -- with its own authority clause validated verbatim against
+# that candidate's real official descriptor (never authored by the model) and its
+# own cited evidence validated against the fact's reconciled evidence (never a
+# bare claim). `resolution._candidate_disposition_uniqueness` is the sole
+# consumer: a candidate is eliminated only when BOTH independent evaluators agree
+# on the SAME structured status with a validated clause, and (for `contradicted`/
+# `different_concept`) validated positive evidence, or (for `not_documented`) a
+# complete, independently-read document search AND the two evaluators' own
+# independent semantic reading -- never exact token absence alone.
+_CANDIDATE_DISPOSITION_STATUSES = {"entailed", "contradicted", "not_documented",
+                                   "different_concept"}
+
+_CANDIDATE_DISPOSITION_CONTRACT = """
+
+Additionally, for EVERY numbered candidate option above, give a structured
+disposition -- a genuine clinical judgement of MEANING, never a bare word-
+presence check:
+  - "entailed": the documentation, read for its clinical MEANING, supports every
+    element this option's own official descriptor requires. A synonym or
+    paraphrase counts (e.g. a document saying "motorized" satisfies a descriptor
+    saying "powered" -- same meaning, different words).
+  - "contradicted": the documentation positively documents something that rules
+    this option out -- not merely uses different words for the same thing.
+  - "different_concept": the documentation describes a recognizably DIFFERENT
+    clinical concept than what this option's descriptor names (not just
+    different wording for the same thing).
+  - "not_documented": nothing in the documentation, read for its meaning, speaks
+    to what this option's descriptor specifically requires.
+Quote, verbatim and character-for-character, the part of THIS option's OWN
+official descriptor (shown above) your disposition is about, as
+"authority_clause" -- copied exactly from that option's descriptor line, never
+paraphrased. Cite the EXACT bracketed evidence id(s) whose text is your basis
+for "entailed"/"contradicted"/"different_concept"; leave span ids empty for
+"not_documented", and instead name the ONE specific fact that would settle it
+as "missing_fact". EVERY option listed above needs exactly one entry -- never
+skip one, never invent an option number. Add to your JSON:
+"candidate_dispositions": [{"option": <option number>,
+ "status": "entailed"|"contradicted"|"different_concept"|"not_documented",
+ "authority_clause": "<verbatim quoted descriptor text>",
+ "span_ids": ["<id>", ...], "missing_fact": "<specific missing fact, or empty>"}]"""
+
+
+@dataclass(frozen=True)
+class CandidateDispositionEvidence:
+    """One evaluator's structured, semantic verdict on ONE shortlisted candidate
+    (issue #6, Codex's independent re-review, F9-R15-B) -- see the
+    `_CANDIDATE_DISPOSITION_CONTRACT` docstring above for the full rationale.
+    Never trusted alone: `resolution._candidate_disposition_uniqueness` requires
+    BOTH declared-independent evaluators to agree on the same status with a
+    clause that reproduces verbatim from the candidate's OWN real descriptor,
+    before any elimination or selection may rest on it."""
+    candidate_code: str
+    status: str
+    authority_clause: str
+    authority_offset: tuple[int, int]
+    evidence_span_ids: tuple[str, ...] = ()
+    missing_fact: str = ""
+    evaluator_origin: dict = field(default_factory=dict)
+
+    def as_record(self) -> dict:
+        return {"candidate_code": self.candidate_code, "status": self.status,
+                "authority_clause": self.authority_clause,
+                "authority_offset": list(self.authority_offset),
+                "evidence_span_ids": list(self.evidence_span_ids),
+                "missing_fact": self.missing_fact,
+                "evaluator_origin": dict(self.evaluator_origin)}
+
+
+def _candidate_dispositions(ans: dict, candidates: list[CandidateCode],
+                            id_to_span: dict[str, str], evaluator_origin: dict
+                            ) -> tuple[CandidateDispositionEvidence, ...]:
+    """Parse the `"candidate_dispositions"` field of a model answer, fail-closed
+    exactly like `_requirement_judgements`: an out-of-range option, a duplicate
+    entry, a malformed status, or an `authority_clause` that does not reproduce
+    verbatim from that CANDIDATE'S OWN real descriptor is dropped rather than
+    trusted -- the model cannot author the requirement it is being judged
+    against."""
+    if not isinstance(ans.get("candidate_dispositions"), list):
+        return ()
+    codes = [c.code for c in candidates]
+    by_code = {c.code: c for c in candidates}
+    out: list[CandidateDispositionEvidence] = []
+    seen: set[str] = set()
+    for item in ans["candidate_dispositions"]:
+        if not isinstance(item, dict):
+            continue
+        code = _option_code(item.get("option"), codes)
+        if not code or code in seen:
+            continue
+        status = str(item.get("status") or "").strip().lower()
+        if status not in _CANDIDATE_DISPOSITION_STATUSES:
+            continue
+        clause = str(item.get("authority_clause") or "")
+        candidate = by_code.get(code)
+        if candidate is None or not clause:
+            continue
+        idx = candidate.descriptor.find(clause)
+        if idx < 0:
+            continue    # does not reproduce verbatim from the real descriptor
+        raw_spans = item.get("span_ids")
+        span_ids: list[str] = []
+        if isinstance(raw_spans, list):
+            for tag in raw_spans:
+                real = id_to_span.get(str(tag).strip())
+                if real and real not in span_ids:
+                    span_ids.append(real)
+        seen.add(code)
+        out.append(CandidateDispositionEvidence(
+            candidate_code=code, status=status, authority_clause=clause,
+            authority_offset=(idx, idx + len(clause)), evidence_span_ids=tuple(span_ids),
+            missing_fact=str(item.get("missing_fact") or "").strip(),
+            evaluator_origin=dict(evaluator_origin)))
+    return tuple(out)
+
+
 def _requirement_options(requirements: tuple[DescriptorRequirement, ...],
                          candidates: list[CandidateCode]) -> str:
     """Per-option compiled requirements, rendered for the shortlist prompt -- axis
@@ -411,6 +539,12 @@ class Judgement:
     #: for, or for any judgement made before this field existed. Never trusted on
     #: its own; see `requirement.validated_requirement`.
     requirement_judgements: tuple[RequirementJudgement, ...] = ()
+    #: This model's structured, semantic disposition on EVERY candidate (issue #6,
+    #: Codex's independent re-review, F9-R15-B) -- empty for a single-candidate
+    #: shortlist (nothing to disambiguate) or a judgement made before this field
+    #: existed. Never trusted alone; see
+    #: `resolution._candidate_disposition_uniqueness`.
+    candidate_dispositions: tuple["CandidateDispositionEvidence", ...] = ()
 
     def entails(self, code: str) -> bool:
         return code in self.entailed
@@ -432,7 +566,8 @@ class Judgement:
                 "missing_element": sorted(k for k, v in self.missing_element.items() if v),
                 "unaccounted": list(self.unaccounted),
                 "reason": self.reason,
-                "requirements": [rj.as_record() for rj in self.requirement_judgements]}
+                "requirements": [rj.as_record() for rj in self.requirement_judgements],
+                "candidate_dispositions": [d.as_record() for d in self.candidate_dispositions]}
 
 
 def _option_code(raw, codes: list[str]) -> str:
@@ -532,7 +667,9 @@ def _judgement(ans: dict, candidates: list[CandidateCode],
         declared=declared,
         unaccounted=tuple(c for c in codes if c not in entailed and c not in eliminated),
         requirement_judgements=_requirement_judgements(
-            ans, requirements, id_to_span or {}, evaluator_origin or {}))
+            ans, requirements, id_to_span or {}, evaluator_origin or {}),
+        candidate_dispositions=_candidate_dispositions(
+            ans, candidates, id_to_span or {}, evaluator_origin or {}))
 
 
 def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
@@ -542,12 +679,17 @@ def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
     """(prompt, id_to_span) -- the id_to_span map is needed by the caller to
     validate a model's cited requirement evidence ids afterward.
 
-    When `requirements` is empty, renders BYTE-IDENTICAL to before this field
-    existed (plain-text evidence, no REQUIREMENTS section) -- zero format-
-    regression risk for the vast majority of shortlists this phase doesn't touch."""
+    When `requirements` is empty AND fewer than 2 candidates are shown (nothing
+    to disambiguate, so the disposition contract below does not apply either),
+    renders BYTE-IDENTICAL to before either field existed (plain-text evidence,
+    no REQUIREMENTS section) -- zero format-regression risk for the shortlists
+    this phase doesn't touch."""
     opts = "\n".join(f"{i + 1}. {_best_descriptor(source, c)}"
                      for i, c in enumerate(candidates))
-    if requirements:
+    # issue #6, Codex's independent re-review (F9-R15-B): bracketed evidence ids
+    # are needed whenever the candidate-disposition contract applies (2+
+    # candidates), not only when descriptor requirements were compiled.
+    if requirements or len(candidates) >= 2:
         ev, id_to_span = _evidence_options(fact)
     else:
         ev, id_to_span = " | ".join(s.text for s in fact.evidence), {}
@@ -582,7 +724,8 @@ def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
     existed."""
     if not candidates:
         return Judgement(reason="no candidates")
-    system = _SELECT_SYSTEM + (_REQUIREMENTS_CONTRACT if requirements else "")
+    system = (_SELECT_SYSTEM + (_REQUIREMENTS_CONTRACT if requirements else "")
+             + (_CANDIDATE_DISPOSITION_CONTRACT if len(candidates) >= 2 else ""))
     prompt, id_to_span = _shortlist_prompt(fact, candidates, source, requirements)
     return _judgement(
         _json(llm(system, prompt)), candidates, requirements, id_to_span,
@@ -601,7 +744,8 @@ def corroborate(fact: ClinicalFact, candidates: list[CandidateCode],
     shortlist survives."""
     if not candidates:
         return Judgement(reason="no candidates")
-    system = _CORROBORATE_SYSTEM + (_REQUIREMENTS_CONTRACT if requirements else "")
+    system = (_CORROBORATE_SYSTEM + (_REQUIREMENTS_CONTRACT if requirements else "")
+             + (_CANDIDATE_DISPOSITION_CONTRACT if len(candidates) >= 2 else ""))
     prompt, id_to_span = _shortlist_prompt(fact, candidates, source, requirements)
     return _judgement(
         _json(llm(system, prompt)), candidates, requirements, id_to_span,

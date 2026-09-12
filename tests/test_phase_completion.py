@@ -60,7 +60,13 @@ def test_auto_hold_never_calls_retrieval():
     src = CountingSource()
     result = _run(src, _payload(evidence="fabricated quotation"))
     assert src.retrieval_calls == 0
-    assert result.verdict.value == "BLOCKED"
+    # issue #6, Codex's independent re-review (F9-R15-C): the fact-local
+    # integrity gate is now scoped to its own fact_id rather than an
+    # encounter-wide hard stop -- with only this one fact in the encounter,
+    # nothing ends up billable and the destination correctly resolves to the
+    # more precise HOLD (not a claim-eligible event) rather than the coarser
+    # blanket BLOCKED this used to assert.
+    assert result.verdict.value == "REVIEW_REQUIRED"
 
 
 def test_eligibility_exception_routes_system_hold_without_retrieval(monkeypatch):

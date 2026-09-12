@@ -112,11 +112,14 @@ class GraphNode:
     #: separate, unlinked record.
     attribute_evidence: tuple[dict[str, Any], ...] = ()
     #: Axes extraction claimed a value for but could not back with relation-valid,
-    #: value-bound evidence (issue #6, Codex's independent re-review, F9-R14-A) --
-    #: `{axis: reason}`, projected from `ClinicalFact.attribute_evidence_gaps` so a
-    #: gapped fact is visible in the clinical graph itself, not only inferable from
-    #: a separate, unlinked record a caller might not consult.
-    attribute_evidence_gaps: tuple[tuple[str, str], ...] = ()
+    #: value-bound evidence (issue #6, Codex's independent re-review, F9-R14-A,
+    #: extended F9-R15-A) -- one record per axis (axis, reason, the rejected
+    #: value, its rejected evidence span ids, and any rejected relation id),
+    #: projected from `ClinicalFact.attribute_evidence_gaps` so a gapped fact
+    #: -- and WHAT was rejected, not only that something was -- is visible in
+    #: the clinical graph itself, not only inferable from a separate, unlinked
+    #: record a caller might not consult.
+    attribute_evidence_gaps: tuple[dict[str, Any], ...] = ()
     anchored: bool = False
     #: Where in the ORIGINAL document the quotations behind this node sit, and what an
     #: independent reading of those pages said about them (directive section 1 machinery).
@@ -143,7 +146,7 @@ class GraphNode:
             "axis_confidence": dict(self.axis_confidence),
             "evidence_span_ids": list(self.evidence_span_ids),
             "attribute_evidence": [dict(r) for r in self.attribute_evidence],
-            "attribute_evidence_gaps": dict(self.attribute_evidence_gaps),
+            "attribute_evidence_gaps": [dict(r) for r in self.attribute_evidence_gaps],
             "anchored": self.anchored,
             "source_pages": list(self.source_pages),
             "source_page_image_sha256": list(self.source_page_image_sha256),
@@ -488,7 +491,12 @@ def _node_from_fact(fact, intent: ClaimLineIntent | None, encounter_id: str,
                                 if _clean(getattr(s, "span_id", ""))),
         attribute_evidence=tuple(_attribute_evidence_records(fact)),
         attribute_evidence_gaps=tuple(
-            (axis, str(getattr(gap, "reason", "") or "")) for axis, gap in sorted(
+            {"axis": axis, "reason": str(getattr(gap, "reason", "") or ""),
+             "rejected_value": str(getattr(gap, "rejected_value", "") or ""),
+             "rejected_evidence_span_ids": sorted(
+                 getattr(gap, "rejected_evidence_span_ids", None) or ()),
+             "rejected_relation_id": str(getattr(gap, "rejected_relation_id", "") or "")}
+            for axis, gap in sorted(
                 (getattr(fact, "attribute_evidence_gaps", None) or {}).items())),
         anchored=any(getattr(s, "anchored", False) for s in spans),
         source_pages=tuple(pages),

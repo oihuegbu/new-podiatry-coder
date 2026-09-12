@@ -871,12 +871,13 @@ class CandidateLine(_Strict):
     blocking_reason: str = ""
     evidence: tuple[EvidenceReference, ...] = ()
     #: The typed disposition `resolution._apply_attribute_evidence_gap_guard`
-    #: stamped when a selected code was withdrawn because this fact's own
-    #: attribute_evidence_gaps was still non-empty (issue #6, Codex's independent
-    #: re-review, F9-R14-A) -- `{fact_id, axes, reason, coverage_complete}`, kept
-    #: alongside `blocking_reason`'s prose rather than only folded into it, so an
-    #: auditor can distinguish this class of hold from an ordinary tie/gap by
-    #: field rather than by parsing the reason string.
+    #: stamps on EVERY line whose fact carries a non-empty
+    #: `attribute_evidence_gaps` (issue #6, Codex's independent re-review,
+    #: F9-R14-A, corrected F9-R15-A) -- whether or not a candidate was ever
+    #: selected -- `{fact_id, axes, reason, per_axis}`, kept alongside
+    #: `blocking_reason`'s prose rather than only folded into it, so an auditor
+    #: can distinguish this class of hold from an ordinary tie/gap by field
+    #: rather than by parsing the reason string.
     attribute_evidence_gap: dict | None = None
 
     @model_validator(mode="before")

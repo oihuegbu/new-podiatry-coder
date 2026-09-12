@@ -118,17 +118,41 @@ def decide(result: CodingResult,
         routing.append({"destination": dest.value, "subject": subject, "reason": reason,
                         "blocking": blocking, "fact_id": fact_id})
 
-    # 1. A hard gate stop dominates everything.
-    hard = [g.name for g in result.gates
-            if g.outcome in (Outcome.BLOCKED, Outcome.ERROR)]
-    if hard:
-        for name in hard:
+    # 1. A hard gate stop dominates everything -- UNLESS the gate names exactly
+    #    which facts it is about (issue #6, Codex's independent re-review,
+    #    F9-R15-C): a fact-scoped BLOCKED/ERROR gate excludes only that fact
+    #    (and anything genuinely entangled with it via section 3's own
+    #    dependency-closure below), never the whole encounter. Before this fix,
+    #    EVERY BLOCKED/ERROR gate reached this branch and returned immediately,
+    #    which made the `affected_fact_ids`-driven exclusion machinery below --
+    #    already built, and already used for a scoped UNKNOWN gate -- silently
+    #    unreachable for BLOCKED/ERROR: a single fact-local evidence-integrity
+    #    failure (e.g. a quote that does not anchor to the source) erased every
+    #    OTHER independently defensible line in the same encounter. An
+    #    unscoped gate (no `affected_fact_ids` -- a genuine encounter-wide
+    #    structural/graph/source-integrity failure) is UNCHANGED: it still
+    #    hard-stops immediately, exactly as before.
+    unscoped_hard = [g.name for g in result.gates
+                    if g.outcome in (Outcome.BLOCKED, Outcome.ERROR)
+                    and not g.affected_fact_ids]
+    if unscoped_hard:
+        for name in unscoped_hard:
             route(Destination.BLOCKED, name, "hard release gate failed")
-        result.notes.append(f"BLOCKED by gate(s): {hard}")
+        result.notes.append(f"BLOCKED by gate(s): {unscoped_hard}")
         result.routing = routing
         result.destination = Destination.BLOCKED
         result.verdict = Verdict.BLOCKED
         return result.verdict
+    # A scoped BLOCKED/ERROR gate is still recorded as BLOCKED (never silently
+    # downgraded to a provider question or dropped), just non-blocking to the
+    # rest of the encounter -- its named fact_ids feed the SAME dependency-
+    # scoped exclusion machinery below (section 3) that a scoped UNKNOWN gate
+    # already uses.
+    for g in result.gates:
+        if g.outcome in (Outcome.BLOCKED, Outcome.ERROR) and g.affected_fact_ids:
+            route(Destination.BLOCKED, g.name,
+                 f"hard release gate failed ({g.detail}) -- scoped to the named fact(s)",
+                 blocking=False)
 
     # 2. Gates that could not be verified: an OPERATIONAL failure (authority
     #    unavailable) is a retry, not a coding problem; anything else is judgement.

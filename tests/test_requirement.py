@@ -39,73 +39,12 @@ class CompileRequirementsTest(unittest.TestCase):
         self.assertEqual(by_code["CAND_LEFT"].expected, ("left",))
         self.assertEqual(by_code["CAND_RIGHT"].expected, ("right",))
 
-    def test_a_non_selectable_axis_still_produces_its_own_optional_requirement(self):
-        """The generic axis-probe projection (this loop) still compiles one
-        non-eliminating, audit-only requirement per candidate for a non-selectable
-        axis -- unchanged. issue #6, Codex's independent re-review (F9-R14-B):
-        `_descriptor_term_requirements` (tested separately below) additionally
-        compiles its OWN, eliminating requirements under the SAME axis name, so
-        this axis now carries both kinds side by side -- this test isolates the
-        generic loop's own (still optional) half."""
+    def test_a_non_selectable_axis_produces_an_optional_requirement(self):
         reqs = req.compile_requirements([POWERED, MANUAL])
-        term_reqs = [r for r in reqs if r.axis == "descriptor_term"
-                    and r.role is req.RequirementRole.POSITIVE_ALIAS]
+        term_reqs = [r for r in reqs if r.axis == "descriptor_term"]
         self.assertEqual(len(term_reqs), 2)
         self.assertTrue(all(not r.required for r in term_reqs))
-
-
-class DescriptorTermRequirementTest(unittest.TestCase):
-    """issue #6, Codex's independent re-review (F9-R14-B): the SAME distinguishing
-    terms `AXIS_DESCRIPTOR_TERM` always isolated, now ALSO compiled as a real,
-    eliminating requirement -- one per individual term, never several terms
-    bundled into one `expected` (the exact defect shape the removed
-    `_semantic_concept_requirements` had). Synthetic descriptors throughout."""
-
-    def test_compiles_one_must_support_requirement_per_distinguishing_term(self):
-        reqs = req.compile_requirements([POWERED, MANUAL])
-        must = [r for r in reqs if r.axis == "descriptor_term"
-               and r.role is req.RequirementRole.MUST_SUPPORT]
-        self.assertEqual(len(must), 2)
-        self.assertTrue(all(r.required for r in must))
-        self.assertTrue(all(not r.selectable and not r.queryable for r in must))
-        by_code = {r.candidate_code: r for r in must}
-        self.assertEqual(by_code["CAND_POWERED"].expected, ("powered",))
-        self.assertEqual(by_code["CAND_MANUAL"].expected, ("manual",))
-
-    def test_a_multi_term_candidate_gets_one_requirement_per_term_not_one_bundled(self):
-        """A candidate with SEVERAL distinguishing words (relative to the other
-        candidate) must never have them bundled into one `expected` tuple --
-        `tiebreak.asserted_status` treats a multi-term `expected` as ANY-term-
-        supported, which would let an unstated word ride along with a stated
-        one to a false SUPPORTED verdict (the exact shape the removed
-        `_semantic_concept_requirements` had)."""
-        plain = _cand("CAND_PLAIN", "assembly service")
-        elaborate = _cand("CAND_ELABORATE",
-                          "assembly service, alpha beta gamma technique")
-        reqs = req.compile_requirements([plain, elaborate])
-        must = [r for r in reqs if r.axis == "descriptor_term"
-               and r.role is req.RequirementRole.MUST_SUPPORT
-               and r.candidate_code == "CAND_ELABORATE"]
-        self.assertEqual({r.expected for r in must},
-                         {("alpha",), ("beta",), ("gamma",), ("technique",)})
-
-    def test_a_shared_term_produces_no_requirement(self):
-        reqs = req.compile_requirements(
-            [_cand("CAND_A", "assembly service performed"),
-             _cand("CAND_B", "assembly service performed")])
-        self.assertEqual([r for r in reqs if r.axis == "descriptor_term"
-                          and r.role is req.RequirementRole.MUST_SUPPORT], [])
-
-    def test_a_single_candidate_produces_no_descriptor_term_requirement(self):
-        self.assertEqual(req._descriptor_term_requirements([POWERED]), [])
-
-    def test_authority_clause_reproduces_verbatim_for_each_term(self):
-        reqs = req.compile_requirements([POWERED, MANUAL])
-        must = [r for r in reqs if r.axis == "descriptor_term"
-               and r.role is req.RequirementRole.MUST_SUPPORT]
-        for r in must:
-            start, end = r.authority_offset
-            self.assertEqual(r.authority_source_text[start:end], r.authority_clause)
+        self.assertTrue(all(r.role is req.RequirementRole.POSITIVE_ALIAS for r in term_reqs))
 
     def test_measurement_axis_never_compiles_a_requirement(self):
         """Measurement is not `provable` by words at all (`tiebreak.AxisProbe`'s own

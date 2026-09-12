@@ -510,79 +510,6 @@ def semantic_axis_status(req: "DescriptorRequirement", fact: Any, reconciliation
     return RequirementStatus.UNRESOLVED
 
 
-def _descriptor_term_requirements(candidates: list[CandidateCode]
-                                  ) -> list[DescriptorRequirement]:
-    """MUST_SUPPORT requirements from each candidate's own raw, distinguishing
-    descriptor wording (issue #6, Codex's independent re-review, F9-R14-B) --
-    the SAME terms `tiebreak.discriminating_axes`'s `AXIS_DESCRIPTOR_TERM` probe
-    already isolates mechanically (each candidate's descriptor tokens minus every
-    token every candidate shares -- never a medical keyword list), now compiled
-    into a real requirement instead of only an audited, non-eliminating probe.
-
-    This does NOT resurrect the reverted `_APPROACH_WORDS` mistake
-    (`discriminating_axes`'s own docstring) or the removed `anatomy_phrase`-as-
-    qualifier heuristic (`_semantic_qualifier_requirements`'s docstring): both of
-    those eliminated directly from bare text presence/absence, trusting no model
-    and no full-document search, and were found unsafe for exactly that reason.
-    THIS requirement can only ever ground an elimination through the existing,
-    unrelated-to-this-round bar in `resolution._grounded_elimination`: TWO
-    INDEPENDENT models must EACH affirmatively judge the term NOT_DOCUMENTED
-    after being shown this fact's own evidence, AND a deterministic, complete
-    whole-document search (`requirement.deterministic_status`, gated on
-    `CoverageCorpus.complete`) must independently agree -- never bare silence
-    alone, and never one model's self-report. A missing judgement, a
-    disagreement, an unvalidated citation, or incomplete coverage all leave the
-    candidate standing exactly as `AXIS_DESCRIPTOR_TERM` always has -- the
-    fail-closed posture is unchanged; only the set of candidate requirements
-    available to the EXISTING gate grows.
-
-    One requirement PER INDIVIDUAL term (never one requirement whose `expected`
-    bundles several distinct words together): a prior, since-removed mechanism
-    in this same module bundled several distinct tokens into one `expected`
-    tuple and `tiebreak.asserted_status` treats a multi-term `expected` as
-    ANY-term-supported, letting an unstated word ride along with a stated one
-    to a false SUPPORTED verdict. Splitting one-term-per-requirement, grouped
-    under the shared `descriptor_term` axis (so `_grounded_elimination`'s
-    axis-group check already requires EVERY one of a candidate's own
-    distinguishing terms, not just one, to be independently, unanimously
-    absent) avoids that exact defect shape.
-
-    `selectable=False, queryable=False`: this requirement only ever ELIMINATES
-    through the validated NOT_DOCUMENTED path above -- it is never handed to
-    `tiebreak._axes_from_requirements`'s generic literal-text narrowing (that
-    remains `AXIS_DESCRIPTOR_TERM`'s own, unrelated, audit-only reporting path),
-    and it never becomes a provider question on its own (an open-ended
-    descriptor-token bag is not provider-answerable, same reasoning
-    `AxisProbe.queryable` already documents).
-    """
-    if len(candidates) < 2:
-        return []
-    by_code = {c.code: c for c in candidates}
-    out: list[DescriptorRequirement] = []
-    for probe in _tiebreak.discriminating_axes(candidates):
-        if probe.axis != _tiebreak.AXIS_DESCRIPTOR_TERM:
-            continue
-        for code, terms in sorted(probe.terms_by_code.items()):
-            candidate = by_code.get(code)
-            if candidate is None:
-                continue
-            for term in terms:
-                found = _find_clause(candidate.descriptor, term)
-                if found is None:
-                    continue
-                clause, offset = found
-                out.append(DescriptorRequirement(
-                    requirement_id=f"descriptor_term:{code}:{len(out)}",
-                    axis="descriptor_term", candidate_code=code, required=True,
-                    role=RequirementRole.MUST_SUPPORT,
-                    expected=(term,), authority_clause=clause,
-                    authority_offset=offset, authority_source_text=candidate.descriptor,
-                    source_identity={"kind": "descriptor", "system": candidate.system,
-                                     "authority": dict(candidate.authority or {})},
-                    selectable=False, queryable=False))
-    return out
-
-
 def compile_requirements(candidates: list[CandidateCode], source: Any = None
                          ) -> tuple[DescriptorRequirement, ...]:
     """Every typed requirement the tied candidates' own authoritative records
@@ -691,8 +618,26 @@ def compile_requirements(candidates: list[CandidateCode], source: Any = None
     out.extend(_semantic_anatomy_requirements(candidates, source))
     out.extend(_semantic_action_requirements(candidates, source))
     out.extend(_semantic_qualifier_requirements(candidates, source))
-    out.extend(_descriptor_term_requirements(candidates))
-
+    # issue #6, Codex's independent re-review (F9-R15-B): a `_descriptor_term_
+    # requirements` function briefly lived here, promoting AXIS_DESCRIPTOR_TERM's
+    # raw distinguishing tokens into MUST_SUPPORT requirements. REVERTED, not
+    # merely disabled: Codex's reproduction proved it unsafe, not merely
+    # imperfect -- `deterministic_status`/`_grounded_elimination`'s NOT_DOCUMENTED
+    # path proves only that a LITERAL TOKEN is absent from the corpus, never that
+    # the descriptor requirement's CONCEPT is absent. A synonym/paraphrase (the
+    # document says "motorized", the candidate's distinguishing word is
+    # "powered") makes the literal token genuinely, correctly absent while the
+    # requirement's actual semantic content is fully documented -- both
+    # evaluators can correctly answer NOT_DOCUMENTED about the literal word and
+    # ground a FALSE elimination of a candidate the document actually supports.
+    # Negation, logical alternatives ("cyst or benign tumor"), and compound
+    # clauses have the same failure shape. The two-model layer does not repair
+    # this: it re-asks the same literal-token question, it does not test the
+    # concept. The intended replacement is a genuine per-candidate SEMANTIC
+    # disposition record inside `verify`'s existing judgement contract (see
+    # `verify.CandidateDispositionEvidence`), never a return to per-token
+    # literal-text requirements.
+    #
     if source is not None:
         resolver = getattr(source, "instructional_terms", None)
         snapshot_fn = getattr(source, "instructional_terms_snapshot", None)

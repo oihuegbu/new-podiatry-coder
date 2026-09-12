@@ -308,10 +308,21 @@ class AttributeEvidenceGap:
     re-review, F9-R13-D). Recorded on the fact that carried the unauthorized
     claim, keyed by axis, so downstream resolution can name the EXACT missing
     fact/axis rather than a generic hold -- and so a later independent
-    second-reading/adjudication proof can find and clear exactly this gap."""
+    second-reading/adjudication proof can find and clear exactly this gap.
+
+    `rejected_value`/`rejected_evidence_span_ids`/`rejected_relation_id`
+    (issue #6, Codex's independent re-review, F9-R15-A) preserve WHAT was
+    popped, not only that something was -- so a retry/adjudication pass and
+    the audit trail can distinguish "the source never documented this at all"
+    from "extraction claimed a specific value but the evidence it cited
+    didn't actually bind to it", which are different failure classes even
+    though both leave the axis unsupported."""
 
     axis: str
     reason: str
+    rejected_value: str = ""
+    rejected_evidence_span_ids: tuple[str, ...] = ()
+    rejected_relation_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -384,16 +395,19 @@ class ResolvedLine:
     # went to the provider. Present only when a tie was re-inspected, and carried into
     # the audit trail because "why the alternatives were rejected" is claim-affecting.
     tie_record: dict | None = None
-    # A code-changing attribute_evidence_gap on this fact withdrew an otherwise-
-    # selected code (issue #6, Codex's independent re-review, F9-R14-A): the shared
-    # post-retrieval guard in `resolution.resolve` set `chosen=None` and moved the
-    # withdrawn code into `alternatives` rather than silently releasing it. Typed
-    # record (never just a rationale string) so this cannot be lost between here
-    # and the certificate/ClaimBundle: {"fact_id", "axes" (sorted), "reason",
-    # "coverage_complete" (whether a complete, independently-read document search
-    # already proved the note itself lacks it -- true only then is this also
-    # PROVIDER_QUERY-worthy via `documentation_gap`; otherwise it stays a line-
-    # local technical hold, never mislabeled a provider or coder question).
+    # This fact carries an unresolved `attribute_evidence_gaps` entry (issue #6,
+    # Codex's independent re-review, F9-R14-A, corrected F9-R15-A): the shared
+    # post-retrieval guard in `resolution.resolve` stamps this on EVERY such
+    # line -- whether or not a candidate was ever selected -- and, when one WAS
+    # selected, withdraws it (`chosen=None`, moved into `alternatives`) rather
+    # than silently releasing it. Typed record (never just a rationale string)
+    # so this cannot be lost between here and the certificate/ClaimBundle:
+    # {"fact_id", "axes" (sorted), "reason", "per_axis": {axis: {"reason",
+    # "rejected_value", "rejected_evidence_span_ids", "rejected_relation_id"}}}.
+    # NEVER promoted to a PROVIDER_QUERY (`documentation_gap`) from this guard
+    # alone -- an extraction-origin gap stays a line-local, technical hold; only
+    # a validated NOT_DOCUMENTED result from the existing candidate-requirement
+    # machinery for the SAME axis may ever create a provider question.
     attribute_evidence_gap: dict | None = None
     # issue #6 item 7: stamped from the intent's own `claim_submission_status` by
     # the caller AFTER resolution -- this module never decides it. READY unless the

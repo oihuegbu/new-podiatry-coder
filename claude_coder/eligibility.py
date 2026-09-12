@@ -82,10 +82,13 @@ class ClaimLineIntent:
     fact_digest: str = ""
 
 
-_SNAPSHOT_DIGEST_VERSION = "fsd-v5"   # v3: added governed_terms (issue #6 F7-R3-C4)
+_SNAPSHOT_DIGEST_VERSION = "fsd-v6"   # v3: added governed_terms (issue #6 F7-R3-C4)
                                       # v4: added attribute_evidence (issue #6 F9-R5-B)
                                       # v5: added attribute_evidence_gaps (issue #6,
                                       #     Codex's independent re-review, F9-R14-A)
+                                      # v6: attribute_evidence_gaps now also binds the
+                                      #     rejected value/evidence/relation, not just
+                                      #     axis+reason (F9-R15-A)
 
 
 def fact_snapshot_digest(fact) -> str:
@@ -114,10 +117,17 @@ def fact_snapshot_digest(fact) -> str:
     # exists to trip -- without it, two facts differing only in whether a
     # code-changing axis has surviving evidence produce the SAME digest, and a
     # gap can silently vanish across the digest boundary unnoticed.
-    attribute_evidence_gaps = {axis: str(getattr(gap, "reason", "") or "")
-                               for axis, gap in sorted(
-                                   (getattr(fact, "attribute_evidence_gaps", None) or {})
-                                   .items())}
+    # issue #6, Codex's independent re-review (F9-R15-A): the rejected value and
+    # its rejected evidence/relation are release-relevant too, not just the axis
+    # name and reason -- bound here so a later change to WHAT was rejected (never
+    # just whether something was) also trips this digest.
+    attribute_evidence_gaps = {
+        axis: {"reason": str(getattr(gap, "reason", "") or ""),
+              "rejected_value": str(getattr(gap, "rejected_value", "") or ""),
+              "rejected_evidence_span_ids": sorted(
+                  getattr(gap, "rejected_evidence_span_ids", None) or ()),
+              "rejected_relation_id": str(getattr(gap, "rejected_relation_id", "") or "")}
+        for axis, gap in sorted((getattr(fact, "attribute_evidence_gaps", None) or {}).items())}
     payload = {
         "v": _SNAPSHOT_DIGEST_VERSION,
         "kind": fact.kind.value,

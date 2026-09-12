@@ -294,8 +294,23 @@ class AutonomousCoderTest(unittest.TestCase):
         ev = next(g for g in r.gates if g.name == "verbatim_evidence")
         hold = next(g for g in r.gates if g.name.startswith("eligibility_hold:"))
         self.assertEqual(hold.outcome, Outcome.BLOCKED)
-        self.assertEqual(ev.outcome, Outcome.PASS)
-        self.assertEqual(r.verdict, Verdict.BLOCKED)
+        # issue #6, Codex's independent re-review (F9-R15-C): the blocked
+        # procedure's gate is scoped to its own fact_id, not the whole
+        # encounter -- but the diagnosis is REASON_FOR-linked to (necessity-
+        # justifies) exactly that unbillable procedure, so it is correctly
+        # excluded as an entangled dependent rather than surviving into
+        # `billable_lines` as if it were independently defensible. Nothing
+        # billable remains, so `verbatim_evidence` (which only scores
+        # `billable_lines`) is NOT_APPLICABLE rather than PASS.
+        self.assertEqual(ev.outcome, Outcome.NOT_APPLICABLE)
+        # issue #6, Codex's independent re-review (F9-R15-C): the blocked gate
+        # is now scoped (non-blocking to the overall verdict) rather than an
+        # encounter-wide hard stop, so the final destination is correctly the
+        # more precise HOLD (nothing left is a claim-eligible event) rather
+        # than the coarser, less accurate blanket BLOCKED this used to assert.
+        from claude_coder.models import Destination
+        self.assertEqual(r.destination, Destination.HOLD)
+        self.assertEqual(r.verdict, Verdict.REVIEW_REQUIRED)
 
     def test_missing_dos_blocks_release(self):
         r = self._run(dos=None)

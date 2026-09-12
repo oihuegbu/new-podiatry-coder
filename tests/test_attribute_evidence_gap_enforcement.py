@@ -39,12 +39,19 @@ class ApplyAttributeEvidenceGapGuardTest(unittest.TestCase):
         self.assertIs(out, line)
         self.assertEqual(out.chosen, chosen)
 
-    def test_an_already_unresolved_line_is_a_no_op(self):
+    def test_an_already_unresolved_line_still_gets_the_typed_gap_stamped(self):
+        """issue #6, Codex's independent re-review, F9-R15-A: an already-
+        abstained line (e.g. held on a genuine tie) must not lose the gap --
+        the first version of this guard returned early here and the typed
+        disposition was never recorded, so the line's own record never named
+        this as one of its reasons."""
         fact = _fact(attribute_evidence_gaps={
             "laterality": AttributeEvidenceGap(axis="laterality", reason="no evidence")})
         line = ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED)
         out = resolution._apply_attribute_evidence_gap_guard(line, None)
-        self.assertIs(out, line)
+        self.assertIsNone(out.chosen)
+        self.assertIsNotNone(out.attribute_evidence_gap)
+        self.assertEqual(out.attribute_evidence_gap["fact_id"], "F1")
 
     def test_a_gapped_fact_never_releases_its_selected_code(self):
         """The core invariant: no unresolved attribute_evidence_gap may coexist
@@ -76,35 +83,32 @@ class ApplyAttributeEvidenceGapGuardTest(unittest.TestCase):
         self.assertEqual(out.attribute_evidence_gap["axes"], ["anatomy", "laterality"])
 
     def test_no_coverage_never_becomes_a_provider_query(self):
-        """issue #6, Codex's independent re-review, F9-R14-A item 6: without a
-        complete, independently-read document search, this must never be
-        labelled a provider question -- `documentation_gap` (which `autonomy.
-        decide` reads as PROVIDER_QUERY) must stay unset."""
+        """issue #6, Codex's independent re-review, F9-R14-A item 6, corrected
+        F9-R15-A: `documentation_gap` (which `autonomy.decide` reads as
+        PROVIDER_QUERY) must never be set by this guard on its own -- it never
+        was proof the specific gapped AXIS is absent, only that pages were
+        read. Only a validated NOT_DOCUMENTED result from the existing
+        candidate-requirement machinery may create that disposition, which
+        this guard does not have access to and must not approximate."""
         fact = _fact(attribute_evidence_gaps={
             "laterality": AttributeEvidenceGap(axis="laterality", reason="no evidence")})
         line = ResolvedLine(fact=fact, chosen=_cand(), method=ResolutionMethod.VERIFIED)
         out = resolution._apply_attribute_evidence_gap_guard(line, None)
         self.assertIsNone(out.documentation_gap)
-        self.assertFalse(out.attribute_evidence_gap["coverage_complete"])
 
-    def test_incomplete_coverage_never_becomes_a_provider_query(self):
-        class _Incomplete:
-            complete = False
-        fact = _fact(attribute_evidence_gaps={
-            "laterality": AttributeEvidenceGap(axis="laterality", reason="no evidence")})
-        line = ResolvedLine(fact=fact, chosen=_cand(), method=ResolutionMethod.VERIFIED)
-        out = resolution._apply_attribute_evidence_gap_guard(line, _Incomplete())
-        self.assertIsNone(out.documentation_gap)
-
-    def test_complete_coverage_is_a_genuine_provider_question(self):
+    def test_complete_coverage_still_never_becomes_a_provider_query(self):
+        """issue #6, Codex's independent re-review, F9-R15-A: `coverage.complete`
+        proves every page was read, not that this specific axis is absent from
+        what was read -- a synonym/paraphrase, or an extraction defect that
+        never bound real evidence, can both coexist with complete coverage.
+        This guard must never infer PROVIDER_QUERY from it."""
         class _Complete:
             complete = True
         fact = _fact(attribute_evidence_gaps={
             "laterality": AttributeEvidenceGap(axis="laterality", reason="no evidence")})
         line = ResolvedLine(fact=fact, chosen=_cand(), method=ResolutionMethod.VERIFIED)
         out = resolution._apply_attribute_evidence_gap_guard(line, _Complete())
-        self.assertIsNotNone(out.documentation_gap)
-        self.assertTrue(out.attribute_evidence_gap["coverage_complete"])
+        self.assertIsNone(out.documentation_gap)
 
     def test_a_clean_fact_alongside_a_gapped_one_is_unaffected(self):
         """issue #6, Codex's independent re-review, required regression: a
