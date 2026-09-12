@@ -27,6 +27,20 @@ from .models import CodingResult, ResolutionMethod, ResolvedLine, UnresolvedReco
 
 
 logger = logging.getLogger(__name__)
+try:
+    # A bare `logging.getLogger` here never gets a handler attached anywhere
+    # in this codebase (only `app.core.logger.get_logger` attaches one), so
+    # every `logger.info`/`logger.warning` call in this module was silently
+    # discarded -- Python's logging module falls back to a "handler of last
+    # resort" that only ever shows WARNING and above, with no visible error.
+    # Imported lazily (never at claude_coder's own top level, matching the
+    # rest of this package) and guarded, so a context where `app` is not on
+    # the path (a standalone import of `claude_coder` alone) still gets a
+    # working, if unconfigured, logger rather than an import error.
+    from app.core.logger import get_logger as _get_logger
+    logger = _get_logger(__name__)
+except Exception:
+    pass
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
