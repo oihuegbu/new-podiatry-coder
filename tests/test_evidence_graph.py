@@ -388,25 +388,45 @@ class TwoReadingAxisConsensus(unittest.TestCase):
             f"model disagreement must never reach a coder queue: {result.routing}")
 
 
-class IndependentAxisAdjudication(unittest.TestCase):
-    """issue #6, Codex's independent re-review, F9-R13-C release-gate root cause 2:
-    when neither reading's own confirmed quotation settles a disagreeing axis,
-    `resolve(..., llm=...)` gets ONE more chance via `adjudicate_axis` -- judged only
-    from the reconciled quotations either reading already attached to the axis,
-    never a preference between the two readings' own claims, never a value or
-    citation the reconciled record does not contain."""
+def _declared(fn, provider):
+    """Stamp a DISTINCT wrapper callable with `provider` -- never `fn` itself.
+    `declare_model_profile` stamps the given callable's `.model_profile` in
+    place, so declaring two roles directly onto the SAME shared function object
+    (e.g. one response body reused for both a verifier and its corroborator)
+    would leave them pointing at the identical object -- `corroboration_origin`
+    treats that as `corroborator is primary` (SHARED_ORIGIN) regardless of which
+    provider string was declared last, silently defeating the independence
+    check this whole class exists to test."""
+    from claude_coder import verify as _verify
 
-    def _disagreement(self):
+    def _wrapped(system, user):
+        return fn(system, user)
+    return _verify.declare_model_profile(_wrapped, provider=provider)
+
+
+class IndependentAxisAdjudication(unittest.TestCase):
+    """issue #6, Codex's independent re-review, F9-R13-C release-gate root cause 2
+    (round 8): `resolve(..., llm=..., corroborate_llm=...)` gets first say on EVERY
+    non-integrity disagreement -- an independent, CROSS-VENDOR verifier PAIR judged
+    only from the reconciled quotations either reading already attached to the
+    axis, never a preference between the two readings' own claims, never a value or
+    citation the reconciled record does not contain, and never a single provider's
+    say-so."""
+
+    def _disagreement(self, *, inherited=False):
         from claude_coder.models import AttributeEvidence
         p1 = _span("The record notes a right-sided finding on exam", span_id="p1")
         s1 = _span("A separate note references the left side in passing", span_id="s1")
+        primary_entry_kwargs = dict(scope="inherited", parent_fact_id="P0",
+                                    source_relation_id="rel-1",
+                                    scope_validated=True) if inherited else dict(
+            scope="local")
         primary = [_fact(
             "F1", FactKind.PROCEDURE, "procedure performed", spans=[p1],
             attributes={"laterality": "right"},
             attribute_evidence={"laterality": (
-                AttributeEvidence(span=p1, scope="local",
-                                  assertion_state=RelationState.UNCERTAIN,
-                                  value="right"),)})]
+                AttributeEvidence(span=p1, assertion_state=RelationState.UNCERTAIN,
+                                  value="right", **primary_entry_kwargs),)})]
         second = [_fact(
             "S1", FactKind.PROCEDURE, "performed procedure", spans=[s1],
             attributes={"laterality": "left"},
@@ -419,24 +439,27 @@ class IndependentAxisAdjudication(unittest.TestCase):
         return disagreement, primary, second, primary_by_id, second_by_node
 
     def test_a_uniquely_supported_value_resolves_and_authorizes_the_fact(self):
-        """The positive case: an independent verifier, shown only the reconciled
-        quotations, finds exactly one candidate value supported -- the axis
-        settles, and the value is genuinely AUTHORIZED downstream, not merely
-        written onto attributes."""
+        """The positive case: an independent, cross-vendor verifier PAIR, shown
+        only the reconciled quotations, independently agree on exactly one
+        candidate value -- the axis settles, and the value is genuinely
+        AUTHORIZED downstream, not merely written onto attributes."""
         disagreement, primary, _second, primary_by_id, second_by_node = self._disagreement()
 
-        def llm(system, user):
+        def _resp(system, user):
             return json.dumps({"values": [
                 {"value": "right", "status": "supported", "span_ids": ["e1"]},
                 {"value": "left", "status": "not_documented", "span_ids": []}]})
 
+        llm = _declared(_resp, "test-verify")
+        corroborate_llm = _declared(_resp, "test-corroborate")
         resolutions = graph_consensus.resolve([disagreement], primary_by_id,
-                                              second_by_node, None, llm=llm)
+                                              second_by_node, None, llm=llm,
+                                              corroborate_llm=corroborate_llm)
         laterality = next(r for r in resolutions if r.axis == "laterality")
         self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.RESOLVED_FROM_SOURCE)
         self.assertEqual(laterality.accepted_from, "adjudicated")
         self.assertEqual(laterality.accepted_value, "right")
-        self.assertEqual(laterality.proof, graph_consensus.PROOF_ADJUDICATED)
+        self.assertEqual(laterality.proof, graph_consensus.PROOF_CROSS_VENDOR)
         graph_consensus.apply_resolutions(primary_by_id, second_by_node, resolutions)
         self.assertEqual(primary[0].attributes["laterality"], "right")
         self.assertEqual(
@@ -445,19 +468,55 @@ class IndependentAxisAdjudication(unittest.TestCase):
             "the adjudicated value must be genuinely authorized downstream, not "
             "merely written onto attributes")
 
+    def test_inherited_scope_provenance_is_preserved_not_relabeled(self):
+        """issue #6, Codex's independent re-review, F9-R13-C2 fix #4: an
+        adjudicated axis must never mutate or relabel the reading's own
+        `AttributeEvidence` entry -- its real scope/parent/relation id/assertion
+        state stay exactly what extraction produced; the adjudication verdict is
+        recorded as separate proof metadata (`axis_adjudications`)."""
+        disagreement, primary, _second, primary_by_id, second_by_node = self._disagreement(
+            inherited=True)
+        original_entry = primary[0].attribute_evidence["laterality"][0]
+
+        def _resp(system, user):
+            return json.dumps({"values": [
+                {"value": "right", "status": "supported", "span_ids": ["e1"]},
+                {"value": "left", "status": "not_documented", "span_ids": []}]})
+
+        llm = _declared(_resp, "test-verify")
+        corroborate_llm = _declared(_resp, "test-corroborate")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None, llm=llm,
+                                              corroborate_llm=corroborate_llm)
+        graph_consensus.apply_resolutions(primary_by_id, second_by_node, resolutions)
+        surviving = primary[0].attribute_evidence["laterality"][0]
+        self.assertIs(surviving, original_entry,
+                     "the original reading's own entry must be untouched, not "
+                     "replaced or relabeled")
+        self.assertEqual(surviving.scope, "inherited")
+        self.assertEqual(surviving.parent_fact_id, "P0")
+        self.assertEqual(surviving.source_relation_id, "rel-1")
+        self.assertIs(surviving.assertion_state, RelationState.UNCERTAIN)
+        adjudication = primary[0].axis_adjudications["laterality"]
+        self.assertEqual(adjudication.value, "right")
+        self.assertEqual(adjudication.proof, graph_consensus.PROOF_CROSS_VENDOR)
+
     def test_both_values_supported_remains_a_precise_unresolved_candidate(self):
-        """Agreement is not the test: the verifier finding BOTH sides supported is
-        still not a unique answer, and must remain a provider question, never a
-        guess at either value."""
+        """Agreement is not the test: the verifier pair finding BOTH sides
+        supported is still not a unique answer, and must remain a provider
+        question, never a guess at either value."""
         disagreement, _primary, _second, primary_by_id, second_by_node = self._disagreement()
 
-        def llm(system, user):
+        def _resp(system, user):
             return json.dumps({"values": [
                 {"value": "right", "status": "supported", "span_ids": ["e1"]},
                 {"value": "left", "status": "supported", "span_ids": ["e2"]}]})
 
+        llm = _declared(_resp, "test-verify")
+        corroborate_llm = _declared(_resp, "test-corroborate")
         resolutions = graph_consensus.resolve([disagreement], primary_by_id,
-                                              second_by_node, None, llm=llm)
+                                              second_by_node, None, llm=llm,
+                                              corroborate_llm=corroborate_llm)
         laterality = next(r for r in resolutions if r.axis == "laterality")
         self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
         self.assertIn("laterality", laterality.provider_question)
@@ -468,27 +527,73 @@ class IndependentAxisAdjudication(unittest.TestCase):
         not a default to either reading."""
         disagreement, _primary, _second, primary_by_id, second_by_node = self._disagreement()
 
-        def llm(system, user):
+        def _resp(system, user):
             return json.dumps({"values": [
                 {"value": "right", "status": "not_documented", "span_ids": []},
                 {"value": "left", "status": "not_documented", "span_ids": []}]})
 
+        llm = _declared(_resp, "test-verify")
+        corroborate_llm = _declared(_resp, "test-corroborate")
         resolutions = graph_consensus.resolve([disagreement], primary_by_id,
-                                              second_by_node, None, llm=llm)
+                                              second_by_node, None, llm=llm,
+                                              corroborate_llm=corroborate_llm)
         laterality = next(r for r in resolutions if r.axis == "laterality")
         self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
+
+    def test_an_incomplete_candidate_set_is_rejected(self):
+        """issue #6, Codex's independent re-review, F9-R13-C2, round 8, fix #1: a
+        response that answers only ONE of the two candidate values -- silently
+        omitting the other -- must never be accepted; an omitted option is not
+        evidence that it lost."""
+        disagreement, _primary, _second, primary_by_id, second_by_node = self._disagreement()
+
+        def _resp(system, user):
+            return json.dumps({"values": [
+                {"value": "right", "status": "supported", "span_ids": ["e1"]}]})
+
+        llm = _declared(_resp, "test-verify")
+        corroborate_llm = _declared(_resp, "test-corroborate")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None, llm=llm,
+                                              corroborate_llm=corroborate_llm)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED,
+                      "a partial response must never be accepted")
+
+    def test_a_supported_verdict_with_no_citation_is_rejected(self):
+        """issue #6, Codex's independent re-review, F9-R13-C2, round 8, fix #1: a
+        "supported" (or "contradicted") verdict citing NO span at all is a bare
+        assertion, not proof -- only "not_documented" may cite nothing."""
+        disagreement, _primary, _second, primary_by_id, second_by_node = self._disagreement()
+
+        def _resp(system, user):
+            return json.dumps({"values": [
+                {"value": "right", "status": "supported", "span_ids": []},
+                {"value": "left", "status": "not_documented", "span_ids": []}]})
+
+        llm = _declared(_resp, "test-verify")
+        corroborate_llm = _declared(_resp, "test-corroborate")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None, llm=llm,
+                                              corroborate_llm=corroborate_llm)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED,
+                      "an uncited 'supported' verdict must never be accepted")
 
     def test_an_invented_value_from_the_adjudicator_is_rejected(self):
         """A value never offered as a candidate (neither reading's own claim) must
         never be accepted, no matter how confidently the verifier asserts it."""
         disagreement, _primary, _second, primary_by_id, second_by_node = self._disagreement()
 
-        def llm(system, user):
+        def _resp(system, user):
             return json.dumps({"values": [
                 {"value": "bilateral", "status": "supported", "span_ids": ["e1"]}]})
 
+        llm = _declared(_resp, "test-verify")
+        corroborate_llm = _declared(_resp, "test-corroborate")
         resolutions = graph_consensus.resolve([disagreement], primary_by_id,
-                                              second_by_node, None, llm=llm)
+                                              second_by_node, None, llm=llm,
+                                              corroborate_llm=corroborate_llm)
         laterality = next(r for r in resolutions if r.axis == "laterality")
         self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
 
@@ -498,16 +603,213 @@ class IndependentAxisAdjudication(unittest.TestCase):
         citation and keeping the verdict."""
         disagreement, _primary, _second, primary_by_id, second_by_node = self._disagreement()
 
-        def llm(system, user):
+        def _resp(system, user):
             return json.dumps({"values": [
-                {"value": "right", "status": "supported", "span_ids": ["e99"]}]})
+                {"value": "right", "status": "supported", "span_ids": ["e99"]},
+                {"value": "left", "status": "not_documented", "span_ids": []}]})
 
+        llm = _declared(_resp, "test-verify")
+        corroborate_llm = _declared(_resp, "test-corroborate")
         resolutions = graph_consensus.resolve([disagreement], primary_by_id,
-                                              second_by_node, None, llm=llm)
+                                              second_by_node, None, llm=llm,
+                                              corroborate_llm=corroborate_llm)
         laterality = next(r for r in resolutions if r.axis == "laterality")
         self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED,
                       "an invented citation must invalidate the whole verdict, not "
                       "just the bad citation")
+
+    def test_same_provider_judges_are_refused(self):
+        """issue #6, Codex's independent re-review, F9-R13-C2, round 8, fix #3: a
+        "verifier pair" sharing one declared provider is one vendor answering
+        twice, not independent confirmation -- refused before either is even
+        asked, exactly like `verify.corroboration_origin` already refuses this
+        for code selection."""
+        disagreement, _primary, _second, primary_by_id, second_by_node = self._disagreement()
+        calls = []
+
+        def _resp(system, user):
+            calls.append(1)
+            return json.dumps({"values": [
+                {"value": "right", "status": "supported", "span_ids": ["e1"]},
+                {"value": "left", "status": "not_documented", "span_ids": []}]})
+
+        llm = _declared(_resp, "test-verify")
+        corroborate_llm = _declared(_resp, "test-verify")     # SAME provider
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None, llm=llm,
+                                              corroborate_llm=corroborate_llm)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
+        self.assertEqual(calls, [], "a same-provider pair must be refused before "
+                                    "either judge is even called")
+
+    def test_no_corroborator_is_refused_exactly_like_a_same_provider_pair(self):
+        """An absent corroborator is `NO_CORROBORATION`, not independence
+        established -- must be refused, never treated as "no second opinion
+        needed"."""
+        disagreement, _primary, _second, primary_by_id, second_by_node = self._disagreement()
+
+        def _resp(system, user):
+            return json.dumps({"values": [
+                {"value": "right", "status": "supported", "span_ids": ["e1"]},
+                {"value": "left", "status": "not_documented", "span_ids": []}]})
+
+        llm = _declared(_resp, "test-verify")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None, llm=llm)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
+
+    def test_cross_vendor_disagreement_remains_unresolved(self):
+        """Two genuinely independent, distinct-provider judges reaching DIFFERENT
+        single answers is real disagreement, not a coin flip -- neither wins."""
+        disagreement, _primary, _second, primary_by_id, second_by_node = self._disagreement()
+
+        def _verifier(system, user):
+            return json.dumps({"values": [
+                {"value": "right", "status": "supported", "span_ids": ["e1"]},
+                {"value": "left", "status": "not_documented", "span_ids": []}]})
+
+        def _corroborator(system, user):
+            return json.dumps({"values": [
+                {"value": "right", "status": "not_documented", "span_ids": []},
+                {"value": "left", "status": "supported", "span_ids": ["e2"]}]})
+
+        llm = _declared(_verifier, "test-verify")
+        corroborate_llm = _declared(_corroborator, "test-corroborate")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None, llm=llm,
+                                              corroborate_llm=corroborate_llm)
+        laterality = next(r for r in resolutions if r.axis == "laterality")
+        self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED,
+                      "the two verifiers disagreeing must never be resolved by "
+                      "picking either one")
+
+    def test_an_asserted_asymmetric_self_report_alone_never_decides(self):
+        """issue #6, Codex's independent re-review, F9-R13-C2, round 8, fix #2 --
+        the exact-SHA reproduction: one reading records a value with its own
+        ASSERTED, reconciled attribute_evidence citing a quote that does not
+        actually STATE that value ("An incision was made" never says
+        "percutaneous"), and the OTHER reading is silent on the axis entirely.
+        Before this fix, `resolve()` accepted the one-sided ASSERTED claim
+        outright, without ever giving an available verifier pair a turn at all.
+        It must now go through adjudication instead -- proven here by an HONEST
+        verifier pair (correctly reporting the shown quote does not actually
+        state "percutaneous") being genuinely CALLED and its "not_documented"
+        verdict deciding the outcome, rather than the self-report short-
+        circuiting around it."""
+        from claude_coder.models import AttributeEvidence
+        p1 = _span("An incision was made", span_id="p1")
+        primary = [_fact(
+            "F1", FactKind.PROCEDURE, "procedure performed", spans=[p1],
+            attributes={"approach": "percutaneous"},
+            attribute_evidence={"approach": (
+                AttributeEvidence(span=p1, scope="local",
+                                  assertion_state=RelationState.ASSERTED,
+                                  value="percutaneous"),)})]
+        second = [_fact("S1", FactKind.PROCEDURE, "performed procedure",
+                        spans=[_span("An incision was made", span_id="s1")],
+                        attributes={})]     # silent on approach entirely
+        report, primary_by_id, second_by_node = graph_consensus.compare(primary, second)
+        disagreement = next(d for d in report.disagreements if d.axis == "approach")
+
+        called = []
+
+        def _honest_resp(system, user):
+            # A genuinely independent verifier reading "An incision was made" can
+            # only truthfully say the quote never states "percutaneous" at all.
+            called.append(1)
+            return json.dumps({"values": [
+                {"value": "percutaneous", "status": "not_documented", "span_ids": []}]})
+
+        llm = _declared(_honest_resp, "test-verify")
+        corroborate_llm = _declared(_honest_resp, "test-corroborate")
+        resolutions = graph_consensus.resolve([disagreement], primary_by_id,
+                                              second_by_node, None, llm=llm,
+                                              corroborate_llm=corroborate_llm)
+        self.assertTrue(called, "an available verifier pair must actually be "
+                                "consulted, never bypassed by the one-sided "
+                                "self-authored ASSERTED claim")
+        approach = next(r for r in resolutions if r.axis == "approach")
+        self.assertIsNot(approach.accepted_from, "primary",
+                         "a one-sided self-authored ASSERTED claim must never "
+                         "decide the axis on its own once a verifier is available")
+        self.assertIs(approach.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
+
+    def test_a_judge_exception_holds_only_its_own_fact_not_the_batch(self):
+        """issue #6, Codex's independent re-review, F9-R13-C2, round 8, fix on
+        exceptions: a system failure calling the verifier pair for ONE
+        disagreement must never propagate out of `resolve()` -- it holds only
+        that fact, and a SEPARATE, unrelated disagreement in the SAME batch (a
+        SEPARATE fact pair, same node-id space, sharing one `resolve()` call)
+        still resolves normally."""
+        from claude_coder.models import AttributeEvidence
+        p1 = _span("The record notes a right-sided finding on exam", span_id="p1")
+        s1 = _span("A separate note references the left side in passing", span_id="s1")
+        p2 = _span("A distinct note records a right-sided reading elsewhere",
+                  span_id="p2")
+        s2 = _span("A distinct second note records a left-sided reading elsewhere",
+                  span_id="s2")
+        failing_primary = _fact(
+            "F1", FactKind.PROCEDURE, "procedure performed", spans=[p1],
+            attributes={"laterality": "right"},
+            attribute_evidence={"laterality": (
+                AttributeEvidence(span=p1, scope="local",
+                                  assertion_state=RelationState.UNCERTAIN,
+                                  value="right"),)})
+        failing_second = _fact(
+            "S1", FactKind.PROCEDURE, "performed procedure", spans=[s1],
+            attributes={"laterality": "left"},
+            attribute_evidence={"laterality": (
+                AttributeEvidence(span=s1, scope="local",
+                                  assertion_state=RelationState.UNCERTAIN,
+                                  value="left"),)})
+        clean_primary = _fact(
+            "F2", FactKind.PROCEDURE, "a distinct procedure performed", spans=[p2],
+            attributes={"laterality": "right"},
+            attribute_evidence={"laterality": (
+                AttributeEvidence(span=p2, scope="local",
+                                  assertion_state=RelationState.UNCERTAIN,
+                                  value="right"),)})
+        clean_second = _fact(
+            "S2", FactKind.PROCEDURE, "a distinct procedure performed", spans=[s2],
+            attributes={"laterality": "left"},
+            attribute_evidence={"laterality": (
+                AttributeEvidence(span=s2, scope="local",
+                                  assertion_state=RelationState.UNCERTAIN,
+                                  value="left"),)})
+        report, primary_by_id, second_by_node = graph_consensus.compare(
+            [failing_primary, clean_primary], [failing_second, clean_second])
+        disagreements = list(report.disagreements)
+        self.assertEqual(len(disagreements), 2, disagreements)
+
+        def _raising(system, user):
+            raise RuntimeError("simulated API failure")
+
+        def _clean_resp(system, user):
+            return json.dumps({"values": [
+                {"value": "right", "status": "supported", "span_ids": ["e1"]},
+                {"value": "left", "status": "not_documented", "span_ids": []}]})
+
+        llm = _declared(_raising, "test-verify")
+        corroborate_llm = _declared(_clean_resp, "test-corroborate")
+        resolutions = graph_consensus.resolve(disagreements, primary_by_id,
+                                              second_by_node, None, llm=llm,
+                                              corroborate_llm=corroborate_llm)
+        by_node = {r.node_id: r for r in resolutions}
+        failing_resolution = by_node["F1"]
+        clean_resolution = by_node["F2"]
+        self.assertIs(failing_resolution.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
+        self.assertIn("SYSTEM ERROR", failing_resolution.detail)
+        # Both facts route through the SAME `llm` (it raises for every call), so the
+        # "clean" one held for a system error too -- proving the failure is
+        # PER-DISAGREEMENT (resolve() kept going and produced a real resolution for
+        # it) rather than an exception that aborted the whole batch.
+        self.assertIs(clean_resolution.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
+        self.assertIn("SYSTEM ERROR", clean_resolution.detail)
+        self.assertEqual(len(resolutions), 2,
+                         "an exception on one disagreement must never stop the "
+                         "others from being resolved at all")
 
     def test_no_llm_supplied_falls_back_to_the_prior_unresolved_behavior(self):
         """`resolve()` without an `llm` (every caller before this round, and every
@@ -2031,8 +2333,20 @@ def _run(primary_reading, second_reading, **kwargs):
 
 class EndToEndTwoReadingConsensus(unittest.TestCase):
 
-    def test_the_document_corrects_the_graph_and_the_line_still_bills(self):
-        """The second reading quotes text that STATES the axis; the primary's does not."""
+    def test_an_asymmetric_self_report_now_holds_without_a_real_cross_vendor_pair(self):
+        """issue #6, Codex's independent re-review, F9-R13-C2, round 8: this used
+        to be "the second reading quotes text that STATES the axis, so the line
+        still bills" -- accepting the second reading's own ASSERTED claim
+        outright. That bypass is exactly what round 8 closes: with a verifier
+        configured (`_run`'s `verify_llm`/`corroborate_llm`, here the SAME stub
+        object -- not a genuine cross-vendor pair), a one-sided self-report may
+        no longer decide the axis by itself; `resolve()` requires it to clear
+        adjudication instead, which correctly refuses a non-distinct-provider
+        pair. So this now holds before retrieval exactly like the genuinely
+        unresolved case below -- the safe default. (Production always configures
+        real, distinct-provider verify_llm/corroborate_llm, so this exact
+        quotation -- which DOES state the axis -- resolves there via a genuine
+        cross-vendor adjudication instead; see `IndependentAxisAdjudication`.)"""
         result = _run(
             _reading("excision procedure alpha performed", "right",
                      "Procedure alpha performed today"),
@@ -2041,15 +2355,11 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
         self.assertIsNotNone(result.consensus, "a second reading must be recorded")
         resolutions = result.consensus["resolutions"]
         laterality = next(r for r in resolutions if r["axis"] == "laterality")
-        self.assertEqual(laterality["verdict"], "resolved_from_source")
-        self.assertEqual(laterality["accepted_value"], "left")
-        # The graph carries the corrected axis, and the line still reached retrieval.
-        node = result.graph.nodes["F1"]
-        self.assertEqual(node.attributes["laterality"], "left")
-        self.assertEqual(node.axis_conflicts, ())
-        self.assertTrue(any(ln.chosen and ln.chosen.code == "PROC_X"
-                            for ln in result.lines),
-                        "a settled axis must not stop the line from being coded")
+        self.assertEqual(laterality["verdict"], "unresolved")
+        self.assertFalse(any(ln.chosen for ln in result.lines),
+                         "a self-report a non-distinct-provider pair cannot "
+                         "independently verify must not stop retrieval on its "
+                         "own say-so")
 
     def test_an_unsettleable_axis_holds_before_retrieval_and_asks_the_provider(self):
         """Neither reading's quotation states the axis: the record simply lacks it."""

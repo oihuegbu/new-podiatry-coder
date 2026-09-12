@@ -1122,12 +1122,6 @@ def _parse_extraction_response(
         if attr_ev_in is not None and not isinstance(attr_ev_in, dict):
             raise ExtractionSchemaError(f"fact #{i} 'attribute_evidence' must be an object")
         attribute_evidence: dict[str, list[AttributeEvidence]] = {}
-        # Every entry's bound value, regardless of local/inherited scope -- the ONLY
-        # thing `_validate_attribute_evidence` below needs to confirm the model's own
-        # "attributes" are backed by ITS OWN cited evidence; whether an "inherited"
-        # entry's claimed relation actually validates is a separate, later question
-        # (the second pass below), not a precondition for this contract check.
-        _bound_values_by_axis: dict[str, list[str]] = {}
         for attr_name, entries in (attr_ev_in or {}).items():
             if not isinstance(entries, list):
                 raise ExtractionSchemaError(
@@ -1139,7 +1133,6 @@ def _parse_extraction_response(
                         f"fact #{i} attribute_evidence[{attr_name!r}] has an "
                         f"empty/malformed entry")
                 text, scope, parent, assertion_state, bound_value = parsed
-                _bound_values_by_axis.setdefault(str(attr_name), []).append(bound_value)
                 if scope == "local":
                     attribute_evidence.setdefault(str(attr_name), []).append(
                         AttributeEvidence(span=EvidenceSpan(text=text), scope="local",
@@ -1148,7 +1141,14 @@ def _parse_extraction_response(
                 else:
                     pending_inherited.append(
                         (fid, str(attr_name), text, parent, assertion_state, bound_value))
-        _validate_attribute_evidence(attributes, _bound_values_by_axis, f"fact #{i}")
+        # NOTE: the "attributes"<->"attribute_evidence" contract is validated ONCE, on
+        # the FINAL facts, after `pending_inherited` is resolved below (issue #6,
+        # Codex's independent re-review, F9-R13-C1, reopened P1) -- NOT here, against
+        # this per-fact accumulator. An "inherited" entry is only a CANDIDATE at this
+        # point (its claimed parent/relation has not been checked yet); validating here
+        # would count it as proof even when the second pass goes on to drop it for
+        # naming no real relation, reproducing the exact malformed shape (an attribute
+        # with no surviving evidence) through a different route.
         # R2: actor identity is resolved EXCLUSIVELY from the structured encounter context.
         # A model-supplied performer/organization id absent from the authoritative roster is
         # invented/unauthorized and is discarded (ownership then resolves to UNKNOWN and
@@ -1235,7 +1235,30 @@ def _parse_extraction_response(
                 **fact.attribute_evidence,
                 attr_name: fact.attribute_evidence.get(attr_name, ()) + (entry,),
             }
+    # THE contract check, on the FINAL facts (issue #6, Codex's independent re-review,
+    # F9-R13-C1, reopened P1): an "inherited" entry that named a real fact but no
+    # matching part_of relation was just silently dropped above, which can leave a
+    # fact's "attributes" claiming a value its (now empty) "attribute_evidence" no
+    # longer backs at all -- the identical malformed shape the per-fact check earlier
+    # in this function exists to catch, reached through a different route. Checking
+    # here, once, on the settled `fact.attribute_evidence`, is the only point that
+    # reflects what actually survived.
+    require_final_attribute_evidence(facts)
     return ExtractionResult(facts=facts, relations=relations, origin=origin)
+
+
+def require_final_attribute_evidence(facts: list[ClinicalFact]) -> None:
+    """`_validate_attribute_evidence`, applied to each FINAL fact's own settled
+    `attribute_evidence` -- never the pre-resolution accumulator, which can still
+    count an "inherited" entry the second pass above goes on to drop for naming no
+    real relation. Raises `ExtractionSchemaError`, which `extract_note`'s existing
+    bounded retry loop already catches -- no second retry mechanism."""
+    for i, fact in enumerate(facts):
+        bound_values_by_axis = {
+            axis: [entry.value for entry in entries]
+            for axis, entries in fact.attribute_evidence.items()
+        }
+        _validate_attribute_evidence(fact.attributes, bound_values_by_axis, f"fact #{i}")
 
 
 def extract_facts(note_text: str, llm: LLMFn | None = None) -> list[ClinicalFact]:

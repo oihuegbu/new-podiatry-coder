@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-from .models import AttributeEvidence, Disposition, RelationState
+from .models import AxisAdjudication, Disposition, RelationState
 
 #: A callable (system_prompt, user_prompt) -> JSON string -- the SAME shape
 #: `extraction.LLMFn`/`verify`'s judging calls already use.
@@ -80,13 +80,15 @@ class AxisVerdict(str, Enum):
 #: ORIGINAL PAGE settled something when only the transcription was available.
 PROOF_ORIGINAL_PAGE = "original_page_reconciliation"
 PROOF_ANCHORED_TEXT = "anchored_source_text"
-#: Neither reading's own confirmed quotation stated its value verbatim, but an
-#: INDEPENDENT verifier -- shown only the reconciled quotations either reading already
-#: attached to this axis -- found exactly one of the candidate values uniquely
-#: supported (issue #6, Codex's independent re-review, F9-R13-C release-gate root
-#: cause 2). Distinct from the two proofs above so an artifact can never imply the
-#: document itself settled an axis the verifier had to adjudicate.
-PROOF_ADJUDICATED = "independent_verifier_adjudication"
+#: An extractor's own self-reported ASSERTED claim did not decide this axis on its
+#: own: an INDEPENDENT verifier PAIR -- two callables Codex's round-8 re-review
+#: requires be POSITIVELY DIFFERENT declared providers, never the same vendor
+#: answering twice -- were each shown only the reconciled quotations either reading
+#: already attached to this axis, and independently agreed on exactly one candidate
+#: value (issue #6, Codex's independent re-review, F9-R13-C release-gate root cause
+#: 2, round 8). Distinct from the two proofs above so an artifact can never imply
+#: the document itself settled an axis a verifier pair had to adjudicate.
+PROOF_CROSS_VENDOR = "cross_vendor_source_adjudication"
 
 
 def _norm(value: Any) -> str:
@@ -210,7 +212,7 @@ class AxisResolution:
     verdict: AxisVerdict
     accepted_value: str = ""
     accepted_from: str = ""        # primary | second | adjudicated | (empty when unresolved)
-    proof: str = ""                # PROOF_ORIGINAL_PAGE | PROOF_ANCHORED_TEXT | PROOF_ADJUDICATED
+    proof: str = ""                # PROOF_ORIGINAL_PAGE | PROOF_ANCHORED_TEXT | PROOF_CROSS_VENDOR
     detail: str = ""
     evidence_span_ids: tuple[str, ...] = ()
     #: The precise, self-contained question to send when the document cannot settle it.
@@ -688,10 +690,20 @@ def claim_authorized_value(fact, axis: str, reconciliation) -> str | None:
 
     Returns `None` (fail closed) when the value cannot be authorized -- the
     caller must treat that exactly as "not documented" for its own decision,
-    never as "documented, use the raw value anyway"."""
+    never as "documented, use the raw value anyway".
+
+    issue #6, Codex's independent re-review, F9-R13-C2: a SECOND, independent
+    path may also authorize a value -- `fact.axis_adjudications`, an
+    independent cross-vendor verifier pair's verdict on an axis neither
+    reading's own quotation settled (`adjudicate_axis`). Checked here, never by
+    mutating an `AttributeEvidence` entry to look directly-asserted when it
+    is not -- the two proofs stay distinguishable in the record."""
     value = str((getattr(fact, "attributes", None) or {}).get(axis) or "").strip()
     if not value:
         return None
+    adjudication = (getattr(fact, "axis_adjudications", None) or {}).get(axis)
+    if adjudication is not None and _norm(adjudication.value) == _norm(value):
+        return value
     return value if asserted_attribute_support(fact, axis, value, reconciliation) else None
 
 
@@ -857,58 +869,106 @@ def _parse_axis_judgement(ans: dict, options: tuple[str, ...],
     return tuple(out)
 
 
-def adjudicate_axis(disagreement: AxisDisagreement, primary, second, reconciliation,
-                    llm: LLMFn) -> AxisSupport | None:
-    """Ask an INDEPENDENT verifier to judge EVERY candidate value a disagreement
-    raised, using ONLY the reconciled (source-confirmed) quotations either reading
-    already attached to this axis -- never a preference between the two readings,
-    never a value or citation the reconciled record does not contain. Returns the
-    SINGLE uniquely supported value, or `None` when zero or more than one candidate is
-    supported -- either is still a genuine documentation gap, never guessed past."""
-    options = tuple(dict.fromkeys(
-        v for v in (disagreement.value_primary, disagreement.value_second) if v))
-    if not options:
-        return None
-    spans = reconciled_attribute_spans(primary, second, disagreement.axis, reconciliation)
-    if not spans:
-        return None
-    user, id_to_span = _axis_judge_prompt(disagreement.axis, options, spans)
+def _judged_pick(axis: str, options: tuple[str, ...], spans: tuple, llm: LLMFn
+                 ) -> AxisSupport | None:
+    """ONE verifier's judgement, reduced to its single supported pick under a
+    deterministic acceptance boundary -- issue #6, Codex's independent re-review,
+    F9-R13-C2, round 8, four adversarial reproductions:
+
+    1. A PARTIAL response (silent about a candidate the disagreement actually
+       raised) is refused outright -- every option offered must receive an
+       explicit verdict, never treated as "the omitted one must be the loser".
+    2. A "supported"/"contradicted" verdict with NO cited span is refused --
+       status alone is never proof; only "not_documented" may cite nothing.
+    3. A value outside the offered options, or a citation naming a span never
+       shown to the model, invalidates its OWN entry (`_parse_axis_judgement`)
+       -- re-checked here as the boundary this function itself promises, not an
+       incidental property of today's parser.
+    """
+    user, id_to_span = _axis_judge_prompt(axis, options, spans)
     answer = _parse_axis_judgement(_json(llm(_AXIS_JUDGE_SYSTEM, user)), options, id_to_span)
-    # Deterministic acceptance boundary: every returned value must be one of the
-    # options actually offered and every cited span id one actually shown to the
-    # model -- `_parse_axis_judgement` already enforces both, but re-asserted here as
-    # the boundary this function itself promises callers, not an incidental property
-    # of today's implementation.
+    if {item.value for item in answer} != set(options):
+        return None                      # partial response -- not every option answered
+    if any(item.status in ("supported", "contradicted") and not item.span_ids
+          for item in answer):
+        return None                      # a verdict claiming proof with no citation at all
     allowed_span_ids = {str(getattr(s, "span_id", "") or "") for s in spans}
     if any(item.value not in options or not set(item.span_ids) <= allowed_span_ids
-           for item in answer):
+          for item in answer):
         return None
     supported = [item for item in answer if item.status == "supported"]
     return supported[0] if len(supported) == 1 else None
 
 
+def adjudicate_axis(disagreement: AxisDisagreement, primary, second, reconciliation,
+                    llm: LLMFn, corroborate_llm: LLMFn | None) -> AxisSupport | None:
+    """Ask an INDEPENDENT, CROSS-VENDOR verifier PAIR to judge every candidate value
+    a disagreement raised, using ONLY the reconciled (source-confirmed) quotations
+    either reading already attached to this axis -- never a preference between the
+    two readings, never a value or citation the reconciled record does not contain,
+    and (issue #6, Codex's independent re-review, F9-R13-C2, round 8) never a
+    single model's own say-so: `llm` and `corroborate_llm` must be POSITIVELY
+    DIFFERENT declared providers (the same fail-closed discipline
+    `verify.corroboration_origin` already applies to code selection), and both must
+    independently agree on the SAME single supported value. Returns that value, or
+    `None` when the pair is not independent, either judge's response fails the
+    acceptance boundary, or the two disagree -- any of those is still a genuine
+    documentation gap, never guessed past."""
+    options = tuple(dict.fromkeys(
+        v for v in (disagreement.value_primary, disagreement.value_second) if v))
+    if not options:
+        return None
+    from . import verify as _verify
+    if _verify.corroboration_origin(llm, corroborate_llm) != _verify.DISTINCT_ORIGIN:
+        return None
+    spans = reconciled_attribute_spans(primary, second, disagreement.axis, reconciliation)
+    if not spans:
+        return None
+    verifier_pick = _judged_pick(disagreement.axis, options, spans, llm)
+    if verifier_pick is None:
+        return None
+    corroborator_pick = _judged_pick(disagreement.axis, options, spans, corroborate_llm)
+    if corroborator_pick is None:
+        return None
+    if verifier_pick.value != corroborator_pick.value:
+        return None
+    merged_span_ids = tuple(dict.fromkeys(
+        verifier_pick.span_ids + corroborator_pick.span_ids))
+    return AxisSupport(value=verifier_pick.value, status="supported",
+                       span_ids=merged_span_ids)
+
+
 def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
-            second_by_node: dict, reconciliation, llm: LLMFn | None = None
-            ) -> list[AxisResolution]:
+            second_by_node: dict, reconciliation, llm: LLMFn | None = None,
+            corroborate_llm: LLMFn | None = None) -> list[AxisResolution]:
     """Settle each disagreeing axis against the ORIGINAL DOCUMENT, never by vote.
 
-    A reading wins only when its OWN value is LITERALLY PRESENT in its own
+    LEGACY PATH (`llm` is `None` -- every pre-existing caller, unchanged): a
+    reading wins only when its OWN value is LITERALLY PRESENT in its own
     source-confirmed quotation -- the document stating the value, never a model
     asserting it, and never merely the surrounding EVENT being source-confirmed
-    (Codex F8-R1, round 2: a reading whose event quotation reconciled but whose
-    specific attribute value was never checked against that quotation was
-    previously accepted whenever the OTHER reading's event simply wasn't
-    confirmed -- event-level confirmation is not value-level confirmation,
-    regardless of how many readings had a confirmed event). Anything else is
-    unresolved, which is a provider question, never a coder queue --
+    (Codex F8-R1, round 2). Anything else is unresolved, which is a provider
+    question, never a coder queue.
 
-    UNLESS `llm` is supplied (issue #6, Codex's independent re-review, F9-R13-C
-    release-gate root cause 2): when neither reading's own confirmed quotation
-    settles it, `adjudicate_axis` gets ONE more chance to settle it from the SAME
-    reconciled quotations, before falling back to a provider question. This is not
-    a second vote between the readings' own claims -- it is asking whether the
-    record itself, already proven genuine, actually says one of the two things
-    being argued about.
+    WITH AN INDEPENDENT VERIFIER PAIR (issue #6, Codex's independent re-review,
+    F9-R13-C release-gate root cause 2, round 8): `adjudicate_axis` gets first
+    say on EVERY code-changing disagreement that is not a source-integrity
+    problem -- never only the "neither reading says" gap the first cut of this
+    fix limited itself to. A one-sided reading's own self-authored ASSERTED claim
+    is real provenance (which reading recorded what), never independent proof
+    that its cited quotation actually STATES the value; letting it decide alone
+    merely because the other reading stayed silent is exactly the asymmetric
+    bypass Codex's exact-SHA reproduction proved unsafe (a value bound to a
+    quotation -- "An incision was made" -- that never says "percutaneous" at
+    all). So when `llm` is supplied, the reading-level ASSERTED short-circuit
+    below is skipped entirely; the axis settles ONLY via the independent,
+    cross-vendor verifier pair, or it does not settle here at all.
+
+    A system failure calling the verifier pair (network/API error, etc.) is
+    caught per-disagreement, never allowed to propagate: it holds ONLY the
+    affected fact, retryably, and is worded so it is never mistaken for an
+    ordinary documentation gap -- it must not crash the encounter or erase an
+    unrelated, separately defensible line.
 
     Proof is now PER-ATTRIBUTE ONLY (issue #6 F9-R5, tightened by F9-R7-A): a
     reading's value is accepted only when its OWN `attribute_evidence` for this
@@ -979,23 +1039,101 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
             primary, item.axis, item.value_primary)
         s_ok, s_proof, s_text, s_spans, s_says = _entailment(
             second, item.axis, item.value_second)
+        # PRECEDENCE, and the reason it matters (post-fix review finding). NEITHER
+        # the legacy self-report path NOR the independent verifier gets a turn when
+        # NEITHER reading rests on a quotation the original document confirms: the
+        # event does not have a documentation gap -- its evidence is contradicted
+        # by the page, which is an INTEGRITY STOP owned by the source-evidence
+        # control (directive section 1). Asking anyone (provider or verifier) there
+        # would be wrong twice over: it invites an answer to a misreading, and --
+        # because a held event never reaches a claim line -- it would take the
+        # misread quotation out of the reach of the very gate that must block it,
+        # silently downgrading a BLOCK to a query. So nothing is raised here, the
+        # fact is left untouched, and the control that owns the failure sees it.
+        source_integrity_problem = not p_ok and not s_ok
+
+        # issue #6, Codex's independent re-review, F9-R13-C2, round 8: when an
+        # independent verifier is available, it gets first say on EVERY
+        # non-integrity disagreement -- an extractor's own self-authored ASSERTED
+        # flag never gets to select/narrow a candidate by itself once a real
+        # verifier pair exists to check it instead.
+        adjudicated = None
+        adjudication_error = ""
+        if llm is not None and not source_integrity_problem:
+            try:
+                adjudicated = adjudicate_axis(item, primary, second, reconciliation,
+                                              llm, corroborate_llm)
+            except Exception as exc:
+                adjudication_error = f"{type(exc).__name__}: {exc}"
+
+        if adjudicated is not None:
+            out.append(AxisResolution(
+                node_id=item.node_id, axis=item.axis,
+                verdict=AxisVerdict.RESOLVED_FROM_SOURCE,
+                accepted_value=adjudicated.value, accepted_from="adjudicated",
+                proof=PROOF_CROSS_VENDOR,
+                detail=("an independent, cross-vendor verifier pair judged this "
+                       "the only candidate value the reconciled quotations "
+                       "support"),
+                evidence_span_ids=adjudicated.span_ids))
+            continue
+
+        if adjudication_error:
+            # A SYSTEM failure at the semantic-adjudication boundary, never a
+            # documentation gap: caught here so it holds only THIS fact,
+            # retryably, rather than propagating into an encounter-wide crash
+            # that would erase every OTHER, unrelated, separately defensible
+            # line. Worded so a downstream reader (human or automated) can never
+            # mistake it for an ordinary provider query -- there is not yet a
+            # routing destination more specific than the existing per-fact hold
+            # this reuses, but the text is unambiguous about which kind of
+            # failure this is.
+            message = (f"SYSTEM ERROR, retryable -- not a documentation gap: axis "
+                      f"adjudication for {item.axis!r} failed ({adjudication_error})")
+            out.append(AxisResolution(
+                node_id=item.node_id, axis=item.axis, verdict=AxisVerdict.UNRESOLVED,
+                detail=message,
+                evidence_span_ids=tuple(dict.fromkeys(p_spans + s_spans)),
+                provider_question=message))
+            continue
 
         winner = ""
         proof = ""
         spans: tuple[str, ...] = ()
         detail = ""
-        source_integrity_problem = False
-        if p_says and not s_says:
-            winner, proof, spans = "primary", p_proof, p_spans
-            detail = "the confirmed quotation states this value verbatim"
-        elif s_says and not p_says:
-            winner, proof, spans = "second", s_proof, s_spans
-            detail = "the confirmed quotation states this value verbatim"
-        elif not p_ok and not s_ok:
-            source_integrity_problem = True
+        if llm is None:
+            # Legacy path, unchanged: every pre-existing caller that supplies no
+            # verifier still settles from a reading's own directly self-reported
+            # ASSERTED, reconciled claim when the other reading does not equally
+            # claim it.
+            if p_says and not s_says:
+                winner, proof, spans = "primary", p_proof, p_spans
+                detail = "the confirmed quotation states this value verbatim"
+            elif s_says and not p_says:
+                winner, proof, spans = "second", s_proof, s_spans
+                detail = "the confirmed quotation states this value verbatim"
+        if winner:
+            out.append(AxisResolution(
+                node_id=item.node_id, axis=item.axis,
+                verdict=AxisVerdict.RESOLVED_FROM_SOURCE,
+                accepted_value=(item.value_primary if winner == "primary"
+                                else item.value_second),
+                accepted_from=winner, proof=proof, detail=detail,
+                evidence_span_ids=spans))
+            continue
+
+        if source_integrity_problem:
             detail = ("neither reading rests on quotations the source confirms, so "
                       "this event has a source-integrity problem, not a documentation "
                       "gap")
+        elif llm is not None:
+            # `llm` was available and tried (or the fact was a source-integrity
+            # problem, handled above) -- adjudication did not settle it, and a
+            # one-sided self-report is never accepted as a substitute (that is
+            # exactly the bypass this round closes).
+            detail = ("no independent, cross-vendor verifier pair found exactly "
+                      "one candidate value uniquely supported by the reconciled "
+                      "quotations")
         else:
             # p_ok or s_ok (or both) -- some reading's EVENT is source-confirmed --
             # but no reading's own recorded value is literally supported by its own
@@ -1010,51 +1148,12 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
                       "verbatim -- a reading's EVENT being source-confirmed is not "
                       "proof of this specific attribute")
 
-        if winner:
-            out.append(AxisResolution(
-                node_id=item.node_id, axis=item.axis,
-                verdict=AxisVerdict.RESOLVED_FROM_SOURCE,
-                accepted_value=(item.value_primary if winner == "primary"
-                                else item.value_second),
-                accepted_from=winner, proof=proof, detail=detail,
-                evidence_span_ids=spans))
-        else:
-            # PRECEDENCE, and the reason it matters (post-fix review finding). An
-            # unsettled axis becomes a provider question ONLY when the readings are
-            # genuinely arguing about a fact the record does not state. When NEITHER
-            # reading rests on a quotation the original document confirms, the event
-            # does not have a documentation gap -- its evidence is contradicted by the
-            # page, which is an INTEGRITY STOP owned by the source-evidence control
-            # (directive section 1). Asking the provider there would be wrong twice
-            # over: it invites a documentation answer to a misreading, and -- because a
-            # held event never reaches a claim line -- it would take the misread
-            # quotation out of the reach of the very gate that must block it, silently
-            # downgrading a BLOCK to a query. So no question is raised, the fact is left
-            # untouched, and the control that owns the failure sees it.
-            #
-            # The SAME precedence gates whether an independent verifier gets a turn
-            # below: a source-integrity problem is never handed to it either -- it
-            # would be asked to adjudicate quotations that are themselves the thing
-            # in question, not a genuine documentation gap.
-            adjudicated = None
-            if llm is not None and not source_integrity_problem:
-                adjudicated = adjudicate_axis(item, primary, second, reconciliation, llm)
-            if adjudicated is not None:
-                out.append(AxisResolution(
-                    node_id=item.node_id, axis=item.axis,
-                    verdict=AxisVerdict.RESOLVED_FROM_SOURCE,
-                    accepted_value=adjudicated.value, accepted_from="adjudicated",
-                    proof=PROOF_ADJUDICATED,
-                    detail=("an independent verifier judged this the only candidate "
-                           "value the reconciled quotations support"),
-                    evidence_span_ids=adjudicated.span_ids))
-                continue
-            settleable = p_ok or s_ok
-            out.append(AxisResolution(
-                node_id=item.node_id, axis=item.axis,
-                verdict=AxisVerdict.UNRESOLVED, detail=detail,
-                evidence_span_ids=tuple(dict.fromkeys(p_spans + s_spans)),
-                provider_question=(_question(item) if settleable else "")))
+        settleable = p_ok or s_ok
+        out.append(AxisResolution(
+            node_id=item.node_id, axis=item.axis,
+            verdict=AxisVerdict.UNRESOLVED, detail=detail,
+            evidence_span_ids=tuple(dict.fromkeys(p_spans + s_spans)),
+            provider_question=(_question(item) if settleable else "")))
     return out
 
 
@@ -1085,14 +1184,9 @@ def apply_resolutions(primary_by_id: dict, second_by_node: dict,
             fact.axis_conflicts = conflicts
             continue
         if resolution.accepted_from == "adjudicated":
-            # No pre-existing ASSERTED, value-bound `attribute_evidence` exists on
-            # EITHER reading for this value -- that is exactly why it needed
-            # adjudication -- so there is nothing to copy, only a NEW entry to
-            # synthesize from the verifier's own cited, already-reconciled spans.
             _write_axis(fact, resolution.axis, resolution.accepted_value)
-            _attach_adjudicated_evidence(
-                fact, second_by_node.get(resolution.node_id), resolution.axis,
-                resolution.accepted_value, resolution.evidence_span_ids)
+            _record_axis_adjudication(fact, resolution.axis, resolution.accepted_value,
+                                      resolution.proof, resolution.evidence_span_ids)
             continue
         if resolution.accepted_from != "second":
             continue                      # the primary reading already holds this value
@@ -1177,50 +1271,19 @@ def _carry_attribute_evidence(fact, source_fact, axis: str) -> None:
     }
 
 
-def _find_span(fact, span_id: str):
-    """The actual `EvidenceSpan` object named by `span_id` on `fact` -- checked
-    against both its whole-fact evidence pool and every axis's attribute_evidence,
-    since an adjudicated span may have come from either. `None` when `fact` is
-    absent or does not carry that span (never invented)."""
-    if fact is None or not span_id:
-        return None
-    for s in (getattr(fact, "evidence", None) or []):
-        if str(getattr(s, "span_id", "") or "") == span_id:
-            return s
-    for entries in (getattr(fact, "attribute_evidence", None) or {}).values():
-        for e in entries:
-            if str(getattr(e.span, "span_id", "") or "") == span_id:
-                return e.span
-    return None
-
-
-def _attach_adjudicated_evidence(fact, second_fact, axis: str, value: str,
-                                 span_ids: tuple[str, ...]) -> None:
-    """An axis an independent verifier adjudicated has no pre-existing ASSERTED,
-    value-bound `attribute_evidence` on EITHER reading (that is exactly why it
-    needed adjudication) -- so, unlike a "second reading wins" resolution, there is
-    nothing to copy, only a NEW entry to synthesize from the verifier's own cited
-    quotations. `scope="local"` and `assertion_state=ASSERTED`: the cited spans are
-    already proven source-reconciled by `reconciled_attribute_spans` before the
-    verifier ever saw them, not a claim inherited from an unvalidated relation."""
-    have_spans = {str(getattr(s, "span_id", "") or "") for s in (fact.evidence or [])}
-    attribute_evidence = dict(getattr(fact, "attribute_evidence", None) or {})
-    entries = list(attribute_evidence.get(axis, ()))
-    added_any = False
-    for span_id in span_ids:
-        span = _find_span(fact, span_id) or _find_span(second_fact, span_id)
-        if span is None:
-            continue
-        entries.append(AttributeEvidence(span=span, scope="local",
-                                         assertion_state=RelationState.ASSERTED,
-                                         value=value))
-        added_any = True
-        if span_id not in have_spans:
-            fact.evidence.append(span)
-            have_spans.add(span_id)
-    if added_any:
-        attribute_evidence[axis] = tuple(entries)
-        fact.attribute_evidence = attribute_evidence
+def _record_axis_adjudication(fact, axis: str, value: str, proof: str,
+                              span_ids: tuple[str, ...]) -> None:
+    """Record an independent verifier pair's verdict as its OWN, separately
+    labeled proof (issue #6, Codex's independent re-review, F9-R13-C2) -- never
+    by manufacturing or relabeling an `AttributeEvidence` entry as directly
+    "local"/"asserted". The reading(s)' own `attribute_evidence` entries for this
+    axis are left completely untouched: their real scope, parent, relation id,
+    and assertion state stay exactly what extraction produced, for audit."""
+    fact.axis_adjudications = {
+        **(getattr(fact, "axis_adjudications", None) or {}),
+        axis: AxisAdjudication(value=value, proof=proof,
+                               evidence_span_ids=span_ids),
+    }
 
 
 def _event_record(fact) -> dict[str, Any]:

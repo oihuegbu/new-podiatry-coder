@@ -227,6 +227,18 @@ class ClinicalFact:
     # what already worked.
     attribute_evidence: dict[str, tuple[AttributeEvidence, ...]] = field(
         default_factory=dict)
+    # A code-changing axis TWO INDEPENDENT READINGS disagreed on, that neither
+    # reading's own confirmed quotation settled, but that an independent verifier
+    # pair -- shown ONLY the reconciled quotations either reading already attached to
+    # the axis -- judged uniquely supported (`graph_consensus.adjudicate_axis`,
+    # issue #6, Codex's independent re-review, F9-R13-C2). Kept SEPARATE from
+    # `attribute_evidence` deliberately: the verdict is proof ABOUT an axis, not a
+    # reading's own quotation, and must never be relabeled as (or mistaken for) a
+    # reading's own directly-asserted evidence -- `claim_authorized_value` checks
+    # this map as an independent, clearly-provenanced second path to authorization,
+    # never by mutating an existing `AttributeEvidence` entry's scope or assertion
+    # state.
+    axis_adjudications: dict[str, "AxisAdjudication"] = field(default_factory=dict)
     fact_id: str = ""
 
     @property
@@ -260,6 +272,21 @@ class ClinicalFact:
         if self.kind is FactKind.DIAGNOSIS:
             return self.disposition is not Disposition.HISTORICAL
         return self.disposition is Disposition.PERFORMED
+
+
+@dataclass(frozen=True)
+class AxisAdjudication:
+    """One code-changing axis an independent, cross-vendor verifier PAIR settled
+    from reconciled quotations alone, when neither reading's own confirmed
+    quotation stated the value (`graph_consensus.adjudicate_axis`). Stored
+    separately from `ClinicalFact.attribute_evidence` on purpose (issue #6,
+    Codex's independent re-review, F9-R13-C2): the verdict is proof ABOUT the
+    axis, not a reading's own directly-asserted quotation, and must never be
+    relabeled as, or merged with, one."""
+
+    value: str
+    proof: str
+    evidence_span_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

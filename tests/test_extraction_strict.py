@@ -626,8 +626,12 @@ def test_an_inherited_entrys_value_survives_the_second_pass():
 
 def test_an_inherited_entry_with_no_matching_relation_is_dropped_not_kept_unproven():
     """The claimed parent exists as a fact, but NO part_of relation was actually
-    emitted connecting the two -- the entry must be dropped entirely, never kept as
-    an unproven inheritance claim."""
+    emitted connecting the two -- the entry is dropped entirely, never kept as an
+    unproven inheritance claim. issue #6, Codex's independent re-review, F9-R13-C1,
+    reopened P1: dropping it leaves "attributes" claiming a value with NO surviving
+    evidence at all -- the same malformed shape the contract check exists to catch,
+    reached through the second pass instead of the first -- so this must now retry
+    and ultimately raise, never silently return a fact in that state."""
     payload = {
         "facts": [
             _fact(fact_id="F1", description="parent step"),
@@ -639,15 +643,15 @@ def test_an_inherited_entry_with_no_matching_relation_is_dropped_not_kept_unprov
         ],
         "relations": [],
     }
-    result = extract_note("note", _stub(payload))
-    component = next(f for f in result.facts if f.fact_id == "F2")
-    assert component.attribute_evidence == {}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub(payload))
 
 
 def test_same_episode_as_is_never_a_candidate_relation_for_inheritance():
     """Issue #6 F9-R5-A: same_episode_as does not imply the same laterality/anatomy/
     product/count/approach -- only part_of may even become a CANDIDATE relation for
-    an inherited attribute, regardless of direction."""
+    an inherited attribute, regardless of direction. The dropped entry leaves
+    "attributes" unsupported (F9-R13-C1 reopened P1), so this retries and raises."""
     payload = {
         "facts": [
             _fact(fact_id="F1", description="parent step"),
@@ -661,15 +665,15 @@ def test_same_episode_as_is_never_a_candidate_relation_for_inheritance():
                        "object_event_id": "F1", "state": "asserted",
                        "evidence_fact_ids": ["F1", "F2"]}],
     }
-    result = extract_note("note", _stub(payload))
-    component = next(f for f in result.facts if f.fact_id == "F2")
-    assert component.attribute_evidence == {}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub(payload))
 
 
 def test_a_reversed_part_of_direction_is_never_a_candidate_relation():
     """Issue #6 F9-R5-A: the relation exists, but runs the WRONG way (the named
     parent is asserted part_of the component instead of the reverse) -- must never
-    even become a candidate, let alone validate later."""
+    even become a candidate, let alone validate later. The dropped entry leaves
+    "attributes" unsupported (F9-R13-C1 reopened P1), so this retries and raises."""
     payload = {
         "facts": [
             _fact(fact_id="F1", description="parent step"),
@@ -683,15 +687,15 @@ def test_a_reversed_part_of_direction_is_never_a_candidate_relation():
                        "object_event_id": "F2", "state": "asserted",
                        "evidence_fact_ids": ["F1", "F2"]}],
     }
-    result = extract_note("note", _stub(payload))
-    component = next(f for f in result.facts if f.fact_id == "F2")
-    assert component.attribute_evidence == {}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub(payload))
 
 
 def test_an_inherited_entry_naming_an_unknown_parent_is_dropped():
     """An unknown parent_fact_id is not itself a schema error (a claimed parent that
     is not any fact's real id simply can never resolve against a relation) -- the
-    entry is dropped, not kept and not a crash."""
+    entry is dropped, not kept and not a crash. The dropped entry leaves
+    "attributes" unsupported (F9-R13-C1 reopened P1), so this retries and raises."""
     payload = {
         "facts": [_fact(fact_id="F1", description="component step",
                         attributes={"laterality": "right"},
@@ -700,8 +704,57 @@ def test_an_inherited_entry_naming_an_unknown_parent_is_dropped():
                              "parent_fact_id": "GHOST", "value": "right"}]})],
         "relations": [],
     }
-    result = extract_note("note", _stub(payload))
-    assert result.facts[0].attribute_evidence == {}
+    with pytest.raises(ExtractionSchemaError):
+        extract_note("note", _stub(payload))
+
+
+def test_an_inherited_entry_dropped_holds_only_its_own_fact_not_the_batch():
+    """issue #6, Codex's independent re-review, F9-R13-C1, required regression: a
+    fact whose only "inherited" evidence turns out ungrounded retries and (since
+    the SAME malformed draw repeats) eventually raises -- but a SEPARATE, cleanly
+    evidenced fact in the SAME response is not what failed. This proves the retry
+    is scoped to the actual malformed draw, not a design that could take down an
+    otherwise-clean batch: a later, corrected draw recovers the WHOLE response,
+    including the clean fact, exactly like any other retried malformed draw."""
+    bad = {
+        "facts": [
+            _fact(fact_id="F1", description="parent step"),
+            _fact(fact_id="F2", description="component step",
+                 attributes={"laterality": "right"},
+                 attribute_evidence={"laterality": [
+                     {"text": "performed on the right side", "scope": "inherited",
+                      "parent_fact_id": "F1", "value": "right"}]}),
+            _fact(fact_id="F3", description="a separately documented, clean step",
+                 attributes={"anatomy": "site two"},
+                 attribute_evidence={"anatomy": [
+                     {"text": "a separately documented, clean step at site two",
+                      "scope": "local", "assertion_state": "asserted",
+                      "value": "site two"}]}),
+        ],
+        "relations": [],
+    }
+    good = {
+        "facts": [
+            _fact(fact_id="F1", description="parent step"),
+            _fact(fact_id="F2", description="component step",
+                 attributes={"laterality": "right"},
+                 attribute_evidence={"laterality": [
+                     {"text": "performed on the right side", "scope": "local",
+                      "assertion_state": "asserted", "value": "right"}]}),
+            _fact(fact_id="F3", description="a separately documented, clean step",
+                 attributes={"anatomy": "site two"},
+                 attribute_evidence={"anatomy": [
+                     {"text": "a separately documented, clean step at site two",
+                      "scope": "local", "assertion_state": "asserted",
+                      "value": "site two"}]}),
+        ],
+        "relations": [],
+    }
+    llm = _sequenced_llm(bad, good)
+    result = extract_note("note", llm)
+    assert len(llm.call_count) == 2
+    f3 = next(f for f in result.facts if f.fact_id == "F3")
+    assert f3.attributes["anatomy"] == "site two"
 
 
 def test_inherited_scope_without_a_parent_fact_id_is_malformed():
