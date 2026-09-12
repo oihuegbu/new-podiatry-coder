@@ -347,52 +347,61 @@ def _semantic_anatomy_requirements(candidates: list[CandidateCode], source: Any
 
 def _semantic_action_requirements(candidates: list[CandidateCode], source: Any
                                   ) -> list[DescriptorRequirement]:
-    """MUST_SUPPORT requirements from each candidate's own coherent official-
-    descriptor ACTION phrase (issue #6, Codex's independent re-review, F9-R13-C).
+    """MUST_SUPPORT requirements from each candidate's own COHERENT GOVERNED
+    action identity (issue #6, Codex's independent re-review, F9-R13-C, round
+    2/P1-B): resolved from the candidate's FULL official descriptor, never a
+    structural comma-split prefix. Codex's exact-SHA reproduction proved the
+    prefix approach ('assembly procedure', 'installation procedure' -- the
+    action_phrase alone) frequently omits the target that makes the SNOMED
+    Procedure concept specific, leaving both sides UNRESOLVED even when the
+    fact-side action was genuinely governed. `procedure_relation_detail`'s own
+    `embedded=True` matcher already resolves a governed phrase CONTAINED
+    within a longer description -- feeding it the whole descriptor lets it
+    find that phrase itself, rather than requiring this module to have
+    pre-isolated it structurally first.
 
-    Unlike the anatomy axis, this is NOT gated by a compile-time single-term
-    lookup: `AuthoritativeSource.procedure_relation_detail` (the genuinely
-    SNOMED-CT-Procedure-backed comparison) is a PAIRWISE function, so
-    "governed enough" is checked here by comparing the phrase to itself --
-    a real concept graph resolving a term uniquely against its own text is a
-    faithful proxy for "this phrase names a real, unambiguous action concept",
-    the same discipline `concept_lookup`'s `unique` gate applies elsewhere.
-    An ungoverned/technique phrase this graph does not recognize resolves
-    UNRESOLVED and is dropped -- never mistaken for a real action.
+    Governed at compile time by a self-check against the candidate's own full
+    descriptor (compared to itself): a real concept graph resolving it to
+    EXACTLY ONE concept id is a faithful proxy for "this descriptor names a
+    real, unambiguous action concept" -- the same discipline `concept_lookup`'s
+    `unique` gate applies elsewhere. An ungoverned/technique descriptor this
+    graph cannot resolve uniquely returns UNRESOLVED/ambiguous and is dropped,
+    never mistaken for a real action.
 
     `selectable=False` deliberately: this requirement is never handed to
     `tiebreak._axes_from_requirements`'s generic literal-text narrowing --
-    selection happens ONLY through `_semantic_axis_status`, called directly
-    by `resolution._settle_uniqueness`, which reads THIS fact's own atomic
-    description against the candidate's action phrase through the SAME
-    governed graph, never blind text presence. `procedure_relation_detail`'s
-    "never selects or expands a code" boundary is honored literally: it is
-    consulted only inside that one axis-support test, one input among several
-    (descriptor + qualifier support + independent entailment + DOS/CMS
-    controls) a selection still requires ALL of.
+    selection happens ONLY through `semantic_axis_status`, called by
+    `resolution._select_by_semantic_axes`, which reads THIS fact's own atomic
+    description against the candidate's descriptor through the SAME governed
+    graph, never blind text presence. `procedure_relation_detail`'s "never
+    selects or expands a code" boundary is honored literally: it is consulted
+    only inside that one axis-support test, one input among several (official
+    descriptor + independent entailment + DOS/CMS controls) a selection still
+    requires ALL of.
     """
     if source is None or len(candidates) < 2:
         return []
     relate = getattr(source, "procedure_relation_detail", None)
     if not callable(relate):
         return []
-    from . import ontology as _ontology
     from . import terminology as _term
     snap_fn = getattr(source, "record_snapshot_identity", None)
 
     out: list[DescriptorRequirement] = []
     for candidate in sorted(candidates, key=lambda c: c.code):
-        feats = _ontology.parse_descriptor(candidate.descriptor)
-        phrase = feats.action_phrase.strip()
-        if not phrase:
+        descriptor = candidate.descriptor.strip()
+        if not descriptor:
             continue
         try:
-            self_check = relate(phrase, phrase)
+            self_check = relate(descriptor, descriptor)
         except Exception:
             continue
         if not isinstance(self_check, dict) or self_check.get("verdict") != _term.CONCEPT_SAME:
-            continue    # not a real, recognized governed action concept
-        found = _find_clause(candidate.descriptor, phrase)
+            continue    # not a real, uniquely recognized governed action concept
+        concept_ids = tuple((self_check.get("term_a") or {}).get("candidates") or ())
+        if not (self_check.get("term_a") or {}).get("unique") or len(concept_ids) != 1:
+            continue    # ambiguous -- never governed enough to require anything on
+        found = _find_clause(candidate.descriptor, descriptor)
         if found is None:
             continue
         clause, offset = found
@@ -406,12 +415,12 @@ def _semantic_action_requirements(candidates: list[CandidateCode], source: Any
             requirement_id=f"semantic_action:{candidate.code}:{len(out)}",
             axis="semantic_action", candidate_code=candidate.code, required=True,
             role=RequirementRole.MUST_SUPPORT,
-            expected=(phrase,),
+            expected=(descriptor,),
             authority_clause=clause, authority_offset=offset,
             authority_source_text=candidate.descriptor,
             source_identity={"kind": "semantic_concept", "system": candidate.system,
                              "authority": dict(candidate.authority or {}),
-                             "concept_axis": "action",
+                             "concept_axis": "action", "concept_id": concept_ids[0],
                              "terminology_identity": dict(
                                  self_check.get("source_identity") or {}),
                              "descriptor_snapshot": descriptor_snapshot},
@@ -421,61 +430,28 @@ def _semantic_action_requirements(candidates: list[CandidateCode], source: Any
 
 def _semantic_qualifier_requirements(candidates: list[CandidateCode], source: Any
                                      ) -> list[DescriptorRequirement]:
-    """Candidate-differing qualifier/approach requirements from each candidate's
-    own official descriptor (issue #6, Codex's independent re-review, F9-R13-C).
+    """DO NOT manufacture approach/qualifier requirements from
+    `ontology.parse_descriptor`'s `anatomy_phrase` (issue #6, Codex's
+    independent re-review, F9-R13-C, round 2/P1-B). `anatomy_phrase` is the
+    ENTIRE descriptor tail after the first comma/semicolon -- it can be
+    anatomy, technique, extent, or several clauses at once; the source itself
+    calls it `anatomy_phrase`, and re-labeling it a "qualifier"/"approach" for
+    THIS axis was type confusion, not a design nuance. Codex's exact-SHA
+    reproduction proved this concretely: a tail like "structure alpha" or
+    "structure beta" compiled as a `semantic_qualifier` requirement and was
+    compared against the fact's typed `approach` attribute, which it is not
+    and never was -- always UNRESOLVED, keeping the selector inert regardless
+    of the missing-snapshot fix.
 
-    Honest limitation, disclosed rather than hidden: `ontology.parse_descriptor`
-    splits a descriptor at its FIRST comma/semicolon into an action phrase and
-    ONE remaining tail -- there is no third, independently-parsed "qualifier"
-    segment in this repo today. This reuses that same tail text (the same
-    source `_semantic_anatomy_requirements` reads), compiled under a
-    DIFFERENT axis name and a DIFFERENT, stricter support test, only when the
-    tied candidates' tails actually differ (a value every candidate shares
-    says nothing about which one the record means). Where a candidate's tail
-    happens to equal its own already-governed anatomy phrase, this axis
-    simply never finds typed evidence for it (the fact's `approach` attribute,
-    when documented, is never the same value as an anatomy phrase) and stays
-    UNRESOLVED -- inert, never a false positive.
-
-    `selectable=False` for the same reason as the action axis above: this
-    must never enter `tiebreak.narrow`'s blind literal-text narrowing (the
-    reverted `_APPROACH_WORDS` mistake `discriminating_axes` warns against).
-    Support is established ONLY by `_semantic_axis_status`, and only from
-    this fact's own typed, claim-authorized `approach` attribute -- never
-    borrowed from anatomy or action evidence, never from raw text presence.
+    Returns nothing until a genuinely, independently typed descriptor
+    qualifier facet exists in this repo (a real per-code field this codebase
+    does not yet have) -- not a stand-in, not a heuristic. An untyped
+    residual descriptor difference remains exactly what it already is
+    elsewhere: `tiebreak.AXIS_DESCRIPTOR_TERM`, audited but never selecting,
+    or (when no other axis settles it) one precise candidate-missing-fact
+    line -- never silently promoted to a requirement here.
     """
-    if len(candidates) < 2:
-        return []
-    from . import ontology as _ontology
-
-    tails: dict[str, str] = {}
-    for c in candidates:
-        tail = _ontology.parse_descriptor(c.descriptor).anatomy_phrase.strip()
-        if tail:
-            tails[c.code] = tail
-    if len(set(tails.values())) < 2:
-        return []    # every tied candidate's tail is identical -- no difference to require
-
-    out: list[DescriptorRequirement] = []
-    by_code = {c.code: c for c in candidates}
-    for code, tail in sorted(tails.items()):
-        candidate = by_code[code]
-        found = _find_clause(candidate.descriptor, tail)
-        if found is None:
-            continue
-        clause, offset = found
-        out.append(DescriptorRequirement(
-            requirement_id=f"semantic_qualifier:{code}:{len(out)}",
-            axis="semantic_qualifier", candidate_code=code, required=True,
-            role=RequirementRole.MUST_SUPPORT,
-            expected=(tail,),
-            authority_clause=clause, authority_offset=offset,
-            authority_source_text=candidate.descriptor,
-            source_identity={"kind": "descriptor_attribute", "system": candidate.system,
-                             "authority": dict(candidate.authority or {}),
-                             "concept_axis": "qualifier"},
-            selectable=False, queryable=False))
-    return out
+    return []
 
 
 def _norm_qualifier(value: Any) -> str:

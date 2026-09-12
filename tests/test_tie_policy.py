@@ -1425,13 +1425,31 @@ class MustSupportGroundedEliminationTest(unittest.TestCase):
 
 class SemanticAxisSelectionTest(unittest.TestCase):
     """issue #6, Codex's independent re-review (F9-R13-C): the governed
-    action/qualifier composite selection, exercised through the REAL
-    deterministic `resolve()` path (`resolution._decide` ->
-    `_select_by_semantic_axes`) -- never a parallel selector. Synthetic,
-    agnostic vocabulary throughout, matching this file's own convention."""
+    action composite selection, exercised through the REAL deterministic
+    `resolve()` path (`resolution._decide` -> `_select_by_semantic_axes`) --
+    never a parallel selector. Synthetic, agnostic vocabulary throughout,
+    matching this file's own convention.
+
+    Round 2 (P1-B): the governed self-check and the judgement-time
+    comparison both now run against each candidate's FULL official
+    descriptor, never a structural comma-split action-phrase prefix -- so
+    every fixture's `procedure_relation` map is keyed on `candidate.
+    descriptor` in full. `fact.description` (not an evidence quote) is what
+    `semantic_axis_status`'s action branch actually compares -- earlier
+    fixtures in this class accidentally set `fact.description` to the SAME
+    literal text as the candidate's action phrase, which meant the
+    "governed synonym, never literal match" claim was never really
+    exercised; these fixtures now deliberately use a DIFFERENT phrase for
+    `fact.description` than any candidate's own descriptor wording."""
 
     ACTION_A = _cand("CAND_ACTION_A", "assembly procedure, structure alpha", 0.9)
     ACTION_B = _cand("CAND_ACTION_B", "installation procedure, structure alpha", 0.9)
+
+    def _self_check(self, candidate, concept_id):
+        """The governed self-check entry `_semantic_action_requirements`
+        needs to compile a requirement for `candidate` at all."""
+        return {(candidate.descriptor, candidate.descriptor): {
+            "verdict": "same", "term_a": {"candidates": [concept_id], "unique": True}}}
 
     def _action_source(self, cands, relation):
         return MockSource(
@@ -1441,17 +1459,17 @@ class SemanticAxisSelectionTest(unittest.TestCase):
             procedure_relation=relation)
 
     def test_one_fully_supported_action_candidate_selects(self):
-        """A governed SYNONYM of CAND_ACTION_A's own action phrase is what the
-        fact documents -- never a literal match -- and CAND_ACTION_B's own
-        action phrase is never confirmed at all, so exactly one candidate
+        """A governed SYNONYM of CAND_ACTION_A's own full descriptor is what
+        the fact documents -- never a literal match -- and CAND_ACTION_B's
+        own descriptor is never confirmed at all, so exactly one candidate
         ends up fully supported."""
-        fact = _fact("assembly procedure",
+        fact = _fact("fitting procedure performed",
                      "fitting procedure performed on structure alpha")
-        source = self._action_source(
-            (self.ACTION_A, self.ACTION_B),
-            {("assembly procedure", "assembly procedure"): {"verdict": "same"},
-             ("installation procedure", "installation procedure"): {"verdict": "same"},
-             ("fitting procedure performed", "assembly procedure"): {"verdict": "same"}})
+        relation = {}
+        relation.update(self._self_check(self.ACTION_A, "C_ACTION_A"))
+        relation.update(self._self_check(self.ACTION_B, "C_ACTION_B"))
+        relation[(fact.description, self.ACTION_A.descriptor)] = {"verdict": "same"}
+        source = self._action_source((self.ACTION_A, self.ACTION_B), relation)
         llm = _sv.judge(entails=lambda d: True, reason="entailed")
         line = resolve(_request(fact), source, reconciliation=_agreed("span-0"), llm=llm)
         self.assertTrue(line.resolved, line.rationale)
@@ -1459,34 +1477,37 @@ class SemanticAxisSelectionTest(unittest.TestCase):
 
     def test_two_fully_supported_action_candidates_remain_a_precise_tie(self):
         """The fact's own description happens to be governed-equivalent to
-        BOTH candidates' action phrases -- neither is uniquely confirmed, so
-        this must never select either one; the existing tie policy still
-        holds the line."""
-        fact = _fact("assembly procedure", "fitting procedure performed")
-        source = self._action_source(
-            (self.ACTION_A, self.ACTION_B),
-            {("assembly procedure", "assembly procedure"): {"verdict": "same"},
-             ("installation procedure", "installation procedure"): {"verdict": "same"},
-             ("fitting procedure performed", "assembly procedure"): {"verdict": "same"},
-             ("fitting procedure performed", "installation procedure"): {"verdict": "same"}})
+        BOTH candidates' full descriptors -- neither is uniquely confirmed,
+        so this must never select either one; the existing tie policy
+        still holds the line."""
+        fact = _fact("fitting procedure performed",
+                     "fitting procedure performed on structure alpha")
+        relation = {}
+        relation.update(self._self_check(self.ACTION_A, "C_ACTION_A"))
+        relation.update(self._self_check(self.ACTION_B, "C_ACTION_B"))
+        relation[(fact.description, self.ACTION_A.descriptor)] = {"verdict": "same"}
+        relation[(fact.description, self.ACTION_B.descriptor)] = {"verdict": "same"}
+        source = self._action_source((self.ACTION_A, self.ACTION_B), relation)
         line = resolve(_request(fact), source, reconciliation=_agreed("span-0"))
         self.assertFalse(line.resolved, line.rationale)
         self.assertIsNone(line.chosen)
 
-    def test_same_governed_action_but_differing_unevidenced_qualifier_does_not_select(self):
-        """Both candidates share the IDENTICAL action phrase (so action alone
-        cannot discriminate) and differ only in qualifier text the fact
-        never documents via a typed `approach` attribute -- action support
-        alone must never be enough; this must stay a tie, not a false
-        selection."""
-        same_action_a = _cand("CAND_QUAL_A", "assembly procedure, open approach", 0.9)
-        same_action_b = _cand("CAND_QUAL_B", "assembly procedure, percutaneous approach", 0.9)
-        fact = _fact("assembly procedure", "assembly procedure performed today")
-        source = self._action_source(
-            (same_action_a, same_action_b),
-            {("assembly procedure", "assembly procedure"): {"verdict": "same"},
-             ("assembly procedure performed today", "assembly procedure"):
-                 {"verdict": "same"}})
+    def test_a_supported_candidate_with_an_unrepresented_rival_remains_a_tie(self):
+        """issue #6, Codex's independent re-review (F9-R13-C, round 2/P1-C):
+        CAND_ACTION_B's own descriptor never resolves against the governed
+        graph at all (no self-check configured for it -- unrepresented, not
+        disconfirmed), while CAND_ACTION_A is fully, governedly supported.
+        Missing authority coverage for a rival is not evidence the rival is
+        wrong -- this must never select CAND_ACTION_A by default; it must
+        stay a tie."""
+        fact = _fact("fitting procedure performed",
+                     "fitting procedure performed on structure alpha")
+        relation = dict(self._self_check(self.ACTION_A, "C_ACTION_A"))
+        relation[(fact.description, self.ACTION_A.descriptor)] = {"verdict": "same"}
+        # Deliberately no entry at all for CAND_ACTION_B's own descriptor
+        # self-check -- it resolves UNRESOLVED, and no semantic_action
+        # requirement compiles for it.
+        source = self._action_source((self.ACTION_A, self.ACTION_B), relation)
         line = resolve(_request(fact), source, reconciliation=_agreed("span-0"))
         self.assertFalse(line.resolved, line.rationale)
         self.assertIsNone(line.chosen)

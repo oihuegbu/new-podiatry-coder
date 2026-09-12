@@ -449,37 +449,63 @@ class SemanticActionAndQualifierRequirementTest(unittest.TestCase):
         self.assertEqual([r for r in reqs if r.axis == "semantic_action"], [])
 
     def test_a_governed_action_compiles_one_atomic_selectable_false_requirement(self):
+        """issue #6, Codex's independent re-review (F9-R13-C, round 2/P1-B):
+        the governed self-check (and the judgement-time comparison) now run
+        against each candidate's FULL official descriptor, never a
+        structural comma-split prefix -- the exact-SHA reproduction proved a
+        prefix-only phrase frequently omits the target that makes the
+        concept specific."""
         source = MockSource(
             records=self._records(self.ACTION_A, self.ACTION_B),
             procedure_relation={
-                ("assembly procedure", "assembly procedure"): {
-                    "verdict": "same", "source_identity": {"source_id": "snomed_procedure_terms",
-                                                            "sha256": "abc"}},
-                ("installation procedure", "installation procedure"): {"verdict": "same"}})
+                (self.ACTION_A.descriptor, self.ACTION_A.descriptor): {
+                    "verdict": "same",
+                    "term_a": {"candidates": ["C_ACTION_A"], "unique": True},
+                    "source_identity": {"source_id": "snomed_procedure_terms",
+                                        "sha256": "abc"}},
+                (self.ACTION_B.descriptor, self.ACTION_B.descriptor): {
+                    "verdict": "same",
+                    "term_a": {"candidates": ["C_ACTION_B"], "unique": True}}})
         reqs = [r for r in req.compile_requirements([self.ACTION_A, self.ACTION_B], source=source)
                if r.axis == "semantic_action"]
         by_code = {r.candidate_code: r for r in reqs}
         self.assertEqual(set(by_code), {"CAND_ACTION_A", "CAND_ACTION_B"})
-        self.assertEqual(by_code["CAND_ACTION_A"].expected, ("assembly procedure",))
+        self.assertEqual(by_code["CAND_ACTION_A"].expected, (self.ACTION_A.descriptor,))
         self.assertEqual(by_code["CAND_ACTION_A"].role, req.RequirementRole.MUST_SUPPORT)
         self.assertFalse(by_code["CAND_ACTION_A"].selectable,
                          "must never enter tiebreak's generic literal narrowing")
+        self.assertEqual(by_code["CAND_ACTION_A"].source_identity["concept_id"], "C_ACTION_A")
         self.assertEqual(by_code["CAND_ACTION_A"].source_identity["terminology_identity"],
                          {"source_id": "snomed_procedure_terms", "sha256": "abc"})
 
-    def test_qualifier_requirements_compile_only_when_candidates_differ(self):
-        same_tail_a = _cand("CAND_SAME_A", "assembly procedure, structure alpha")
-        same_tail_b = _cand("CAND_SAME_B", "installation procedure, structure alpha")
-        source = MockSource(records=self._records(same_tail_a, same_tail_b))
-        reqs = req.compile_requirements([same_tail_a, same_tail_b], source=source)
-        self.assertEqual([r for r in reqs if r.axis == "semantic_qualifier"], [])
+    def test_an_ambiguous_action_match_never_compiles_a_requirement(self):
+        """Fail-closed, the same discipline the anatomy axis already applies:
+        a descriptor resolving to MORE than one concept id is not governed
+        enough to require anything on."""
+        source = MockSource(
+            records=self._records(self.ACTION_A, self.ACTION_B),
+            procedure_relation={
+                (self.ACTION_A.descriptor, self.ACTION_A.descriptor): {
+                    "verdict": "same",
+                    "term_a": {"candidates": ["C1", "C2"], "unique": False}}})
+        reqs = [r for r in req.compile_requirements([self.ACTION_A, self.ACTION_B], source=source)
+               if r.axis == "semantic_action" and r.candidate_code == "CAND_ACTION_A"]
+        self.assertEqual(reqs, [])
 
-        differing_a = _cand("CAND_DIFF_A", "assembly procedure, open approach")
-        differing_b = _cand("CAND_DIFF_B", "assembly procedure, percutaneous approach")
-        reqs2 = [r for r in req.compile_requirements([differing_a, differing_b], source=source)
-                if r.axis == "semantic_qualifier"]
-        self.assertEqual({r.candidate_code for r in reqs2}, {"CAND_DIFF_A", "CAND_DIFF_B"})
-        self.assertFalse(reqs2[0].selectable)
+    def test_qualifier_requirements_never_compile_from_the_descriptor_tail(self):
+        """issue #6, Codex's independent re-review (F9-R13-C, round 2/P1-B):
+        `_semantic_qualifier_requirements` must never manufacture an
+        `approach` requirement from `ontology.parse_descriptor`'s
+        `anatomy_phrase` -- the source itself calls it anatomy, and
+        re-labeling it a qualifier was type confusion, reproduced exactly on
+        differing tails that are plainly anatomy, not approach."""
+        differing_a = _cand("CAND_DIFF_A", "assembly procedure, structure alpha")
+        differing_b = _cand("CAND_DIFF_B", "assembly procedure, structure beta")
+        source = MockSource(records=self._records(differing_a, differing_b))
+        reqs = req.compile_requirements([differing_a, differing_b], source=source)
+        self.assertEqual([r for r in reqs if r.axis == "semantic_qualifier"], [])
+        self.assertEqual(req._semantic_qualifier_requirements(
+            [differing_a, differing_b], source), [])
 
 
 class SemanticAxisStatusTest(unittest.TestCase):

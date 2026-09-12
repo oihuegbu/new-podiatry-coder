@@ -64,6 +64,19 @@ services:
       - ./doctors_notes:/app/attachments:ro
       - ./output:/app/output
       - ./logs:/app/logs
+      # issue #6, Codex's independent re-review (F9-R13-C P1-A): the licensed
+      # SNOMED CT RF2 release `tools/build_snomed_procedure_terms.py` (and
+      # build_snomed_concept_terms.py) consume -- `run.ensure_procedure_
+      # authority()` builds `data/codes/snomed_procedure_terms.json` from
+      # this at container startup if the snapshot is missing. Read-only:
+      # this container only ever READS the release, never modifies it.
+      # `SNOMED_RF2_HOST_DIR` is a deployment-specific host path (like the
+      # checkpoint anchor above), so it lives in .env, not hard-coded here;
+      # `./data/sources` is the tracked, always-valid default when unset --
+      # the SAME resolution order build_snomed_procedure_terms.py's own
+      # `_find_release` already documents (--release / $SNOMED_RF2_DIR /
+      # data/sources / ~/snomed / /snomed).
+      - ${SNOMED_RF2_HOST_DIR:-./data/sources}:/app/data/sources:ro
       # Named volume (not a bind mount) so it auto-populates from the image's
       # baked-in data/ (codes/, global_periods.json, etc.) on first run, then
       # persists everything written back — critically compliance.db, which
@@ -143,7 +156,8 @@ services:
       # tests against the mounted (current) app code (observed live).
       - ./tests:/app/tests
       - hf_cache:/root/.cache/huggingface
-    # entrypoint (not command) so the Qdrant-readiness wait always runs even
+    # entrypoint (not command) so the Qdrant-readiness wait -- and the
+    # procedure-terminology-authority check added below -- always run even
     # when `docker compose run app <override>` replaces the command — e.g.
     # `docker compose run --rm app python run.py --setup-only`.
     entrypoint:
@@ -156,6 +170,16 @@ services:
           sleep 10
         done
         echo 'Qdrant is ready.'
+        # issue #6, Codex's independent re-review (F9-R13-C P1-A): the
+        # governed semantic_action requirement axis depends on the SNOMED
+        # CT Procedure snapshot run.ensure_procedure_authority() builds from
+        # the mounted RF2 release. Wired ONCE here, in the deployment/
+        # bootstrap path -- before run.py's own process starts -- rather
+        # than inside run.py's main(), so hermetic tests that call
+        # entrypoint.main() in-process (which never go through this
+        # compose entrypoint) are never gated by a check they have no
+        # licensed RF2 release to satisfy.
+        python -c "from run import ensure_procedure_authority; ensure_procedure_authority()" || exit 1
         exec "$@"
       - --
     # The deployed coding run. Since issue #6 finding F6-R4-A1 this entrypoint

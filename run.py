@@ -572,6 +572,53 @@ def reject_retired_flags(args) -> int | None:
     return None
 
 
+def ensure_procedure_authority() -> None:
+    """Bootstrap check, run ONCE per deployment invocation, before any note is
+    processed (issue #6, Codex's independent re-review, F9-R13-C P1-A): the
+    governed `semantic_action` requirement axis depends on `data/codes/
+    snomed_procedure_terms.json` (the SNOMED CT Procedure hierarchy snapshot
+    `AuthoritativeSource.procedure_relation_detail` reads). The product owner
+    has already supplied the licensed RF2 release and authorized automated
+    preparation -- this is a genuine deployment-readiness dependency of the
+    selector `resolution._select_by_semantic_axes` now relies on, not
+    optional infrastructure expansion.
+
+    Never silently runs an inert selector: if the snapshot is missing, this
+    invokes the SAME existing, registered refresh target a human operator
+    would (`tools/refresh_authoritative_data.py snomed_procedure_terms
+    --no-integrate`) exactly as build_snomed_procedure_terms.py's own
+    docstring already documents it being run; if the release still cannot be
+    found/built (or the rebuilt snapshot still does not load), this raises
+    ONE precise readiness error before any paid model call, rather than
+    proceeding with `semantic_action` compiling nothing for every candidate,
+    which would look identical to "the note simply had no governed action to
+    find" instead of "the required authority was never available"."""
+    from claude_coder.terminology import ConceptRelationIndex
+    try:
+        ConceptRelationIndex.load_snapshot(source_id="snomed_procedure_terms")
+        return
+    except Exception:
+        pass
+    import subprocess
+    root = Path(__file__).resolve().parent
+    completed = subprocess.run(
+        [sys.executable, "tools/refresh_authoritative_data.py",
+         "snomed_procedure_terms", "--no-integrate"],
+        cwd=str(root), check=False)
+    if completed.returncode:
+        raise RuntimeError(
+            "required procedure terminology snapshot (snomed_procedure_terms) could "
+            "not be built -- confirm the licensed SNOMED CT RF2 release is mounted "
+            "and readable (SNOMED_RF2_DIR / data/sources), then retry")
+    try:
+        ConceptRelationIndex.load_snapshot(source_id="snomed_procedure_terms")
+    except Exception as exc:
+        raise RuntimeError(
+            "procedure terminology snapshot was rebuilt but still does not load "
+            f"({type(exc).__name__}: {exc}) -- the semantic_action axis cannot run "
+            "safely until this is resolved") from exc
+
+
 # ------------------------------------------------------------------------ main
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
@@ -651,8 +698,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.setup_only:
         try:
             AuthoritativeSource().prepare(force_rebuild_index=args.rebuild_index)
+            ensure_procedure_authority()
         except AuthoritativeDataUnavailable as exc:
             logger.error(f"--setup-only: claim-assembly data is not readable: {exc}")
+            return 1
+        except Exception as exc:
+            logger.error(f"--setup-only: procedure terminology authority is not "
+                        f"ready: {exc}")
             return 1
         logger.info("\n--setup-only: dependencies loaded, no notes processed. Exiting.")
         return 0

@@ -1449,37 +1449,42 @@ def _select_by_semantic_axes(fact: ClinicalFact, remaining: list[CandidateCode],
                              requirements: tuple, reconciliation, source
                              ) -> CandidateCode | None:
     """One additional candidate-selection condition (issue #6, Codex's
-    independent re-review, F9-R13-C), tried only among candidates several
-    OTHER independent eliminations already left standing: select the ONE
-    remaining candidate for which EVERY one of its own compiled
-    `semantic_action`/`semantic_qualifier` requirements reads SUPPORTED via
-    `requirement.semantic_axis_status` -- never eliminates a candidate,
-    never guesses. A candidate with no compiled semantic requirement of its
-    own is never selectable through this path (no positive evidence to
-    select it on), but its presence never blocks another candidate that DOES
-    have full support -- exactly the same non-blocking discipline this
-    codebase already applies elsewhere. Zero or more than one fully-supported
-    candidate returns None, deferring to the existing tie policy
-    (`tiebreak.narrow`, then a provider/coder tie question) completely
-    unchanged.
+    independent re-review, F9-R13-C): select the ONE remaining candidate for
+    which EVERY one of its own compiled `semantic_action` requirements reads
+    SUPPORTED via `requirement.semantic_axis_status` -- never eliminates a
+    candidate, never guesses.
+
+    Round 2 (P1-C): requires COMPLETE `semantic_action` coverage across the
+    WHOLE remaining/tied set before this may select anything at all. Codex's
+    exact-SHA reproduction proved the earlier "a candidate with no compiled
+    requirement is simply skipped" rule unsafe: a governed, fully-supported
+    candidate could win outright merely because a surviving rival's action
+    phrase never resolved (no authority coverage for IT), even though missing
+    coverage for that rival is not evidence it is wrong -- it is an absence
+    of information, and absence is never evidence either way. If even ONE
+    remaining candidate has no `semantic_action` requirement of its own, this
+    returns None immediately and defers completely to the existing tie policy
+    (`tiebreak.narrow`, then a provider/coder tie question) -- exactly as
+    before this axis existed.
     """
     from . import requirement as _requirement
-    semantic_reqs = [r for r in requirements
-                    if r.axis in ("semantic_action", "semantic_qualifier")]
+    semantic_reqs = [r for r in requirements if r.axis == "semantic_action"]
     if not semantic_reqs:
         return None
-    fully_supported: list[CandidateCode] = []
-    for cand in remaining:
-        own = [r for r in semantic_reqs if r.candidate_code == cand.code]
-        if not own:
-            continue
-        statuses = [_requirement.semantic_axis_status(r, fact, reconciliation, source)
-                   for r in own]
-        if all(s == _requirement.RequirementStatus.SUPPORTED for s in statuses):
-            fully_supported.append(cand)
-    if len(fully_supported) == 1:
-        return fully_supported[0]
-    return None
+    remaining_codes = {c.code for c in remaining}
+    action_by_code = {
+        code: [r for r in semantic_reqs if r.candidate_code == code]
+        for code in remaining_codes
+    }
+    if any(not action_by_code[code] for code in remaining_codes):
+        return None    # incomplete coverage -- missing authority is not evidence
+    supported = [
+        cand for cand in remaining
+        if all(_requirement.semantic_axis_status(r, fact, reconciliation, source)
+              == _requirement.RequirementStatus.SUPPORTED
+              for r in action_by_code[cand.code])
+    ]
+    return supported[0] if len(supported) == 1 else None
 
 
 def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
