@@ -133,9 +133,18 @@ class GraphNode:
     encounter_id: str = ""
     date_of_service: str | None = None
     service_episode_id: str | None = None
-    #: Axes two independent readings disagreed on that the ORIGINAL PAGE could not
-    #: settle. Non-empty means a targeted provider query, never a coder queue.
+    #: STRUCTURAL axes only (`occurrence_status`/`assertion_certainty`/`beneficiary`)
+    #: two independent readings disagreed on that the ORIGINAL PAGE could not settle.
+    #: Non-empty means a targeted provider query, never a coder queue.
     axis_conflicts: tuple[str, ...] = ()
+    #: CLINICAL attribute axes (anatomy, approach, product, laterality, count, ...)
+    #: two independent readings disagreed on that the ORIGINAL PAGE could not settle
+    #: (issue #6, Codex's independent re-review, F9-R18-A) -- one record per axis
+    #: (axis, provider_question, value_primary, value_second), projected from
+    #: `ClinicalFact.attribute_axis_conflicts`. Deliberately separate from
+    #: `axis_conflicts`: never blocks eligibility/retrieval on its own; see
+    #: `AttributeAxisConflict`'s own docstring for why.
+    attribute_axis_conflicts: tuple[dict[str, Any], ...] = ()
 
     def as_record(self) -> dict[str, Any]:
         return {
@@ -159,6 +168,7 @@ class GraphNode:
             "date_of_service": self.date_of_service,
             "service_episode_id": self.service_episode_id,
             "axis_conflicts": list(self.axis_conflicts),
+            "attribute_axis_conflicts": [dict(r) for r in self.attribute_axis_conflicts],
         }
 
 
@@ -511,6 +521,13 @@ def _node_from_fact(fact, intent: ClaimLineIntent | None, encounter_id: str,
         service_episode_id=(intent.service_episode_id if intent is not None else None),
         axis_conflicts=tuple(_clean(c) for c in
                              (getattr(fact, "axis_conflicts", None) or []) if _clean(c)),
+        attribute_axis_conflicts=tuple(
+            {"axis": axis,
+             "provider_question": str(getattr(c, "provider_question", "") or ""),
+             "value_primary": str(getattr(c, "value_primary", "") or ""),
+             "value_second": str(getattr(c, "value_second", "") or "")}
+            for axis, c in sorted(
+                (getattr(fact, "attribute_axis_conflicts", None) or {}).items())),
     )
 
 

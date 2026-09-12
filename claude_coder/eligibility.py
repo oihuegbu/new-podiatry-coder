@@ -82,13 +82,15 @@ class ClaimLineIntent:
     fact_digest: str = ""
 
 
-_SNAPSHOT_DIGEST_VERSION = "fsd-v6"   # v3: added governed_terms (issue #6 F7-R3-C4)
+_SNAPSHOT_DIGEST_VERSION = "fsd-v7"   # v3: added governed_terms (issue #6 F7-R3-C4)
                                       # v4: added attribute_evidence (issue #6 F9-R5-B)
                                       # v5: added attribute_evidence_gaps (issue #6,
                                       #     Codex's independent re-review, F9-R14-A)
                                       # v6: attribute_evidence_gaps now also binds the
                                       #     rejected value/evidence/relation, not just
                                       #     axis+reason (F9-R15-A)
+                                      # v7: added attribute_axis_conflicts (issue #6,
+                                      #     Codex's independent re-review, F9-R18-A)
 
 
 def fact_snapshot_digest(fact) -> str:
@@ -128,6 +130,18 @@ def fact_snapshot_digest(fact) -> str:
                   getattr(gap, "rejected_evidence_span_ids", None) or ()),
               "rejected_relation_id": str(getattr(gap, "rejected_relation_id", "") or "")}
         for axis, gap in sorted((getattr(fact, "attribute_evidence_gaps", None) or {}).items())}
+    # issue #6, Codex's independent re-review (F9-R18-A): a clinical-attribute axis
+    # conflict is release-relevant (resolution.py assesses its materiality against
+    # the retrieved shortlist) even though it never blocks eligibility itself -- a
+    # post-eligibility change to it (e.g. `graph_consensus.apply_resolutions` later
+    # resolving one) must trip this digest exactly like every other release-relevant
+    # field above.
+    attribute_axis_conflicts = {
+        axis: {"provider_question": str(getattr(c, "provider_question", "") or ""),
+              "value_primary": str(getattr(c, "value_primary", "") or ""),
+              "value_second": str(getattr(c, "value_second", "") or "")}
+        for axis, c in sorted(
+            (getattr(fact, "attribute_axis_conflicts", None) or {}).items())}
     payload = {
         "v": _SNAPSHOT_DIGEST_VERSION,
         "kind": fact.kind.value,
@@ -141,6 +155,7 @@ def fact_snapshot_digest(fact) -> str:
         "governed_terms": governed_terms,
         "attribute_evidence": attribute_evidence_records(fact),
         "attribute_evidence_gaps": attribute_evidence_gaps,
+        "attribute_axis_conflicts": attribute_axis_conflicts,
         "evidence": evidence,
     }
     return hashlib.sha256(

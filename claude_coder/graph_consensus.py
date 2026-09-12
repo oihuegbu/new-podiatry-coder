@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-from .models import AxisAdjudication, Disposition, RelationState
+from .models import AttributeAxisConflict, AxisAdjudication, Disposition, RelationState
 
 #: A callable (system_prompt, user_prompt) -> JSON string -- the SAME shape
 #: `extraction.LLMFn`/`verify`'s judging calls already use.
@@ -239,6 +239,14 @@ class AxisResolution:
     evidence_span_ids: tuple[str, ...] = ()
     #: The precise, self-contained question to send when the document cannot settle it.
     provider_question: str = ""
+    # issue #6, Codex's independent re-review (F9-R18-A): the two disagreeing readings'
+    # own values, carried onto an UNRESOLVED resolution so `apply_resolutions` can route
+    # a CLINICAL attribute's conflict into `AttributeAxisConflict` with enough context
+    # for `resolution.py`'s later materiality check to search the document for either
+    # literal value -- never populated for a RESOLVED resolution, which already carries
+    # its own settled `accepted_value`.
+    value_primary: str = ""
+    value_second: str = ""
 
     @property
     def unresolved(self) -> bool:
@@ -250,7 +258,9 @@ class AxisResolution:
                 "accepted_from": self.accepted_from, "proof": self.proof,
                 "detail": self.detail,
                 "evidence_span_ids": list(self.evidence_span_ids),
-                "provider_question": self.provider_question}
+                "provider_question": self.provider_question,
+                "value_primary": self.value_primary,
+                "value_second": self.value_second}
 
 
 @dataclass(frozen=True)
@@ -1169,7 +1179,8 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
                 node_id=item.node_id, axis=item.axis, verdict=AxisVerdict.UNRESOLVED,
                 detail=message,
                 evidence_span_ids=tuple(dict.fromkeys(p_spans + s_spans)),
-                provider_question=message))
+                provider_question=message,
+                value_primary=item.value_primary, value_second=item.value_second))
             continue
 
         winner = ""
@@ -1228,7 +1239,8 @@ def resolve(disagreements: list[AxisDisagreement], primary_by_id: dict,
             node_id=item.node_id, axis=item.axis,
             verdict=AxisVerdict.UNRESOLVED, detail=detail,
             evidence_span_ids=tuple(dict.fromkeys(p_spans + s_spans)),
-            provider_question=(_question(item) if settleable else "")))
+            provider_question=(_question(item) if settleable else ""),
+            value_primary=item.value_primary, value_second=item.value_second))
     return out
 
 
@@ -1266,10 +1278,31 @@ def apply_resolutions(primary_by_id: dict, second_by_node: dict,
             # from that control.
             if not resolution.provider_question:
                 continue
-            conflicts = list(getattr(fact, "axis_conflicts", None) or [])
-            if resolution.provider_question not in conflicts:
-                conflicts.append(resolution.provider_question)
-            fact.axis_conflicts = conflicts
+            # issue #6, Codex's independent re-review (F9-R18-A): only the three
+            # STRUCTURAL axes (whether it happened, how certain, who it was for)
+            # are a real reason to hold the EVENT before retrieval even exists --
+            # disagreeing on those isn't something any candidate set could settle.
+            # A CLINICAL attribute (anatomy, approach, product, laterality, count,
+            # ...) may or may not matter to any candidate that will ever be
+            # retrieved; routing it into `axis_conflicts` here pre-judged its
+            # materiality before a shortlist existed to judge it against, and
+            # blocked retrieval outright for axes no candidate would ever have
+            # cared about. It goes into the separate, non-blocking
+            # `attribute_axis_conflicts` instead; `resolution.py` assesses it once
+            # real candidates exist.
+            if resolution.axis in _STRUCTURAL_AXES:
+                conflicts = list(getattr(fact, "axis_conflicts", None) or [])
+                if resolution.provider_question not in conflicts:
+                    conflicts.append(resolution.provider_question)
+                fact.axis_conflicts = conflicts
+                continue
+            attr_conflicts = dict(getattr(fact, "attribute_axis_conflicts", None) or {})
+            attr_conflicts[resolution.axis] = AttributeAxisConflict(
+                axis=resolution.axis,
+                provider_question=resolution.provider_question,
+                value_primary=resolution.value_primary,
+                value_second=resolution.value_second)
+            fact.attribute_axis_conflicts = attr_conflicts
             continue
         if resolution.accepted_from == "adjudicated":
             _write_axis(fact, resolution.axis, resolution.accepted_value)

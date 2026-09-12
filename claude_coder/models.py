@@ -251,6 +251,14 @@ class ClinicalFact:
     # suppress its candidate set), naming the exact gapped axis.
     attribute_evidence_gaps: dict[str, "AttributeEvidenceGap"] = field(
         default_factory=dict)
+    # A CLINICAL attribute axis (never one of `graph_consensus._STRUCTURAL_AXES`)
+    # two independent readings disagreed on, unsettled by the original page
+    # (issue #6, Codex's independent re-review, F9-R18-A). Deliberately NOT
+    # `axis_conflicts` -- see `AttributeAxisConflict`'s docstring. Never blocks
+    # eligibility/retrieval on its own; `resolution.py` assesses materiality
+    # against the real candidate shortlist once one exists.
+    attribute_axis_conflicts: dict[str, "AttributeAxisConflict"] = field(
+        default_factory=dict)
     fact_id: str = ""
 
     @property
@@ -323,6 +331,37 @@ class AttributeEvidenceGap:
     rejected_value: str = ""
     rejected_evidence_span_ids: tuple[str, ...] = ()
     rejected_relation_id: str = ""
+
+
+@dataclass(frozen=True)
+class AttributeAxisConflict:
+    """One CLINICAL attribute axis (anatomy, approach, product, laterality,
+    count, etc. -- anything NOT in `graph_consensus._STRUCTURAL_AXES`) that
+    two independent readings of the original document disagreed on and the
+    original page could not settle (issue #6, Codex's independent re-review,
+    F9-R18-A).
+
+    Kept SEPARATE from `ClinicalFact.axis_conflicts` on purpose:
+    `axis_conflicts` is reserved for the three STRUCTURAL axes
+    (`occurrence_status`/`assertion_certainty`/`beneficiary`) whose
+    disagreement is a real reason to hold the EVENT before retrieval even
+    exists -- disagreeing on whether something happened, was asserted, or
+    who it was done to isn't something any candidate set can resolve.
+    A clinical attribute is different: whether it matters at all depends on
+    whether any code candidate actually turns on it, which can only be known
+    AFTER retrieval builds a shortlist. Routing every clinical disagreement
+    into the same pre-retrieval `axis_conflicts` list (the bug this field
+    replaces) blocked retrieval outright for axes no candidate would ever
+    have cared about, and conflated genuine silence with a reconciliation
+    failure that should instead retry. This field lets
+    `graph_consensus.apply_resolutions` preserve the disagreement without
+    pre-judging its materiality, so `resolution.py` can assess it once real
+    candidates exist."""
+
+    axis: str
+    provider_question: str
+    value_primary: str = ""
+    value_second: str = ""
 
 
 @dataclass(frozen=True)

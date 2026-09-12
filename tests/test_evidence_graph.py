@@ -253,8 +253,15 @@ class TwoReadingAxisConsensus(unittest.TestCase):
         self.assertIn("one reading", approach.provider_question)
         self.assertNotIn("two independent readings", approach.provider_question)
         graph_consensus.apply_resolutions(primary_by_id, second_by_node, resolutions)
-        self.assertNotEqual(primary[0].axis_conflicts, [],
-                            "an ungrounded inference must hold the fact, not settle it")
+        # `approach` is a CLINICAL attribute (issue #6, Codex's independent
+        # re-review, F9-R18-A), not one of the three STRUCTURAL axes -- an
+        # ungrounded inference is recorded, but on the non-blocking
+        # `attribute_axis_conflicts` field, never the pre-retrieval-blocking
+        # `axis_conflicts`.
+        self.assertEqual(primary[0].axis_conflicts, [])
+        self.assertIn("approach", primary[0].attribute_axis_conflicts,
+                      "an ungrounded inference must still be RECORDED, not silently "
+                      "settled")
 
     def _reconciliation(self, statuses: dict):
         from app.contracts.source_evidence import (ReconciliationStatus,
@@ -336,8 +343,18 @@ class TwoReadingAxisConsensus(unittest.TestCase):
         self.assertIn("'open'", question)
         self.assertIn("'closed'", question)
 
-    def test_axis_the_source_cannot_settle_becomes_a_precise_provider_query(self):
-        """Both readings rest on confirmed quotations, neither is uniquely stated."""
+    def test_axis_the_source_cannot_settle_is_recorded_but_no_longer_pre_judged(self):
+        """Both readings rest on confirmed quotations, neither is uniquely stated.
+
+        issue #6, Codex's independent re-review (F9-R18-A): `laterality` is a
+        CLINICAL attribute, not a STRUCTURAL one -- the disagreement is real
+        and recorded, but whether it matters to eligibility/retrieval can only
+        be known once real candidates exist (`resolution.py`'s post-retrieval
+        materiality check), not here. Eligibility's `axis_consensus` gate reads
+        only the STRUCTURAL `axis_conflicts` list and correctly PASSES; this
+        replaces a prior version of this test whose own premise was the bug
+        it pre-judged an unresolved clinical attribute as event-blocking before
+        any candidate could ever be consulted about it."""
         primary, second = self._readings(
             "right", "left",
             primary_quote="Procedure performed today",
@@ -349,15 +366,15 @@ class TwoReadingAxisConsensus(unittest.TestCase):
         self.assertIs(laterality.verdict, graph_consensus.AxisVerdict.UNRESOLVED)
         self.assertIn("laterality", laterality.provider_question)
         graph_consensus.apply_resolutions(primary_by_id, second_by_node, resolutions)
-        self.assertTrue(primary[0].axis_conflicts)
+        self.assertEqual(primary[0].axis_conflicts, [])
+        self.assertIn("laterality", primary[0].attribute_axis_conflicts)
 
-        # ...and eligibility HOLDS it before retrieval, on that gate specifically.
+        # ...and eligibility does NOT hold it before retrieval on this account.
         intents = _intents(primary, [])
         intent = intents[0]
-        self.assertIs(intent.state, eligibility.EligibilityState.AUTO_HOLD)
-        non_pass = [d for d in intent.decisions if d.outcome is not Outcome.PASS]
-        self.assertEqual([d.gate for d in non_pass], ["axis_consensus"],
-                         "an unsettled axis must be the ONLY reason it is held")
+        self.assertIs(intent.state, eligibility.EligibilityState.ELIGIBLE_FOR_RETRIEVAL)
+        axis_consensus = next(d for d in intent.decisions if d.gate == "axis_consensus")
+        self.assertIs(axis_consensus.outcome, Outcome.PASS)
 
     def test_unresolved_axis_routes_to_provider_query_never_to_a_coder(self):
         """End to end through the real pipeline entrypoint and the real router."""
@@ -2345,7 +2362,7 @@ def _run(primary_reading, second_reading, **kwargs):
 
 class EndToEndTwoReadingConsensus(unittest.TestCase):
 
-    def test_an_asymmetric_self_report_now_holds_without_a_real_cross_vendor_pair(self):
+    def test_an_asymmetric_self_report_no_longer_blocks_retrieval_when_non_material(self):
         """issue #6, Codex's independent re-review, F9-R13-C2, round 8: this used
         to be "the second reading quotes text that STATES the axis, so the line
         still bills" -- accepting the second reading's own ASSERTED claim
@@ -2354,11 +2371,18 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
         object -- not a genuine cross-vendor pair), a one-sided self-report may
         no longer decide the axis by itself; `resolve()` requires it to clear
         adjudication instead, which correctly refuses a non-distinct-provider
-        pair. So this now holds before retrieval exactly like the genuinely
-        unresolved case below -- the safe default. (Production always configures
-        real, distinct-provider verify_llm/corroborate_llm, so this exact
-        quotation -- which DOES state the axis -- resolves there via a genuine
-        cross-vendor adjudication instead; see `IndependentAxisAdjudication`.)"""
+        pair -- `laterality` stays UNRESOLVED at the graph_consensus layer.
+
+        issue #6, Codex's independent re-review (F9-R18-A): `laterality` is a
+        CLINICAL attribute, though, not one of the three STRUCTURAL axes -- and
+        `_mock_source` here returns exactly ONE candidate, so it is never
+        MATERIAL (`tiebreak.discriminating_axes` needs at least two candidates
+        to disagree on anything). An unresolved-but-non-material disagreement
+        must not stop retrieval on its own say-so; it no longer does. (Production
+        always configures real, distinct-provider verify_llm/corroborate_llm, so
+        this exact quotation -- which DOES state the axis -- resolves via a
+        genuine cross-vendor adjudication instead when it IS material; see
+        `IndependentAxisAdjudication`.)"""
         result = _run(
             _reading("excision procedure alpha performed", "right",
                      "Procedure alpha performed today"),
@@ -2368,15 +2392,32 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
         resolutions = result.consensus["resolutions"]
         laterality = next(r for r in resolutions if r["axis"] == "laterality")
         self.assertEqual(laterality["verdict"], "unresolved")
-        self.assertFalse(any(ln.chosen for ln in result.lines),
-                         "a self-report a non-distinct-provider pair cannot "
-                         "independently verify must not stop retrieval on its "
-                         "own say-so")
+        self.assertFalse(result.graph.nodes["F1"].axis_conflicts)
+        self.assertTrue(
+            any(ln.chosen for ln in result.lines),
+            "a non-material, unresolved self-report must not stop retrieval "
+            "on its own say-so")
 
-    def test_an_unsettleable_axis_holds_before_retrieval_and_asks_the_provider(self):
-        """Neither reading's quotation states the axis: the record simply lacks it."""
-        from claude_coder.models import Destination
-
+    def test_an_unsettleable_clinical_axis_no_longer_blocks_retrieval(self):
+        """issue #6, Codex's independent re-review (F9-R18-A): `laterality` is a
+        CLINICAL attribute, not one of the three STRUCTURAL axes
+        (`occurrence_status`/`assertion_certainty`/`beneficiary`). Neither
+        reading's quotation states it, and the two readings disagree -- but
+        whether that disagreement matters at all depends on whether any
+        RETRIEVED candidate distinguishes on it, which can only be known
+        after retrieval runs. `_mock_source` here returns exactly ONE
+        candidate, so laterality is never discriminating
+        (`tiebreak.discriminating_axes` returns nothing for fewer than two
+        candidates) -- a non-material disagreement must not stop a uniquely
+        supported candidate from releasing normally. This replaces a prior
+        version of this test whose own premise was the bug: it expected
+        `laterality` to pre-judge materiality and hold the EVENT before
+        retrieval even ran, exactly the defect this fix removes. (Destination
+        is deliberately not asserted here: with the same stub object serving
+        both `verify_llm`/`corroborate_llm`, `_run`'s corroboration is never
+        INDEPENDENT, which its own separate policy routes away from
+        AUTO_READY regardless of this fix -- orthogonal to what this test
+        checks.)"""
         result = _run(
             _reading("excision procedure alpha performed", "right",
                      "Procedure alpha performed today"),
@@ -2387,33 +2428,33 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
         self.assertEqual(laterality["verdict"], "unresolved")
         self.assertIn("laterality", laterality["provider_question"])
 
-        # Held BEFORE retrieval — no code was ever fetched for it.
-        self.assertFalse(any(ln.chosen for ln in result.lines),
-                         "an unsettled code-changing axis must stop retrieval")
-        self.assertTrue(result.graph.nodes["F1"].axis_conflicts)
+        # The disagreement is recorded, but on the non-blocking clinical-attribute
+        # field -- `axis_conflicts` (structural-only, pre-retrieval-blocking) stays
+        # empty.
+        self.assertFalse(result.graph.nodes["F1"].axis_conflicts)
+        attribute_axes = {r["axis"] for r in
+                          result.graph.nodes["F1"].attribute_axis_conflicts}
+        self.assertIn("laterality", attribute_axes)
 
-        # ...and routed to the PROVIDER, never to a coder.
-        self.assertIs(result.destination, Destination.PROVIDER_QUERY)
-        self.assertFalse(
-            any(r["destination"] == Destination.REVIEW.value for r in result.routing),
-            f"model disagreement must never reach a coder queue: {result.routing}")
-        query = next(r for r in result.routing
-                     if r["destination"] == Destination.PROVIDER_QUERY.value)
-        self.assertIn("laterality", query["reason"])
+        # Retrieval ran and the sole, uniquely-supported candidate released --
+        # never held for a disagreement no candidate here turns on.
+        line = result.lines[0]
+        self.assertIsNotNone(line.chosen)
+        self.assertEqual(line.chosen.code, "PROC_X")
 
     def test_the_original_page_confirms_an_event_but_still_cannot_settle_an_unstated_value(self):
         """Codex F8-R1, round 2: the ORIGINAL document contradicts the primary
         reading's quotation and confirms the second reading's -- but NEITHER
         reading's own quotation literally states the laterality value it recorded.
-        A prior version of this test's own premise was the bug: it expected page
-        reconciliation of WHICH READING'S EVENT is real to be sufficient, by
-        itself, to accept that reading's axis VALUE, and then relied on a
-        SEPARATE, later gate (source-evidence reconciliation) to still catch the
-        primary's contradicted quotation and block the claim. Now the encounter
-        holds earlier and more precisely, via `_gate_axis_consensus` on the
-        unresolved axis itself -- before retrieval ever runs, so the later gate
-        has no billable line to evaluate at all (NOT_APPLICABLE, not BLOCKED) and
-        that is the correct, cleaner outcome, not a gap.
+
+        Updated for issue #6, Codex's independent re-review (F9-R18-A): `laterality`
+        is a CLINICAL attribute, not one of the three STRUCTURAL axes, so it is
+        recorded (unresolved) but no longer pre-judged as event-blocking on its own
+        -- `_mock_source` here returns exactly ONE candidate, so it is never
+        MATERIAL, and the sole candidate releases normally. This replaces a prior
+        version of this test asserting the OLD, now-corrected behavior (any
+        unresolved laterality held the whole encounter before retrieval, regardless
+        of whether any candidate distinguished on it).
         """
         import tempfile
         from pathlib import Path as _Path
@@ -2450,11 +2491,14 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
                          "page confirmation of an EVENT is not proof of an "
                          "unstated attribute value")
         self.assertTrue(laterality["provider_question"])
-        self.assertTrue(result.graph.nodes["F1"].axis_conflicts)
-        self.assertFalse(any(ln.chosen for ln in result.lines),
-                         "an unsettled code-changing axis must stop retrieval "
-                         "entirely, regardless of the primary quotation's own "
-                         "contradiction")
+        self.assertFalse(result.graph.nodes["F1"].axis_conflicts)
+        attribute_axes = {r["axis"] for r in
+                          result.graph.nodes["F1"].attribute_axis_conflicts}
+        self.assertIn("laterality", attribute_axes)
+        self.assertTrue(
+            any(ln.chosen for ln in result.lines),
+            "a non-material, unresolved axis must not stop retrieval, regardless "
+            "of the primary quotation's own contradiction")
 
     def test_a_second_reading_that_fails_holds_the_encounter_with_zero_retrieval(self):
         """A control that could not run must never look like two readings agreeing."""
@@ -2516,22 +2560,27 @@ class EndToEndTwoReadingConsensus(unittest.TestCase):
         NON-blocking. Counting it made a condition held ONLY by an unsettled fact axis
         look held for two reasons, which routed it to a coder: precisely the outcome the
         directive forbids for a model disagreement.
+
+        issue #6, Codex's independent re-review (F9-R18-A): the unsettled axis here
+        must be one of the three STRUCTURAL axes (`assertion_certainty`, used below)
+        -- a CLINICAL attribute like `laterality` no longer pre-judges eligibility on
+        its own, so it could no longer reproduce the shape this regression guards.
         """
         import json
 
         from claude_coder import eligibility as elig
         from claude_coder.models import Destination
 
-        def _condition(description, laterality):
+        def _condition(description, certainty):
             return json.dumps({"facts": [{
                 "fact_id": "F1", "kind": "diagnosis", "description": description,
-                "attributes": {"laterality": laterality},
+                "attributes": {},
                 "disposition": "performed_today", "negated": False,
-                "certainty": "confirmed", "experiencer": "patient",
+                "certainty": certainty, "experiencer": "patient",
                 "evidence": ["Condition alpha addressed today"], "confidence": 0.99}]})
 
-        result = _run(_condition("condition alpha documented", "right"),
-                      _condition("documented condition alpha", "left"))
+        result = _run(_condition("condition alpha documented", "confirmed"),
+                      _condition("documented condition alpha", "suspected"))
         intent = result.claim_line_intents[0]
         self.assertIs(intent.state, elig.EligibilityState.AUTO_HOLD)
         # Recorded-but-non-blocking notes are present...
@@ -3334,16 +3383,20 @@ class LineScopedHoldsPreserveOtherLines(unittest.TestCase):
     fact -- a separately documented, clean service in the SAME encounter still
     reaches retrieval and bills, never erased by an unrelated line's hold."""
 
-    def _two_facts(self, f1_laterality):
+    def _two_facts(self, f1_certainty):
+        # issue #6, Codex's independent re-review (F9-R18-A): F1's unresolved axis
+        # here must be STRUCTURAL (`assertion_certainty`), not a CLINICAL attribute
+        # like `laterality` -- `_union_source` returns exactly ONE candidate per
+        # description, so a clinical attribute disagreement is never MATERIAL and
+        # no longer holds the fact on its own, which would no longer reproduce the
+        # scoping defect this regression guards (an unrelated fact's hold must not
+        # erase a separately defensible line).
         return json.dumps({"facts": [
             {"fact_id": "F1", "kind": "procedure",
              "description": "excision procedure alpha performed",
-             "attributes": {"laterality": f1_laterality, "performer_id": "actor-1",
-                            "billing_entity_id": "actor-1"},
-             "attribute_evidence": {"laterality": [
-                 {"text": "Procedure alpha performed today", "scope": "local",
-                  "assertion_state": "uncertain", "value": f1_laterality}]},
+             "attributes": {"performer_id": "actor-1", "billing_entity_id": "actor-1"},
              "disposition": "performed_today", "negated": False,
+             "certainty": f1_certainty,
              "evidence": ["Procedure alpha performed today"], "confidence": 0.99},
             {"fact_id": "F2", "kind": "procedure",
              "description": "removal of separate lesion beta",
@@ -3360,12 +3413,12 @@ class LineScopedHoldsPreserveOtherLines(unittest.TestCase):
     def test_an_unresolved_fact_does_not_erase_a_separately_defensible_line(self):
         note = ("Procedure alpha performed today. "
                 "Removal of separate lesion beta on the left side.")
-        result = _run_union(self._two_facts("right"), self._two_facts("left"),
+        result = _run_union(self._two_facts("confirmed"), self._two_facts("suspected"),
                             note_text=note)
 
-        laterality_disagreements = [d for d in result.consensus["disagreements"]
-                                   if d["axis"] == "laterality"]
-        self.assertTrue(laterality_disagreements, result.consensus["disagreements"])
+        certainty_disagreements = [d for d in result.consensus["disagreements"]
+                                  if d["axis"] == "assertion_certainty"]
+        self.assertTrue(certainty_disagreements, result.consensus["disagreements"])
 
         lines_by_desc = {ln.fact.description: ln for ln in result.lines}
         f1_line = lines_by_desc["excision procedure alpha performed"]
@@ -5268,10 +5321,17 @@ class WholeEncounterGovernedTerminology(unittest.TestCase):
         # was raised and then separately excused.
         self.assertEqual(result.consensus.get("disagreements"), [], result.consensus)
 
-    def test_the_same_pair_still_holds_without_a_governed_source(self):
-        """Regression: absence of a concept source (or an unresolved relation) must
-        still hold exactly as before this round -- the fix adds a confirmation path,
-        it does not loosen the default."""
+    def test_the_same_pair_no_longer_holds_pre_retrieval_without_a_governed_source(self):
+        """Regression, updated for issue #6, Codex's independent re-review (F9-R18-A):
+        absence of a concept source (or an unresolved relation) still records the
+        disagreement -- `anatomy` is a CLINICAL attribute, not one of the three
+        STRUCTURAL axes, so it no longer pre-judges eligibility on its own. This
+        replaces a prior version of this test asserting the OLD, now-corrected
+        behavior (any unconfirmed anatomy disagreement held the whole encounter
+        before retrieval, regardless of whether any candidate even distinguished on
+        anatomy). `_union_source` here returns exactly ONE candidate for "alpha"
+        descriptions -- Codex's explicit test case: a non-material disagreement must
+        not stop a uniquely-supported synthetic candidate from releasing."""
         primary, second = self._readings("great toe", "hallux")
         note = "Procedure alpha performed today on the great toe/hallux."
 
@@ -5279,11 +5339,17 @@ class WholeEncounterGovernedTerminology(unittest.TestCase):
 
         result = _run_union(primary, second, note_text=note)   # default source, no map
 
-        self.assertEqual(result.billable_lines, [], result.billable_lines)
+        billable = result.billable_lines
+        self.assertEqual([ln.chosen.code for ln in billable], ["PROC_X"],
+                         [ln.rationale for ln in result.lines])
         axis_decisions = [d for intent in result.claim_line_intents
                          for d in intent.decisions if d.gate == "axis_consensus"]
-        self.assertTrue(any(d.outcome is Outcome.UNKNOWN for d in axis_decisions),
+        self.assertTrue(all(d.outcome is Outcome.PASS for d in axis_decisions),
                         axis_decisions)
+        self.assertFalse(result.graph.nodes["F1"].axis_conflicts)
+        attribute_axes = {r["axis"] for r in
+                          result.graph.nodes["F1"].attribute_axis_conflicts}
+        self.assertIn("anatomy", attribute_axes)
 
     def test_an_ancestor_descendant_relation_widens_retrieval_never_merges(self):
         """issue #6, Codex's independent re-review, F9-R13-D architectural-gap
@@ -5327,12 +5393,19 @@ class WholeEncounterGovernedTerminology(unittest.TestCase):
         self.assertEqual([ln.chosen.code for ln in result.billable_lines], ["PROC_X"],
                          result.billable_lines)
 
-    def test_a_reported_disjoint_relation_still_holds_not_splits(self):
+    def test_a_reported_disjoint_relation_still_does_not_split_into_two_events(self):
         """Defense in depth for the acceptance criterion's distinct-events case: even a
         source that WRONGLY reports DISJOINT (this codebase's own `ConceptRelationIndex`
         never does -- issue #6 F7-R3-C3) must not let that promote to a confirmed
-        cross-reading difference; the encounter still holds rather than fabricating a
-        second occurrence from a relation this system does not trust."""
+        cross-reading difference -- never fabricating a second occurrence from a
+        relation this system does not trust.
+
+        Updated for issue #6, Codex's independent re-review (F9-R18-A): the
+        encounter no longer holds pre-retrieval merely for the unconfirmed `anatomy`
+        disagreement itself (a CLINICAL attribute, non-material here -- `_union_source`
+        returns exactly ONE candidate for "alpha" descriptions), so this now asserts
+        the actual acceptance criterion directly: still exactly ONE event/line, never
+        two."""
         from claude_coder.terminology import CONCEPT_DISJOINT
 
         primary, second = self._readings("great toe", "hallux")
@@ -5342,7 +5415,9 @@ class WholeEncounterGovernedTerminology(unittest.TestCase):
 
         result = _run_union(primary, second, note_text=note, source=src)
 
-        self.assertEqual(result.billable_lines, [], result.billable_lines)
+        self.assertEqual(len(result.lines), 1, result.lines)
+        self.assertEqual([ln.chosen.code for ln in result.billable_lines], ["PROC_X"],
+                         [ln.rationale for ln in result.lines])
 
     def test_a_governed_expansion_reaches_retrieval_and_is_bound_in_consensus(self):
         """Codex F7-R3-C4, exact-SHA re-review, exact counterexample: primary anatomy

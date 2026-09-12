@@ -492,7 +492,12 @@ def _copy_fact(fact, node_id: str):
         # without this a later in-place mutation of one copy's gaps (extraction's own
         # `finalize_attribute_evidence`, or `graph_consensus._clear_attribute_evidence_gap`)
         # would leak into the other copy's view of the SAME event.
-        attribute_evidence_gaps=dict(getattr(fact, "attribute_evidence_gaps", None) or {}))
+        attribute_evidence_gaps=dict(getattr(fact, "attribute_evidence_gaps", None) or {}),
+        # issue #6, Codex's independent re-review (F9-R18-A): same mutable-dict-sharing
+        # hazard as `attribute_evidence_gaps` above, for the new clinical-attribute
+        # axis-conflict field.
+        attribute_axis_conflicts=dict(
+            getattr(fact, "attribute_axis_conflicts", None) or {}))
 
 
 def _remap(relation, mapping: dict[str, str]):

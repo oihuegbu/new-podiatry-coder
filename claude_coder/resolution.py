@@ -1266,6 +1266,65 @@ def _bind_evaluation_descriptors(candidates: list[CandidateCode],
     return bound
 
 
+def _material_attribute_axis_conflict(fact: ClinicalFact, requirements: tuple):
+    """The first MATERIAL, unresolved clinical-attribute axis conflict this
+    fact carries (issue #6, Codex's independent re-review, F9-R18-A), or None.
+
+    A conflict recorded on `fact.attribute_axis_conflicts` (two independent
+    readings disagreed, the original page couldn't settle it) never blocked
+    eligibility -- but it also never went through anything that checks
+    whether any RETRIEVED candidate actually turns on that axis. An axis
+    absent from `requirements` (this shortlist's own compiled, discriminating
+    axes -- `tiebreak.discriminating_axes` via `requirement.compile_requirements`)
+    is not material here: no candidate in THIS shortlist distinguishes on it,
+    so the disagreement, real as it may be, cannot change this fact's release
+    regardless of which value is true. Only a conflict on an axis some
+    candidate DOES turn on is returned.
+    """
+    conflicts = getattr(fact, "attribute_axis_conflicts", None) or {}
+    if not conflicts:
+        return None
+    material_axes = {r.axis for r in requirements}
+    for axis, conflict in sorted(conflicts.items()):
+        if axis in material_axes:
+            return axis, conflict
+    return None
+
+
+def _attribute_axis_conflict_is_system_defect(
+        conflict, coverage: "_requirement.CoverageCorpus | None") -> bool:
+    """Whether the FULL document corpus -- independent of whatever reconciled
+    quotations either reading happened to attach -- already asserts one of
+    the two disputed values somewhere (issue #6, Codex's independent
+    re-review, F9-R18-A).
+
+    Distinguishes the two shapes a material, unresolved clinical-attribute
+    conflict can be: the source GENUINELY never states either value (real
+    provider silence -- the existing candidate-requirement/disposition
+    machinery already produces the correct missing-fact hold for this, no
+    special-casing needed) versus the source states one of the values
+    somewhere but extraction/reconciliation never bound it onto this fact's
+    own evidence (a system/reconciliation defect -- retryable, and never a
+    provider question, since the provider already answered this in the
+    document Codex independently re-read page by page). A deterministic,
+    clause-scoped, negation-aware full-corpus search is the correct
+    discriminator precisely because it is independent of whatever the
+    narrower per-quotation reconciliation already failed to bind -- checking
+    the SAME narrow evidence again would just reproduce the same failure.
+    Fail-closed: an incomplete or missing corpus never claims a system
+    defect (returns False), since "the search space is unproven" is not
+    proof either value is anywhere in it.
+    """
+    if coverage is None or not coverage.complete:
+        return False
+    term_options = tuple(v for v in
+                         (getattr(conflict, "value_primary", "") or "",
+                          getattr(conflict, "value_second", "") or "") if v)
+    if not term_options:
+        return False
+    return _tiebreak.asserted_status(term_options, coverage.text) == "supported"
+
+
 def _active_only(cands: list[CandidateCode], source: CodeSource,
                  dos: str | None) -> list[CandidateCode]:
     """Fix3: drop candidates DEFINITIVELY inactive on the DOS before they can occupy
@@ -2108,6 +2167,36 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
     # entries whose candidate is in the option list actually passed).
     from . import requirement as _requirement
     requirements = _requirement.compile_requirements(shortlist, source)
+    # issue #6, Codex's independent re-review (F9-R18-A): a CLINICAL attribute
+    # axis conflict (see `AttributeAxisConflict`) never blocks eligibility, but
+    # it also was never checked against whether the retrieved shortlist even
+    # turns on it. Only once real candidates -- and this shortlist's own
+    # compiled, discriminating `requirements` -- exist can that be known. A
+    # conflict on an axis no candidate here distinguishes on is not material
+    # and is silently ignored (release proceeds normally below); real
+    # provider silence on a MATERIAL axis is already handled correctly by the
+    # existing verify/disposition/tie-escalation machinery further down (no
+    # special-casing needed for that shape). The one shape that machinery
+    # cannot tell apart from genuine silence on its own -- the document
+    # itself already asserts one of the two disputed values, but
+    # extraction/reconciliation never bound it onto this fact -- is checked
+    # here, deterministically, against the full document corpus, and turned
+    # into a scoped, retryable SYSTEM hold instead of a provider question the
+    # document has already answered.
+    material_conflict = _material_attribute_axis_conflict(fact, requirements)
+    if material_conflict is not None:
+        axis, conflict = material_conflict
+        if _attribute_axis_conflict_is_system_defect(conflict, coverage):
+            return ResolvedLine(
+                fact=fact, chosen=None, alternatives=shortlist,
+                method=ResolutionMethod.ABSTAINED,
+                rationale=(
+                    f"SYSTEM ERROR, retryable -- not a documentation gap: two "
+                    f"independent readings disagreed on {axis!r} "
+                    f"({conflict.value_primary!r} vs {conflict.value_second!r}), "
+                    f"and the full document corpus asserts one of those values, "
+                    f"but extraction/reconciliation never bound it onto this "
+                    f"fact's own evidence"))
     # code -> the NAMED reason an earlier round's judgement ruled that candidate out.
     # Keyed by code (not a bare set) because a release now has to be able to say WHY every
     # alternative is gone, not merely that it was skipped.
