@@ -485,7 +485,14 @@ def _copy_fact(fact, node_id: str):
         evidence=list(getattr(fact, "evidence", None) or []),
         axis_confidence=dict(getattr(fact, "axis_confidence", None) or {}),
         axis_conflicts=list(getattr(fact, "axis_conflicts", None) or []),
-        attribute_evidence=dict(getattr(fact, "attribute_evidence", None) or {}))
+        attribute_evidence=dict(getattr(fact, "attribute_evidence", None) or {}),
+        # issue #6, Codex's independent re-review (F9-R14-A): `attribute_evidence_gaps`
+        # is a mutable dict field like the others copied above -- `replace()` leaves any
+        # field it is not given pointing at the SAME object the original fact holds, so
+        # without this a later in-place mutation of one copy's gaps (extraction's own
+        # `finalize_attribute_evidence`, or `graph_consensus._clear_attribute_evidence_gap`)
+        # would leak into the other copy's view of the SAME event.
+        attribute_evidence_gaps=dict(getattr(fact, "attribute_evidence_gaps", None) or {}))
 
 
 def _remap(relation, mapping: dict[str, str]):

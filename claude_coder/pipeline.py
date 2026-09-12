@@ -728,6 +728,11 @@ def code_encounter(
         # a line that never went through resolve() at all this iteration.
         _candidate_eligibility = None
         _advisory_terminology = None
+        # issue #6, Codex's independent re-review (F9-R14-A): reset every iteration
+        # for the same reason -- only the resolved-and-retrieved branch below sets
+        # this to a real CoverageCorpus; every other branch (no intent, non-eligible,
+        # duplicate-merge) must see None when the shared guard re-applies below.
+        _line_coverage = None
         _it = _elig_state.get(fact.fact_id)
         if _it is None:
             line = ResolvedLine(
@@ -782,10 +787,26 @@ def code_encounter(
                 _integrity = _elig.OWNER_INTEGRITY in _owners
                 _retryable = (not _integrity and _elig.OWNER_SYSTEM in _owners
                               and _elig.OWNER_CODER not in _owners)
+                # issue #6, Codex's independent re-review (F9-R14-C): this gate's own
+                # name already names the ONE fact its hold is about -- unlike a
+                # structural/authority failure with no natural fact scope, there is no
+                # reason for this to default to encounter-wide. Every other gate this
+                # function constructs from a per-fact/per-event hold (the
+                # second_reading_* family above) already passes its own scope;
+                # leaving this one unscoped made a single fact's hold (however
+                # classified) block the entire encounter down to SYSTEM_HOLD/
+                # SYSTEM_RETRY at the top level even when every OTHER fact in the
+                # encounter resolved cleanly and independently -- reproduced live on
+                # the designated note (two facts with no asserted performer collapsed
+                # a 19-fact encounter to zero lines). `autonomy.decide`'s own
+                # dependency-scoped exclusion still widens this to any fact this one
+                # is genuinely entangled with via the graph's own edges -- this only
+                # stops the gate itself from claiming a scope it never had.
                 pre_retrieval_gates.append(GateResult(
                     f"eligibility_hold:{fact.fact_id}",
                     Outcome.BLOCKED if _integrity else Outcome.UNKNOWN, _r,
-                    "eligibility-before-retrieval", retryable=_retryable))
+                    "eligibility-before-retrieval", retryable=_retryable,
+                    affected_fact_ids=(fact.fact_id,)))
         elif fact.fact_id != _it.clinical_event_ids[0]:
             line = ResolvedLine(
                 fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
@@ -798,6 +819,22 @@ def code_encounter(
             # isolation. Empty tuple (falls back to the fact alone) when this
             # fact belongs to no multi-member intent -- the common case.
             _intent_facts = _intent_facts_by_event.get(fact.fact_id, ())
+            # issue #6, Codex's independent re-review (F9-R14-A): captured in a named
+            # variable so the SAME coverage corpus can back the post-arbitration/
+            # refinement re-application of the attribute-evidence-gap guard below --
+            # `resolution.resolve` already applies it once internally, but
+            # `arbitration.arbitrate`/`resolution.refine_diagnosis_specificity` can
+            # each reconstruct `line` with a NEW `chosen` afterward, and `em.resolve_em`
+            # never applies it at all.
+            _line_coverage = (_requirement.CoverageCorpus(
+                channel_id=recall.channel_id, text=recall.text,
+                text_sha256=hashlib.sha256(recall.text.encode("utf-8")).hexdigest(),
+                covered_pages=recall.covered_pages, uncovered_pages=recall.uncovered_pages,
+                page_image_sha256=tuple(
+                    (source_evidence.page(n).image_sha256
+                     if source_evidence is not None and source_evidence.page(n) else "")
+                    for n in recall.covered_pages))
+                if recall is not None else None)
             try:
                 if fact.kind is FactKind.EM:
                     line = em.resolve_em(
@@ -816,18 +853,7 @@ def code_encounter(
                         # (`recall.text` -- never `fact.evidence` alone) actually
                         # swept every page AND is what gets deterministically
                         # searched.
-                        coverage=(_requirement.CoverageCorpus(
-                            channel_id=recall.channel_id, text=recall.text,
-                            text_sha256=hashlib.sha256(
-                                recall.text.encode("utf-8")).hexdigest(),
-                            covered_pages=recall.covered_pages,
-                            uncovered_pages=recall.uncovered_pages,
-                            page_image_sha256=tuple(
-                                (source_evidence.page(n).image_sha256
-                                 if source_evidence is not None and source_evidence.page(n)
-                                 else "")
-                                for n in recall.covered_pages))
-                            if recall is not None else None))
+                        coverage=_line_coverage)
             except Exception as exc:
                 return _system_hold_result(encounter_id, date_of_service,
                                            f"retrieval_execution:{fact.fact_id}", exc, source)
@@ -907,6 +933,15 @@ def code_encounter(
             line = resolution.refine_diagnosis_specificity(
                 line, source, verify_llm, corroborate_llm,
                 reconciliation=source_reconciliation)
+        # issue #6, Codex's independent re-review (F9-R14-A): `resolution.resolve`
+        # already applies this guard once internally, but `arbitration.arbitrate`
+        # and `resolution.refine_diagnosis_specificity` above can each reconstruct
+        # `line` with a NEW `chosen` afterward, and `em.resolve_em` never applies it
+        # at all -- re-applied here, once, on whatever `line` looks like right
+        # before the modifier/units/bundling block below reads `line.chosen`, so no
+        # path through this loop can release a code for a fact whose own
+        # attribute_evidence_gaps is still non-empty.
+        line = resolution._apply_attribute_evidence_gap_guard(line, _line_coverage)
         if line.resolved and line.fact.billable:
             # Data-driven bundling filter: a resolved code the source declares
             # NOT separately reportable (bundled / non-covered / MUE 0) is kept

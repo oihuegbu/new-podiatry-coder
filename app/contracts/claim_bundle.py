@@ -870,6 +870,14 @@ class CandidateLine(_Strict):
     #: already states one (`documentation_gap`, `tie_record`, or `rationale`).
     blocking_reason: str = ""
     evidence: tuple[EvidenceReference, ...] = ()
+    #: The typed disposition `resolution._apply_attribute_evidence_gap_guard`
+    #: stamped when a selected code was withdrawn because this fact's own
+    #: attribute_evidence_gaps was still non-empty (issue #6, Codex's independent
+    #: re-review, F9-R14-A) -- `{fact_id, axes, reason, coverage_complete}`, kept
+    #: alongside `blocking_reason`'s prose rather than only folded into it, so an
+    #: auditor can distinguish this class of hold from an ordinary tie/gap by
+    #: field rather than by parsing the reason string.
+    attribute_evidence_gap: dict | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -2164,6 +2172,12 @@ def _line_snapshot(line) -> dict[str, Any]:
         "rationale": getattr(line, "rationale", ""),
         "excluded_reason": getattr(line, "excluded_reason", None),
         "documentation_gap": getattr(line, "documentation_gap", None),
+        # issue #6, Codex's independent re-review (F9-R14-A): the typed disposition
+        # `resolution._apply_attribute_evidence_gap_guard` stamps when a selected
+        # code was withdrawn because this fact's own attribute_evidence_gaps was
+        # still non-empty -- the exact fact_id/axes/reason must survive into the
+        # audit surface, never collapse into the generic rationale string.
+        "attribute_evidence_gap": getattr(line, "attribute_evidence_gap", None),
         # issue #6 item 7/F8-R3: a line excluded from `billable_lines` because its
         # submission is HELD (not because it was bundled/non-covered/excluded)
         # must say so here -- this is the ONE place its resolved code survives
@@ -2450,6 +2464,9 @@ def bundle_from_coding_result(
             candidates=candidates,
             blocking_reason=blocking_reason,
             evidence=_evidence_of(fact),
+            attribute_evidence_gap=(dict(getattr(line, "attribute_evidence_gap", None))
+                                    if getattr(line, "attribute_evidence_gap", None)
+                                    else None),
         ))
 
     # issue #6, Codex's independent re-review (F9-R13-A): a second-reading

@@ -371,6 +371,68 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
             llm=None, corroborate=None, dos: str | None = None,
             reconciliation=None,
             coverage: "_requirement.CoverageCorpus | None" = None) -> ResolvedLine:
+    """Public entry point -- resolves via `_resolve_core`, then applies the ONE
+    shared post-retrieval guard every internal path (deterministic, semantic-axis
+    selection, tie-narrowed, propose-then-verify) funnels through before a caller
+    ever sees a selected code (issue #6, Codex's independent re-review, F9-R14-A).
+    See `_resolve_core` for the actual resolution logic and `_apply_attribute_
+    evidence_gap_guard` for the guard itself."""
+    line = _resolve_core(request, source, top_k=top_k, llm=llm, corroborate=corroborate,
+                         dos=dos, reconciliation=reconciliation, coverage=coverage)
+    return _apply_attribute_evidence_gap_guard(line, coverage)
+
+
+def _apply_attribute_evidence_gap_guard(line: ResolvedLine, coverage) -> ResolvedLine:
+    """A fact whose own `attribute_evidence_gaps` is non-empty must never release
+    with a selected code (issue #6, Codex's independent re-review, F9-R14-A):
+    extraction already proved it has no relation-valid, value-bound evidence for a
+    code-changing axis (every axis that can appear here IS code-changing --
+    `extraction.finalize_attribute_evidence` never records a gap for the actor-
+    identity axes, which are context-resolved, not document-read), and nothing
+    inside `_resolve_core`'s several independent selection paths re-checks that
+    before returning. Applied exactly ONCE, after every path already decided its
+    own candidate -- never duplicated per code path, and never a parallel
+    selector: it only ever withdraws a selection `_resolve_core` already made.
+
+    The withdrawn code moves to `alternatives` (never silently dropped -- an
+    auditor must still see what would have released); `chosen` becomes `None`;
+    and the typed disposition on `ResolvedLine.attribute_evidence_gap` names the
+    exact fact and axes, so this cannot be lost between here and the certificate/
+    ClaimBundle.
+
+    `documentation_gap` (which `autonomy.decide` reads as a PROVIDER_QUERY) is set
+    ONLY when `coverage.complete` -- a complete, independently-read whole-document
+    search already looked and found nothing, the same bar `requirement.
+    deterministic_status`'s NOT_DOCUMENTED already requires. Anything short of
+    that (no coverage supplied, or an incomplete one) means this gap could just as
+    easily be an extraction defect as a genuine documentation absence -- it is
+    never labelled a provider question on that weaker basis; it stays a line-local
+    technical hold a retry can revisit instead.
+    """
+    if line.chosen is None:
+        return line
+    fact = line.fact
+    gaps = getattr(fact, "attribute_evidence_gaps", None) or {}
+    if not gaps:
+        return line
+    axes = sorted(gaps)
+    reason = (f"axis {axes[0]!r} has no relation-valid, value-bound evidence"
+             if len(axes) == 1 else
+             f"axes {axes} have no relation-valid, value-bound evidence")
+    proven_absent = bool(coverage is not None and getattr(coverage, "complete", False))
+    withdrawn = [line.chosen] + [c for c in line.alternatives if c.code != line.chosen.code]
+    return _dc_replace(
+        line, chosen=None, alternatives=withdrawn[:5], method=ResolutionMethod.ABSTAINED,
+        rationale=f"selected code withdrawn for {fact.fact_id}: {reason}",
+        documentation_gap=(reason if proven_absent else None),
+        attribute_evidence_gap={"fact_id": fact.fact_id, "axes": axes, "reason": reason,
+                               "coverage_complete": proven_absent})
+
+
+def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
+                  llm=None, corroborate=None, dos: str | None = None,
+                  reconciliation=None,
+                  coverage: "_requirement.CoverageCorpus | None" = None) -> ResolvedLine:
     """Resolve an eligible retrieval request, never a raw clinical fact.
 
     `reconciliation` is the encounter's `SourceReconciliation` (directive section 1).
