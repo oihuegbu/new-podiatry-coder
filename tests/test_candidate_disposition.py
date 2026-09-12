@@ -52,7 +52,7 @@ def _judgement(dispositions):
     return _verify.Judgement(candidate_dispositions=tuple(dispositions))
 
 
-def _disp(code, status, clause, span_ids=(), offset=None):
+def _disp(code, status, clause, span_ids=(), offset=None, missing_fact=""):
     """Offset computed from the real descriptor by default -- never hand-
     counted, which is exactly the kind of transcription error this
     mechanism's own verbatim-reproduction check exists to catch. Pass an
@@ -64,7 +64,8 @@ def _disp(code, status, clause, span_ids=(), offset=None):
         offset = (idx, idx + len(clause))
     return _verify.CandidateDispositionEvidence(
         candidate_code=code, status=status, authority_clause=clause,
-        authority_offset=offset, evidence_span_ids=span_ids)
+        authority_offset=offset, evidence_span_ids=span_ids,
+        missing_fact=missing_fact)
 
 
 class ParsingTest(unittest.TestCase):
@@ -138,9 +139,11 @@ class EliminationTest(unittest.TestCase):
 
     def test_not_documented_without_complete_coverage_leaves_it_standing(self):
         j0 = _judgement([_disp("CAND_ALPHA", "entailed", "alpha technique"),
-                        _disp("CAND_BETA", "not_documented", "beta technique")])
+                        _disp("CAND_BETA", "not_documented", "beta technique",
+                             missing_fact="a beta-specific finding")])
         j1 = _judgement([_disp("CAND_ALPHA", "entailed", "alpha technique"),
-                        _disp("CAND_BETA", "not_documented", "beta technique")])
+                        _disp("CAND_BETA", "not_documented", "beta technique",
+                             missing_fact="a beta-specific finding")])
         remaining, eliminated = res._candidate_disposition_uniqueness(
             [ALPHA, BETA], ALPHA, [j0, j1], None, _Coverage(False))
         self.assertIn(BETA, remaining)
@@ -148,13 +151,45 @@ class EliminationTest(unittest.TestCase):
 
     def test_not_documented_with_complete_coverage_and_both_evaluators_agreeing_eliminates(self):
         j0 = _judgement([_disp("CAND_ALPHA", "entailed", "alpha technique"),
+                        _disp("CAND_BETA", "not_documented", "beta technique",
+                             missing_fact="a beta-specific finding")])
+        j1 = _judgement([_disp("CAND_ALPHA", "entailed", "alpha technique"),
+                        _disp("CAND_BETA", "not_documented", "beta technique",
+                             missing_fact="a beta-specific finding")])
+        remaining, eliminated = res._candidate_disposition_uniqueness(
+            [ALPHA, BETA], ALPHA, [j0, j1], None, _Coverage(True))
+        self.assertNotIn(BETA, remaining)
+        self.assertIn("CAND_BETA", eliminated)
+
+    def test_not_documented_with_an_empty_missing_fact_leaves_it_standing(self):
+        """issue #6, Codex's independent re-review (F9-R16-B): an empty
+        `missing_fact` cannot be turned into a precise provider question, so
+        this must never eliminate on a vaguer basis than it could also route
+        a question from."""
+        j0 = _judgement([_disp("CAND_ALPHA", "entailed", "alpha technique"),
                         _disp("CAND_BETA", "not_documented", "beta technique")])
         j1 = _judgement([_disp("CAND_ALPHA", "entailed", "alpha technique"),
                         _disp("CAND_BETA", "not_documented", "beta technique")])
         remaining, eliminated = res._candidate_disposition_uniqueness(
             [ALPHA, BETA], ALPHA, [j0, j1], None, _Coverage(True))
-        self.assertNotIn(BETA, remaining)
-        self.assertIn("CAND_BETA", eliminated)
+        self.assertIn(BETA, remaining)
+        self.assertEqual(eliminated, {})
+
+    def test_different_clauses_with_the_same_status_leave_it_standing(self):
+        """issue #6, Codex's independent re-review (F9-R16-B): equal status
+        alone is not agreement -- two evaluators citing two DIFFERENT clauses
+        (about two different aspects of the descriptor) is not the same
+        agreement as citing the same one."""
+        j0 = _judgement([_disp("CAND_ALPHA", "entailed", "alpha technique"),
+                        _disp("CAND_BETA", "not_documented", "assembly service",
+                             missing_fact="something")])
+        j1 = _judgement([_disp("CAND_ALPHA", "entailed", "alpha technique"),
+                        _disp("CAND_BETA", "not_documented", "beta technique",
+                             missing_fact="something")])
+        remaining, eliminated = res._candidate_disposition_uniqueness(
+            [ALPHA, BETA], ALPHA, [j0, j1], None, _Coverage(True))
+        self.assertIn(BETA, remaining)
+        self.assertEqual(eliminated, {})
 
     def test_contradicted_without_validated_spans_leaves_it_standing(self):
         """A bare claim of contradiction, with no cited evidence, is not enough."""
@@ -191,12 +226,15 @@ class EliminationTest(unittest.TestCase):
             [ALPHA, BETA], ALPHA, [j0, j1], recon, _Coverage(True))
         self.assertIn(BETA, remaining)
 
-    def test_the_chosen_candidate_is_never_eliminated_even_if_both_evaluators_call_it_out(self):
-        """A structural safety guard: this mechanism exists to rule OTHER
-        candidates out for an already-entailed `chosen`, never to re-litigate
-        `chosen` itself -- eliminating it here (while a different candidate
-        stayed standing) would let the caller's naive `len(remaining) == 1`
-        check release `chosen` anyway."""
+    def test_chosen_is_properly_eliminated_when_both_evaluators_structurally_contradict_it(self):
+        """issue #6, Codex's independent re-review (F9-R16-B): `chosen` is no
+        longer special-cased. Codex's exact reproduction: a judgement's LEGACY
+        `choice`/`entailed` field can pick `chosen` while that SAME judgement's
+        STRUCTURED disposition calls it "contradicted" -- a self-contradicting
+        model answer that the first version of this function let release
+        anyway (it never validated `chosen`'s own disposition at all). `chosen`
+        must now be eliminated exactly like any other candidate when both
+        evaluators structurally, validly contradict it."""
         recon = _reconciliation({"s1": "AGREED", "s2": "AGREED"})
         j0 = _judgement([_disp("CAND_ALPHA", "contradicted", "alpha technique",
                               span_ids=("s1",)),
@@ -206,8 +244,22 @@ class EliminationTest(unittest.TestCase):
                         _disp("CAND_BETA", "entailed", "beta technique")])
         remaining, eliminated = res._candidate_disposition_uniqueness(
             [ALPHA, BETA], ALPHA, [j0, j1], recon, _Coverage(True))
-        self.assertIn(ALPHA, remaining)
-        self.assertNotIn("CAND_ALPHA", eliminated)
+        self.assertNotIn(ALPHA, remaining)
+        self.assertIn("CAND_ALPHA", eliminated)
+
+    def test_chosen_survives_when_both_evaluators_call_it_entailed(self):
+        """The ordinary, ubiquitous case: chosen surviving is unaffected by no
+        longer special-casing it."""
+        j0 = _judgement([_disp("CAND_ALPHA", "entailed", "alpha technique"),
+                        _disp("CAND_BETA", "not_documented", "beta technique",
+                             missing_fact="something")])
+        j1 = _judgement([_disp("CAND_ALPHA", "entailed", "alpha technique"),
+                        _disp("CAND_BETA", "not_documented", "beta technique",
+                             missing_fact="something")])
+        remaining, eliminated = res._candidate_disposition_uniqueness(
+            [ALPHA, BETA], ALPHA, [j0, j1], None, _Coverage(True))
+        self.assertEqual(remaining, [ALPHA])
+        self.assertIn("CAND_BETA", eliminated)
 
     def test_a_clause_that_does_not_reproduce_from_the_real_descriptor_leaves_it_standing(self):
         """Defense in depth against a stale/mismatched entry, independent of
@@ -234,21 +286,27 @@ class EliminationTest(unittest.TestCase):
 
     def test_three_candidates_are_all_accounted_for(self):
         j0 = _judgement([_disp("CAND_ALPHA", "entailed", "alpha technique"),
-                        _disp("CAND_BETA", "not_documented", "beta technique"),
-                        _disp("CAND_GAMMA", "not_documented", "gamma technique")])
+                        _disp("CAND_BETA", "not_documented", "beta technique",
+                             missing_fact="a beta finding"),
+                        _disp("CAND_GAMMA", "not_documented", "gamma technique",
+                             missing_fact="a gamma finding")])
         j1 = _judgement([_disp("CAND_ALPHA", "entailed", "alpha technique"),
-                        _disp("CAND_BETA", "not_documented", "beta technique"),
-                        _disp("CAND_GAMMA", "not_documented", "gamma technique")])
+                        _disp("CAND_BETA", "not_documented", "beta technique",
+                             missing_fact="a beta finding"),
+                        _disp("CAND_GAMMA", "not_documented", "gamma technique",
+                             missing_fact="a gamma finding")])
         remaining, eliminated = res._candidate_disposition_uniqueness(
             [ALPHA, BETA, GAMMA], ALPHA, [j0, j1], None, _Coverage(True))
         self.assertEqual(remaining, [ALPHA])
         self.assertEqual(set(eliminated), {"CAND_BETA", "CAND_GAMMA"})
 
     def test_candidate_order_permutation_produces_the_same_result(self):
-        j0 = _judgement([_disp("CAND_BETA", "not_documented", "beta technique"),
+        j0 = _judgement([_disp("CAND_BETA", "not_documented", "beta technique",
+                              missing_fact="a beta finding"),
                         _disp("CAND_ALPHA", "entailed", "alpha technique")])
         j1 = _judgement([_disp("CAND_ALPHA", "entailed", "alpha technique"),
-                        _disp("CAND_BETA", "not_documented", "beta technique")])
+                        _disp("CAND_BETA", "not_documented", "beta technique",
+                             missing_fact="a beta finding")])
         remaining, eliminated = res._candidate_disposition_uniqueness(
             [BETA, ALPHA], ALPHA, [j0, j1], None, _Coverage(True))
         self.assertEqual({c.code for c in remaining}, {"CAND_ALPHA"})

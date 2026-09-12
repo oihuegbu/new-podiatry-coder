@@ -1540,13 +1540,25 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
     BOTH evaluators call "entailed" is a SELECTION candidate, never treated as
     eliminated here), `eliminated` maps every other candidate to why.
 
-    `chosen` is NEVER eliminated by this function, mirroring `_uniqueness_view`'s
-    own identical guard: this mechanism exists to rule OTHER candidates out so
-    an already-entailed `chosen` can release with confidence, never to
-    re-litigate `chosen` itself through a second, independent path -- doing so
-    could otherwise eliminate `chosen` while leaving a DIFFERENT single
-    candidate standing, and the caller's `len(remaining) == 1` check would then
-    incorrectly release `chosen` anyway (it does not re-check membership).
+    issue #6, Codex's independent re-review (F9-R16-B): `chosen` is deliberately
+    NOT special-cased -- it flows through the exact same per-candidate bar as
+    every other candidate below. The first version of this function skipped
+    validating `chosen`'s own disposition entirely (to protect against a
+    different bug: eliminating `chosen` while a different candidate survived,
+    which `_settle_uniqueness`'s old count-only check would then misrelease as
+    `chosen` anyway). Codex's reproduction showed that "protection" let a
+    self-contradicting model answer through: a judgement's LEGACY `choice`/
+    `entailed` field (which `_uniqueness_view` trusts) can pick `chosen` while
+    that SAME judgement's structured `candidate_dispositions` calls `chosen`
+    "contradicted" -- and skipping `chosen` here let it release anyway with
+    `verified_entailment`. The real fix is structural, not a skip:
+    `_settle_uniqueness` now checks `remaining[0].code == chosen.code` (never
+    just `len(remaining) == 1`) before releasing, which makes it SAFE to
+    validate -- and properly eliminate -- `chosen` through this same bar: if
+    both evaluators structurally, validly contradict it, it is eliminated like
+    any other candidate, and the caller's membership check then correctly
+    falls through to the tie/hold path instead of either releasing `chosen`
+    or silently swapping in whichever different candidate happens to survive.
 
     A candidate is validly disposed only when BOTH judgements' own
     `CandidateDispositionEvidence` for it:
@@ -1556,22 +1568,30 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
         against the descriptor it was shown; re-checked here against the
         actual shortlist descriptor so a stale/mismatched entry can never
         slip through a caller that reused a judgement across shortlists),
-      - agrees with the OTHER judgement on the exact same status, and that
-        status is:
+      - agrees with the OTHER judgement on the exact same status AND the exact
+        same authority clause (issue #6, Codex's independent re-review,
+        F9-R16-B: equal status alone let two evaluators agree "not_documented"
+        while citing two DIFFERENT clauses -- about two different aspects of
+        the descriptor -- which is not the same agreement the docstring always
+        claimed), and that status is:
           * "contradicted"/"different_concept": ONLY with validated,
             reconciled evidence spans on BOTH sides -- a genuine semantic
             judgement backed by real source text, never a bare claim.
           * "not_documented": ONLY when `coverage is not None and
             coverage.complete` -- a complete, independently-read whole-
             document search -- ON TOP OF both evaluators' own independent
-            semantic reading. Exact token absence alone (what the reverted
-            mechanism relied on) is never treated as semantic proof here;
-            this requires the SAME evaluator judgement layer Codex's contract
-            asks for, not a re-derivation of it from raw text.
+            semantic reading AND a non-empty `missing_fact` on both sides
+            (issue #6, Codex's independent re-review, F9-R16-B: an empty
+            `missing_fact` cannot be turned into a precise provider question,
+            so this must never eliminate on a vaguer basis than it could also
+            route a question from). Exact token absence alone (what the
+            reverted mechanism relied on) is never treated as semantic proof
+            here; this requires the SAME evaluator judgement layer Codex's
+            contract asks for, not a re-derivation of it from raw text.
     Anything short of that (a missing entry, an unreproduced clause, an
     uncited contradiction/different_concept, disagreement between the two
-    evaluators on status or clause, or incomplete coverage for
-    not_documented) leaves the candidate standing.
+    evaluators on status or clause, incomplete coverage, or an empty
+    `missing_fact` for not_documented) leaves the candidate standing.
     """
     if len(judgements) < 2:
         return None
@@ -1601,11 +1621,25 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
     remaining: list[CandidateCode] = []
     eliminated: dict[str, str] = {}
     for cand in shortlist:
-        if cand.code == chosen.code:
-            remaining.append(cand)
-            continue
+        # issue #6, Codex's independent re-review (F9-R16-B): `chosen` is NO
+        # LONGER special-cased here. The prior version skipped validating
+        # `chosen`'s own disposition entirely, so a judgement whose LEGACY
+        # `choice`/`entailed` field picked `chosen` (which `_uniqueness_view`
+        # trusts) could still carry a STRUCTURED disposition of "contradicted"
+        # for that same candidate -- a self-contradicting model answer that
+        # released a code both evaluators' own structured judgement called
+        # out. `chosen` now flows through the exact same per-candidate bar as
+        # any other candidate: it survives (stays in `remaining`) when both
+        # evaluators call it "entailed" (the ordinary case), and is properly
+        # eliminated when both structurally, validly contradict it -- the
+        # caller (`_settle_uniqueness`) now checks `remaining[0].code ==
+        # chosen.code` before releasing, so `chosen` being eliminated here
+        # correctly routes to the tie/hold path instead of a false release,
+        # and never lets a DIFFERENT surviving candidate release in its place.
         d0, d1 = j0[cand.code], j1[cand.code]
-        if (d0.status != d1.status or not _clause_reproduces(cand, d0)
+        if (d0.status != d1.status
+                or d0.authority_clause != d1.authority_clause
+                or not _clause_reproduces(cand, d0)
                 or not _clause_reproduces(cand, d1)):
             remaining.append(cand)
             continue
@@ -1619,12 +1653,18 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
             else:
                 remaining.append(cand)
         elif status == "not_documented":
-            if coverage is not None and getattr(coverage, "complete", False):
+            # issue #6, Codex's independent re-review (F9-R16-B): a specific
+            # missing fact is required on BOTH sides -- an empty `missing_fact`
+            # for a NOT_DOCUMENTED verdict cannot be turned into a precise
+            # provider question, and this mechanism must never eliminate on a
+            # vaguer basis than it could also route a question from.
+            if (coverage is not None and getattr(coverage, "complete", False)
+                    and d0.missing_fact and d1.missing_fact):
                 eliminated[cand.code] = (
                     f"both independent evaluators judged {cand.code}'s own official "
-                    f"descriptor clause {d0.authority_clause!r} not documented, "
-                    f"against a complete, independently-read search of the whole "
-                    f"document")
+                    f"descriptor clause {d0.authority_clause!r} not documented "
+                    f"(missing: {d0.missing_fact!r}), against a complete, "
+                    f"independently-read search of the whole document")
             else:
                 remaining.append(cand)
         else:
@@ -1761,7 +1801,16 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
         # two loose primitives -- binds WHAT was searched, not just whether.
         "coverage": (coverage.as_record() if coverage is not None else None),
     }
-    if len(remaining) == 1:
+    # issue #6, Codex's independent re-review (F9-R16-B): membership, not just
+    # count -- `_candidate_disposition_uniqueness` no longer special-cases
+    # `chosen`, so `remaining` narrowing to exactly one candidate no longer
+    # guarantees that candidate IS `chosen` (it can now be validly eliminated,
+    # or a different candidate can be the sole survivor). Releasing whichever
+    # single candidate happens to remain, regardless of whether it is the one
+    # BOTH models' own propose-then-verify pick actually was, would be a
+    # different, unverified leap; anything other than "exactly chosen, alone"
+    # falls through to the tie/hold path below unchanged.
+    if len(remaining) == 1 and remaining[0].code == chosen.code:
         return _entailed_line(fact, chosen, shortlist, why, corroboration,
                               uniqueness=record)
 

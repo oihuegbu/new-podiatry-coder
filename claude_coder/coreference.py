@@ -387,10 +387,8 @@ def normalize_fact_terminology(fact: Any, source: Any = None,
         for s in (getattr(fact, "evidence", None) or [])
         if getattr(s, "span_id", None)))
     current = dict(getattr(fact, "governed_terms", None) or {})
-    conflicts = list(getattr(fact, "axis_conflicts", None) or [])
     records: list[dict] = []
     expanded = False
-    conflicted = False
     for axis in _CONCEPT_GOVERNED_AXES:
         value = str(attrs.get(axis, "") or "").strip()
         if not value:
@@ -406,19 +404,23 @@ def normalize_fact_terminology(fact: Any, source: Any = None,
         if not candidates:
             status = "unresolved"
         elif not unique:
+            # issue #6, Codex's independent re-review (F9-R16-A): a non-unique
+            # lookup proves only that the TERMINOLOGY SOURCE supplies several
+            # candidate concepts for this ONE reading's phrase -- it is not
+            # proof the documentation itself is contradictory or missing
+            # anything, and no code candidates exist yet for the pipeline to
+            # know whether this ambiguity is even code-changing. Writing it
+            # into `fact.axis_conflicts` promoted it to the SAME pre-retrieval,
+            # encounter-blocking signal `graph_consensus` uses for a genuine
+            # cross-reading contradiction (two independent READINGS disagreed)
+            # -- a different, stronger claim this single-lookup case never
+            # earned. `status`/`candidates`/`alternatives`/`source_identity`
+            # below still record the ambiguity for audit; retrieval proceeds
+            # with the raw documented phrase, and only a surviving candidate
+            # set that genuinely requires anatomy the evidence cannot settle
+            # may hold that ONE line, after retrieval -- never the whole
+            # encounter before it.
             status = "ambiguous"
-            candidate_terms = result.get("candidate_terms") or {}
-            named = tuple(dict.fromkeys(
-                t for c in candidates for t in (candidate_terms.get(c) or ())))
-            heard_as = " or ".join(repr(n) for n in named) if named else (
-                " or ".join(repr(c) for c in candidates))
-            question = (f"The record does not settle {axis!r}: the documented "
-                        f"phrase {value!r} matches more than one governed concept "
-                        f"({heard_as}), and nothing in the record picks between "
-                        f"them. Please document {axis!r} explicitly for this event.")
-            if question not in conflicts:
-                conflicts.append(question)
-                conflicted = True
         elif not source_identity or not expansions:
             status = "unbound"
         else:
@@ -446,8 +448,6 @@ def normalize_fact_terminology(fact: Any, source: Any = None,
         })
     if expanded:
         fact.governed_terms = current
-    if conflicted:
-        fact.axis_conflicts = conflicts
     return tuple(records)
 
 

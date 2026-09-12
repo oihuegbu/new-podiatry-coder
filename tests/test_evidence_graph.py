@@ -5432,18 +5432,21 @@ class WholeEncounterGovernedTerminology(unittest.TestCase):
         self.assertEqual(cert_record["status"], "expanded")
         self.assertIn("canonical term", cert_record["expansion"])
 
-    def test_an_ambiguous_single_entity_match_never_silently_chooses_one(self):
-        """Required regression #4 (reviewer's exact-SHA re-review, tenth pass): a
-        term that resolves ambiguously (more than one candidate concept) must not
-        expand -- there is nothing here to disambiguate against, so guessing which
-        candidate it meant is exactly the silent choice this must never make. The
-        RAW, unexpanded phrase is deliberately made retrievable here (unlike the
-        earlier version of this test, whose mock never returned anything for ANY
-        query and so proved nothing): retrieval CAN find a candidate for this fact,
-        so the only thing that can be holding the line is the ambiguity itself --
-        via `fact.axis_conflicts`, the same field a cross-reading disagreement
-        already uses to reach `eligibility._gate_axis_consensus` -- not an
-        unrelated gate or an empty retrieval pool."""
+    def test_an_ambiguous_single_entity_match_still_lets_retrieval_run(self):
+        """issue #6, Codex's independent re-review (F9-R16-A): a term that
+        resolves ambiguously (more than one candidate concept) from a SINGLE
+        reading's lookup must NOT hold the fact before retrieval -- that
+        proves only that the terminology SOURCE supplies several candidates
+        for this phrase, never that the documentation itself is contradictory
+        or missing anything, and no code candidates exist yet for the
+        pipeline to know whether the ambiguity is even code-changing. (Before
+        this fix, this exact ambiguity was written into `fact.axis_conflicts`
+        -- the SAME field a genuine cross-reading disagreement uses -- and
+        held the fact pre-retrieval even though retrieval could fully resolve
+        it, as this test's own mock proves by configuring a real, retrievable
+        candidate for the ambiguous phrase.) The normalization record still
+        captures the ambiguity (status/candidates/alternatives) for audit;
+        it merely no longer blocks anything on its own."""
         from claude_coder.data_access import MockSource
         from claude_coder.models import CandidateCode
 
@@ -5465,31 +5468,27 @@ class WholeEncounterGovernedTerminology(unittest.TestCase):
         self.assertEqual(record["status"], "ambiguous")
         self.assertEqual(record["expansion"], [])
         self.assertEqual(sorted(record["alternatives"]), ["C1", "C2"])
-        # The ambiguity held the fact before retrieval ever ran, despite retrieval
-        # being fully able to return "PROC_X" for this fact's query.
-        self.assertEqual(result.billable_lines, [])
-        held = next(ln for ln in result.lines if ln.fact.fact_id == "F1")
-        self.assertIsNone(held.chosen)
-        self.assertIn("does not settle", held.rationale)
-        # The routed provider question names the candidates by their governed
-        # terms, not by bare internal concept ids -- an id alone is not something
-        # a provider can answer against.
-        self.assertIn("structure one", held.rationale)
-        self.assertIn("structure two", held.rationale)
-        self.assertNotIn("'C1'", held.rationale)
-        self.assertNotIn("'C2'", held.rationale)
+        # Retrieval ran and resolved the fact -- the ambiguity never reached
+        # `fact.axis_conflicts` and never held the line pre-retrieval.
+        resolved = next(ln for ln in result.lines if ln.fact.fact_id == "F1")
+        self.assertEqual(resolved.chosen.code, "PROC_X")
+        self.assertEqual(resolved.fact.axis_conflicts, [])
 
-    def test_an_ambiguous_match_with_no_named_terms_still_holds_not_crashes(self):
-        """Failure-path sibling of the test above: a source that reports ambiguous
-        candidates but no `candidate_terms` (an older or leaner authoritative
-        adapter) must still hold the fact, not raise, falling back to the bare
-        candidate ids in the routed question rather than losing the hold."""
+    def test_an_ambiguous_match_with_no_named_terms_does_not_crash_normalization(self):
+        """Failure-path sibling of the test above: a source that reports
+        ambiguous candidates but no `candidate_terms` (an older or leaner
+        authoritative adapter) must still produce a well-formed normalization
+        record and must not crash -- and, per F9-R16-A, must not hold the
+        fact either, exactly like the named-terms case."""
         from claude_coder.data_access import MockSource
+        from claude_coder.models import CandidateCode
 
         primary, second = self._readings("ambiguous term", "ambiguous term")
         note = "Procedure alpha performed today."
         src = MockSource(
             records={("PROC_X", "cpt"): {"active": True}},
+            retrieval={("*", "cpt"): [
+                CandidateCode("PROC_X", "cpt", "Procedure alpha, each", 0.9)]},
             concept_lookup={"ambiguous term": {
                 "term": "ambiguous term", "candidates": ["C1", "C2"], "method": "exact",
                 "unique": False, "expansions": [],
@@ -5497,10 +5496,12 @@ class WholeEncounterGovernedTerminology(unittest.TestCase):
 
         result = _run_union(primary, second, note_text=note, source=src)
 
-        self.assertEqual(result.billable_lines, [])
-        held = next(ln for ln in result.lines if ln.fact.fact_id == "F1")
-        self.assertIsNone(held.chosen)
-        self.assertIn("does not settle", held.rationale)
+        record = result.terminology_normalizations[0]
+        self.assertEqual(record["status"], "ambiguous")
+        self.assertEqual(sorted(record["alternatives"]), ["C1", "C2"])
+        resolved = next(ln for ln in result.lines if ln.fact.fact_id == "F1")
+        self.assertEqual(resolved.chosen.code, "PROC_X")
+        self.assertEqual(resolved.fact.axis_conflicts, [])
 
     def test_a_unique_match_with_no_source_identity_never_expands_either(self):
         """Required regression #3, single-entity form: missing source identity must
