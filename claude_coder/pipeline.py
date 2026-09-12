@@ -835,6 +835,7 @@ def code_encounter(
                      if source_evidence is not None and source_evidence.page(n) else "")
                     for n in recall.covered_pages))
                 if recall is not None else None)
+            logger.info("  resolving %s: %s", fact.fact_id, fact.description[:80])
             try:
                 if fact.kind is FactKind.EM:
                     line = em.resolve_em(
@@ -942,6 +943,10 @@ def code_encounter(
         # path through this loop can release a code for a fact whose own
         # attribute_evidence_gaps is still non-empty.
         line = resolution._apply_attribute_evidence_gap_guard(line, _line_coverage)
+        logger.info("    -> %s: %s", fact.fact_id,
+                   (f"{line.chosen.system}/{line.chosen.code} ({line.method.value})"
+                    if line.chosen else
+                    f"held ({line.excluded_reason or line.documentation_gap or line.rationale or 'unresolved'})"))
         if line.resolved and line.fact.billable:
             # Data-driven bundling filter: a resolved code the source declares
             # NOT separately reportable (bundled / non-covered / MUE 0) is kept
