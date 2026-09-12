@@ -504,14 +504,6 @@ def evidence_text_by_span_id(fact: ClinicalFact) -> dict[str, str]:
            for s in _citable_evidence(fact) if getattr(s, "span_id", "")}
 
 
-def _best_descriptor(source: CodeSource, cand: CandidateCode) -> str:
-    try:
-        tiers = source.descriptions(cand.code, cand.system)
-    except Exception:
-        tiers = []
-    return tiers[0] if tiers else cand.descriptor
-
-
 @dataclass(frozen=True)
 class Judgement:
     """ONE model's verdict over a WHOLE shortlist.
@@ -683,9 +675,19 @@ def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
     to disambiguate, so the disposition contract below does not apply either),
     renders BYTE-IDENTICAL to before either field existed (plain-text evidence,
     no REQUIREMENTS section) -- zero format-regression risk for the shortlists
-    this phase doesn't touch."""
-    opts = "\n".join(f"{i + 1}. {_best_descriptor(source, c)}"
-                     for i, c in enumerate(candidates))
+    this phase doesn't touch.
+
+    issue #6, Codex's independent re-review (F9-R17-A): renders `c.descriptor`
+    directly -- never re-derived here via `_best_descriptor(source, c)`, which
+    could pick a DIFFERENT (richer) descriptor than what `candidate.descriptor`
+    itself holds and what `_candidate_dispositions`/`requirement.
+    compile_requirements` validate a model's answer against. Every caller of
+    this function is responsible for binding each candidate's own `.descriptor`
+    to the single authoritative text that governs its evaluation BEFORE calling
+    it (see `resolution._bind_evaluation_descriptors`) -- this function only
+    ever renders that already-bound field, so what a model is shown and what
+    its answer is checked against can never diverge again."""
+    opts = "\n".join(f"{i + 1}. {c.descriptor}" for i, c in enumerate(candidates))
     # issue #6, Codex's independent re-review (F9-R15-B): bracketed evidence ids
     # are needed whenever the candidate-disposition contract applies (2+
     # candidates), not only when descriptor requirements were compiled.

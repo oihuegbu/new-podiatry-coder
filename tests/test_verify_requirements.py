@@ -29,7 +29,13 @@ RIGHT = CandidateCode("CAND_RIGHT", "cpt", "assembly service performed on the ri
 
 class _Source:
     def descriptions(self, code, system):
-        return []   # forces _best_descriptor's fallback to cand.descriptor
+        # issue #6, Codex's independent re-review (F9-R17-A): `_shortlist_prompt`
+        # no longer calls this at all -- it renders `candidate.descriptor`
+        # directly, which the caller (`resolution._bind_evaluation_descriptors`)
+        # is responsible for having already bound to the authoritative text.
+        # Kept as a no-op stub only because `_Source` is reused below as a
+        # minimal generic `source` argument.
+        return []
 
 
 def _requirements():

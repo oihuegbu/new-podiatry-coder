@@ -48,6 +48,86 @@ class _SourceStub:
         return []
 
 
+class _RichDescriptorSource:
+    """issue #6, Codex's independent re-review (F9-R17-A): a source whose
+    `descriptions()` returns a RICHER authoritative descriptor than the
+    candidate's own (short, retrieval-time) `.descriptor` -- exactly the
+    real-world shape (`source.descriptions()` returning the long/medium/
+    consumer record) that let a model's verbatim-correct answer, quoted from
+    what it was actually SHOWN, get silently dropped because the parser
+    checked it against the SHORT string instead."""
+
+    def __init__(self, rich_by_code, snapshot=None):
+        self._rich = rich_by_code
+        self._snapshot = snapshot or {}
+
+    def descriptions(self, code, system):
+        rich = self._rich.get(code)
+        return [rich] if rich else []
+
+    def record_snapshot_identity(self, code, system):
+        return dict(self._snapshot)
+
+
+class DescriptorBindingTest(unittest.TestCase):
+    """`resolution._bind_evaluation_descriptors` -- one authoritative
+    descriptor per candidate, bound once, used everywhere downstream."""
+
+    def test_binds_the_richer_authoritative_descriptor_and_preserves_recall_lineage(self):
+        short = _cand("CAND_A", "short retrieval descriptor")
+        source = _RichDescriptorSource(
+            {"CAND_A": "authoritative long descriptor with required technique"})
+        bound, = res._bind_evaluation_descriptors([short], source)
+        self.assertEqual(bound.descriptor,
+                         "authoritative long descriptor with required technique")
+        self.assertEqual(bound.authority["recall_descriptor"], "short retrieval descriptor")
+
+    def test_falls_back_to_the_candidates_own_descriptor_when_source_has_nothing(self):
+        cand = _cand("CAND_A", "short retrieval descriptor")
+        bound, = res._bind_evaluation_descriptors([cand], _SourceStub())
+        self.assertEqual(bound.descriptor, "short retrieval descriptor")
+
+    def test_binds_the_governing_descriptors_source_snapshot_identity(self):
+        cand = _cand("CAND_A", "short retrieval descriptor")
+        source = _RichDescriptorSource(
+            {"CAND_A": "authoritative long descriptor"},
+            snapshot={"source_id": "cpt_codes", "sha256": "abc123"})
+        bound, = res._bind_evaluation_descriptors([cand], source)
+        self.assertEqual(bound.authority["evaluation_descriptor_snapshot"],
+                         {"source_id": "cpt_codes", "sha256": "abc123"})
+
+    def test_a_source_that_raises_degrades_to_the_candidates_own_descriptor(self):
+        class _Raises:
+            def descriptions(self, code, system):
+                raise RuntimeError("simulated unavailable descriptor tiers")
+        cand = _cand("CAND_A", "short retrieval descriptor")
+        bound, = res._bind_evaluation_descriptors([cand], _Raises())
+        self.assertEqual(bound.descriptor, "short retrieval descriptor")
+
+    def test_a_clause_quoted_from_the_rich_descriptor_survives_parsing_once_bound(self):
+        """The exact regression Codex asked for: a model correctly quotes a
+        phrase from the RICH descriptor it was shown; before binding, that
+        phrase is absent from the short retrieval descriptor and the parser
+        drops the disposition; after binding, the candidate's own `.descriptor`
+        IS the rich text, so the SAME clause reproduces and parses."""
+        short = _cand("CAND_A", "short retrieval descriptor")
+        source = _RichDescriptorSource(
+            {"CAND_A": "authoritative long descriptor with required technique"})
+        ans = {"candidate_dispositions": [
+            {"option": 1, "status": "entailed", "authority_clause": "required technique"}]}
+
+        # Before binding: the clause is not in the short descriptor -- dropped.
+        dropped = _verify._candidate_dispositions(ans, [short], {}, {})
+        self.assertEqual(dropped, ())
+
+        # After binding: the candidate's own descriptor IS the rich text.
+        bound, = res._bind_evaluation_descriptors([short], source)
+        parsed = _verify._candidate_dispositions(ans, [bound], {}, {})
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0].status, "entailed")
+        self.assertEqual(parsed[0].authority_clause, "required technique")
+
+
 def _judgement(dispositions):
     return _verify.Judgement(candidate_dispositions=tuple(dispositions))
 

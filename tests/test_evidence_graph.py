@@ -1887,12 +1887,24 @@ class DependencyScopedPartialRelease(unittest.TestCase):
                         "just a non-blocking one")
 
     def test_ambiguous_colocated_second_reading_hold_affects_only_its_episode(self):
-        """issue #6 F9-R11-C, Codex's independent re-review: an `AMBIGUOUS_COLOCATED`
-        second-reading hold names the specific primary event it is about
-        (`affected_fact_ids`), so `autonomy.decide`'s existing dependency-scoped
-        exclusion -- the SAME mechanism `medical_necessity_gate` already uses --
-        excludes only that entangled line. A second, wholly unrelated procedure
-        with no documented relationship to it must stay independently billable
+        """issue #6 F9-R11-C, Codex's independent re-review: a hand-built,
+        scoped `GateResult` naming one specific fact must exclude only that
+        entangled line via `autonomy.decide`'s existing dependency-scoped
+        exclusion -- the SAME mechanism `medical_necessity_gate` already uses.
+        Kept as a direct `autonomy.decide` test of that GENERIC scoping
+        contract (still exercised for real by `RELATION_UNPLACED`/
+        `RELATION_INVALID` holds) even though `pipeline.py` no longer
+        constructs a gate shaped exactly like this for `COREFERENCE_AMBIGUOUS`
+        specifically -- issue #6, Codex's independent re-review (F9-R17-B):
+        that hold cause used to scope its gate to `possible_primary_ids` (the
+        PRIMARY event(s) an ambiguous SECOND-reading mention was co-located
+        with), which correctly-by-this-very-contract excluded the PRIMARY --
+        exactly backwards, since the primary was never itself undocumented.
+        It is now represented as a non-blocking `UnresolvedRecoveredLine`
+        instead (see `test_a_coreference_ambiguous_hold_is_visible_and_never_
+        excludes_the_primary` below), never a gate that could exclude the
+        primary at all. A second, wholly unrelated procedure with no
+        documented relationship to it must stay independently billable
         and the encounter must reach AUTO_READY, exactly like the analogous
         `medical_necessity` case above."""
         from claude_coder.models import CandidateCode, CodingResult, ResolutionMethod, ResolvedLine
@@ -3932,6 +3944,68 @@ class PhysicalLocationIdentityAcrossReadings(unittest.TestCase):
         self.assertEqual(line.kind, "procedure")
         self.assertEqual(len(line.evidence), 1)
         self.assertIn("cannot reproduce faithfully", line.blocking_reason)
+
+    def test_a_coreference_ambiguous_hold_is_visible_and_never_excludes_the_primary(self):
+        """issue #6, Codex's independent re-review (F9-R17-B): a
+        `COREFERENCE_AMBIGUOUS` hold (a second-reading mention co-located with
+        a primary event, never confirmed the same or proven distinct) must
+        remain VISIBLE in the ClaimBundle -- exactly like a `RELATION_UNPLACED`
+        hold already is -- but, unlike that case, it must carry NO gate and
+        exclude NOTHING: the primary event this ambiguity is co-located with
+        stays independently billable, since the ambiguity is about the SECOND
+        READING's own observation, never proof the primary itself is
+        undocumented. Mirrors the sibling test above
+        (`test_a_relation_naming_an_unresolvable_endpoint_is_visible_as_an_
+        unresolved_line`), proving the SAME vehicle (`UnresolvedRecoveredLine`
+        -> `bundle_from_coding_result` -> `EVIDENCE_RELATION_UNRESOLVED`) now
+        also carries this hold cause, with NO corresponding `gates` entry and
+        NO exclusion of the primary's own resolved line."""
+        from app.contracts.claim_bundle import (
+            AuthorityBinding, EncounterContext, LineStatus, SourceDocument,
+            bundle_from_coding_result)
+        from claude_coder.models import (CandidateCode, CodingResult, ResolutionMethod,
+                                         ResolvedLine, UnresolvedRecoveredLine)
+
+        primary = _fact("F1", FactKind.PROCEDURE, "procedure one performed",
+                        spans=[EvidenceSpan(text="Procedure one performed today",
+                                            anchored=True, start=0, end=10,
+                                            span_id="p1", reading_channel_id="")])
+        ambiguous_fact = _fact(
+            "second-S1", FactKind.PROCEDURE, "procedure one performed again",
+            spans=[EvidenceSpan(text="Procedure one performed again today",
+                                anchored=True, start=0, end=10, span_id="s1",
+                                reading_channel_id="second-reading")])
+
+        result = CodingResult(
+            encounter_id="enc", date_of_service="2026-03-14",
+            lines=[ResolvedLine(fact=primary, chosen=CandidateCode("PROC_X", "cpt", "x"),
+                               method=ResolutionMethod.DETERMINISTIC)],
+            gates=[])   # no gate at all for this hold cause -- the point of the fix
+        result.unresolved_recovered_lines = (UnresolvedRecoveredLine(
+            description="procedure one performed again",
+            kind="procedure",
+            evidence=tuple(ambiguous_fact.evidence),
+            reason=("co-located with F1's own quotation, never confirmed the same "
+                    "documented event or proven distinct -- candidate requiring one "
+                    "specific fact: whether this is the same documented service as "
+                    "['F1'], or a distinct one"),
+            affected_fact_ids=("F1",)),)
+
+        bundle = bundle_from_coding_result(
+            result, source_document=SourceDocument(filename="n"),
+            context=EncounterContext(), authority=AuthorityBinding())
+
+        # The primary's own line is untouched: still billable, still selected.
+        self.assertEqual([ln.code for ln in bundle.service_lines], ["PROC_X"])
+        self.assertIsNone(result.lines[0].excluded_reason)
+        # The ambiguity is visible as its own candidate line, never a gate.
+        self.assertEqual(result.gates, [])
+        ambiguous_lines = [c for c in bundle.candidate_lines
+                          if c.subject == "procedure one performed again"]
+        self.assertEqual(len(ambiguous_lines), 1)
+        self.assertEqual(ambiguous_lines[0].status, LineStatus.EVIDENCE_RELATION_UNRESOLVED)
+        self.assertIn("candidate requiring one specific fact",
+                      ambiguous_lines[0].blocking_reason)
 
     def test_relation_validation_withdrawal_scopes_to_the_recovered_events_own_canonical_neighbors(
             self):

@@ -594,12 +594,48 @@ def code_encounter(
 
     for _held in (recovery.holds if recovery is not None else ()):
         if _held.hold_cause == _union.RecoveryHoldCause.COREFERENCE_AMBIGUOUS.value:
+            # issue #6, Codex's independent re-review (F9-R17-B): this used to
+            # emit a pre-retrieval GATE scoped to `possible_primary_ids` -- the
+            # PRIMARY event(s) this second-reading mention is co-located with,
+            # never confirmed the SAME as. `autonomy.decide`'s dependency-scoped
+            # exclusion then correctly (by its own contract) excluded exactly
+            # those named ids -- which are the PRIMARY facts, not the
+            # second-reading observation raising the ambiguity. A wording
+            # alignment the pipeline could not confirm one way or the other was
+            # suppressing an otherwise independently evidence-backed PRIMARY
+            # service, never itself. Whether two documented mentions are the
+            # SAME service or two DISTINCT ones is a question about the SECOND
+            # READING'S observation, not proof the primary is undocumented --
+            # it must never gate the primary's own retrieval/resolution at all.
+            #
+            # This is now represented purely as a non-blocking, VISIBLE
+            # candidate line (never a gate, never `affected_fact_ids` naming
+            # the primary) -- the exact same `UnresolvedRecoveredLine` vehicle
+            # `RELATION_UNPLACED` below already uses for "recovered but not
+            # placeable", so the primary event(s) proceed through ordinary
+            # retrieval/resolution completely undisturbed. `possible_primary_ids`
+            # is still named in `affected_fact_ids` here for AUDIT context only
+            # (which primary(ies) this observation might restate) -- this field
+            # is informational on `UnresolvedRecoveredLine` (unlike a `GateResult`'s
+            # identically-named field, it is never consulted by `autonomy.decide`'s
+            # exclusion mechanism).
+            #
+            # A genuinely DISTINCT co-located event is unaffected by this change:
+            # `event_union._physical_duplicates` already falls through such a
+            # candidate to ordinary admission (never reaches this branch at
+            # all), and a confirmed SAME-event match already merges into the
+            # primary before this branch too -- only the genuinely undecided
+            # middle case (never proven same, never proven distinct) reaches
+            # here, and it is now held on its OWN account alone.
             _scope = _canonical_scope(_held.possible_primary_ids, _canonical_fact_ids)
-            pre_retrieval_gates.append(GateResult(
-                f"second_reading_coreference:{_held.second_event_id}",
-                Outcome.UNKNOWN, _held.reason,
-                "event-candidate union (product directive section 3)",
-                retryable=False, affected_fact_ids=_scope))
+            _unresolved_recovered_lines.append(UnresolvedRecoveredLine(
+                description=str(getattr(_held.fact, "description", "") or ""),
+                kind=str(getattr(getattr(_held.fact, "kind", None), "value", "") or ""),
+                evidence=tuple(getattr(_held.fact, "evidence", None) or ()),
+                reason=(f"{_held.reason} -- candidate requiring one specific fact: "
+                       f"whether this is the same documented service as "
+                       f"{list(_scope) or 'a co-located event'}, or a distinct one"),
+                affected_fact_ids=_scope))
         elif _held.hold_cause == _union.RecoveryHoldCause.RELATION_UNPLACED.value:
             _scope = _canonical_scope(_held.affected_ids, _canonical_fact_ids)
             # issue #6, Codex's independent re-review (F9-R13-A): this is a

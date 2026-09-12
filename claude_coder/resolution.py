@@ -1215,6 +1215,57 @@ _LEARNED_DETERMINISTIC = False  # Fix5: learned index is recall-only until re-ke
                                 # full clinical context (system/anatomy/laterality/...)
 
 
+def _bind_evaluation_descriptors(candidates: list[CandidateCode],
+                                 source: CodeSource) -> list[CandidateCode]:
+    """issue #6, Codex's independent re-review (F9-R17-A): ONE authoritative
+    descriptor per candidate, bound once and used everywhere downstream --
+    requirement compilation, both verifier prompts, response parsing, tie
+    comparison, audit, and the released line.
+
+    Before this fix, `verify._shortlist_prompt` displayed `_best_descriptor
+    (source, c)` (the richer long/medium/consumer record `source.
+    descriptions()` returns) while `verify._candidate_dispositions` validated
+    the model's verbatim `authority_clause` against `candidate.descriptor` (a
+    DIFFERENT, often shorter registry/retrieval descriptor) -- two different
+    strings for the same candidate, one shown, one validated against. A model
+    that correctly quoted a phrase from the descriptor it was ACTUALLY shown
+    had its answer silently dropped because that phrase never appears in the
+    shorter string the parser checked instead. A missing disposition entry
+    makes `_candidate_disposition_uniqueness` return `None` (defer entirely,
+    per its own fail-closed contract for incomplete coverage) -- so this bug
+    could make EVERY candidate in a shortlist look permanently undecidable,
+    with nothing about it visible as a parse failure rather than a genuine
+    model disagreement.
+
+    Replaces `candidate.descriptor` with the same authoritative text
+    `_best_descriptor` would select (falling back to the candidate's own
+    descriptor exactly as `_best_descriptor` does when `source.descriptions`
+    has nothing), and records the original retrieval descriptor plus the
+    governing descriptor's own source snapshot identity in `authority` for
+    lineage/audit -- never used as a second validation authority.
+    """
+    bound: list[CandidateCode] = []
+    for cand in candidates:
+        try:
+            tiers = source.descriptions(cand.code, cand.system) or []
+        except Exception:
+            tiers = []
+        authoritative = tiers[0] if tiers else cand.descriptor
+        snapshot_fn = getattr(source, "record_snapshot_identity", None)
+        snapshot: dict[str, Any] = {}
+        if callable(snapshot_fn):
+            try:
+                snapshot = snapshot_fn(cand.code, cand.system) or {}
+            except Exception:
+                snapshot = {}
+        bound.append(_dc_replace(
+            cand, descriptor=authoritative,
+            authority={**dict(cand.authority or {}),
+                      "recall_descriptor": cand.descriptor,
+                      "evaluation_descriptor_snapshot": snapshot}))
+    return bound
+
+
 def _active_only(cands: list[CandidateCode], source: CodeSource,
                  dos: str | None) -> list[CandidateCode]:
     """Fix3: drop candidates DEFINITIVELY inactive on the DOS before they can occupy
@@ -2042,6 +2093,13 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
     shortlist = _active_only(order, source, dos)[:VERIFY_K]
     if not shortlist and unsupported:
         return _bounded_interval_hold(fact, unsupported)
+    # issue #6, Codex's independent re-review (F9-R17-A): bind ONE authoritative
+    # descriptor per candidate now, before anything downstream reads
+    # `candidate.descriptor` -- requirement compilation, both verifier prompts,
+    # response parsing, tie comparison, audit, and the released line all read
+    # this SAME bound field from here on, so what a model is shown and what its
+    # answer is validated against can never diverge again.
+    shortlist = _bind_evaluation_descriptors(shortlist, source)
     # issue #6 F9-R6: compiled ONCE against the whole shortlist and passed
     # identically to every verifier call below (both models judge the SAME
     # requirement_ids -- structural, not coincidental) and into uniqueness
