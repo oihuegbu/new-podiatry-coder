@@ -322,8 +322,11 @@ def code_encounter(
         # The extraction call's own recorded identity travels WITH the graph it produced:
         # every relation is stamped with this call's assertion origin, so corroboration
         # downstream counts distinct sources rather than repetitions. (Codex F6-R3.)
+        logger.info("  primary extraction starting (provider=%s)...",
+                   (profiles.get("extraction") or {}).get("provider", "unknown"))
         extracted = extraction.extract_note(note_text, extract_llm, billing_context,
                                             model_profile=profiles.get("extraction"))
+        logger.info("  primary extraction complete: %d fact(s)", len(extracted.facts))
         facts = extracted.facts
         _prov.anchor_facts(note_text, facts, document_version=document_version)
         # ---- Structural composition (issue #6 items 2/3) -----------------------------
@@ -364,11 +367,13 @@ def code_encounter(
         #: listed here (see `provenance.readings_map`).
         readings: dict[str, str] = {}
         if extract_llm_b is not None:
+            logger.info("  graph consensus (second reading + axis comparison) starting...")
             consensus, source_evidence, recovery, recall = _run_graph_consensus(
                 note_text, facts, billing_context, extract_llm_b, profiles,
                 document_version, source_evidence, source_reader,
                 enforce_independence=enforce_second_reading_independence,
                 source=source, verify_llm=verify_llm, corroborate_llm=corroborate_llm)
+            logger.info("  graph consensus complete")
             # Every reading a fact may now be anchored in. The relation kernel re-reads
             # the document between two endpoint mentions to prove an edge's DIRECTION,
             # and it can only do that against the string those mentions were verified
@@ -1487,10 +1492,13 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
                     f"obtained but covered none of them; they remain recall-uncovered")
 
     recall_text = recall.text if recall is not None else note_text
+    logger.info("  second-reading extraction starting (provider=%s)...",
+               (profiles.get("second_extraction") or {}).get("provider", "unknown"))
     extracted_b = extraction.extract_note(
         recall_text, extract_llm_b, billing_context,
         run_id=_SECOND_READING_RUN_ID,
         model_profile=profiles.get("second_extraction"))
+    logger.info("  second-reading extraction complete: %d fact(s)", len(extracted_b.facts))
     # Anchored into the reading it was extracted from, and stamped with WHICH reading
     # that is, so nothing downstream slices the wrong string.
     _prov.anchor_facts(recall_text, extracted_b.facts, document_version=document_version,
