@@ -630,8 +630,8 @@ def compile_requirements(candidates: list[CandidateCode], source: Any = None
     # requirement's actual semantic content is fully documented -- both
     # evaluators can correctly answer NOT_DOCUMENTED about the literal word and
     # ground a FALSE elimination of a candidate the document actually supports.
-    # Negation, logical alternatives ("cyst or benign tumor"), and compound
-    # clauses have the same failure shape. The two-model layer does not repair
+    # Negation, logical alternatives ("condition X or condition Y"), and
+    # compound clauses have the same failure shape. The two-model layer does not repair
     # this: it re-asks the same literal-token question, it does not test the
     # concept. The intended replacement is a genuine per-candidate SEMANTIC
     # disposition record inside `verify`'s existing judgement contract (see
