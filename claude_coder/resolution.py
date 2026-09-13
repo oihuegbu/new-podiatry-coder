@@ -464,59 +464,79 @@ def _apply_attribute_evidence_gap_guard(line: ResolvedLine, coverage) -> Resolve
         attribute_evidence_gap=disposition)
 
 
-def _required_claim_axes(chosen: CandidateCode, source: CodeSource,
-                         dos: str | None) -> frozenset[str]:
-    """Axes not necessarily stated as a literal descriptor clause, but that
-    downstream modifier/unit generation will actually consult for THIS
-    candidate (issue #6, Codex's independent re-review, F9-R18-A reopened P1
-    correction, required correction item 3) -- derived from the SAME
+@dataclass(frozen=True)
+class ClaimInputContract:
+    """The axes downstream modifier/unit generation will actually consult
+    for ONE selected candidate (issue #6, Codex's independent re-review,
+    F9-R18-A reopened P1, second correction) -- derived from the SAME
     authoritative records and descriptor parsers those consumers already
-    use, never a hardcoded axis list or specialty vocabulary:
-      - `laterality`, when the code's own authoritative bilateral-surgery
-        indicator (`source.bilat_indicator`, the same PFS table
-        `modifiers.py` already reads) makes a side/bilateral modifier
-        applicable AND the descriptor does not already encode a side
-        (`parse_descriptor(...).laterality` empty) -- an absent descriptor
-        side is not "not required", it is "the modifier decision depends on
-        which side, and the descriptor alone can't say".
-      - `count`, when the descriptor's own parsed cardinality
-        (`parse_descriptor(...).cardinality`, the SAME field
-        `_needs_verification` already reads to decide whether a count/
-        quantity claim needs independent confirmation) means units will be
-        computed from it.
-      - `dose`, when `source.drug_unit` declares a dosing/unit record for
-        this code -- units are computed from the documented dose.
+    use, so the axis-conflict guard's own notion of "material" can never
+    drift from what those consumers actually read. The original
+    `_required_claim_axes` this replaces mismatched both real consumers:
+
+      - `laterality`: True whenever `modifiers.ModifierEngine.assign` would
+        actually consult it -- ANY non-empty bilateral indicator except "9"
+        (not applicable), matching `modifiers.py`'s own governed-indicator
+        check exactly. The prior version only flagged indicator "1",
+        silently letting an indicator "0" (bilateral NOT allowed, so the
+        SIDE itself still determines which unilateral code line applies)
+        line's still-unresolved laterality bypass the guard.
+      - `quantity_axes`: BOTH alias keys claim assembly actually reads
+        (`claim_authorized_value(fact, "count", ...) or
+        claim_authorized_value(fact, "quantity", ...)` -- `pipeline.py`'s own
+        unit computation, verbatim) whenever the descriptor's own parsed
+        cardinality means units are computed from either. The prior version
+        only ever added "count", so a conflict recorded under "quantity"
+        specifically was invisible even though it controls the SAME units.
+      - `dose`: True when `source.drug_unit` OR the descriptor's own parsed
+        dose denominator (`ontology.parse_dose_denominator`, the SAME
+        fail-closed fallback `pipeline.py`/`gates.py` already use when the
+        authoritative table has no entry) means units are computed from a
+        documented dose.
     """
-    axes: set[str] = set()
+    laterality: bool = False
+    quantity_axes: tuple[str, ...] = ()
+    dose: bool = False
+
+
+def claim_input_contract(chosen: CandidateCode, source: CodeSource,
+                         dos: str | None) -> ClaimInputContract:
     feats = parse_descriptor(chosen.descriptor)
+    indicator = None
     bilat_indicator = getattr(source, "bilat_indicator", None)
     if callable(bilat_indicator):
         try:
-            bilat = bilat_indicator(chosen.code, dos)
+            indicator = bilat_indicator(chosen.code, dos)
         except Exception:
-            bilat = None
-        if bilat == "1" and not feats.laterality:
-            axes.add("laterality")
-    if feats.cardinality:
-        axes.add("count")
+            indicator = None
+    laterality = bool(indicator and str(indicator) != "9" and not feats.laterality)
+    quantity_axes = ("count", "quantity") if feats.cardinality else ()
+    dose = False
     drug_unit = getattr(source, "drug_unit", None)
     if callable(drug_unit):
         try:
-            unit_record = drug_unit(chosen.code)
+            dose = bool(drug_unit(chosen.code))
         except Exception:
-            unit_record = None
-        if unit_record:
-            axes.add("dose")
-    return frozenset(axes)
+            dose = False
+    if not dose:
+        from .ontology import parse_dose_denominator
+        dose = bool(parse_dose_denominator(chosen.descriptor))
+    return ClaimInputContract(laterality=laterality, quantity_axes=quantity_axes, dose=dose)
 
 
 def _material_axis_conflicts_for(chosen: CandidateCode, conflicts: dict,
                                  requirements: tuple = (),
-                                 required_claim_axes: frozenset = frozenset()
-                                 ) -> list[tuple[str, Any]]:
+                                 contract: "ClaimInputContract | None" = None
+                                 ) -> list[tuple[str, Any, str | None]]:
     """Every unresolved clinical-attribute conflict that is MATERIAL to
     `chosen` specifically (issue #6, Codex's independent re-review, F9-R18-A;
-    corrected reopened P1, required correction item 3).
+    corrected reopened P1). Returns `(axis, conflict, required_value)`
+    triples: `required_value` is the SPECIFIC disputed value `chosen`'s own
+    descriptor literally states (via a reproduced clause), or `None` when
+    materiality comes only from `contract`/compiled requirements -- the
+    descriptor itself is silent on which value applies, so there is no
+    specific value to check compatibility against, only that SOME value
+    gets authorized.
 
     A literal descriptor clause (`requirement._find_clause`) is a fast
     POSITIVE signal -- never the complete rule on its own, since a candidate
@@ -531,25 +551,32 @@ def _material_axis_conflicts_for(chosen: CandidateCode, conflicts: dict,
         `compile_requirements` already derives -- empty for a true singleton,
         since `tiebreak.discriminating_axes` needs 2+ candidates to compare;
         meaningful once this fact reaches a real tie),
-      - `required_claim_axes` (`_required_claim_axes`): axes downstream
-        modifier/unit generation will consult for THIS specific candidate,
-        singleton or not.
+      - `contract` (`claim_input_contract`): axes downstream modifier/unit
+        generation will consult for THIS specific candidate, singleton or
+        not.
     """
     if not conflicts:
         return []
     from . import requirement as _requirement
+    contract = contract or ClaimInputContract()
     typed_axes = {req.axis for req in requirements
                  if req.candidate_code == chosen.code
                  and req.role == _requirement.RequirementRole.MUST_SUPPORT}
-    typed_axes |= set(required_claim_axes)
-    out: list[tuple[str, Any]] = []
+    if contract.laterality:
+        typed_axes.add("laterality")
+    typed_axes.update(contract.quantity_axes)
+    if contract.dose:
+        typed_axes.add("dose")
+    out: list[tuple[str, Any, str | None]] = []
     for axis, conflict in sorted(conflicts.items()):
-        literal = any(
-            value and _requirement._find_clause(chosen.descriptor, value) is not None
-            for value in (getattr(conflict, "value_primary", "") or "",
-                         getattr(conflict, "value_second", "") or ""))
-        if literal or axis in typed_axes:
-            out.append((axis, conflict))
+        required_value = None
+        for value in (getattr(conflict, "value_primary", "") or "",
+                     getattr(conflict, "value_second", "") or ""):
+            if value and _requirement._find_clause(chosen.descriptor, value) is not None:
+                required_value = value
+                break
+        if required_value is not None or axis in typed_axes:
+            out.append((axis, conflict, required_value))
     return out
 
 
@@ -766,16 +793,38 @@ def _apply_attribute_axis_conflict_guard(
     chosen = line.chosen
     from . import requirement as _requirement
     requirements = _requirement.compile_requirements([chosen], source)
-    required_claim_axes = _required_claim_axes(chosen, source, dos)
-    material = _material_axis_conflicts_for(
-        chosen, conflicts, requirements, required_claim_axes)
+    contract = claim_input_contract(chosen, source, dos)
+    material = _material_axis_conflicts_for(chosen, conflicts, requirements, contract)
     if not material:
         return line
-    outstanding = [(axis, conflict) for axis, conflict in material
-                  if _gc.claim_authorized_value(fact, axis, reconciliation) is None]
+    withdrawn = [chosen] + [c for c in line.alternatives if c.code != chosen.code]
+    outstanding: list[tuple[str, Any]] = []
+    for axis, conflict, required_value in material:
+        value = _gc.claim_authorized_value(fact, axis, reconciliation)
+        if value is None:
+            outstanding.append((axis, conflict))
+            continue
+        # issue #6, Codex's independent re-review (F9-R18-A reopened P1,
+        # third correction): an authorized value on the SAME axis is not
+        # enough on its own -- it must be the value `chosen`'s own
+        # descriptor actually requires. A fact could authorize one value
+        # while the selected candidate's descriptor requires a DIFFERENT
+        # one; releasing on "some value was authorized" would bill the
+        # wrong candidate. Only checked when the descriptor names a
+        # SPECIFIC required value (a literal clause match) -- a
+        # contract-only conflict (descriptor silent on which value applies)
+        # has nothing specific to compare against, so any authorized value
+        # is compatible.
+        if required_value is not None and _gc._norm(value) != _gc._norm(required_value):
+            return _dc_replace(
+                line, chosen=None, alternatives=withdrawn[:5],
+                method=ResolutionMethod.ABSTAINED,
+                rationale=(
+                    f"selected code withdrawn for {fact.fact_id}: its own descriptor "
+                    f"requires {axis}={required_value!r}, but the record authorizes "
+                    f"{axis}={value!r}"))
     if not outstanding:
         return line
-    withdrawn = [chosen] + [c for c in line.alternatives if c.code != chosen.code]
     for axis, conflict in outstanding:
         outcome, detail = _resolve_material_axis_conflict(
             fact, chosen, axis, conflict, source, llm, corroborate, reconciliation,

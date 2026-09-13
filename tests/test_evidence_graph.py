@@ -1789,7 +1789,8 @@ class DependencyScopedPartialRelease(unittest.TestCase):
         """F1 (resolved) is PART_OF F2 (unresolved) -- a real, documented
         clinical relationship. Both must be excluded from this claim; neither
         releases independently of the other."""
-        from claude_coder.models import (CandidateCode, CodingResult,
+        from claude_coder.models import (CandidateCode, ClaimSubmissionStatus,
+                                         CodingResult,
                                          RelationAssertion, RelationPredicate,
                                          RelationState, ResolutionMethod, ResolvedLine)
         from claude_coder.autonomy import decide
@@ -1822,7 +1823,12 @@ class DependencyScopedPartialRelease(unittest.TestCase):
         self.assertEqual(result.billable_lines, [],
                          "F1 is entangled with the unresolved F2 via a documented "
                          "PART_OF relationship and must not release alone")
-        self.assertIsNotNone(lines[0].excluded_reason)
+        # issue #6, Codex's independent re-review (F9-R20-A clarification):
+        # entanglement is a submission problem, never proof F1's own
+        # selection is invalid -- F1 is HELD (code/evidence intact, visible
+        # via `submission_held_lines`), not erased via `excluded_reason`.
+        self.assertIsNone(lines[0].excluded_reason)
+        self.assertEqual(lines[0].claim_submission_status, ClaimSubmissionStatus.HELD)
 
     def test_an_unresolved_qualifying_diagnosis_blocks_only_its_dependent_procedure(self):
         """Procedure A has its OWN resolved, record-grounded diagnosis link and
@@ -1838,7 +1844,8 @@ class DependencyScopedPartialRelease(unittest.TestCase):
         not blocking-by-default merely because its kind is DIAGNOSIS, which is
         exactly what forced the whole encounter away from AUTO_READY for an
         isolated diagnosis with zero relationship to the released pair)."""
-        from claude_coder.models import (CandidateCode, CodingResult,
+        from claude_coder.models import (CandidateCode, ClaimSubmissionStatus,
+                                         CodingResult,
                                          RelationAssertion, RelationPredicate,
                                          RelationState, ResolutionMethod, ResolvedLine)
         from claude_coder import gates as gates_mod
@@ -1897,7 +1904,12 @@ class DependencyScopedPartialRelease(unittest.TestCase):
                          "procedure A has its own independent qualifying diagnosis "
                          "and must release; procedure B, lacking one, must not")
         self.assertIsNone(lines[0].excluded_reason)
-        self.assertIsNotNone(lines[1].excluded_reason)
+        # issue #6, Codex's independent re-review (F9-R20-A clarification):
+        # procedure B's own selection is unaffected by diagnosis B's
+        # ambiguity -- it is HELD (code/evidence intact), not erased via
+        # `excluded_reason`.
+        self.assertIsNone(lines[1].excluded_reason)
+        self.assertEqual(lines[1].claim_submission_status, ClaimSubmissionStatus.HELD)
         non_blocking = [r for r in result.routing if not r["blocking"]]
         self.assertTrue(any(r["fact_id"] == "DXB" for r in non_blocking),
                         "diagnosis B must still surface as an open question, "
@@ -1924,7 +1936,8 @@ class DependencyScopedPartialRelease(unittest.TestCase):
         documented relationship to it must stay independently billable
         and the encounter must reach AUTO_READY, exactly like the analogous
         `medical_necessity` case above."""
-        from claude_coder.models import CandidateCode, CodingResult, ResolutionMethod, ResolvedLine
+        from claude_coder.models import (CandidateCode, ClaimSubmissionStatus,
+                                         CodingResult, ResolutionMethod, ResolvedLine)
         from claude_coder.models import GateResult, Outcome
         from claude_coder.autonomy import decide
 
@@ -1960,7 +1973,11 @@ class DependencyScopedPartialRelease(unittest.TestCase):
                          "procedure B has no documented relationship to the ambiguous "
                          "mention and must release; procedure A, named by the gate, "
                          "must not")
-        self.assertIsNotNone(lines[0].excluded_reason)
+        # issue #6, Codex's independent re-review (F9-R20-A clarification):
+        # procedure A's own selection is unaffected by the ambiguity -- it
+        # is HELD (code/evidence intact), not erased via `excluded_reason`.
+        self.assertIsNone(lines[0].excluded_reason)
+        self.assertEqual(lines[0].claim_submission_status, ClaimSubmissionStatus.HELD)
         self.assertIsNone(lines[1].excluded_reason)
 
     def test_unread_page_second_reading_hold_stays_encounter_wide(self):
@@ -2065,7 +2082,8 @@ class DependencyScopedPartialRelease(unittest.TestCase):
         id in the same tuple), and `autonomy.decide` excludes only the line it
         names -- an unrelated, independently documented procedure must still
         release."""
-        from claude_coder.models import CandidateCode, CodingResult, ResolutionMethod, ResolvedLine
+        from claude_coder.models import (CandidateCode, ClaimSubmissionStatus,
+                                         CodingResult, ResolutionMethod, ResolvedLine)
         from claude_coder.models import GateResult, Outcome
         from claude_coder.autonomy import decide
         from claude_coder.pipeline import _canonical_scope
@@ -2105,7 +2123,12 @@ class DependencyScopedPartialRelease(unittest.TestCase):
         decide(result, source=None)
         self.assertEqual(result.destination.value, "AUTO_READY", result.notes)
         self.assertEqual([ln.chosen.code for ln in result.billable_lines], ["CPT_B"])
-        self.assertIsNotNone(lines[0].excluded_reason)
+        # issue #6, Codex's independent re-review (F9-R20-A clarification):
+        # procedure A's own selection is unaffected by the unplaced-relation
+        # hold -- it is HELD (code/evidence intact), not erased via
+        # `excluded_reason`.
+        self.assertIsNone(lines[0].excluded_reason)
+        self.assertEqual(lines[0].claim_submission_status, ClaimSubmissionStatus.HELD)
         self.assertIsNone(lines[1].excluded_reason)
         # issue #6, Codex's independent re-review (F9-R13-A): this is a SYSTEM
         # reconciliation problem, never a coding judgement -- the routing item

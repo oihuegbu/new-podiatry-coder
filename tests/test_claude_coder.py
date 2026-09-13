@@ -297,19 +297,22 @@ class AutonomousCoderTest(unittest.TestCase):
         # issue #6, Codex's independent re-review (F9-R15-C): the blocked
         # procedure's gate is scoped to its own fact_id, not the whole
         # encounter -- but the diagnosis is REASON_FOR-linked to (necessity-
-        # justifies) exactly that unbillable procedure, so it is correctly
-        # excluded as an entangled dependent rather than surviving into
-        # `billable_lines` as if it were independently defensible. Nothing
-        # billable remains, so `verbatim_evidence` (which only scores
-        # `billable_lines`) is NOT_APPLICABLE rather than PASS.
+        # justifies) exactly that unbillable procedure, so it is dependency-
+        # held rather than surviving into `billable_lines` as if it were
+        # independently defensible. Nothing billable remains, so
+        # `verbatim_evidence` (which only scores `billable_lines`) is
+        # NOT_APPLICABLE rather than PASS.
         self.assertEqual(ev.outcome, Outcome.NOT_APPLICABLE)
-        # issue #6, Codex's independent re-review (F9-R15-C): the blocked gate
-        # is now scoped (non-blocking to the overall verdict) rather than an
-        # encounter-wide hard stop, so the final destination is correctly the
-        # more precise HOLD (nothing left is a claim-eligible event) rather
-        # than the coarser, less accurate blanket BLOCKED this used to assert.
+        # issue #6, Codex's independent re-review (F9-R20-A clarification):
+        # "downstream controls classify; they do not erase" -- the linked
+        # diagnosis's own selection is unaffected by F1's eligibility hold,
+        # so it is HELD (code/evidence intact, visible), not excluded. A
+        # real, defensible held diagnosis line now needs a coder's
+        # attention -- REVIEW, the more precise destination -- rather than
+        # the coarser HOLD this asserted back when the diagnosis was simply
+        # erased and truly nothing survived to review.
         from claude_coder.models import Destination
-        self.assertEqual(r.destination, Destination.HOLD)
+        self.assertEqual(r.destination, Destination.REVIEW)
         self.assertEqual(r.verdict, Verdict.REVIEW_REQUIRED)
 
     def test_missing_dos_blocks_release(self):
@@ -633,7 +636,8 @@ class ClaimAfterPruningReconciliationTest(unittest.TestCase):
 
     def test_a_stale_distinct_service_modifier_is_removed_after_pruning(self):
         from claude_coder.data_access import MockSource
-        from claude_coder.models import (AttributeEvidence, ClinicalFact, CodingResult,
+        from claude_coder.models import (AttributeEvidence, ClaimSubmissionStatus,
+                                         ClinicalFact, CodingResult,
                                          EvidenceSpan, FactKind, RelationAssertion,
                                          RelationPredicate, RelationState,
                                          ResolutionMethod, ResolvedLine)
@@ -707,8 +711,16 @@ class ClaimAfterPruningReconciliationTest(unittest.TestCase):
 
         _reconcile_claim_after_pruning(r, src, note_text, eng, None, [], None)
 
-        self.assertIsNotNone(p1.excluded_reason,
-                             "P1 must be excluded -- entangled with unresolved F3")
+        # issue #6, Codex's independent re-review (F9-R20-A clarification):
+        # "downstream controls classify; they do not erase" -- entanglement
+        # with unresolved F3 is a SUBMISSION problem, never proof P1's own
+        # selection is invalid, so P1 is HELD (code/evidence intact, visible
+        # via `submission_held_lines`), not erased via `excluded_reason`.
+        self.assertIsNone(p1.excluded_reason,
+                          "P1's own selection is not invalid -- entanglement "
+                          "holds submission, it does not erase the selection")
+        self.assertEqual(p1.claim_submission_status, ClaimSubmissionStatus.HELD,
+                         "P1 must be held -- entangled with unresolved F3")
         self.assertIsNone(p2.excluded_reason,
                           "P2 has its own independent diagnosis link and must survive")
         self.assertNotIn("MXS", p2.modifiers,
@@ -777,7 +789,8 @@ class ClaimAfterPruningReconciliationTest(unittest.TestCase):
         billable with no real support. Gates must be recomputed every round
         so the FINAL state is what's attested, never a frozen earlier one."""
         from claude_coder.data_access import MockSource
-        from claude_coder.models import (ClinicalFact, CodingResult, Destination,
+        from claude_coder.models import (ClaimSubmissionStatus, ClinicalFact,
+                                         CodingResult, Destination,
                                          EvidenceSpan, FactKind, RelationAssertion,
                                          RelationPredicate, RelationState,
                                          ResolutionMethod, ResolvedLine, CandidateCode)
@@ -827,8 +840,16 @@ class ClaimAfterPruningReconciliationTest(unittest.TestCase):
 
         _reconcile_claim_after_pruning(result, src, note_text, eng, None, [], None)
 
-        self.assertIsNotNone(dx.excluded_reason,
-                             "DX must be excluded -- entangled with unresolved U")
+        # issue #6, Codex's independent re-review (F9-R20-A clarification):
+        # DX's own selection is unaffected by U's ambiguity -- it is HELD,
+        # not erased via `excluded_reason`. It still drops out of
+        # `billable_lines`/`diagnosis_lines` exactly as an excluded line
+        # would, so P's necessity support is removed all the same.
+        self.assertIsNone(dx.excluded_reason,
+                          "DX's own selection is not invalid -- entanglement "
+                          "holds submission, it does not erase the selection")
+        self.assertEqual(dx.claim_submission_status, ClaimSubmissionStatus.HELD,
+                         "DX must be held -- entangled with unresolved U")
         # `billable_lines` alone (resolved + not excluded) does not decide
         # submission -- the necessity gate going hard-BLOCKED (no documented
         # diagnosis remains for P) is what must, and does, force the WHOLE
@@ -856,7 +877,8 @@ class ClaimAfterPruningReconciliationTest(unittest.TestCase):
         restored to a pristine baseline and re-derived fresh every round,
         not assumed monotonic."""
         from claude_coder.data_access import MockSource
-        from claude_coder.models import (ClinicalFact, CodingResult, EvidenceSpan,
+        from claude_coder.models import (ClaimSubmissionStatus, ClinicalFact,
+                                         CodingResult, EvidenceSpan,
                                          FactKind, RelationAssertion, RelationPredicate,
                                          RelationState, ResolutionMethod, ResolvedLine,
                                          CandidateCode)
@@ -947,8 +969,16 @@ class ClaimAfterPruningReconciliationTest(unittest.TestCase):
         _reconcile_claim_after_pruning(result, src, note_text, eng, None, [], None,
                                        baseline=baseline)
 
-        self.assertIsNotNone(a.excluded_reason,
-                             "A must be excluded -- entangled with unresolved U")
+        # issue #6, Codex's independent re-review (F9-R20-A clarification):
+        # A's own selection is unaffected by U's ambiguity -- it is HELD,
+        # not erased via `excluded_reason`. It still drops out of
+        # `billable_lines` exactly as an excluded line would, so B's NCCI
+        # partner is gone all the same and B correctly returns.
+        self.assertIsNone(a.excluded_reason,
+                          "A's own selection is not invalid -- entanglement "
+                          "holds submission, it does not erase the selection")
+        self.assertEqual(a.claim_submission_status, ClaimSubmissionStatus.HELD,
+                         "A must be held -- entangled with unresolved U")
         self.assertIsNone(b.excluded_reason,
                           "B's only NCCI partner is gone -- it must return")
         self.assertEqual(sorted(ln.chosen.code for ln in result.billable_lines),

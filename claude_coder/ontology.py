@@ -321,12 +321,27 @@ def _to_base(amount: float, unit: str) -> tuple[float, str]:
     return amount, u
 
 
-def documented_dose_text(fact) -> str:
-    """The free text a drug line's documented dose is read from (attributes + anchored
-    evidence + description). Defined ONCE so the unit computation and the fail-closed
-    availability gate ask the same question of the same text. (Codex F6-R5.)"""
-    return " ".join([str(v) for v in (getattr(fact, "attributes", None) or {}).values()]
-                    + [s.text for s in (getattr(fact, "evidence", None) or [])]
+def documented_dose_text(fact, reconciliation=None) -> str:
+    """The free text a drug line's documented dose is read from. Defined ONCE
+    so the unit computation and the fail-closed availability gate ask the
+    same question of the same text. (Codex F6-R5.)
+
+    `reconciliation` (issue #6, Codex's independent re-review, F9-R18-A
+    reopened P1, adjacent correction): this used to concatenate every raw
+    `fact.attributes` value unconditionally -- bypassing
+    `graph_consensus.claim_authorized_value` entirely, the SAME accessor
+    this round made exclusive for every other claim-affecting consumer. An
+    unresolved, conflicted, or otherwise unauthorized attribute value could
+    still silently drive a dosed drug's billed UNITS. Now includes only
+    values `claim_authorized_value` actually authorizes, plus this event's
+    own source-reconciled evidence text (`graph_consensus.source_support`) --
+    never the raw dict."""
+    from . import graph_consensus as _gc
+    attributes = getattr(fact, "attributes", None) or {}
+    authorized = [v for axis in sorted(attributes)
+                 if (v := _gc.claim_authorized_value(fact, axis, reconciliation))]
+    ok, _proof, verified_text, _ids = _gc.source_support(fact, reconciliation)
+    return " ".join(authorized + ([verified_text] if ok and verified_text else [])
                     + [str(getattr(fact, "description", "") or "")])
 
 

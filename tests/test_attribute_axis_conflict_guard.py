@@ -82,6 +82,17 @@ def _disposition_llm(status, descriptor, span_tags=(), missing_fact="", raises=F
     return stub
 
 
+class _BilatSource:
+    def __init__(self, indicator="1"):
+        self._indicator = indicator
+
+    def bilat_indicator(self, code, dos=None):
+        return self._indicator
+
+    def drug_unit(self, code):
+        return None
+
+
 class MaterialityTest(unittest.TestCase):
     """`resolution._material_axis_conflicts_for` -- singleton-safe materiality,
     never requiring 2+ candidates to compare."""
@@ -90,7 +101,8 @@ class MaterialityTest(unittest.TestCase):
         cand = _cand("PROC_RIGHT", "Procedure alpha, right side")
         conflicts = {"laterality": _conflict("laterality", "right", "left")}
         out = res._material_axis_conflicts_for(cand, conflicts)
-        self.assertEqual([axis for axis, _ in out], ["laterality"])
+        self.assertEqual([axis for axis, _, _ in out], ["laterality"])
+        self.assertEqual(out[0][2], "right")   # the required_value the clause matched
 
     def test_a_conflict_absent_from_the_chosen_candidates_own_descriptor_is_not_material(self):
         cand = _cand("PROC_X", "Procedure alpha, each")
@@ -110,27 +122,47 @@ class MaterialityTest(unittest.TestCase):
         list."""
         cand = _cand("PROC_X", "Procedure alpha, each")   # descriptor is silent on side
         conflicts = {"laterality": _conflict("laterality", "right", "left")}
+        contract = res.claim_input_contract(cand, _BilatSource("1"), None)
+        self.assertTrue(contract.laterality)
+        out = res._material_axis_conflicts_for(cand, conflicts, (), contract)
+        self.assertEqual([axis for axis, _, _ in out], ["laterality"])
+        self.assertIsNone(out[0][2])   # descriptor names no SPECIFIC required value
 
-        class _BilatSource:
-            def bilat_indicator(self, code, dos=None):
-                return "1"
-
-        required = res._required_claim_axes(cand, _BilatSource(), None)
-        self.assertIn("laterality", required)
-        out = res._material_axis_conflicts_for(cand, conflicts, (), required)
-        self.assertEqual([axis for axis, _ in out], ["laterality"])
-
-    def test_no_bilateral_indicator_and_no_literal_clause_is_not_material(self):
+    def test_a_zero_bilateral_indicator_still_makes_laterality_material(self):
+        """issue #6, Codex's independent re-review, F9-R18-A reopened P1: a
+        bilateral indicator of "0" (bilateral surgery rules do NOT apply, so
+        the documented SIDE still determines which unilateral code line
+        applies) is exactly as claim-relevant as "1" -- only "9" (not
+        applicable) is not. `modifiers.ModifierEngine.assign` consults
+        laterality for every nonempty indicator except "9"; the guard must
+        match that exactly, not narrow to indicator "1" alone."""
         cand = _cand("PROC_X", "Procedure alpha, each")
         conflicts = {"laterality": _conflict("laterality", "right", "left")}
+        contract = res.claim_input_contract(cand, _BilatSource("0"), None)
+        self.assertTrue(contract.laterality)
+        out = res._material_axis_conflicts_for(cand, conflicts, (), contract)
+        self.assertEqual([axis for axis, _, _ in out], ["laterality"])
 
-        class _NonBilatSource:
-            def bilat_indicator(self, code, dos=None):
-                return "0"
+    def test_a_not_applicable_indicator_and_no_literal_clause_is_not_material(self):
+        cand = _cand("PROC_X", "Procedure alpha, each")
+        conflicts = {"laterality": _conflict("laterality", "right", "left")}
+        contract = res.claim_input_contract(cand, _BilatSource("9"), None)
+        self.assertFalse(contract.laterality)
+        self.assertEqual(res._material_axis_conflicts_for(cand, conflicts, (), contract), [])
 
-        required = res._required_claim_axes(cand, _NonBilatSource(), None)
-        self.assertNotIn("laterality", required)
-        self.assertEqual(res._material_axis_conflicts_for(cand, conflicts, (), required), [])
+    def test_a_quantity_keyed_conflict_is_material_via_the_count_alias(self):
+        """issue #6, Codex's independent re-review, F9-R18-A reopened P1: a
+        conflict recorded under the "quantity" alias is exactly as
+        claim-relevant as one recorded under "count" -- claim assembly reads
+        `claim_authorized_value(fact, "count", ...) or
+        claim_authorized_value(fact, "quantity", ...)`, so the guard's own
+        materiality must cover both keys, not just "count"."""
+        cand = _cand("PROC_X", "Procedure alpha, each")   # "each" -> cardinality
+        conflicts = {"quantity": _conflict("quantity", "2", "3")}
+        contract = res.claim_input_contract(cand, _BilatSource("9"), None)
+        self.assertIn("quantity", contract.quantity_axes)
+        out = res._material_axis_conflicts_for(cand, conflicts, (), contract)
+        self.assertEqual([axis for axis, _, _ in out], ["quantity"])
 
 
 class EventScopedRegionTest(unittest.TestCase):

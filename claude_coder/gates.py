@@ -247,7 +247,7 @@ def mue_gate(result: CodingResult, source: CodeSource) -> GateResult:
                       "units within MUE" if not detail else "; ".join(detail), "MUE (data)")
 
 
-def drug_units_gate(result: CodingResult, source: CodeSource) -> GateResult:
+def drug_units_gate(result: CodingResult, source: CodeSource, reconciliation=None) -> GateResult:
     """A documented drug DOSE may only become billing units from the authoritative
     per-unit dose table.
 
@@ -284,10 +284,10 @@ def drug_units_gate(result: CodingResult, source: CodeSource) -> GateResult:
             if parsed is not None:
                 per_unit = {"amount": parsed[0], "unit": parsed[1]}
         if per_unit is not None and ontology.drug_billing_units(
-                ontology.documented_dose_text(fact), per_unit) is None:
+                ontology.documented_dose_text(fact, reconciliation), per_unit) is None:
             unconfirmed_billed.append(chosen.code)
             continue
-        if ontology.parse_dose(ontology.documented_dose_text(fact)) is None:
+        if ontology.parse_dose(ontology.documented_dose_text(fact, reconciliation)) is None:
             continue                            # no dose documented -> count-based units
         dosed.append(ln)
     if unconfirmed_billed:
@@ -782,11 +782,16 @@ def source_manifest_gate(result: CodingResult) -> GateResult:
 
 
 def run_gates(result: CodingResult, note_text: str, source: CodeSource,
-              readings: dict[str, str] | None = None) -> list[GateResult]:
+              readings: dict[str, str] | None = None, reconciliation=None
+              ) -> list[GateResult]:
     """All mandatory gates. Add a gate here (never a code list) as coverage grows.
 
     `readings` is every ADDITIONAL reading of the original document this encounter took,
-    keyed by channel id; `note_text` is always the primary transcription."""
+    keyed by channel id; `note_text` is always the primary transcription.
+    `reconciliation` (issue #6, Codex's independent re-review, F9-R18-A
+    reopened P1): threaded to `drug_units_gate` so its documented-dose text
+    is built the SAME claim-authorized way `pipeline.py`'s own unit
+    computation already is, never from raw, possibly-conflicted attributes."""
     try:
         return [
             source_manifest_gate(result),
@@ -798,7 +803,7 @@ def run_gates(result: CodingResult, note_text: str, source: CodeSource,
             medical_necessity_gate(result, source),
             ncci_gate(result, source),
             mue_gate(result, source),
-            drug_units_gate(result, source),
+            drug_units_gate(result, source, reconciliation),
             icd_excludes_gate(result, source),
         ]
     except Exception as exc:  # a gate that crashes is ERROR, never a silent pass

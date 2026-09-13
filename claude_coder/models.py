@@ -413,6 +413,17 @@ class ClaimSubmissionStatus(str, Enum):
     HELD = "held"
 
 
+#: Marker appended to `ResolvedLine.rationale` (issue #6, Codex's independent
+#: re-review, F9-R20-A clarification) whenever `autonomy.decide`/`pipeline.
+#: _apply_dependency_exclusions` holds a line for graph entanglement with an
+#: unresolved/gate-held fact, rather than an unresolved administrative fact
+#: (e.g. actor ownership). One shared constant so both writers (`autonomy.py`,
+#: `pipeline.py`) and the one reader that distinguishes the two HELD shapes
+#: for routing (`autonomy.decide`'s own `submission_held_lines` loop) can
+#: never drift apart into two different literal strings.
+DEPENDENCY_SUBMISSION_HOLD_MARKER = "; submission held: entangled with"
+
+
 @dataclass
 class ResolvedLine:
     fact: ClinicalFact

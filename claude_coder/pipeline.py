@@ -23,7 +23,8 @@ from . import requirement as _requirement
 from .arbitration import LLMFn
 from .autonomy import decide
 from .data_access import AuthoritativeSource, CodeSource
-from .models import CodingResult, ResolutionMethod, ResolvedLine, UnresolvedRecoveredLine
+from .models import (ClaimSubmissionStatus, CodingResult, DEPENDENCY_SUBMISSION_HOLD_MARKER,
+                     ResolutionMethod, ResolvedLine, UnresolvedRecoveredLine)
 
 
 logger = logging.getLogger(__name__)
@@ -932,7 +933,8 @@ def code_encounter(
                         coverage=_line_coverage, page_text=_line_page_text)
             except Exception as exc:
                 return _system_hold_result(encounter_id, date_of_service,
-                                           f"retrieval_execution:{fact.fact_id}", exc, source)
+                                           f"retrieval_execution:{fact.fact_id}", exc, source,
+                                           lines=lines)
             # issue #6 item 8: captured here, before arbitration/refinement below MAY
             # reconstruct `line` (see the item 7 comment at the end of this loop for
             # why that matters) -- `em.resolve_em` does not run semantic eligibility
@@ -988,7 +990,7 @@ def code_encounter(
             except Exception as exc:              # durable audit is enforced
                 return _system_hold_result(
                     encounter_id, date_of_service,
-                    f"code_tie_audit_persistence:{fact.fact_id}", exc, source)
+                    f"code_tie_audit_persistence:{fact.fact_id}", exc, source, lines=lines)
         # OBSERVE: feed a propose-then-verify success into the learned index so that,
         # once the same phrase->code is confirmed across enough distinct encounters,
         # it resolves deterministically next time. Real mode only; fail-safe.
@@ -1082,7 +1084,8 @@ def code_encounter(
                             per_unit = {"amount": parsed[0], "unit": parsed[1]}
                     if per_unit is not None:
                         du = ontology.drug_billing_units(
-                            ontology.documented_dose_text(line.fact), per_unit)
+                            ontology.documented_dose_text(line.fact, source_reconciliation),
+                            per_unit)
                         if du is not None:
                             line.units = du
                         else:
@@ -1239,7 +1242,8 @@ def code_encounter(
                     except Exception as exc:              # durable audit is enforced
                         return _system_hold_result(
                             encounter_id, date_of_service,
-                            "source_evidence_audit_persistence", exc, source)
+                            "source_evidence_audit_persistence", exc, source,
+                            lines=result.lines)
                     # issue #6 F9-R11-D: the newly-incorporated page content can
                     # change anything `_reconcile_claim_after_pruning` itself
                     # depends on (an axis now CLAIM-AUTHORIZED, a relation now
@@ -1367,8 +1371,9 @@ def _terminal_head_anchor(audit_repository) -> dict:
 
 
 def _system_hold_result(encounter_id: str, date_of_service: str | None,
-                        stage: str, exc: Exception, source) -> CodingResult:
-    """Typed fail-closed result for any pre-retrieval operational/integrity failure.
+                        stage: str, exc: Exception, source,
+                        lines: list | None = None) -> CodingResult:
+    """Typed fail-closed result for any operational/integrity failure.
 
     LOUD as well as fail-closed. Holding here is correct and already typed, but the
     hold alone is not diagnosable: the ClaimBundle carries no gate detail, so this
@@ -1382,11 +1387,24 @@ def _system_hold_result(encounter_id: str, date_of_service: str | None,
     artifact: an exception message can quote the note (`ExtractionSchemaError` embeds
     the offending value), and a claim artifact is a different distribution boundary
     from an operator log. The artifact keeps the exception TYPE only.
-    """
+
+    `lines` (issue #6, Codex's independent re-review, F9-R20-A clarification:
+    "downstream controls classify; they do not erase" -- extended to a
+    genuinely encounter-wide operational failure too): several call sites
+    raise from INSIDE the per-fact resolution loop, after earlier facts in
+    the SAME encounter already resolved real, evidence-backed lines. Building
+    an empty `CodingResult` there discarded every one of those -- a failure
+    changes RELEASE STATUS, never historical facts. When supplied, those
+    already-resolved lines are carried into the held result; `decide()`'s own
+    unscoped hard-stop still blocks the WHOLE encounter (this gate carries no
+    `affected_fact_ids`), but does so without erasing any line's own
+    `chosen`/evidence -- the failure is visible in `release`, the facts stay
+    visible in the bundle."""
     from .models import GateResult, Outcome
     logger.error("  %s: held with zero retrieval at the %s boundary - %s: %s",
                  encounter_id, stage, type(exc).__name__, exc, exc_info=True)
-    result = CodingResult(encounter_id=encounter_id, date_of_service=date_of_service)
+    result = CodingResult(encounter_id=encounter_id, date_of_service=date_of_service,
+                         lines=list(lines) if lines else [])
     result.gates = [GateResult(stage, Outcome.UNKNOWN,
                                f"{stage} failed ({type(exc).__name__})",
                                "enforced pipeline boundary", retryable=True)]
@@ -2159,16 +2177,28 @@ def _snapshot_pre_claim_set_state(result: CodingResult) -> dict:
     encounter -- what a round restores to before re-deriving fresh (issue #6
     F9-R11-B, Codex's independent re-review of aff9da6). Keyed by `id(ln)`:
     the SAME `ResolvedLine` objects persist for the life of one `decide`
-    loop, never recreated, so identity is a safe, real key here."""
-    return {id(ln): (ln.excluded_reason, ln.chosen, ln.method) for ln in result.lines}
+    loop, never recreated, so identity is a safe, real key here.
+
+    `claim_submission_status`/`rationale` (issue #6, Codex's independent
+    re-review, F9-R20-A clarification: "downstream controls classify; they
+    do not erase") joined `excluded_reason`/`chosen`/`method` here once
+    `_apply_dependency_exclusions` started setting the FORMER instead of the
+    latter for a dependency hold -- it is now a claim-set-mechanic-derived
+    field exactly like `excluded_reason` always was, and must restore to the
+    SAME pre-mechanic baseline every round for the same reason."""
+    return {id(ln): (ln.excluded_reason, ln.chosen, ln.method,
+                    ln.claim_submission_status, ln.rationale)
+           for ln in result.lines}
 
 
 def _restore_pre_claim_set_state(result: CodingResult, baseline: dict) -> None:
     for ln in result.lines:
-        excluded_reason, chosen, method = baseline[id(ln)]
+        excluded_reason, chosen, method, claim_submission_status, rationale = baseline[id(ln)]
         ln.excluded_reason = excluded_reason
         ln.chosen = chosen
         ln.method = method
+        ln.claim_submission_status = claim_submission_status
+        ln.rationale = rationale
     # Both accumulate ACROSS calls by construction (append-only) and are
     # entirely DERIVED by claim-set mechanics -- their baseline value is
     # always empty, since nothing populates either before those mechanics
@@ -2184,17 +2214,32 @@ def _apply_dependency_exclusions(result: CodingResult, dependency_excluded_ids: 
     substrate fresh rather than re-deriving a bundling decision (e.g. an
     NCCI demotion) whose basis no longer exists. Never the source of truth
     for WHICH ids to apply -- `result.dependency_excluded_fact_ids`, set by
-    `autonomy.decide` itself, is; this only replays it."""
+    `autonomy.decide` itself, is; this only replays it.
+
+    issue #6, Codex's independent re-review (F9-R20-A clarification):
+    "downstream controls classify; they do not erase." A resolved,
+    evidence-backed line entangled with an unresolved/gate-held dependency
+    has a SUBMISSION problem, not an invalid SELECTION -- setting
+    `excluded_reason` used to erase it from the bundle entirely (it entered
+    neither `diagnosis_lines`/`billable_lines` nor `submission_held_lines`,
+    so `bundle_from_coding_result` never saw it at all). This now stamps
+    `claim_submission_status = HELD` instead (the SAME mechanism issue #6
+    item 7 already built for an unresolved actor-ownership fact,
+    `submission_held_lines`/`HELD_POLICY_OR_DATA`) -- `chosen` and its
+    evidence stay intact, `billable_lines` still correctly excludes it (not
+    submission-ready), and `bundle_from_coding_result` projects it visibly
+    as a held diagnosis/service line instead of erasing it."""
     if not dependency_excluded_ids:
         return
     for ln in result.lines:
         if (ln.resolved and ln.fact.billable and not ln.excluded_reason
+                and ln.claim_submission_status is not ClaimSubmissionStatus.HELD
                 and ln.fact.fact_id in dependency_excluded_ids):
-            ln.excluded_reason = (
-                f"excluded from this claim: entangled with an unresolved or "
-                f"gate-held fact sharing this line's clinical episode or "
-                f"necessity linkage, which could change this line's own "
-                f"billing correctness")
+            ln.claim_submission_status = ClaimSubmissionStatus.HELD
+            ln.rationale = (
+                f"{ln.rationale}{DEPENDENCY_SUBMISSION_HOLD_MARKER} an unresolved or "
+                f"gate-held fact sharing this line's clinical episode or necessity "
+                f"linkage, which could change this line's own billing correctness")
 
 
 def _reconcile_claim_after_pruning(
@@ -2265,7 +2310,8 @@ def _reconcile_claim_after_pruning(
         apply_integral_bundling(result, source)
         apply_global_package(result, source)
         result.gates = pre_retrieval_gates + gates.run_gates(
-            result, note_text, source, readings=readings)
+            result, note_text, source, readings=readings,
+            reconciliation=source_reconciliation)
         decide(result, source=source)
         new_ids = set(result.dependency_excluded_fact_ids)
         if new_ids <= dependency_excluded_ids:

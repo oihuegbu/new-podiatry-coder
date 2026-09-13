@@ -15,7 +15,9 @@ with a full audit trail for every decision.
 from __future__ import annotations
 
 from .models import (
+    ClaimSubmissionStatus,
     CodingResult,
+    DEPENDENCY_SUBMISSION_HOLD_MARKER,
     Destination,
     FactKind,
     Outcome,
@@ -210,18 +212,32 @@ def decide(result: CodingResult,
     result.dependency_excluded_fact_ids = frozenset(blocked_fact_ids)
 
     # A currently-resolved, billable line entangled with an unresolved or
-    # gate-held fact cannot be certified independently of it -- excluded from
-    # THIS claim, visibly (never silently dropped: `excluded_reason` is exactly
-    # the field `billable_lines`/the release certificate already key off).
+    # gate-held fact cannot be CERTIFIED FOR SUBMISSION independently of it --
+    # held from THIS claim, visibly (never silently dropped: `billable_lines`
+    # already excludes a HELD line exactly like an `excluded_reason` one).
+    #
+    # issue #6, Codex's independent re-review (F9-R20-A clarification):
+    # "downstream controls classify; they do not erase." This used to set
+    # `excluded_reason`, which erases a line from the bundle entirely
+    # (`bundle_from_coding_result` places it in neither `diagnosis_lines`/
+    # `billable_lines` NOR `submission_held_lines`, so a genuinely resolved,
+    # evidence-backed diagnosis whose only problem was an ENTANGLED, still-
+    # unresolved dependency simply vanished). Entanglement is a SUBMISSION
+    # problem, not proof the selection itself is wrong -- `claim_submission_
+    # status = HELD` is the SAME typed signal issue #6 item 7 already built
+    # for an unresolved actor-ownership fact (`submission_held_lines`/
+    # `HELD_POLICY_OR_DATA`): `chosen` and its evidence stay intact and
+    # visible, `billable_lines` still correctly excludes it from submission.
     if blocked_fact_ids:
         for ln in result.lines:
             if (ln.resolved and ln.fact.billable and not ln.excluded_reason
+                    and ln.claim_submission_status is not ClaimSubmissionStatus.HELD
                     and ln.fact.fact_id in blocked_fact_ids):
-                ln.excluded_reason = (
-                    f"excluded from this claim: entangled with an unresolved or "
-                    f"gate-held fact sharing this line's clinical episode or "
-                    f"necessity linkage, which could change this line's own "
-                    f"billing correctness")
+                ln.claim_submission_status = ClaimSubmissionStatus.HELD
+                ln.rationale = (
+                    f"{ln.rationale}{DEPENDENCY_SUBMISSION_HOLD_MARKER} an unresolved or "
+                    f"gate-held fact sharing this line's clinical episode or necessity "
+                    f"linkage, which could change this line's own billing correctness")
 
     # Computed AFTER the exclusion stamping above, not before: whether an
     # unresolved fact's own `blocking` flag (section 3) should fire depends on
@@ -330,12 +346,41 @@ def decide(result: CodingResult,
     # administrative, not a clinical judgement a coder owns, and not an
     # operational/data failure a retry fixes.
     for ln in result.submission_held_lines:
-        route(Destination.PROVIDER_QUERY, ln.fact.description,
-              f"a defensible code ({ln.chosen.code}) was resolved, but submission "
-              f"is held pending an unresolved administrative fact (claim ownership) "
-              f"-- confirm the performing actor and billing entity before this "
-              f"line is submitted",
-              fact_id=ln.fact.fact_id)
+        # issue #6, Codex's independent re-review (F9-R20-A clarification):
+        # `submission_held_lines` now also carries a dependency-entangled
+        # line (see the `blocked_fact_ids` stamping above), not only the
+        # original unresolved-actor-ownership case -- routed as a coder
+        # REVIEW item (a coding-judgement dependency on ANOTHER fact's own
+        # resolution, never something a provider can answer, and never an
+        # operational failure a retry fixes), distinguished from the
+        # actor-ownership case by the marker its own stamping appends to
+        # `rationale` -- never re-deriving the classification from scratch.
+        #
+        # Non-blocking: this entry is purely a DERIVED, informational notice
+        # about a downstream consequence of the root cause (the still-
+        # unresolved or gate-held fact this line is entangled with) -- that
+        # root cause's OWN routing entry above already computes whether the
+        # encounter should escalate (`_affects`, evaluated AFTER this line
+        # was excluded from `remaining_billable_ids` by the HELD stamp, so it
+        # correctly reflects the current state). Making this entry itself
+        # blocking would double-count the same root cause and force whole-
+        # encounter escalation even when the root cause is genuinely scoped
+        # to just this affected pair -- exactly the whole-encounter-erasure
+        # failure mode section 8 forbids, just moved from `excluded_reason`
+        # to the routing layer instead of fixed.
+        if DEPENDENCY_SUBMISSION_HOLD_MARKER in (ln.rationale or ""):
+            route(Destination.REVIEW, ln.fact.description,
+                  f"a defensible code ({ln.chosen.code}) was resolved, but submission "
+                  f"is held pending another documented item's own resolution: "
+                  f"{ln.rationale}",
+                  blocking=False, fact_id=ln.fact.fact_id)
+        else:
+            route(Destination.PROVIDER_QUERY, ln.fact.description,
+                  f"a defensible code ({ln.chosen.code}) was resolved, but submission "
+                  f"is held pending an unresolved administrative fact (claim ownership) "
+                  f"-- confirm the performing actor and billing entity before this "
+                  f"line is submitted",
+                  fact_id=ln.fact.fact_id)
 
     billable = result.billable_lines
     if not billable:
