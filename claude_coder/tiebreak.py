@@ -485,12 +485,30 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
         probes.append(AxisProbe(
             AXIS_QUALIFIED_CHILD, full,
             provable=True, selectable=True, queryable=True))
-        # issue #6, Codex's independent re-review (F9-R19-A Finding 2): the
-        # shared-stem viability check, compiled ALONGSIDE the differential
-        # (never instead of it) whenever a qualified-child family exists.
+        # issue #6, Codex's independent re-review (F9-R21-B): the shared
+        # stem is recorded as AUDIT CONTEXT only -- `provable=False,
+        # selectable=False, queryable=False` -- never a literal-absence
+        # MUST_SUPPORT proxy. An exact-text prefix match reproduces the
+        # exact unsafe shape `AXIS_DESCRIPTOR_TERM`'s own history already
+        # rejected (a synonymous/paraphrased note can support the clinical
+        # family while never repeating the descriptor's exact wording), and
+        # `queryable=True` let it leak into a provider question asking the
+        # provider to "document" a parent service the note already states.
+        # `compile_requirements` filters on `provable`, so this axis never
+        # produces a requirement, never grounds an elimination, and (with
+        # `_GATE_ONLY_AXES`) never reaches a provider question. Family
+        # viability is instead established by the now-corrected disposition
+        # layer itself (issue #6, Codex's independent re-review, F9-R21-A):
+        # an "entailed" verdict only counts as SUPPORTED once BOTH
+        # evaluators independently cite validated, reconciled evidence for
+        # the candidate's OWN COMPLETE descriptor -- stem and differential
+        # together -- so a genuinely inapplicable family can no longer
+        # slip through merely because no lexical proxy caught it, and a
+        # genuinely applicable, paraphrased family is no longer falsely
+        # eliminated by one.
         probes.append(AxisProbe(
             AXIS_FAMILY_VIABILITY, {c.code: viability.get(c.code, ()) for c in candidates},
-            provable=True, selectable=True, queryable=True))
+            provable=False, selectable=False, queryable=False))
     return tuple(probes)
 
 

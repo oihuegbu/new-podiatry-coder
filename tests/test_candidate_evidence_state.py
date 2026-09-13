@@ -98,42 +98,59 @@ class DispositionClassificationTest(unittest.TestCase):
                          "not be treated as a grounded elimination")
 
     def test_a_validated_contradiction_is_cleanly_eliminated(self):
+        # issue #6, Codex's independent re-review (F9-R21-A): B's "entailed"
+        # disposition now also needs its own validated, reconciled evidence
+        # span to count as SUPPORTED (never a bare claim) -- cited here as
+        # s2, alongside A's own contradiction span s1.
         j0 = _judgement([_disp(self.A, "contradicted", evidence_span_ids=("s1",)),
-                         _disp(self.B, "entailed")])
+                         _disp(self.B, "entailed", evidence_span_ids=("s2",))])
         j1 = _judgement([_disp(self.A, "contradicted", evidence_span_ids=("s1",)),
-                         _disp(self.B, "entailed")])
+                         _disp(self.B, "entailed", evidence_span_ids=("s2",))])
         remaining, eliminated, system_unresolved = resolution._candidate_disposition_uniqueness(
             [self.A, self.B], self.A, [j0, j1],
-            reconciliation=_reconciliation({"s1": "AGREED"}), coverage=None)
+            reconciliation=_reconciliation({"s1": "AGREED", "s2": "AGREED"}), coverage=None)
         self.assertIn("CAND_A", eliminated)
         self.assertNotIn("CAND_A", system_unresolved)
         self.assertEqual([c.code for c in remaining], ["CAND_B"])
 
     def test_not_documented_without_complete_coverage_is_system_unresolved(self):
         j0 = _judgement([_disp(self.A, "not_documented", missing_fact="type A stated"),
-                         _disp(self.B, "entailed")])
+                         _disp(self.B, "entailed", evidence_span_ids=("s2",))])
         j1 = _judgement([_disp(self.A, "not_documented", missing_fact="type A stated"),
-                         _disp(self.B, "entailed")])
+                         _disp(self.B, "entailed", evidence_span_ids=("s2",))])
         remaining, eliminated, system_unresolved = resolution._candidate_disposition_uniqueness(
-            [self.A, self.B], self.A, [j0, j1], reconciliation=None, coverage=None)
+            [self.A, self.B], self.A, [j0, j1],
+            reconciliation=_reconciliation({"s2": "AGREED"}), coverage=None)
         self.assertIn("CAND_A", system_unresolved)
         self.assertNotIn("CAND_A", eliminated)
 
     def test_both_genuinely_entailed_with_no_contract_stays_remaining(self):
-        j0 = _judgement([_disp(self.A, "entailed"), _disp(self.B, "entailed")])
-        j1 = _judgement([_disp(self.A, "entailed"), _disp(self.B, "entailed")])
+        # issue #6, Codex's independent re-review (F9-R21-A): "genuinely
+        # entailed" now requires validated, reconciled evidence on both
+        # sides -- both candidates cite real spans here.
+        j0 = _judgement([_disp(self.A, "entailed", evidence_span_ids=("s1",)),
+                         _disp(self.B, "entailed", evidence_span_ids=("s2",))])
+        j1 = _judgement([_disp(self.A, "entailed", evidence_span_ids=("s1",)),
+                         _disp(self.B, "entailed", evidence_span_ids=("s2",))])
         remaining, eliminated, system_unresolved = resolution._candidate_disposition_uniqueness(
-            [self.A, self.B], self.A, [j0, j1], reconciliation=None, coverage=None)
+            [self.A, self.B], self.A, [j0, j1],
+            reconciliation=_reconciliation({"s1": "AGREED", "s2": "AGREED"}), coverage=None)
         self.assertEqual(sorted(c.code for c in remaining), ["CAND_A", "CAND_B"])
         self.assertEqual(eliminated, {})
         self.assertEqual(system_unresolved, {})
 
 
 class FamilyViabilityContractTest(unittest.TestCase):
-    """Finding 2: a qualified-child family's shared stem is a REQUIRED
-    precondition, checked UNCONDITIONALLY (never gated behind a model's own
-    free-text elimination reason) via the same requirement-grounding
-    machinery every other MUST_SUPPORT axis uses."""
+    """issue #6, Codex's independent re-review (F9-R21-B): `family_viability`
+    is now pure AUDIT CONTEXT (`provable=False, selectable=False,
+    queryable=False`) -- never a literal-prefix-text MUST_SUPPORT proxy
+    (the same unsafe shape `AXIS_DESCRIPTOR_TERM`'s own history already
+    rejected: a paraphrase can support the family while never repeating the
+    descriptor's exact wording), and never askable of a provider. Family
+    viability is established entirely by the disposition layer itself
+    (F9-R21-A): an "entailed" verdict counts as SUPPORTED only once BOTH
+    evaluators cite validated, reconciled evidence for the candidate's OWN
+    COMPLETE descriptor -- stem and differential together."""
 
     # Non-numeric differentiators deliberately: a numeric clause ("less than
     # 3 cm") would ALSO parse as a separate `measurement` axis (`provable=
@@ -145,55 +162,75 @@ class FamilyViabilityContractTest(unittest.TestCase):
     SMALL = _cand("CAND_SMALL", "excision of lesion, subcutaneous; with allograft")
     LARGE = _cand("CAND_LARGE", "excision of lesion, subcutaneous; with autograft")
 
-    def test_an_undocumented_shared_family_eliminates_both_siblings(self):
-        """Both children entailed at the disposition layer, but the shared
-        stem ("excision of lesion, subcutaneous") is validated NOT_DOCUMENTED
-        by both evaluators -- neither sibling may survive, and no
-        differential (graft/size) question is ever built from them."""
+    def test_family_viability_never_compiles_a_requirement(self):
+        """The axis is audit-only -- `compile_requirements` filters on
+        `provable`, so a raw descriptor prefix can never ground an
+        elimination through this axis at all."""
+        reqs = req.compile_requirements([self.SMALL, self.LARGE])
+        self.assertEqual([r for r in reqs if r.axis == "family_viability"], [])
+
+    def test_an_unvalidated_entailed_claim_for_an_unrelated_note_is_system_unresolved(self):
+        """Both evaluators bare-assert "entailed" with no cited evidence for
+        a note that describes something else entirely -- F9-R21-A's fix
+        (not a lexical viability check) is what correctly refuses to treat
+        either sibling as supported."""
         fact = _fact("an unrelated procedure was performed")
         reqs = req.compile_requirements([self.SMALL, self.LARGE])
-        viability_reqs = [r for r in reqs if r.axis == "family_viability"]
-        self.assertEqual(len(viability_reqs), 2)   # one per sibling, same clause
-        rjs = tuple(req.RequirementJudgement(requirement_id=r.requirement_id,
-                                             status=req.RequirementStatus.NOT_DOCUMENTED)
-                   for r in reqs)
-        j0 = _judgement([_disp(self.SMALL, "entailed"), _disp(self.LARGE, "entailed")], rjs)
-        j1 = _judgement([_disp(self.SMALL, "entailed"), _disp(self.LARGE, "entailed")], rjs)
-        coverage = _coverage("an unrelated procedure was performed")
+        j0 = _judgement([_disp(self.SMALL, "entailed"), _disp(self.LARGE, "entailed")])
+        j1 = _judgement([_disp(self.SMALL, "entailed"), _disp(self.LARGE, "entailed")])
         remaining, eliminated, system_unresolved = resolution._candidate_disposition_uniqueness(
             [self.SMALL, self.LARGE], self.SMALL, [j0, j1],
-            reconciliation=None, coverage=coverage, fact=fact, requirements=reqs)
+            reconciliation=None, coverage=None, fact=fact, requirements=reqs)
         self.assertEqual(remaining, [])
-        self.assertIn("CAND_SMALL", eliminated)
-        self.assertIn("CAND_LARGE", eliminated)
+        self.assertEqual(eliminated, {},
+                         "never falsely ELIMINATE on absent lexical family text")
+        self.assertIn("CAND_SMALL", system_unresolved)
+        self.assertIn("CAND_LARGE", system_unresolved)
 
-    def test_documented_family_with_undocumented_differential_leaves_both_standing(self):
-        """The shared stem IS documented, but neither sibling's own suffix
-        (the differential) is -- both remain, which is exactly what must
-        turn into ONE precise provider question ("less than 3cm vs 3cm or
-        greater"), never a silent pick."""
-        text = "excision of lesion, subcutaneous, performed today"
+    def test_a_paraphrased_family_is_not_falsely_eliminated(self):
+        """issue #6, Codex's independent re-review (F9-R21-B), the exact
+        paraphrase-safety property: the note never repeats the descriptor's
+        own "excision of lesion, subcutaneous" wording verbatim, but both
+        evaluators -- reading for CLINICAL MEANING, not literal text --
+        validly cite real, reconciled evidence that SMALL's complete
+        descriptor is entailed. The old lexical `family_viability`
+        MUST_SUPPORT check would have wrongly eliminated this (the prefix
+        text is nowhere in the note); the corrected design does not."""
+        text = "the surgeon removed the lesion beneath the skin and used donor graft"
         fact = _fact(text)
-        reqs = req.compile_requirements([self.SMALL, self.LARGE])
-        rjs = []
-        for r in reqs:
-            status = (req.RequirementStatus.SUPPORTED if r.axis == "family_viability"
-                     else req.RequirementStatus.NOT_DOCUMENTED)
-            rjs.append(req.RequirementJudgement(
-                requirement_id=r.requirement_id, status=status,
-                evidence_span_ids=(("s1",) if status is req.RequirementStatus.SUPPORTED
-                                   else ())))
-        j0 = _judgement([_disp(self.SMALL, "entailed"), _disp(self.LARGE, "entailed")], rjs)
-        j1 = _judgement([_disp(self.SMALL, "entailed"), _disp(self.LARGE, "entailed")], rjs)
-        coverage = _coverage(text)
-        reconciliation = _reconciliation({"s1": "AGREED"})
         span = EvidenceSpan(text=text, anchored=True, span_id="s1")
         fact.evidence = [span]
+        recon = _reconciliation({"s1": "AGREED"})
+        reqs = req.compile_requirements([self.SMALL])
+        j0 = _judgement([_disp(self.SMALL, "entailed", evidence_span_ids=("s1",))])
+        j1 = _judgement([_disp(self.SMALL, "entailed", evidence_span_ids=("s1",))])
         remaining, eliminated, system_unresolved = resolution._candidate_disposition_uniqueness(
-            [self.SMALL, self.LARGE], self.SMALL, [j0, j1],
-            reconciliation=reconciliation, coverage=coverage, fact=fact, requirements=reqs)
-        self.assertEqual(sorted(c.code for c in remaining), ["CAND_LARGE", "CAND_SMALL"])
+            [self.SMALL], self.SMALL, [j0, j1],
+            reconciliation=recon, coverage=None, fact=fact, requirements=reqs)
+        self.assertEqual([c.code for c in remaining], ["CAND_SMALL"])
         self.assertEqual(eliminated, {})
+        self.assertEqual(system_unresolved, {})
+
+    def test_family_viability_never_becomes_a_provider_question(self):
+        """issue #6, Codex's independent re-review (F9-R21-B): even when the
+        shared stem IS textually present and positively documented,
+        `family_viability` must never be named in a provider question --
+        only the genuine clinical differential may be asked about."""
+        from claude_coder import tiebreak
+        text = "excision of lesion, subcutaneous, performed today"
+        span = EvidenceSpan(text=text, anchored=True, span_id="s1")
+        fact = _fact(text)
+        fact.evidence = [span]
+        reconciliation = _reconciliation({"s1": "AGREED"})
+        outcome = tiebreak.narrow(fact, [self.SMALL, self.LARGE], reconciliation)
+        self.assertNotIn("family_viability", outcome.provider_question)
+        self.assertEqual(
+            outcome.provider_question,
+            "The record does not state the fact that distinguishes the candidate "
+            "codes for 'excision of lesion, subcutaneous, performed today'. Please "
+            "document: qualified_child (with allograft vs with autograft).",
+            "only the genuine clinical differential may be asked about -- never "
+            "the shared family stem")
 
     def test_a_documented_differential_selects_through_narrows_existing_logic(self):
         """Once `_candidate_disposition_uniqueness` clears the family's
@@ -218,28 +255,85 @@ class FamilyViabilityContractTest(unittest.TestCase):
 
 
 class SettleUniquenessSystemHoldTest(unittest.TestCase):
-    """`_settle_uniqueness` integration: a system-unresolved sibling must
-    never block a genuinely clean release, and a shortlist that cannot
-    resolve at all because of system-unresolved candidates must route to a
-    retryable system hold, never a provider query."""
+    """`_settle_uniqueness` integration (issue #6, Codex's independent
+    re-review, F9-R21-A): a clinically eligible, system-unresolved
+    candidate BLOCKS release even when a different candidate cleanly
+    narrows to a single, positively-supported winner -- an unresolved
+    rival's applicability is genuinely unknown, and "unrelated" is not
+    something the mechanism may assume without proof. Release requires
+    EVERY remaining candidate to have validated, reconciled positive
+    evidence, exactly like every other axis's elimination bar."""
 
-    def test_a_system_unresolved_rival_does_not_block_a_clean_release(self):
+    def _reconciliation(self, statuses):
+        return _reconciliation(statuses)
+
+    def test_an_unvalidated_entailed_disposition_is_system_unresolved_never_released(self):
+        """Codex's independent exact-SHA reproduction: two bare "entailed"
+        claims, neither citing a reconciled span, must never release as
+        `verified_entailment`."""
+        chosen = _cand("CAND_CHOSEN", "assembly service, clean")
+        fact = _fact("assembly service, clean, performed today")
+        j0 = _verify.Judgement(
+            chosen=chosen, entailed=("CAND_CHOSEN",), declared=True,
+            candidate_dispositions=(_disp(chosen, "entailed"),))
+        j1 = _verify.Judgement(
+            chosen=chosen, entailed=("CAND_CHOSEN",), declared=True,
+            candidate_dispositions=(_disp(chosen, "entailed"),))
+        line = resolution._settle_uniqueness(
+            fact, chosen, [chosen], [j0, j1], {}, "entailed", "", None)
+        self.assertIsNone(line.chosen)
+        self.assertNotEqual(getattr(line, "method", None), None)
+
+    def test_one_supported_candidate_plus_one_unresolved_eligible_candidate_is_a_system_hold(self):
+        """A rival whose own disposition could not be validated (evaluators
+        disagree) is genuinely unknown, not proven wrong -- it must block
+        release, per Codex's required ordering."""
         chosen = _cand("CAND_CHOSEN", "assembly service, clean")
         rival = _cand("CAND_RIVAL", "assembly service, rival")
         fact = _fact("assembly service, clean, performed today")
-        # Legacy judgement layer: only `chosen` is named entailed by both;
-        # `rival`'s disposition will disagree between evaluators, so it must
-        # land in system_unresolved, not silently count as a live rival.
+        span = EvidenceSpan(text="assembly service, clean, performed today",
+                            anchored=True, span_id="s1")
+        fact.evidence = [span]
+        recon = self._reconciliation({"s1": "AGREED"})
         j0 = _verify.Judgement(
             chosen=chosen, entailed=("CAND_CHOSEN",), declared=True,
-            candidate_dispositions=(_disp(chosen, "entailed"),
+            candidate_dispositions=(_disp(chosen, "entailed", evidence_span_ids=("s1",)),
                                     _disp(rival, "entailed")))
         j1 = _verify.Judgement(
             chosen=chosen, entailed=("CAND_CHOSEN",), declared=True,
-            candidate_dispositions=(_disp(chosen, "entailed"),
+            candidate_dispositions=(_disp(chosen, "entailed", evidence_span_ids=("s1",)),
                                     _disp(rival, "contradicted")))
         line = resolution._settle_uniqueness(
-            fact, chosen, [chosen, rival], [j0, j1], {}, "entailed", "", None)
+            fact, chosen, [chosen, rival], [j0, j1], {}, "entailed", "", recon)
+        self.assertIsNone(line.chosen,
+                         "an unresolved eligible rival must block release, never be "
+                         "silently ignored")
+
+    def test_one_supported_candidate_plus_one_positively_excluded_candidate_releases(self):
+        """A rival BOTH evaluators validly, cleanly eliminate (agreement +
+        reconciled evidence) is proven wrong -- it must not block release."""
+        chosen = _cand("CAND_CHOSEN", "assembly service, clean")
+        excluded = _cand("CAND_EXCLUDED", "assembly service, excluded")
+        fact = _fact("assembly service, clean, performed today")
+        span = EvidenceSpan(text="assembly service, clean, performed today",
+                            anchored=True, span_id="s1")
+        excl_span = EvidenceSpan(text="not the excluded variant",
+                                 anchored=True, span_id="s2")
+        fact.evidence = [span, excl_span]
+        recon = self._reconciliation({"s1": "AGREED", "s2": "AGREED"})
+        j0 = _verify.Judgement(
+            chosen=chosen, entailed=("CAND_CHOSEN",), declared=True,
+            candidate_dispositions=(
+                _disp(chosen, "entailed", evidence_span_ids=("s1",)),
+                _disp(excluded, "contradicted", evidence_span_ids=("s2",))))
+        j1 = _verify.Judgement(
+            chosen=chosen, entailed=("CAND_CHOSEN",), declared=True,
+            candidate_dispositions=(
+                _disp(chosen, "entailed", evidence_span_ids=("s1",)),
+                _disp(excluded, "contradicted", evidence_span_ids=("s2",))))
+        line = resolution._settle_uniqueness(
+            fact, chosen, [chosen, excluded], [j0, j1], {}, "entailed", "", recon)
+        self.assertIsNotNone(line.chosen, line.rationale)
         self.assertEqual(line.chosen.code, "CAND_CHOSEN")
 
     def test_system_unresolved_candidates_route_to_a_retryable_hold_not_a_provider_query(self):

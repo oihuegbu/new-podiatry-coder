@@ -12,6 +12,17 @@ from PIL import Image
 from app.ingestion import pdf_parser
 
 
+def _fake_client(response):
+    """A stand-in Anthropic client whose `.messages.create(**kwargs)` returns
+    `response` regardless of kwargs -- unlike a bare `object()`, this stays
+    correct whichever of `pdf_parser.extract_from_pdf`'s two call paths
+    actually runs (`_claude_message_via_batch` when `ANTHROPIC_USE_BATCH` is
+    set, `client.messages.create` directly otherwise), so the test does not
+    silently depend on which one the test-runner's own environment
+    variable happens to select."""
+    return SimpleNamespace(messages=SimpleNamespace(create=lambda **_: response))
+
+
 class PdfIntegrityTest(unittest.TestCase):
     def test_all_pages_are_sent_and_bound_to_result(self):
         parsed = {
@@ -40,7 +51,7 @@ class PdfIntegrityTest(unittest.TestCase):
             with mock.patch.object(pdf_parser, "convert_from_path",
                                    return_value=images) as convert, \
                     mock.patch("app.core.llm_client.get_anthropic_client",
-                               return_value=object()), \
+                               return_value=_fake_client(response)), \
                     mock.patch("app.core.llm_client._claude_message_via_batch",
                                return_value=response):
                 result = pdf_parser.extract_from_pdf(pdf)
@@ -77,7 +88,7 @@ class PdfIntegrityTest(unittest.TestCase):
             with mock.patch.object(pdf_parser, "convert_from_path",
                                    return_value=images), \
                     mock.patch("app.core.llm_client.get_anthropic_client",
-                               return_value=object()), \
+                               return_value=_fake_client(response)), \
                     mock.patch("app.core.llm_client._claude_message_via_batch",
                                return_value=response):
                 with self.assertRaisesRegex(RuntimeError, "coverage"):

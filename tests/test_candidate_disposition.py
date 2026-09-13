@@ -372,15 +372,18 @@ class EliminationTest(unittest.TestCase):
 
     def test_chosen_survives_when_both_evaluators_call_it_entailed(self):
         """The ordinary, ubiquitous case: chosen surviving is unaffected by no
-        longer special-casing it."""
-        j0 = _judgement([_disp("CAND_ALPHA", "entailed"),
+        longer special-casing it. (F9-R21-A: "entailed" now also requires
+        both evaluators to cite validated, reconciled evidence spans for
+        their own candidate.)"""
+        j0 = _judgement([_disp("CAND_ALPHA", "entailed", span_ids=("s1",)),
                         _disp("CAND_BETA", "not_documented",
                              missing_fact="something")])
-        j1 = _judgement([_disp("CAND_ALPHA", "entailed"),
+        j1 = _judgement([_disp("CAND_ALPHA", "entailed", span_ids=("s1",)),
                         _disp("CAND_BETA", "not_documented",
                              missing_fact="something")])
+        reconciliation = _reconciliation({"s1": "AGREED"})
         remaining, eliminated, _system_unresolved = res._candidate_disposition_uniqueness(
-            [ALPHA, BETA], ALPHA, [j0, j1], None, _Coverage(True))
+            [ALPHA, BETA], ALPHA, [j0, j1], reconciliation, _Coverage(True))
         self.assertEqual(remaining, [ALPHA])
         self.assertIn("CAND_BETA", eliminated)
 
@@ -411,30 +414,32 @@ class EliminationTest(unittest.TestCase):
             [ALPHA, BETA], ALPHA, [j0, j1], None, _Coverage(True)))
 
     def test_three_candidates_are_all_accounted_for(self):
-        j0 = _judgement([_disp("CAND_ALPHA", "entailed"),
+        reconciliation = _reconciliation({"s1": "AGREED"})
+        j0 = _judgement([_disp("CAND_ALPHA", "entailed", span_ids=("s1",)),
                         _disp("CAND_BETA", "not_documented",
                              missing_fact="a beta finding"),
                         _disp("CAND_GAMMA", "not_documented",
                              missing_fact="a gamma finding")])
-        j1 = _judgement([_disp("CAND_ALPHA", "entailed"),
+        j1 = _judgement([_disp("CAND_ALPHA", "entailed", span_ids=("s1",)),
                         _disp("CAND_BETA", "not_documented",
                              missing_fact="a beta finding"),
                         _disp("CAND_GAMMA", "not_documented",
                              missing_fact="a gamma finding")])
         remaining, eliminated, _system_unresolved = res._candidate_disposition_uniqueness(
-            [ALPHA, BETA, GAMMA], ALPHA, [j0, j1], None, _Coverage(True))
+            [ALPHA, BETA, GAMMA], ALPHA, [j0, j1], reconciliation, _Coverage(True))
         self.assertEqual(remaining, [ALPHA])
         self.assertEqual(set(eliminated), {"CAND_BETA", "CAND_GAMMA"})
 
     def test_candidate_order_permutation_produces_the_same_result(self):
+        reconciliation = _reconciliation({"s1": "AGREED"})
         j0 = _judgement([_disp("CAND_BETA", "not_documented",
                               missing_fact="a beta finding"),
-                        _disp("CAND_ALPHA", "entailed")])
-        j1 = _judgement([_disp("CAND_ALPHA", "entailed"),
+                        _disp("CAND_ALPHA", "entailed", span_ids=("s1",))])
+        j1 = _judgement([_disp("CAND_ALPHA", "entailed", span_ids=("s1",)),
                         _disp("CAND_BETA", "not_documented",
                              missing_fact="a beta finding")])
         remaining, eliminated, _system_unresolved = res._candidate_disposition_uniqueness(
-            [BETA, ALPHA], ALPHA, [j0, j1], None, _Coverage(True))
+            [BETA, ALPHA], ALPHA, [j0, j1], reconciliation, _Coverage(True))
         self.assertEqual({c.code for c in remaining}, {"CAND_ALPHA"})
         self.assertEqual(set(eliminated), {"CAND_BETA"})
 

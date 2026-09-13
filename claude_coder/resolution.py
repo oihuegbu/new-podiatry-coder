@@ -2245,6 +2245,22 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
                     f"could not be validated against a complete, independently-read "
                     f"whole-document search")
         elif status == "entailed":
+            # issue #6, Codex's independent re-review (F9-R21-A): a bare
+            # "entailed" claim from both evaluators is not, by itself,
+            # positive support -- exactly the same evidentiary bar
+            # `contradicted`/`different_concept` already clear above.
+            # Without this, two unvalidated model assertions (no cited
+            # span, or a span never reconciled to the target event) reached
+            # `remaining` and could release as `verified_entailment` with
+            # zero source-grounded evidence -- reproduced directly by
+            # Codex's independent exact-SHA synthetic test. Missing/
+            # unvalidated evidence here is a SYSTEM gap, never proof either
+            # way.
+            if not (_spans_validated(d0) and _spans_validated(d1)):
+                system_unresolved[cand.code] = (
+                    f"both evaluators judged {cand.code} entailed, but positive "
+                    f"support lacks reconciled target-event evidence on both sides")
+                continue
             # issue #6, Codex's independent re-review (F9-R19-A Finding 1/2):
             # positive disposition support is necessary but not sufficient --
             # this candidate's OWN VIABILITY/EXCLUSION contract must also not
@@ -2481,6 +2497,23 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
         # function; a hit is positive identity evidence, not authorization.
         "exact_direct_code_term": _exact_direct_code_term_signal(fact, remaining, source),
     }
+    # issue #6, Codex's independent re-review (F9-R21-A): a clinically
+    # eligible candidate this mechanism could neither confirm NOR eliminate
+    # must be checked BEFORE any release, not after -- its applicability is
+    # genuinely UNKNOWN, and a rival whose status is unknown is not proof
+    # the winner is right. Codex's independent exact-SHA reproduction: a
+    # clean single-remaining winner released as `verified_entailment` while
+    # an unresolved rival sat unaddressed in the same shortlist, because the
+    # prior version checked this only AFTER a clean release already fired.
+    # It is a SYSTEM verification gap (evaluator disagreement, an
+    # unreproduced identity, an uncited verdict), never a documentation gap
+    # or a coding judgement -- so it routes to a retryable system hold, not
+    # a provider query or a tie question, regardless of how cleanly
+    # `remaining` itself narrowed.
+    if _system_unresolved:
+        return _system_unresolved_line(fact, shortlist, _system_unresolved,
+                                       eliminated, record)
+
     # issue #6, Codex's independent re-review (F9-R16-B): membership, not just
     # count -- `_candidate_disposition_uniqueness` no longer special-cases
     # `chosen`, so `remaining` narrowing to exactly one candidate no longer
@@ -2493,20 +2526,6 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
     if len(remaining) == 1 and remaining[0].code == chosen.code:
         return _entailed_line(fact, chosen, shortlist, why, corroboration,
                               uniqueness=record)
-
-    # issue #6, Codex's independent re-review (F9-R19-A Finding 1): a
-    # candidate this mechanism could neither confirm NOR eliminate must
-    # never be silently treated as a tie rival or turned into a provider
-    # question about facts the record may already state -- it is a SYSTEM
-    # verification gap (evaluator disagreement, an unreproduced identity, an
-    # uncited verdict), never a documentation gap or a coding judgement.
-    # Reached only when the clean release above did not already fire --
-    # `remaining` no longer counts these candidates as rivals, so a genuine
-    # single winner still releases even when an unrelated sibling's
-    # disposition could not be verified.
-    if _system_unresolved:
-        return _system_unresolved_line(fact, shortlist, _system_unresolved,
-                                       eliminated, record)
 
     # issue #6, Codex's independent re-review (F9-R13-C): one additional
     # selection condition, tried BEFORE the original-document tie policy --
