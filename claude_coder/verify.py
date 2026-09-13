@@ -30,6 +30,7 @@ about the ones neither of them was asked about (Codex F8-R1).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -339,41 +340,56 @@ presence check:
     different wording for the same thing).
   - "not_documented": nothing in the documentation, read for its meaning, speaks
     to what this option's descriptor specifically requires.
-Quote, verbatim and character-for-character, the part of THIS option's OWN
-official descriptor (shown above) your disposition is about, as
-"authority_clause" -- copied exactly from that option's descriptor line, never
-paraphrased. Cite the EXACT bracketed evidence id(s) whose text is your basis
+Cite the EXACT descriptor identity hash ("descriptor_sha256", shown above in
+brackets before each option's descriptor) your disposition is about -- copied
+exactly, never invented or altered; this is how your disposition is bound to
+THIS option's real, current descriptor rather than to a quoted phrase you
+authored. Cite the EXACT bracketed evidence id(s) whose text is your basis
 for "entailed"/"contradicted"/"different_concept"; leave span ids empty for
 "not_documented", and instead name the ONE specific fact that would settle it
 as "missing_fact". EVERY option listed above needs exactly one entry -- never
 skip one, never invent an option number. Add to your JSON:
 "candidate_dispositions": [{"option": <option number>,
  "status": "entailed"|"contradicted"|"different_concept"|"not_documented",
- "authority_clause": "<verbatim quoted descriptor text>",
+ "descriptor_sha256": "<the bracketed hash shown for this option>",
  "span_ids": ["<id>", ...], "missing_fact": "<specific missing fact, or empty>"}]"""
+
+
+def _descriptor_sha256(candidate: CandidateCode) -> str:
+    """The server's own identity for a candidate's current authoritative
+    descriptor (issue #6, Codex's independent re-review, F9-R18-A reopened
+    P1 correction) -- what a disposition is validated against instead of a
+    model-authored, verbatim-but-still-arbitrary substring. The server
+    already owns the descriptor; there is no safe reason to ask a model to
+    reproduce a piece of it and then compare two arbitrary choices."""
+    return hashlib.sha256(candidate.descriptor.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
 class CandidateDispositionEvidence:
     """One evaluator's structured, semantic verdict on ONE shortlisted candidate
-    (issue #6, Codex's independent re-review, F9-R15-B) -- see the
-    `_CANDIDATE_DISPOSITION_CONTRACT` docstring above for the full rationale.
-    Never trusted alone: `resolution._candidate_disposition_uniqueness` requires
-    BOTH declared-independent evaluators to agree on the same status with a
-    clause that reproduces verbatim from the candidate's OWN real descriptor,
-    before any elimination or selection may rest on it."""
+    (issue #6, Codex's independent re-review, F9-R15-B; corrected F9-R18-A
+    reopened P1) -- see the `_CANDIDATE_DISPOSITION_CONTRACT` docstring above
+    for the full rationale. Never trusted alone:
+    `resolution._candidate_disposition_uniqueness` requires BOTH
+    declared-independent evaluators to agree on the same status, each citing
+    the candidate's OWN current `descriptor_sha256`, before any elimination or
+    selection may rest on it -- and even then, a disposition may only
+    ELIMINATE or defer; it may never itself AUTHORIZE a conflicted clinical
+    attribute (see `resolution._resolve_material_axis_conflict`, which
+    reserves positive authorization exclusively for
+    `graph_consensus.claim_authorized_value`)."""
     candidate_code: str
+    descriptor_sha256: str
     status: str
-    authority_clause: str
-    authority_offset: tuple[int, int]
     evidence_span_ids: tuple[str, ...] = ()
     missing_fact: str = ""
     evaluator_origin: dict = field(default_factory=dict)
 
     def as_record(self) -> dict:
-        return {"candidate_code": self.candidate_code, "status": self.status,
-                "authority_clause": self.authority_clause,
-                "authority_offset": list(self.authority_offset),
+        return {"candidate_code": self.candidate_code,
+                "descriptor_sha256": self.descriptor_sha256,
+                "status": self.status,
                 "evidence_span_ids": list(self.evidence_span_ids),
                 "missing_fact": self.missing_fact,
                 "evaluator_origin": dict(self.evaluator_origin)}
@@ -384,10 +400,11 @@ def _candidate_dispositions(ans: dict, candidates: list[CandidateCode],
                             ) -> tuple[CandidateDispositionEvidence, ...]:
     """Parse the `"candidate_dispositions"` field of a model answer, fail-closed
     exactly like `_requirement_judgements`: an out-of-range option, a duplicate
-    entry, a malformed status, or an `authority_clause` that does not reproduce
-    verbatim from that CANDIDATE'S OWN real descriptor is dropped rather than
-    trusted -- the model cannot author the requirement it is being judged
-    against."""
+    entry, a malformed status, or a `descriptor_sha256` that does not exactly
+    equal the SERVER's own hash of that CANDIDATE'S current real descriptor is
+    dropped rather than trusted -- the model cannot author, or drift from, the
+    identity it is being judged against (issue #6, Codex's independent
+    re-review, F9-R18-A reopened P1)."""
     if not isinstance(ans.get("candidate_dispositions"), list):
         return ()
     codes = [c.code for c in candidates]
@@ -403,13 +420,12 @@ def _candidate_dispositions(ans: dict, candidates: list[CandidateCode],
         status = str(item.get("status") or "").strip().lower()
         if status not in _CANDIDATE_DISPOSITION_STATUSES:
             continue
-        clause = str(item.get("authority_clause") or "")
+        digest = str(item.get("descriptor_sha256") or "").strip().lower()
         candidate = by_code.get(code)
-        if candidate is None or not clause:
+        if candidate is None or not digest:
             continue
-        idx = candidate.descriptor.find(clause)
-        if idx < 0:
-            continue    # does not reproduce verbatim from the real descriptor
+        if digest != _descriptor_sha256(candidate):
+            continue    # does not match the server's own current descriptor identity
         raw_spans = item.get("span_ids")
         span_ids: list[str] = []
         if isinstance(raw_spans, list):
@@ -419,8 +435,8 @@ def _candidate_dispositions(ans: dict, candidates: list[CandidateCode],
                     span_ids.append(real)
         seen.add(code)
         out.append(CandidateDispositionEvidence(
-            candidate_code=code, status=status, authority_clause=clause,
-            authority_offset=(idx, idx + len(clause)), evidence_span_ids=tuple(span_ids),
+            candidate_code=code, descriptor_sha256=digest, status=status,
+            evidence_span_ids=tuple(span_ids),
             missing_fact=str(item.get("missing_fact") or "").strip(),
             evaluator_origin=dict(evaluator_origin)))
     return tuple(out)
@@ -664,19 +680,65 @@ def _judgement(ans: dict, candidates: list[CandidateCode],
             ans, candidates, id_to_span or {}, evaluator_origin or {}))
 
 
+def _authorized_attributes(fact: ClinicalFact, reconciliation) -> dict:
+    """The claim-safe view of `fact.attributes` a verifier may treat as
+    ESTABLISHED (issue #6, Codex's independent re-review, F9-R18-A reopened
+    P1 correction): every axis `graph_consensus.claim_authorized_value`
+    actually authorizes, never the raw dict. A raw, conflicted, or otherwise
+    unauthorized attribute must never be shown to a verifier as if it were a
+    settled fact -- that is exactly how a model could rubber-stamp
+    "entailed" on the strength of the very value this mechanism exists to
+    keep unauthorized."""
+    from .graph_consensus import claim_authorized_value
+    out: dict[str, str] = {}
+    for axis in sorted(fact.attributes or {}):
+        value = claim_authorized_value(fact, axis, reconciliation)
+        if value is not None:
+            out[axis] = value
+    return out
+
+
+def _unresolved_observations(fact: ClinicalFact) -> dict:
+    """The two disputed values for every unresolved clinical-attribute axis
+    conflict this fact carries (`ClinicalFact.attribute_axis_conflicts`),
+    shown to the verifier explicitly labeled as NON-AUTHORIZING observations
+    -- never merged into `_authorized_attributes`, and never presented as
+    settled (issue #6, Codex's independent re-review, F9-R18-A reopened P1
+    correction)."""
+    return {axis: [conflict.value_primary, conflict.value_second]
+           for axis, conflict in sorted(
+               (getattr(fact, "attribute_axis_conflicts", None) or {}).items())}
+
+
 def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
                       source: CodeSource,
                       requirements: tuple[DescriptorRequirement, ...] = (),
-                      *, force_disposition: bool = False
+                      *, force_disposition: bool = False,
+                      reconciliation=None,
+                      coverage: "object | None" = None
                       ) -> tuple[str, dict[str, str]]:
     """(prompt, id_to_span) -- the id_to_span map is needed by the caller to
     validate a model's cited requirement evidence ids afterward.
 
     When `requirements` is empty AND fewer than 2 candidates are shown AND
     `force_disposition` is not set (nothing to disambiguate, so the disposition
-    contract below does not apply either), renders BYTE-IDENTICAL to before
-    either field existed (plain-text evidence, no REQUIREMENTS section) -- zero
-    format-regression risk for the shortlists this phase doesn't touch.
+    contract below does not apply either), the EVIDENCE/REQUIREMENTS rendering
+    stays byte-identical to before either field existed -- zero
+    format-regression risk for the shortlists this phase doesn't touch. The
+    ATTRIBUTES line is the one deliberate exception (issue #6, Codex's
+    independent re-review, F9-R18-A reopened P1 correction): it ALWAYS shows
+    `_authorized_attributes` (never the raw dict) plus
+    `_unresolved_observations`, explicitly labeled non-authorizing, for EVERY
+    caller -- there is no safe reason a verifier should ever be shown a raw,
+    possibly-conflicted attribute as if it were established.
+
+    `reconciliation`/`coverage` (same F9-R18-A reopened P1 correction): needed
+    to compute `_authorized_attributes` and to render the COMPLETE NOTE
+    section (the full reconciled document text, only when `coverage.complete`
+    -- otherwise "(not supplied)", never a partial excerpt standing in for the
+    whole). A `not_documented` disposition may only be treated as validating
+    genuine silence when the complete note was actually rendered to BOTH
+    evaluators (`resolution._candidate_disposition_uniqueness` enforces this).
 
     `force_disposition` (issue #6, Codex's independent re-review, F9-R18-A
     reopened P1): a SINGLE candidate whose own descriptor carries an absolute
@@ -698,7 +760,8 @@ def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
     it (see `resolution._bind_evaluation_descriptors`) -- this function only
     ever renders that already-bound field, so what a model is shown and what
     its answer is checked against can never diverge again."""
-    opts = "\n".join(f"{i + 1}. {c.descriptor}" for i, c in enumerate(candidates))
+    opts = "\n".join(f"{i + 1}. [{_descriptor_sha256(c)}] {c.descriptor}"
+                     for i, c in enumerate(candidates))
     # issue #6, Codex's independent re-review (F9-R15-B): bracketed evidence ids
     # are needed whenever the candidate-disposition contract applies (2+
     # candidates, or a forced singleton per F9-R18-A above), not only when
@@ -709,20 +772,30 @@ def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
         ev, id_to_span = " | ".join(s.text for s in fact.evidence), {}
     req_block = _requirement_options(requirements, candidates)
     req_section = f"\n\nREQUIREMENTS:\n{req_block}" if req_block else ""
+    attrs = _authorized_attributes(fact, reconciliation)
+    observations = _unresolved_observations(fact)
+    complete_note = (coverage.text if coverage is not None
+                     and getattr(coverage, "complete", False) else "")
     prompt = (f"DOCUMENTED FACT: {fact.description}\n"
-             f"ATTRIBUTES: {json.dumps(fact.attributes)}\n"
-             f"EVIDENCE: {ev}\n\n"
+             f"AUTHORIZED ATTRIBUTES: {json.dumps(attrs, sort_keys=True)}\n"
+             f"UNRESOLVED NON-AUTHORIZING OBSERVATIONS: "
+             f"{json.dumps(observations, sort_keys=True)}\n"
+             f"TARGET-EVENT EVIDENCE: {ev}\n\n"
+             f"COMPLETE NOTE: {complete_note or '(not supplied)'}\n\n"
              f"CANDIDATE OFFICIAL DESCRIPTORS:\n{opts}"
              f"{req_section}\n\n"
-             f"Which options' descriptors does the documentation entail, which single "
-             f"option would you code (0 if none), and why is each other option out?")
+             f"Evaluate every fixed descriptor against the complete note and "
+             f"target-event evidence. Which options' descriptors does the "
+             f"documentation entail, which single option would you code (0 if "
+             f"none), and why is each other option out?")
     return prompt, id_to_span
 
 
 def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
                     source: CodeSource, llm: LLMFn,
                     requirements: tuple[DescriptorRequirement, ...] = (),
-                    *, force_disposition: bool = False) -> Judgement:
+                    *, force_disposition: bool = False,
+                    reconciliation=None, coverage=None) -> Judgement:
     """ONE call over the whole shortlist: which candidates' OFFICIAL descriptors the
     documentation entails, which single one this model would code, and the named reason
     every other candidate is out. Judged on the authoritative descriptor text — the
@@ -740,14 +813,18 @@ def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
 
     `force_disposition` (issue #6, Codex's independent re-review, F9-R18-A
     reopened P1): see `_shortlist_prompt`'s docstring -- requests the structured
-    candidate-disposition contract even for a single candidate."""
+    candidate-disposition contract even for a single candidate.
+
+    `reconciliation`/`coverage`: threaded to `_shortlist_prompt` -- see its
+    docstring (F9-R18-A reopened P1 correction)."""
     if not candidates:
         return Judgement(reason="no candidates")
     system = (_SELECT_SYSTEM + (_REQUIREMENTS_CONTRACT if requirements else "")
              + (_CANDIDATE_DISPOSITION_CONTRACT
                if len(candidates) >= 2 or force_disposition else ""))
-    prompt, id_to_span = _shortlist_prompt(fact, candidates, source, requirements,
-                                           force_disposition=force_disposition)
+    prompt, id_to_span = _shortlist_prompt(
+        fact, candidates, source, requirements, force_disposition=force_disposition,
+        reconciliation=reconciliation, coverage=coverage)
     return _judgement(
         _json(llm(system, prompt)), candidates, requirements, id_to_span,
         {"provider": VERIFY_PROVIDER})
@@ -756,7 +833,8 @@ def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
 def corroborate(fact: ClinicalFact, candidates: list[CandidateCode],
                 source: CodeSource, llm: LLMFn,
                 requirements: tuple[DescriptorRequirement, ...] = (),
-                *, force_disposition: bool = False) -> Judgement:
+                *, force_disposition: bool = False,
+                reconciliation=None, coverage=None) -> Judgement:
     """The INDEPENDENT second judgement, over the SAME shortlist and the SAME contract.
 
     It is deliberately NOT told which candidate the first model picked: a corroborator that
@@ -765,14 +843,15 @@ def corroborate(fact: ClinicalFact, candidates: list[CandidateCode],
     independent judgements agree BOTH that it is entailed AND that nothing else on the
     shortlist survives.
 
-    `force_disposition`: see `select_entailed`."""
+    `force_disposition`/`reconciliation`/`coverage`: see `select_entailed`."""
     if not candidates:
         return Judgement(reason="no candidates")
     system = (_CORROBORATE_SYSTEM + (_REQUIREMENTS_CONTRACT if requirements else "")
              + (_CANDIDATE_DISPOSITION_CONTRACT
                if len(candidates) >= 2 or force_disposition else ""))
-    prompt, id_to_span = _shortlist_prompt(fact, candidates, source, requirements,
-                                           force_disposition=force_disposition)
+    prompt, id_to_span = _shortlist_prompt(
+        fact, candidates, source, requirements, force_disposition=force_disposition,
+        reconciliation=reconciliation, coverage=coverage)
     return _judgement(
         _json(llm(system, prompt)), candidates, requirements, id_to_span,
         {"provider": CORROBORATE_PROVIDER})

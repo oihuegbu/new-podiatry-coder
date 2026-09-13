@@ -1008,7 +1008,7 @@ def code_encounter(
         if line.resolved and fact.kind is FactKind.DIAGNOSIS:
             line = resolution.refine_diagnosis_specificity(
                 line, source, verify_llm, corroborate_llm,
-                reconciliation=source_reconciliation)
+                reconciliation=source_reconciliation, coverage=_line_coverage)
         # issue #6, Codex's independent re-review (F9-R14-A): `resolution.resolve`
         # already applies this guard once internally, but `arbitration.arbitrate`
         # and `resolution.refine_diagnosis_specificity` above can each reconstruct
@@ -1031,7 +1031,7 @@ def code_encounter(
         # independently authorized.
         line = resolution._apply_attribute_axis_conflict_guard(
             line, source, verify_llm, corroborate_llm, source_reconciliation,
-            _line_coverage, _line_page_text)
+            _line_coverage, _line_page_text, date_of_service)
         logger.info("    -> %s: %s", fact.fact_id,
                    (f"{line.chosen.system}/{line.chosen.code} ({line.method.value})"
                     if line.chosen else

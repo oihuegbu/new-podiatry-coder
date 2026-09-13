@@ -392,7 +392,7 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
                          dos=dos, reconciliation=reconciliation, coverage=coverage)
     line = _apply_attribute_evidence_gap_guard(line, coverage)
     return _apply_attribute_axis_conflict_guard(
-        line, source, llm, corroborate, reconciliation, coverage, page_text)
+        line, source, llm, corroborate, reconciliation, coverage, page_text, dos)
 
 
 def _apply_attribute_evidence_gap_guard(line: ResolvedLine, coverage) -> ResolvedLine:
@@ -464,34 +464,92 @@ def _apply_attribute_evidence_gap_guard(line: ResolvedLine, coverage) -> Resolve
         attribute_evidence_gap=disposition)
 
 
-def _material_axis_conflicts_for(chosen: CandidateCode, conflicts: dict) -> list[tuple[str, Any]]:
-    """Every unresolved clinical-attribute conflict that is MATERIAL to
-    `chosen` specifically -- its OWN descriptor literally states one of the
-    two disputed values as a clause (issue #6, Codex's independent re-review,
-    F9-R18-A reopened P1).
+def _required_claim_axes(chosen: CandidateCode, source: CodeSource,
+                         dos: str | None) -> frozenset[str]:
+    """Axes not necessarily stated as a literal descriptor clause, but that
+    downstream modifier/unit generation will actually consult for THIS
+    candidate (issue #6, Codex's independent re-review, F9-R18-A reopened P1
+    correction, required correction item 3) -- derived from the SAME
+    authoritative records and descriptor parsers those consumers already
+    use, never a hardcoded axis list or specialty vocabulary:
+      - `laterality`, when the code's own authoritative bilateral-surgery
+        indicator (`source.bilat_indicator`, the same PFS table
+        `modifiers.py` already reads) makes a side/bilateral modifier
+        applicable AND the descriptor does not already encode a side
+        (`parse_descriptor(...).laterality` empty) -- an absent descriptor
+        side is not "not required", it is "the modifier decision depends on
+        which side, and the descriptor alone can't say".
+      - `count`, when the descriptor's own parsed cardinality
+        (`parse_descriptor(...).cardinality`, the SAME field
+        `_needs_verification` already reads to decide whether a count/
+        quantity claim needs independent confirmation) means units will be
+        computed from it.
+      - `dose`, when `source.drug_unit` declares a dosing/unit record for
+        this code -- units are computed from the documented dose.
+    """
+    axes: set[str] = set()
+    feats = parse_descriptor(chosen.descriptor)
+    bilat_indicator = getattr(source, "bilat_indicator", None)
+    if callable(bilat_indicator):
+        try:
+            bilat = bilat_indicator(chosen.code, dos)
+        except Exception:
+            bilat = None
+        if bilat == "1" and not feats.laterality:
+            axes.add("laterality")
+    if feats.cardinality:
+        axes.add("count")
+    drug_unit = getattr(source, "drug_unit", None)
+    if callable(drug_unit):
+        try:
+            unit_record = drug_unit(chosen.code)
+        except Exception:
+            unit_record = None
+        if unit_record:
+            axes.add("dose")
+    return frozenset(axes)
 
-    This is deliberately NOT `tiebreak.discriminating_axes` (which requires
-    2+ candidates to compare and so is structurally blind to a SINGLETON
-    candidate whose own descriptor still carries an absolute, non-optional
-    requirement on the conflicted axis -- exactly Codex's exact-SHA
-    reproduction: a lone "Procedure alpha, right side" candidate, conflicted
-    on laterality, released deterministically because nothing with 2+
-    candidates ever ran). Uses the SAME verbatim clause-finding primitive
-    `requirement.compile_requirements` already uses for the pairwise case
-    (`requirement._find_clause`) -- never a new term list or heuristic --
-    driven entirely by the two values THIS conflict already recorded, not by
-    any axis name or specialty vocabulary.
+
+def _material_axis_conflicts_for(chosen: CandidateCode, conflicts: dict,
+                                 requirements: tuple = (),
+                                 required_claim_axes: frozenset = frozenset()
+                                 ) -> list[tuple[str, Any]]:
+    """Every unresolved clinical-attribute conflict that is MATERIAL to
+    `chosen` specifically (issue #6, Codex's independent re-review, F9-R18-A;
+    corrected reopened P1, required correction item 3).
+
+    A literal descriptor clause (`requirement._find_clause`) is a fast
+    POSITIVE signal -- never the complete rule on its own, since a candidate
+    can require an axis without literally spelling out the disputed value
+    (e.g. a code whose own applicable bilateral indicator makes laterality
+    claim-relevant even though its descriptor is silent on side). Materiality
+    is therefore the union of three signals, none of them a new term list or
+    specialty vocabulary:
+      - a literal clause match against `chosen`'s own descriptor,
+      - a compiled `DescriptorRequirement` for `chosen` with
+        `role == MUST_SUPPORT` (the same typed, governed axes
+        `compile_requirements` already derives -- empty for a true singleton,
+        since `tiebreak.discriminating_axes` needs 2+ candidates to compare;
+        meaningful once this fact reaches a real tie),
+      - `required_claim_axes` (`_required_claim_axes`): axes downstream
+        modifier/unit generation will consult for THIS specific candidate,
+        singleton or not.
     """
     if not conflicts:
         return []
     from . import requirement as _requirement
+    typed_axes = {req.axis for req in requirements
+                 if req.candidate_code == chosen.code
+                 and req.role == _requirement.RequirementRole.MUST_SUPPORT}
+    typed_axes |= set(required_claim_axes)
     out: list[tuple[str, Any]] = []
     for axis, conflict in sorted(conflicts.items()):
-        for value in (getattr(conflict, "value_primary", "") or "",
-                     getattr(conflict, "value_second", "") or ""):
-            if value and _requirement._find_clause(chosen.descriptor, value) is not None:
-                out.append((axis, conflict))
-                break
+        literal = any(
+            value and _requirement._find_clause(chosen.descriptor, value) is not None
+            for value in (getattr(conflict, "value_primary", "") or "",
+                         getattr(conflict, "value_second", "") or ""))
+        if literal or axis in typed_axes:
+            out.append((axis, conflict))
     return out
 
 
@@ -528,39 +586,55 @@ def _resolve_material_axis_conflict(
     """Settle ONE material, unresolved clinical-attribute conflict against
     `chosen` specifically. Returns `(outcome, detail)`:
 
-      "authorized"   -- both independent evaluators cite source-reconciled
-                        evidence that `chosen`'s own descriptor clause is
-                        ENTAILED; release may stand.
+      "authorized"   -- `graph_consensus.claim_authorized_value` now
+                        authorizes this axis (either it already did, or the
+                        bounded autonomous-adjudication step below settled it
+                        and the axis now reproduces through that SAME,
+                        pre-existing, fail-closed accessor); release may stand.
       "contradicted" -- both independent evaluators, with validated evidence,
-                        call `chosen`'s own descriptor clause CONTRADICTED or
-                        a DIFFERENT CONCEPT; `chosen` is wrong.
+                        call `chosen`'s own descriptor identity CONTRADICTED
+                        or a DIFFERENT CONCEPT; `chosen` is wrong.
       "silent"       -- both independent evaluators agree the note genuinely
                         never documents this axis (validated per
                         `_candidate_disposition_uniqueness`'s own
-                        `not_documented` bar), and a bounded, page-scoped
-                        re-check of this event's own source region confirms
-                        it is not there either -- a real, provider-answerable
-                        gap.
+                        `not_documented` bar, itself gated on the COMPLETE
+                        NOTE having actually been rendered to both), and a
+                        bounded, page-scoped re-check of this event's own
+                        source region confirms it is not there either -- a
+                        real, provider-answerable gap.
       "system_error" -- the bounded, page-scoped reconciliation check itself
                         raised (never "the value was not found" -- that is
-                        "silent") -- retryable, never a documentation gap.
+                        "silent"), OR the page-scoped check DID find one of
+                        the disputed values there but `claim_authorized_value`
+                        still does not reproduce it -- the document may say
+                        it, but no event-local AttributeEvidence/
+                        AxisAdjudication binds it; retryable, never a
+                        documentation gap or a manufactured authorization.
       "unverified"   -- no verifier is configured, only one evaluator is
-                        configured, the evaluators disagree, or an entailed
-                        verdict was not cited to validated evidence -- the
-                        conservative default: `chosen` is withdrawn, not
+                        configured, the evaluators disagree, or the bounded
+                        autonomous adjudication could not settle it either --
+                        the conservative default: `chosen` is withdrawn, not
                         eliminated, so it stays visible as a candidate rather
                         than either billing or falsely ruling it out (issue
                         #6, Codex's independent re-review, F9-R18-A reopened
                         P1, required correction item 2).
 
-    Never a new selector: authorization/elimination both flow through the
-    EXISTING `verify.select_entailed`/`corroborate` and
-    `resolution._candidate_disposition_uniqueness`, exactly as a tied
-    shortlist already uses -- `force_disposition=True` is the only thing that
-    makes a SINGLE candidate eligible for the same structured, evidence-cited
-    disposition a tie already gets.
+    A candidate disposition may ELIMINATE (contradicted/different_concept) or
+    defer -- it may NEVER itself manufacture clinical-axis proof (issue #6,
+    Codex's independent re-review, F9-R18-A reopened P1 correction). Positive
+    authorization runs EXCLUSIVELY through `claim_authorized_value`, the same
+    fail-closed accessor every other claim-affecting consumer in this
+    codebase already uses; a "both evaluators say entailed" or "the page
+    lexically contains the word" verdict is deliberately never treated as
+    substitute proof, since either was shown exploitable (a reconciled but
+    UNRELATED cited span; a term stated for a DIFFERENT event on a shared
+    page).
     """
     label = f"{axis!r} ({conflict.value_primary!r} vs {conflict.value_second!r})"
+
+    def _try_authorize() -> str | None:
+        return _gc.claim_authorized_value(fact, axis, reconciliation)
+
     if llm is None:
         return "unverified", (
             f"no verifier is configured to confirm {label} for {chosen.code}, whose own "
@@ -570,11 +644,13 @@ def _resolve_material_axis_conflict(
     requirements = _requirement.compile_requirements([chosen], source)
     try:
         j0 = _verify.select_entailed(fact, [chosen], source, llm, requirements,
-                                     force_disposition=True)
+                                     force_disposition=True,
+                                     reconciliation=reconciliation, coverage=coverage)
         judgements = [j0]
         if corroborate is not None:
             j1 = _verify.corroborate(fact, [chosen], source, corroborate, requirements,
-                                     force_disposition=True)
+                                     force_disposition=True,
+                                     reconciliation=reconciliation, coverage=coverage)
             judgements.append(j1)
     except Exception as exc:
         return "system_error", (
@@ -605,19 +681,43 @@ def _resolve_material_axis_conflict(
                     return "system_error", (
                         f"bounded reconciliation of {label} for {chosen.code} failed "
                         f"({type(exc).__name__}: {exc})")
-                if found:
+                if not found:
+                    return "silent", (conflict.provider_question or (
+                        f"the record does not settle {axis!r} for {fact.description!r}"))
+                # issue #6, Codex's independent re-review (F9-R18-A reopened
+                # P1 correction): the bounded region DOES lexically contain a
+                # disputed value, but that is evidence of a binding gap, not
+                # proof of authorization on its own -- only
+                # `claim_authorized_value` may authorize.
+                if _try_authorize() is not None:
                     return "authorized", ""
-                return "silent", (conflict.provider_question or (
-                    f"the record does not settle {axis!r} for {fact.description!r}"))
+                return "system_error", (
+                    f"source text may state {label} for {fact.fact_id}, but no "
+                    f"event-local AttributeEvidence/AxisAdjudication binds it; "
+                    f"retry targeted reconciliation")
             return "contradicted", eliminated[chosen.code]
-    if (d0 is not None and d1 is not None
-            and d0.status == d1.status == "entailed"
-            and d0.authority_clause == d1.authority_clause
-            and _disposition_clause_reproduces(chosen, d0)
-            and _disposition_clause_reproduces(chosen, d1)):
-        settled_lookup, permitted = _reconciled_span_lookup(reconciliation)
-        if (_disposition_spans_validated(d0, settled_lookup, permitted)
-                and _disposition_spans_validated(d1, settled_lookup, permitted)):
+    # Neither entailed-and-authorized nor validly eliminated. Last resort,
+    # bounded and autonomous (issue #6, Codex's independent re-review,
+    # F9-R18-A reopened P1 correction): an independent, cross-vendor verifier
+    # pair may settle the axis itself from ONLY the reconciled attribute
+    # spans already attached to THIS target fact -- never a full page, never
+    # a preference between two readings' say-so. `second=None`: this module
+    # only ever has the canonical, already-merged fact, never the original
+    # second reading's own object.
+    disagreement = _gc.AxisDisagreement(
+        node_id=fact.fact_id, axis=axis, value_primary=conflict.value_primary,
+        value_second=conflict.value_second, basis="unresolved cross-reading conflict")
+    try:
+        support = _gc.adjudicate_axis(disagreement, fact, None, reconciliation,
+                                      llm, corroborate)
+    except Exception as exc:
+        return "system_error", (
+            f"autonomous adjudication of {label} for {fact.fact_id} failed "
+            f"({type(exc).__name__}: {exc})")
+    if support is not None:
+        _gc._record_axis_adjudication(fact, axis, support.value,
+                                      _gc.PROOF_CROSS_VENDOR, support.span_ids)
+        if _try_authorize() is not None:
             return "authorized", ""
     return "unverified", (
         f"the independent evaluators did not both confirm {label} for {chosen.code} "
@@ -627,7 +727,7 @@ def _resolve_material_axis_conflict(
 def _apply_attribute_axis_conflict_guard(
         line: ResolvedLine, source: CodeSource, llm, corroborate, reconciliation,
         coverage: "_requirement.CoverageCorpus | None",
-        page_text: dict | None) -> ResolvedLine:
+        page_text: dict | None, dos: str | None = None) -> ResolvedLine:
     """The ONE shared post-resolution finalizer for clinical-attribute axis
     conflicts (issue #6, Codex's independent re-review, F9-R18-A, reopened
     P1) -- applied, like `_apply_attribute_evidence_gap_guard`, AFTER every
@@ -664,7 +764,11 @@ def _apply_attribute_axis_conflict_guard(
     if not conflicts or line.chosen is None:
         return line
     chosen = line.chosen
-    material = _material_axis_conflicts_for(chosen, conflicts)
+    from . import requirement as _requirement
+    requirements = _requirement.compile_requirements([chosen], source)
+    required_claim_axes = _required_claim_axes(chosen, source, dos)
+    material = _material_axis_conflicts_for(
+        chosen, conflicts, requirements, required_claim_axes)
     if not material:
         return line
     outstanding = [(axis, conflict) for axis, conflict in material
@@ -1286,7 +1390,9 @@ def upgrade_diagnosis_laterality(line: ResolvedLine, source: CodeSource,
 
 def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
                                  llm=None, corroborate=None,
-                                 reconciliation=None) -> ResolvedLine:
+                                 reconciliation=None,
+                                 coverage: "_requirement.CoverageCorpus | None" = None
+                                 ) -> ResolvedLine:
     """ICD-10-CM 'code to the highest documented specificity'. Entailment is
     NECESSARY BUT NOT SUFFICIENT: an 'unspecified'/NOS descriptor is entailed by
     every case in its concept, so a specific, equally-entailed sibling must win —
@@ -1363,14 +1469,16 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
     relatives.sort(key=lambda c: len(concept & tok(_strip_laterality(c.descriptor))),
                    reverse=True)
     shortlist = [line.chosen] + relatives[:6]
-    judgement = _verify.select_entailed(fact, shortlist, source, llm)
+    judgement = _verify.select_entailed(fact, shortlist, source, llm,
+                                        reconciliation=reconciliation, coverage=coverage)
     picked, why = judgement.chosen, judgement.reason
     if picked is None or picked.code == line.chosen.code:
         return line                                # verifier keeps the unspecified code -> respect it
     corroboration = _verify.corroboration_origin(llm, corroborate)
     judgements = [judgement]
     if corroborate is not None:
-        second = _verify.corroborate(fact, shortlist, source, corroborate)
+        second = _verify.corroborate(fact, shortlist, source, corroborate,
+                                     reconciliation=reconciliation, coverage=coverage)
         ok = second.entails(picked.code)
         if ok:
             judgements.append(second)
@@ -1826,12 +1934,17 @@ def _reconciled_span_lookup(reconciliation):
     return settled, permitted
 
 
-def _disposition_clause_reproduces(cand: CandidateCode, d) -> bool:
-    """Whether a `CandidateDispositionEvidence`'s own `authority_clause` still
-    reproduces verbatim, at its recorded offset, from THIS candidate's current
-    official descriptor."""
-    start, end = d.authority_offset
-    return bool(d.authority_clause) and cand.descriptor[start:end] == d.authority_clause
+def _disposition_identity_matches(cand: CandidateCode, d) -> bool:
+    """Whether a `CandidateDispositionEvidence`'s `descriptor_sha256` still
+    matches the SERVER's own current hash of this candidate's official
+    descriptor (issue #6, Codex's independent re-review, F9-R18-A reopened
+    P1 correction) -- replaces the earlier model-authored-clause-reproduces
+    check. `verify._candidate_dispositions` already validated this at parse
+    time; re-checked here against the actual shortlist candidate so a
+    stale/mismatched entry can never slip through a caller that reused a
+    judgement across shortlists."""
+    from .verify import _descriptor_sha256
+    return bool(d.descriptor_sha256) and d.descriptor_sha256 == _descriptor_sha256(cand)
 
 
 def _disposition_spans_validated(d, settled, permitted) -> bool:
@@ -1889,18 +2002,21 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
 
     A candidate is validly disposed only when BOTH judgements' own
     `CandidateDispositionEvidence` for it:
-      - has an `authority_clause` that reproduces VERBATIM from THIS
-        candidate's own current official descriptor (defense in depth --
-        `verify._candidate_dispositions` already checked this at parse time
-        against the descriptor it was shown; re-checked here against the
-        actual shortlist descriptor so a stale/mismatched entry can never
-        slip through a caller that reused a judgement across shortlists),
-      - agrees with the OTHER judgement on the exact same status AND the exact
-        same authority clause (issue #6, Codex's independent re-review,
-        F9-R16-B: equal status alone let two evaluators agree "not_documented"
-        while citing two DIFFERENT clauses -- about two different aspects of
-        the descriptor -- which is not the same agreement the docstring always
-        claimed), and that status is:
+      - has a `descriptor_sha256` that matches THIS candidate's own current
+        official descriptor identity (issue #6, Codex's independent
+        re-review, F9-R18-A reopened P1 correction -- replaces the earlier
+        model-authored-clause-reproduces check: a verbatim substring is still
+        an arbitrary choice the model makes, and two evaluators quoting two
+        different-but-both-verbatim clauses used to compare unequal as
+        strings without ever proving they disagreed about the SAME thing.
+        The server-computed hash is not authored by either evaluator, so
+        "both cite the same identity" is a structural fact, not a
+        string-equality coincidence),
+      - agrees with the OTHER judgement on the exact same status (issue #6,
+        Codex's independent re-review, F9-R16-B's original concern --
+        agreeing on the SAME descriptor identity now makes "equal status"
+        sufficient; there is no second, separate clause to disagree about),
+        and that status is:
           * "contradicted"/"different_concept": ONLY with validated,
             reconciled evidence spans on BOTH sides -- a genuine semantic
             judgement backed by real source text, never a bare claim.
@@ -1933,8 +2049,8 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
 
     settled, permitted = _reconciled_span_lookup(reconciliation)
 
-    def _clause_reproduces(cand: CandidateCode, d) -> bool:
-        return _disposition_clause_reproduces(cand, d)
+    def _identity_matches(cand: CandidateCode, d) -> bool:
+        return _disposition_identity_matches(cand, d)
 
     def _spans_validated(d) -> bool:
         return _disposition_spans_validated(d, settled, permitted)
@@ -1959,9 +2075,8 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
         # and never lets a DIFFERENT surviving candidate release in its place.
         d0, d1 = j0[cand.code], j1[cand.code]
         if (d0.status != d1.status
-                or d0.authority_clause != d1.authority_clause
-                or not _clause_reproduces(cand, d0)
-                or not _clause_reproduces(cand, d1)):
+                or not _identity_matches(cand, d0)
+                or not _identity_matches(cand, d1)):
             remaining.append(cand)
             continue
         status = d0.status
@@ -1969,8 +2084,8 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
             if _spans_validated(d0) and _spans_validated(d1):
                 eliminated[cand.code] = (
                     f"both independent evaluators, on {cand.code}'s own official "
-                    f"descriptor clause {d0.authority_clause!r}, judged it {status} "
-                    f"with source-confirmed evidence")
+                    f"descriptor (identity {d0.descriptor_sha256[:12]}...), judged it "
+                    f"{status} with source-confirmed evidence")
             else:
                 remaining.append(cand)
         elif status == "not_documented":
@@ -1983,8 +2098,8 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
                     and d0.missing_fact and d1.missing_fact):
                 eliminated[cand.code] = (
                     f"both independent evaluators judged {cand.code}'s own official "
-                    f"descriptor clause {d0.authority_clause!r} not documented "
-                    f"(missing: {d0.missing_fact!r}), against a complete, "
+                    f"descriptor (identity {d0.descriptor_sha256[:12]}...) not "
+                    f"documented (missing: {d0.missing_fact!r}), against a complete, "
                     f"independently-read search of the whole document")
             else:
                 remaining.append(cand)
@@ -2401,7 +2516,8 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
         cands = [c for c in shortlist if c.code not in tried]
         if not cands:
             break
-        primary = _verify.select_entailed(fact, cands, source, llm, requirements)
+        primary = _verify.select_entailed(fact, cands, source, llm, requirements,
+                                          reconciliation=reconciliation, coverage=coverage)
         chosen, why = primary.chosen, primary.reason
         if chosen is None:
             # Tie policy step 5: nothing was entailed, so the useful output is WHICH
@@ -2438,7 +2554,8 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
             # is not told which candidate was picked -- a corroborator asked only "is THIS
             # one entailed?" cannot notice that another candidate is entailed too, which is
             # precisely how a non-unique code used to auto-release (Codex F8-R1).
-            second = _verify.corroborate(fact, cands, source, corroborate, requirements)
+            second = _verify.corroborate(fact, cands, source, corroborate, requirements,
+                                         reconciliation=reconciliation, coverage=coverage)
             if not second.entails(chosen.code):
                 why2 = (second.elimination_of(chosen.code) or second.reason
                         or "the independent second judgement does not find this "
