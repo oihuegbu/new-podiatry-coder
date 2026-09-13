@@ -671,5 +671,118 @@ class RealAuthoritativeDataSmokeTest(unittest.TestCase):
         self.assertEqual(result, "surgical_procedure")
 
 
+class ExactDirectCodeTermAccessor(unittest.TestCase):
+    """`AuthoritativeSource.exact_direct_code_term` (issue #6, Codex's
+    independent re-review, F9-R19-A item 1). Synthetic codes/CUIs, per this
+    suite's convention -- same bypass-declared-loading pattern as
+    `UmlsCandidatesAccessor` above."""
+
+    def _source(self, index: dict) -> AuthoritativeSource:
+        source = AuthoritativeSource.__new__(AuthoritativeSource)
+        source._umls_term_index = index
+        return source
+
+    def _index(self) -> dict:
+        return {
+            "release": "TEST2026", "mrconso_sha256": "deadbeef", "generated": "now",
+            "direct_term_to_atoms": {
+                "synthetic assembly service": [
+                    {"cui": "C0000001", "sab": "CPT", "code": "99999", "tty": "PT",
+                     "atom_term": "Synthetic assembly service"}],
+            },
+        }
+
+    def test_an_exact_direct_term_returns_its_own_atom(self):
+        hits = self._source(self._index()).exact_direct_code_term(
+            "synthetic assembly service")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["code"], "99999")
+        self.assertEqual(hits[0]["cui"], "C0000001")
+
+    def test_normalization_is_applied_before_lookup(self):
+        hits = self._source(self._index()).exact_direct_code_term(
+            "  Synthetic  Assembly Service  ")
+        self.assertEqual([h["code"] for h in hits], ["99999"])
+
+    def test_an_unmatched_term_returns_empty(self):
+        hits = self._source(self._index()).exact_direct_code_term(
+            "an entirely unrelated procedure")
+        self.assertEqual(hits, [])
+
+    def test_a_missing_term_index_degrades_to_empty_not_an_error(self):
+        source = AuthoritativeSource.__new__(AuthoritativeSource)
+        source._umls_term_index = False
+        self.assertEqual(source.exact_direct_code_term("anything"), [])
+
+
+class ExactDirectCodeTermSignalTest(unittest.TestCase):
+    """`resolution._exact_direct_code_term_signal` (issue #6, Codex's
+    independent re-review, F9-R19-A): AUDIT ONLY -- proves it never raises,
+    degrades cleanly, and restricts hits to candidates actually in play."""
+
+    def _fact(self, description):
+        from claude_coder.models import ClinicalFact, FactKind
+        return ClinicalFact(kind=FactKind.PROCEDURE, description=description,
+                            confidence=0.9, fact_id="F1")
+
+    def _cand(self, code):
+        from claude_coder.models import CandidateCode
+        return CandidateCode(code=code, system="cpt", descriptor="d", score=0.9,
+                             source="retrieval")
+
+    def test_a_hit_restricted_to_a_candidate_in_play_is_recorded(self):
+        from claude_coder import resolution
+
+        class _Source:
+            def exact_direct_code_term(self, term):
+                return [{"cui": "C1", "sab": "CPT", "code": "99999",
+                        "tty": "PT", "atom_term": term}]
+
+        out = resolution._exact_direct_code_term_signal(
+            self._fact("synthetic assembly service"),
+            [self._cand("99999"), self._cand("88888")], _Source())
+        self.assertEqual(list(out.keys()), ["99999"])
+        self.assertEqual(out["99999"][0]["code"], "99999")
+
+    def test_a_hit_for_a_code_not_in_play_is_dropped(self):
+        from claude_coder import resolution
+
+        class _Source:
+            def exact_direct_code_term(self, term):
+                return [{"code": "OTHER_CODE"}]
+
+        out = resolution._exact_direct_code_term_signal(
+            self._fact("anything"), [self._cand("99999")], _Source())
+        self.assertEqual(out, {})
+
+    def test_a_source_without_the_method_degrades_to_empty(self):
+        from claude_coder import resolution
+        out = resolution._exact_direct_code_term_signal(
+            self._fact("anything"), [self._cand("99999")], object())
+        self.assertEqual(out, {})
+
+    def test_a_raising_source_degrades_to_empty_not_an_error(self):
+        from claude_coder import resolution
+
+        class _Source:
+            def exact_direct_code_term(self, term):
+                raise RuntimeError("simulated failure")
+
+        out = resolution._exact_direct_code_term_signal(
+            self._fact("anything"), [self._cand("99999")], _Source())
+        self.assertEqual(out, {})
+
+    def test_a_fact_with_no_description_degrades_to_empty(self):
+        from claude_coder import resolution
+
+        class _Source:
+            def exact_direct_code_term(self, term):
+                return [{"code": "99999"}]
+
+        out = resolution._exact_direct_code_term_signal(
+            self._fact(""), [self._cand("99999")], _Source())
+        self.assertEqual(out, {})
+
+
 if __name__ == "__main__":
     unittest.main()

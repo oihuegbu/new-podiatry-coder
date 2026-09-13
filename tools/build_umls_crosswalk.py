@@ -13,7 +13,7 @@ union) -- but only as a RECALL SEED, never as selecting authority: it turns a
 note phrase into a set of CPT/HCPCS candidates for the existing
 descriptor-entailment / typed-facet-uniqueness / DOS-activity / CMS-validation
 machinery to accept or reject, exactly like a RAG hit or an advisory synonym
-expansion. It carries three indexes:
+expansion. It carries four indexes:
 
   term_to_cuis  -- normalized exact atom term -> CUIs, built from EVERY
                    unsuppressed English atom (any source vocabulary a
@@ -31,6 +31,17 @@ expansion. It carries three indexes:
                    merely mentions but the authoritative registry no longer
                    carries as current never appears here.
   code_to_cuis  -- "{system}:{code}" -> CUIs, the inverse of cui_to_atoms.
+  direct_term_to_atoms -- (issue #6, Codex's independent re-review, F9-R19-A)
+                   normalized term -> [{cui, sab, code, tty, atom_term}],
+                   built ONLY from a CPT/HCPT/HCPCS atom's OWN wording --
+                   never inferred through a shared CUI or a different
+                   vocabulary's synonym the way `term_to_cuis`/`cui_to_atoms`
+                   above deliberately allow. A hit here means the record's
+                   own words literally ARE a current billing code's own
+                   authoritative atom term -- positive IDENTITY evidence a
+                   resolver may record, never sole authorization and never a
+                   tie-break by itself (see
+                   `data_access.AuthoritativeSource.exact_direct_code_term`).
 
 No fuzzy matching. Missing/ambiguous terms simply have no entry -- recall
 degrades gracefully, exactly like the crosswalk above.
@@ -290,6 +301,17 @@ def _build_term_index(release: Path, conso: Path, versions: dict[str, str]) -> N
     cui_to_atoms: dict[str, list[dict]] = defaultdict(list)
     code_to_cuis: dict[str, set] = defaultdict(set)
     useful_cuis: set = set()
+    # issue #6, Codex's independent re-review (F9-R19-A): a normalized term ->
+    # atom index built ONLY from the CPT/HCPT/HCPCS atom's OWN term (never
+    # inferred through a shared CUI or a different vocabulary's synonym, the
+    # way `term_to_cuis`/`cui_to_atoms` below deliberately allow for RECALL
+    # widening). This is what a resolver may treat as DIRECT positive identity
+    # evidence -- the record's own wording literally IS a current billing
+    # code's own authoritative atom term -- never sole authorization and never
+    # a tie-break alone (see `data_access.AuthoritativeSource.
+    # exact_direct_code_term`'s own docstring for how it is actually
+    # consulted).
+    direct_term_to_atoms: dict[str, list[dict]] = defaultdict(list)
     with open(conso, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             f = line.rstrip("\n").split("|")
@@ -306,10 +328,15 @@ def _build_term_index(release: Path, conso: Path, versions: dict[str, str]) -> N
                 continue
             term = f[_STR].strip()
             key = f"{system}:{code}"
-            cui_to_atoms[cui].append({"sab": sab, "code": code, "term": term,
-                                      "tty": f[_TTY]})
+            atom = {"sab": sab, "code": code, "term": term, "tty": f[_TTY]}
+            cui_to_atoms[cui].append(atom)
             code_to_cuis[key].add(cui)
             useful_cuis.add(cui)
+            norm = _norm_term(term)
+            if norm:
+                direct_term_to_atoms[norm].append(
+                    {"cui": cui, "sab": sab, "code": code, "tty": f[_TTY],
+                     "atom_term": term})
     if not useful_cuis:
         print(f"{release}: no CPT/HCPT/HCPCS atom's code is current in the "
               f"authoritative registry -- skipping umls_term_index.")
@@ -351,18 +378,28 @@ def _build_term_index(release: Path, conso: Path, versions: dict[str, str]) -> N
                        "existing descriptor-entailment/typed-facet-uniqueness/"
                        "DOS-activity/CMS-validation path remains the sole selecting "
                        "authority. term_to_cuis is pruned to CUIs that resolve to at "
-                       "least one CURRENT CPT/HCPCS atom via cui_to_atoms."),
+                       "least one CURRENT CPT/HCPCS atom via cui_to_atoms. "
+                       "direct_term_to_atoms (issue #6 F9-R19-A) is a SEPARATE, "
+                       "stricter index: a normalized term maps only to atoms where "
+                       "that term IS the CPT/HCPT/HCPCS atom's own wording -- never "
+                       "inferred through a shared CUI or a different vocabulary's "
+                       "synonym. Positive identity evidence only; never sole "
+                       "authorization or a tie-break alone."),
         "generated": datetime.now(timezone.utc).isoformat(),
         "cui_count": len(useful_cuis),
         "term_count": len(term_to_cuis),
         "code_count": len(code_to_cuis),
+        "direct_term_count": len(direct_term_to_atoms),
         "term_to_cuis": {t: sorted(cuis) for t, cuis in sorted(term_to_cuis.items())},
         "cui_to_atoms": {c: atoms for c, atoms in sorted(cui_to_atoms.items())},
+        "direct_term_to_atoms": {t: atoms for t, atoms
+                                 in sorted(direct_term_to_atoms.items())},
         "code_to_cuis": {k: sorted(cuis) for k, cuis in sorted(code_to_cuis.items())},
     }
     out.write_text(json.dumps(payload, indent=1))
     print(f"{release.name}: {len(useful_cuis)} current-code CUIs -> "
-          f"{len(term_to_cuis)} terms, {len(code_to_cuis)} codes -> {out}")
+          f"{len(term_to_cuis)} terms, {len(code_to_cuis)} codes, "
+          f"{len(direct_term_to_atoms)} direct terms -> {out}")
 
 
 def main() -> int:

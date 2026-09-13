@@ -183,6 +183,55 @@ class UmlsCrosswalkRefreshRegression(unittest.TestCase):
         self.assertNotIn("cpt:88888", payload["code_to_cuis"])
         self.assertNotIn("hcpcs:88888", payload["code_to_cuis"])
 
+    def test_direct_term_to_atoms_maps_only_the_atoms_own_wording(self):
+        """issue #6, Codex's independent re-review (F9-R19-A): a normalized
+        term maps only to an atom whose OWN wording that term literally is --
+        the CPT row's own STR ("synthetic assembly service"), never a
+        SNOMED-only synonym sharing the same CUI ("synthetic assembly
+        (procedure)"), even though both share CSYN1 and both would appear
+        together in `term_to_cuis`/`cui_to_atoms`."""
+        import json
+        import tools.build_umls_crosswalk as builder
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            release_dir = tmp / "rrf_output"
+            _write_fixture(release_dir)
+            data_dir = tmp / "data"
+            (data_dir / "codes").mkdir(parents=True)
+
+            old_argv, old_data_dir, old_current = (
+                sys.argv, builder.DATA_DIR, builder._load_current_codes)
+            sys.argv = ["build_umls_crosswalk.py", "--release", str(release_dir)]
+            builder.DATA_DIR = data_dir
+            # HCPT (88888) is CMS's own republished CPT channel -- it maps to
+            # the "cpt" system (`_SAB_TO_SYSTEM`), never "hcpcs".
+            builder._load_current_codes = lambda: {"cpt": {"99999", "88888"}, "hcpcs": set()}
+            try:
+                self.assertEqual(builder.main(), 0)
+                payload = json.loads(
+                    (data_dir / "codes" / "umls_term_index.json").read_text())
+            finally:
+                (sys.argv, builder.DATA_DIR, builder._load_current_codes) = (
+                    old_argv, old_data_dir, old_current)
+
+        direct = payload["direct_term_to_atoms"]
+        self.assertIn("synthetic assembly service", direct)
+        hits = direct["synthetic assembly service"]
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["code"], "99999")
+        self.assertEqual(hits[0]["cui"], "CSYN1")
+        self.assertEqual(hits[0]["atom_term"], "synthetic assembly service")
+        # The SNOMED-only synonym sharing the same CUI must NEVER appear as a
+        # key here -- that is exactly the "inferred through a shared CUI"
+        # shape this index is deliberately narrower than `term_to_cuis` to
+        # exclude.
+        self.assertNotIn("synthetic assembly (procedure)", direct)
+        # HCPT (88888) genuinely current in this test's patched registry --
+        # its own atom term must be a direct key too.
+        self.assertIn("synthetic hcpt service", direct)
+        self.assertEqual(direct["synthetic hcpt service"][0]["code"], "88888")
+
     def test_no_snomed_overlap_at_all_degrades_to_a_clean_no_op(self):
         import tools.build_umls_crosswalk as builder
 

@@ -1838,11 +1838,22 @@ def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: Cand
     by_axis: dict[str, list] = {}
     for r in loser_reqs:
         by_axis.setdefault(r.axis, []).append(r)
-    if by_axis and (coverage is None or not coverage.complete):
-        by_axis = {}     # NOT_DOCUMENTED is the only remaining grounding status,
-                          # and it needs a fully-covered, real corpus to search
     evidence_by_span_id = _verify.evidence_text_by_span_id(fact) if by_axis else {}
     for axis, axis_reqs in by_axis.items():
+        # issue #6, Codex's independent re-review (F9-R19-A): an EXCLUSION-role
+        # axis group grounds on the OPPOSITE judgement status from every other
+        # elimination-eligible axis -- the candidate's own descriptor names a
+        # condition it does NOT apply under, so genuinely DOCUMENTING that
+        # condition (validated SUPPORTED) is what eliminates it, never its
+        # absence. `validated_requirement`'s SUPPORTED path grounds on the
+        # cited span's own reconciled content, not on `coverage.complete` (that
+        # gate exists only for the NOT_DOCUMENTED path's whole-corpus search),
+        # so an EXCLUSION group is checked regardless of `coverage` state.
+        is_exclusion = axis_reqs[0].role is _requirement.RequirementRole.EXCLUSION
+        target_status = ({_requirement.RequirementStatus.SUPPORTED} if is_exclusion
+                         else {_requirement.RequirementStatus.NOT_DOCUMENTED})
+        if not is_exclusion and (coverage is None or not coverage.complete):
+            continue          # NOT_DOCUMENTED needs a fully-covered, real corpus to search
         grounded_reqs: list | None = []
         for req in axis_reqs:
             outcomes = [rj for j in judgements for rj in j.requirement_judgements
@@ -1856,16 +1867,23 @@ def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: Cand
                 grounded_reqs = None
                 break            # an uncited, unreproduced, or content-mismatched
                                  # verdict -- whole axis standing
-            if {rj.status for rj in outcomes} != {_requirement.RequirementStatus.NOT_DOCUMENTED}:
+            if {rj.status for rj in outcomes} != target_status:
                 grounded_reqs = None
-                break            # disagreement, or a validated SUPPORTED among them --
-                                 # this candidate documents at least one alternative
+                break            # disagreement, or the wrong-polarity status among
+                                 # them -- this candidate is not groundedly eliminated
             grounded_reqs.append(req)
         if grounded_reqs:
             names = ", ".join(sorted(r.requirement_id for r in grounded_reqs))
-            return True, (f"every alternative requirement on axis {axis!r} for "
+            if is_exclusion:
+                detail = (f"every requirement on axis {axis!r} for {loser.code} "
+                          f"({names}) is validated SUPPORTED by every evaluator -- "
+                          f"{loser.code}'s own descriptor names a condition it does "
+                          f"not apply under, and that condition is documented")
+            else:
+                detail = (f"every alternative requirement on axis {axis!r} for "
                           f"{loser.code} ({names}) is validated NOT_DOCUMENTED by "
                           f"every evaluator, in a fully-covered, searched source")
+            return True, detail
     # issue #6 F9-R6 Phase 4 NOTE: `requirements` is deliberately NOT threaded into
     # this fallback narrow call. This call is the escape hatch for a loser the
     # requirement mechanism above did not (or could not) ground -- letting it see
@@ -2212,6 +2230,33 @@ def _select_by_semantic_axes(fact: ClinicalFact, remaining: list[CandidateCode],
     return supported[0] if len(supported) == 1 else None
 
 
+def _exact_direct_code_term_signal(fact: ClinicalFact, candidates: list[CandidateCode],
+                                   source: Any) -> dict[str, list[dict]]:
+    """issue #6, Codex's independent re-review (F9-R19-A): {candidate_code ->
+    [matched direct atoms]} wherever this fact's own description literally IS
+    a current CPT/HCPCS atom's own wording, restricted to atoms whose code is
+    among `candidates`. AUDIT SIGNAL ONLY -- see `_settle_uniqueness`'s own
+    comment at the call site and `AuthoritativeSource.exact_direct_code_term`'s
+    docstring; this function never eliminates or selects anything, and its
+    caller must not either. Degrades to {} when `source` does not implement
+    the lookup, or the fact carries no description."""
+    fn = getattr(source, "exact_direct_code_term", None)
+    description = str(getattr(fact, "description", "") or "").strip()
+    if not callable(fn) or not description:
+        return {}
+    try:
+        hits = fn(description) or []
+    except Exception:
+        return {}
+    codes = {c.code for c in candidates}
+    out: dict[str, list[dict]] = {}
+    for atom in hits:
+        code = str((atom or {}).get("code") or "")
+        if code in codes:
+            out.setdefault(code, []).append(dict(atom))
+    return out
+
+
 def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
                        shortlist: list[CandidateCode], judgements: list,
                        eliminated_earlier: dict[str, str], why: str,
@@ -2285,6 +2330,14 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
         # coverage record (channel, content hash, page coverage) rather than
         # two loose primitives -- binds WHAT was searched, not just whether.
         "coverage": (coverage.as_record() if coverage is not None else None),
+        # issue #6, Codex's independent re-review (F9-R19-A): whether this
+        # fact's own description literally IS a current CPT/HCPCS atom's own
+        # wording (`data_access.AuthoritativeSource.exact_direct_code_term`),
+        # per still-standing candidate. AUDIT ONLY, exactly as that method's
+        # own docstring requires -- recorded here for visibility, never read
+        # by any elimination/selection branch above or below in this
+        # function; a hit is positive identity evidence, not authorization.
+        "exact_direct_code_term": _exact_direct_code_term_signal(fact, remaining, source),
     }
     # issue #6, Codex's independent re-review (F9-R16-B): membership, not just
     # count -- `_candidate_disposition_uniqueness` no longer special-cases

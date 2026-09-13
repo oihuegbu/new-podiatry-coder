@@ -991,3 +991,197 @@ class InstructionalTermsMockSourceTest(unittest.TestCase):
     def test_unconfigured_code_returns_empty_not_an_error(self):
         source = MockSource(instructional_terms={"A000": {"classical cholera"}})
         self.assertEqual(source.instructional_terms("Z99.9", "icd10"), ())
+
+
+class ExclusionClauseRequirementTest(unittest.TestCase):
+    """issue #6, Codex's independent re-review (F9-R19-A): a candidate's own
+    descriptor stating "except"/"excluding"/"other than" compiles into a
+    `RequirementRole.EXCLUSION` requirement -- the opposite polarity of every
+    other elimination-eligible axis: genuinely DOCUMENTING the excluded
+    condition (validated SUPPORTED) is what eliminates the candidate that
+    carries it, never its absence. Synthetic descriptors throughout."""
+
+    WITH_EXCLUSION = _cand("CAND_EXC", "assembly service, except powered variant")
+    PLAIN = _cand("CAND_PLAIN", "assembly service performed")
+
+    def _coverage(self, text):
+        import hashlib
+        return req.CoverageCorpus(channel_id="test-channel", text=text,
+                                  text_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                                  covered_pages=(1,), page_image_sha256=("stub-hash",))
+
+    def _reconciliation(self, statuses):
+        from app.contracts.source_evidence import (ReconciliationStatus,
+                                                    SourceReconciliation,
+                                                    SpanReconciliation)
+        return SourceReconciliation(spans=tuple(
+            SpanReconciliation(span_id=sid, status=ReconciliationStatus[status])
+            for sid, status in statuses.items()))
+
+    def test_an_exclusion_clause_compiles_as_a_required_exclusion_role_requirement(self):
+        reqs = [r for r in req.compile_requirements([self.WITH_EXCLUSION, self.PLAIN])
+               if r.axis == "exclusion_clause"]
+        self.assertEqual(len(reqs), 1)     # only CAND_EXC states one
+        r = reqs[0]
+        self.assertEqual(r.candidate_code, "CAND_EXC")
+        self.assertTrue(r.required)
+        self.assertEqual(r.role, req.RequirementRole.EXCLUSION)
+        self.assertEqual(r.expected, ("powered variant",))
+        self.assertEqual(r.authority_source_text, self.WITH_EXCLUSION.descriptor)
+
+    def test_a_descriptor_stating_no_exclusion_compiles_nothing_for_that_candidate(self):
+        reqs = [r for r in req.compile_requirements([self.WITH_EXCLUSION, self.PLAIN])
+               if r.axis == "exclusion_clause"]
+        self.assertEqual([r for r in reqs if r.candidate_code == "CAND_PLAIN"], [])
+
+    def test_two_candidates_with_no_exclusion_clause_compile_nothing(self):
+        a = _cand("CAND_A", "assembly service performed")
+        b = _cand("CAND_B", "assembly service performed differently")
+        reqs = [r for r in req.compile_requirements([a, b]) if r.axis == "exclusion_clause"]
+        self.assertEqual(reqs, [])
+
+    def test_exclusion_clause_validates_supported_through_the_existing_plumbing(self):
+        """Wired through the SAME `validated_requirement` every other axis
+        uses -- proves this is not a parallel, unvetted mechanism."""
+        reqs = [r for r in req.compile_requirements([self.WITH_EXCLUSION, self.PLAIN])
+               if r.axis == "exclusion_clause"]
+        r = reqs[0]
+        judgement = req.RequirementJudgement(
+            requirement_id=r.requirement_id, status=req.RequirementStatus.SUPPORTED,
+            evidence_span_ids=("s1",))
+        span_text = "documentation confirms the powered variant was used today"
+        self.assertTrue(req.validated_requirement(
+            r, judgement, evidence_by_span_id={"s1": span_text},
+            reconciliation=self._reconciliation({"s1": "AGREED"})))
+
+    def test_exclusion_clause_not_documented_validates_against_full_coverage(self):
+        reqs = [r for r in req.compile_requirements([self.WITH_EXCLUSION, self.PLAIN])
+               if r.axis == "exclusion_clause"]
+        r = reqs[0]
+        coverage = self._coverage("assembly service performed today, nothing else stated")
+        judgement = req.RequirementJudgement(
+            requirement_id=r.requirement_id, status=req.RequirementStatus.NOT_DOCUMENTED)
+        self.assertTrue(req.validated_requirement(r, judgement, coverage=coverage))
+
+    def _judgements(self, requirement_ids, statuses, evidence_span_ids=("s1",)):
+        """Both judging models unanimously reporting the SAME status for each
+        of `requirement_ids` -- the duck-typed shape `resolution.
+        _grounded_elimination` reads (`j.requirement_judgements`)."""
+        rjs = tuple(req.RequirementJudgement(
+            requirement_id=rid, status=statuses,
+            evidence_span_ids=(evidence_span_ids if statuses == req.RequirementStatus.SUPPORTED
+                               else ()))
+            for rid in requirement_ids)
+        model_a = type("J", (), {"requirement_judgements": rjs})()
+        model_b = type("J", (), {"requirement_judgements": rjs})()
+        return [model_a, model_b]
+
+    def test_grounded_elimination_eliminates_on_a_documented_exclusion_condition(self):
+        """End-to-end through the REAL `resolution._grounded_elimination` --
+        the actual function `_uniqueness_view` calls, not merely
+        `validated_requirement` in isolation. Both models named CAND_EXC
+        eliminated (a real precondition of this function ever being
+        consulted at all -- see `_uniqueness_view`); this proves the
+        DOCUMENT-GROUNDING check for an EXCLUSION-role axis fires on
+        SUPPORTED, the opposite polarity from every MUST_SUPPORT axis."""
+        from claude_coder import resolution
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from app.contracts.source_evidence import (ReconciliationStatus,
+                                                    SourceReconciliation,
+                                                    SpanReconciliation)
+
+        span = EvidenceSpan(text="documentation confirms the powered variant was used",
+                            anchored=True, span_id="s1")
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="assembly service",
+                            evidence=[span], confidence=0.9, fact_id="F1")
+        reqs = req.compile_requirements([self.WITH_EXCLUSION, self.PLAIN])
+        excl_req = next(r for r in reqs if r.axis == "exclusion_clause")
+        reconciliation = SourceReconciliation(spans=(
+            SpanReconciliation(span_id="s1", status=ReconciliationStatus.AGREED),))
+        judgements = self._judgements((excl_req.requirement_id,),
+                                      req.RequirementStatus.SUPPORTED)
+
+        grounded, detail = resolution._grounded_elimination(
+            fact, self.WITH_EXCLUSION, self.PLAIN, reconciliation,
+            requirements=reqs, judgements=judgements, coverage=None)
+        self.assertTrue(grounded, detail)
+        self.assertIn("SUPPORTED", detail)
+
+    def test_grounded_elimination_never_eliminates_on_an_undocumented_exclusion(self):
+        """The mirror case: the SAME exclusion requirement, but every
+        evaluator reports NOT_DOCUMENTED for it -- the excluded condition is
+        genuinely absent, so CAND_EXC's own descriptor's exception does NOT
+        apply, and nothing grounds an elimination through this axis. Falls
+        through to the pairwise/word-overlap fallback, which also finds
+        nothing distinguishing these two synthetic descriptors."""
+        from claude_coder import resolution
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+
+        span = EvidenceSpan(text="assembly service performed, nothing else stated",
+                            anchored=True, span_id="s1")
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="assembly service",
+                            evidence=[span], confidence=0.9, fact_id="F1")
+        reqs = req.compile_requirements([self.WITH_EXCLUSION, self.PLAIN])
+        excl_req = next(r for r in reqs if r.axis == "exclusion_clause")
+        coverage = self._coverage("assembly service performed, nothing else stated")
+        judgements = self._judgements((excl_req.requirement_id,),
+                                      req.RequirementStatus.NOT_DOCUMENTED)
+
+        grounded, _detail = resolution._grounded_elimination(
+            fact, self.WITH_EXCLUSION, self.PLAIN, reconciliation=None,
+            requirements=reqs, judgements=judgements, coverage=coverage)
+        self.assertFalse(grounded)
+
+
+class QualifiedChildRequirementTest(unittest.TestCase):
+    """issue #6, Codex's independent re-review (F9-R19-A): CPT's own family-
+    indentation convention -- candidates sharing an identical stem up to a
+    semicolon each compile their OWN post-semicolon qualifying clause as a
+    real, `selectable` MUST_SUPPORT requirement (structurally derived, never
+    an arbitrary leftover-word difference like `descriptor_term`). Synthetic
+    descriptors throughout."""
+
+    SMALL = _cand("CAND_SMALL", "excision of lesion, subcutaneous; less than 3 cm")
+    LARGE = _cand("CAND_LARGE", "excision of lesion, subcutaneous; 3 cm or greater")
+    UNRELATED = _cand("CAND_UNRELATED", "assembly service, unrelated family")
+
+    def _coverage(self, text):
+        import hashlib
+        return req.CoverageCorpus(channel_id="test-channel", text=text,
+                                  text_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                                  covered_pages=(1,), page_image_sha256=("stub-hash",))
+
+    def test_sibling_members_each_compile_their_own_qualifying_clause(self):
+        reqs = [r for r in req.compile_requirements([self.SMALL, self.LARGE])
+               if r.axis == "qualified_child"]
+        self.assertEqual(len(reqs), 2)
+        self.assertTrue(all(r.required for r in reqs))
+        self.assertTrue(all(r.role is req.RequirementRole.MUST_SUPPORT for r in reqs))
+        by_code = {r.candidate_code: r for r in reqs}
+        self.assertEqual(by_code["CAND_SMALL"].expected, ("less than 3 cm",))
+        self.assertEqual(by_code["CAND_LARGE"].expected, ("3 cm or greater",))
+
+    def test_a_candidate_from_an_unrelated_family_compiles_nothing(self):
+        reqs = [r for r in req.compile_requirements(
+                    [self.SMALL, self.LARGE, self.UNRELATED])
+               if r.axis == "qualified_child"]
+        self.assertEqual([r for r in reqs if r.candidate_code == "CAND_UNRELATED"], [])
+
+    def test_a_lone_semicolon_descriptor_with_no_sibling_compiles_nothing(self):
+        lone = _cand("CAND_LONE", "excision of lesion, subcutaneous; unusual variant")
+        reqs = [r for r in req.compile_requirements([lone, self.UNRELATED])
+               if r.axis == "qualified_child"]
+        self.assertEqual(reqs, [])
+
+    def test_qualified_child_axis_is_selectable_like_laterality(self):
+        """`tiebreak.discriminating_axes` marks this axis `selectable`,
+        exactly like laterality -- so `narrow`'s EXISTING literal-presence
+        winner logic (unchanged) may settle a tie through it, never a new
+        selection mechanism. (Full page-proof narrowing is exercised at the
+        `tiebreak`-level tests, not here.)"""
+        from claude_coder import tiebreak
+        axes = tiebreak.discriminating_axes([self.SMALL, self.LARGE])
+        qualified = [a for a in axes if a.axis == "qualified_child"]
+        self.assertEqual(len(qualified), 1)
+        self.assertTrue(qualified[0].selectable)
+        self.assertTrue(qualified[0].provable)

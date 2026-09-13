@@ -39,6 +39,7 @@ facts uniquely support. Neither counts votes.
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -52,6 +53,28 @@ from .terminology import _sing
 AXIS_LATERALITY = "laterality"
 AXIS_MEASUREMENT = "measurement"
 AXIS_DESCRIPTOR_TERM = "descriptor_term"
+#: issue #6, Codex's independent re-review (F9-R19-A): a candidate's own
+#: authoritative descriptor stating "except"/"excluding"/"other than" names a
+#: condition under which THIS candidate does NOT apply — the opposite polarity
+#: of every other axis here. Genuinely DOCUMENTING that condition ELIMINATES
+#: the candidate that carries it; it never selects anything (see
+#: `requirement.RequirementRole.EXCLUSION`, `resolution._grounded_elimination`).
+#: Never `selectable` here (kept out of `narrow()`'s literal-presence winner
+#: logic, which assumes positive-for-this-candidate polarity) — only
+#: `compile_requirements` special-cases this axis name to emit the flipped
+#: `EXCLUSION` role instead of the default `MUST_SUPPORT`/`POSITIVE_ALIAS`.
+AXIS_EXCLUSION_CLAUSE = "exclusion_clause"
+#: issue #6, Codex's independent re-review (F9-R19-A): CPT's own family-
+#: indentation convention — several candidates' descriptors share an identical
+#: stem up to and including a semicolon, and each member's own qualifying
+#: clause after it is what a record must state to bill THAT member rather
+#: than a sibling. A real, structural, governed pattern (never an arbitrary
+#: leftover-word difference — see `AXIS_DESCRIPTOR_TERM`'s own docstring for
+#: why raw token differences were deliberately made non-selecting), so this
+#: axis IS `selectable`: the whole qualifying clause is checked as one phrase
+#: via the same `asserted_status`/`validated_requirement` machinery already
+#: proven safe for `laterality`/`inclusion_term`, never bag-of-words.
+AXIS_QUALIFIED_CHILD = "qualified_child"
 
 #: English and coding GRAMMAR that can never be a discriminating clinical axis:
 #: function words; the classification grammar of a residual bucket (a record states a
@@ -257,6 +280,75 @@ class AxisProbe:
                                   for k, v in sorted(self.terms_by_code.items())}}
 
 
+#: issue #6, Codex's independent re-review (F9-R19-A): the three English
+#: markers a CPT/HCPCS descriptor uses to state a condition under which the
+#: code does NOT apply. Documentation grammar, not clinical vocabulary — the
+#: same kind of exemption `_GRAMMAR`/`_NEGATION` above already rely on.
+_EXCLUSION_MARKERS = ("except", "excluding", "other than")
+_EXCLUSION_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(m) for m in _EXCLUSION_MARKERS) + r")\b\s*(.+)",
+    re.IGNORECASE)
+
+
+def _exclusion_clause(descriptor: str) -> str | None:
+    """The clause following an "except"/"excluding"/"other than" marker within
+    ONE clause of `descriptor` (never spanning a clause boundary — a marker in
+    an earlier clause must not swallow unrelated later text), or None when the
+    descriptor states no such condition. Reproduces verbatim from the
+    descriptor by construction (a regex match on the real string), so a
+    caller compiling this into a `requirement.DescriptorRequirement` can
+    always find it again via `_find_clause`."""
+    for clause in _split_clauses(descriptor or ""):
+        m = _EXCLUSION_RE.search(clause)
+        if m:
+            text = m.group(1).strip(" ,;.")
+            if text:
+                return text
+    return None
+
+
+def _semicolon_prefix(descriptor: str) -> tuple[str, str] | None:
+    """(normalized stem including the semicolon, the candidate's own remaining
+    qualifying clause) for a descriptor stating CPT's family-indentation
+    convention (a shared stem, then a semicolon, then the member-specific
+    differentiator) — or None when `descriptor` carries no semicolon, or
+    nothing follows it."""
+    idx = (descriptor or "").find(";")
+    if idx < 0:
+        return None
+    prefix = descriptor[:idx + 1].strip().lower()
+    remainder = descriptor[idx + 1:].strip(" ,;.")
+    if not prefix or not remainder:
+        return None
+    return prefix, remainder
+
+
+def _qualified_child_terms(candidates: list[CandidateCode]) -> dict[str, tuple[str, ...]]:
+    """Which candidates share an IDENTICAL normalized pre-semicolon stem with
+    at least one other tied candidate — CPT's own family convention, never an
+    arbitrary prefix match — mapped to that candidate's own post-semicolon
+    qualifying clause. A candidate with no semicolon, or whose stem no
+    sibling in THIS shortlist shares, gets no entry: it is not part of a
+    documented family needing this differentiation, so nothing is required
+    of it on this axis (silence is never proof, same as every other axis
+    here)."""
+    by_prefix: dict[str, list[CandidateCode]] = defaultdict(list)
+    parsed: dict[str, tuple[str, str]] = {}
+    for c in candidates:
+        got = _semicolon_prefix(c.descriptor)
+        if got is None:
+            continue
+        parsed[c.code] = got
+        by_prefix[got[0]].append(c)
+    out: dict[str, tuple[str, ...]] = {}
+    for prefix, members in by_prefix.items():
+        if len(members) < 2:
+            continue          # no sibling shares this stem -- nothing to differentiate
+        for c in members:
+            out[c.code] = (parsed[c.code][1],)
+    return out
+
+
 def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...]:
     """The axes on which the tied candidates' AUTHORITATIVE descriptors differ.
 
@@ -311,6 +403,25 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
         probes.append(AxisProbe(
             AXIS_DESCRIPTOR_TERM, distinct,
             provable=True, selectable=False, queryable=False))
+
+    # issue #6, Codex's independent re-review (F9-R19-A): candidate-differential
+    # selection from the candidates' own authoritative descriptor STRUCTURE
+    # (never an arbitrary word list) -- an exclusion clause each candidate
+    # states independently, and a family-qualifying clause candidates sharing
+    # a semicolon stem each state relative to their siblings.
+    excl = {c.code: ((_exclusion_clause(c.descriptor),) if _exclusion_clause(c.descriptor)
+                     else ()) for c in candidates}
+    if any(excl.values()):
+        probes.append(AxisProbe(
+            AXIS_EXCLUSION_CLAUSE, excl,
+            provable=True, selectable=False, queryable=True))
+
+    qualified = _qualified_child_terms(candidates)
+    if qualified:
+        full = {c.code: qualified.get(c.code, ()) for c in candidates}
+        probes.append(AxisProbe(
+            AXIS_QUALIFIED_CHILD, full,
+            provable=True, selectable=True, queryable=True))
     return tuple(probes)
 
 
@@ -542,6 +653,17 @@ def narrow(fact, candidates: list[CandidateCode],
     documented_axes: set[str] = set()
     for probe in axes:
         if not probe.provable:
+            continue
+        if probe.axis == AXIS_EXCLUSION_CLAUSE:
+            # issue #6, Codex's independent re-review (F9-R19-A): an exclusion
+            # clause's polarity is inverted from every other axis here --
+            # documenting it argues AGAINST the candidate that carries it, not
+            # for it. `narrow()`'s `support`/`documented_codes` bookkeeping
+            # below assumes positive-for-this-candidate polarity throughout,
+            # so this axis is deliberately excluded from it entirely; its
+            # (opposite-polarity) elimination is handled exclusively through
+            # `compile_requirements`'s `RequirementRole.EXCLUSION` ->
+            # `resolution._grounded_elimination`, never here.
             continue
         # issue #6 F9-R6-R2, fourth re-review: laterality is settled EXCLUSIVELY
         # from the fact's own typed attribute now, never re-derived lexically --

@@ -549,10 +549,21 @@ def compile_requirements(candidates: list[CandidateCode], source: Any = None
                     snapshot = snap_fn(code, candidate.system) or {}
                 except Exception:
                     snapshot = {}
+            # issue #6, Codex's independent re-review (F9-R19-A): an exclusion
+            # clause is a real, checked, elimination-eligible condition (never
+            # merely an example), but its polarity is the OPPOSITE of every
+            # other elimination-eligible axis (see `tiebreak.
+            # AXIS_EXCLUSION_CLAUSE`'s own docstring) -- special-cased by axis
+            # NAME, independent of `probe.selectable` (which governs whether
+            # `tiebreak.narrow`'s literal-presence winner logic may use this
+            # axis, not whether it is elimination-eligible here).
+            is_exclusion = probe.axis == _tiebreak.AXIS_EXCLUSION_CLAUSE
             out.append(DescriptorRequirement(
                 requirement_id=f"{probe.axis}:{code}:{len(out)}",
-                axis=probe.axis, candidate_code=code, required=probe.selectable,
-                role=(RequirementRole.MUST_SUPPORT if probe.selectable
+                axis=probe.axis, candidate_code=code,
+                required=(True if is_exclusion else probe.selectable),
+                role=(RequirementRole.EXCLUSION if is_exclusion
+                     else RequirementRole.MUST_SUPPORT if probe.selectable
                      else RequirementRole.POSITIVE_ALIAS),
                 expected=tuple(terms), authority_clause=clause,
                 authority_offset=offset, authority_source_text=candidate.descriptor,

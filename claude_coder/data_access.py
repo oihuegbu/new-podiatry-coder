@@ -765,6 +765,44 @@ class AuthoritativeSource:
             ))
         return out
 
+    def exact_direct_code_term(self, term: str) -> list[dict]:
+        """issue #6, Codex's independent re-review (F9-R19-A): every current
+        CPT/HCPT/HCPCS atom whose OWN wording, normalized, exactly equals
+        `term` -- `umls_term_index.json`'s `direct_term_to_atoms`, never the
+        `term_to_cuis`/`cui_to_atoms` pair `umls_candidates` uses, which
+        deliberately widens through a shared CUI and other vocabularies'
+        synonyms for RECALL. This is a strictly narrower, DIRECT-IDENTITY
+        lookup: a hit means the record's own words literally ARE a current
+        billing code's authoritative atom term, not merely a concept relative
+        of one.
+
+        POSITIVE IDENTITY EVIDENCE ONLY. Callers must never treat a hit (or
+        its absence) as sole authorization to select a candidate, nor as a
+        tie-break by itself when several candidates remain entailed --
+        exactly like every other recall/audit signal in this module
+        (`umls_crosswalk_entry`, `umls_candidates`), the existing descriptor-
+        entailment/typed-facet-uniqueness/DOS-activity/CMS-validation path
+        remains the sole selecting authority. Intended for the resolution
+        audit trail (e.g. `resolution._propose_then_verify_core`'s per-
+        candidate record), never as an elimination or selection input.
+
+        Returns `[]` when the term-index artifact is unavailable or absent
+        for `term` -- degrades gracefully, never raises."""
+        if self._umls_term_index is None:
+            try:
+                document, identity = declared_document_snapshot(
+                    "umls_term_index", AuthoritativeDataUnavailable)
+                self._umls_term_index = document or {}
+                self._bound_sources.bind(identity)
+            except Exception:
+                self._umls_term_index = False
+        if not self._umls_term_index:
+            return []
+        from .terminology import normalize_term as _norm_term
+        direct = self._umls_term_index.get("direct_term_to_atoms") or {}
+        hits = direct.get(_norm_term(term)) or ()
+        return [dict(h) for h in hits if isinstance(h, dict)]
+
     #: Governed axes THIS source can route `concept_lookup` to a real concept graph
     #: for. Only "anatomy" has one today (the SNOMED CT Body Structure hierarchy) --
     #: adding a "procedure" axis needs a real licensed/verified procedure-terminology
