@@ -60,6 +60,13 @@ class _EntangledGraph:
             closure |= self._closures.get(n, set())
         return _Binding(clinical_event_ids=closure)
 
+    def certificate_record(self):
+        """`certificate.build_certificate` reads this unconditionally
+        whenever `result.graph` is set -- a minimal, empty stand-in is
+        enough for tests whose own concern is unrelated to the certificate's
+        clinical-graph binding."""
+        return {}
+
 
 def _result(lines, graph=None, gates=()):
     result = CodingResult(encounter_id="enc-1", date_of_service="2026-01-01",
@@ -165,6 +172,36 @@ class DependencyHoldBundleTest(unittest.TestCase):
                         "disappear")
         self.assertEqual(held_diagnoses[0].status, LineStatus.HELD_POLICY_OR_DATA)
         self.assertTrue(bundle.release_blockers())
+
+    def test_the_certificate_attests_the_held_diagnosis_too(self):
+        """issue #6, Codex's independent re-review (F9-R19-A consolidated
+        live-run remediation, Finding 5): `certificate.build_certificate`
+        used to attest ONLY `result.billable_lines`, while the ClaimBundle
+        (since F9-R20-A) also projects `result.submission_held_lines` --
+        so a genuinely resolved, HELD diagnosis appeared in the bundle but
+        the certificate reported it unattested. Both artifacts must now
+        certify the SAME coded-output line set, and agree on submission
+        status too."""
+        from app.contracts.claim_bundle import (AuthorityBinding, EncounterContext,
+                                                SourceDocument, bundle_from_coding_result)
+        from claude_coder import certificate
+        diagnosis = _resolved_line("D1", "DX_A", kind=FactKind.DIAGNOSIS)
+        procedure = _unresolved_line("P1")
+        graph = _EntangledGraph({"P1": {"D1"}})
+        result = _result([diagnosis, procedure], graph=graph)
+        autonomy.decide(result)
+
+        cert = certificate.build_certificate(result, "note text")
+        cert_line = next(ln for ln in cert["lines"] if ln["code"] == "DX_A")
+        self.assertEqual(cert_line["submission_status"], "held")
+
+        bundle = bundle_from_coding_result(
+            result, source_document=SourceDocument(), context=EncounterContext(),
+            authority=AuthorityBinding())
+        problems = bundle._attested_line_problems(cert)
+        self.assertEqual(problems, (),
+                         "the certificate must attest the held diagnosis exactly "
+                         "like the bundle does, including its submission status")
 
 
 class EncounterWideFailurePreservesLinesTest(unittest.TestCase):

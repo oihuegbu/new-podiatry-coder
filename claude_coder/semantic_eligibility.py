@@ -268,15 +268,21 @@ class RoleControlDecision:
     exactly one element when the control actually ran); `candidate_role` is
     this candidate's own classification, or None when unclassifiable.
 
-    `blocks_line` (Codex F9-R11-H-D, second re-review): True only for a
-    FACT_ROLE_CONFLICT/MIXED_KIND_INTENT decision where the candidates in
+    `blocks_line` (Codex F9-R11-H-D, second re-review; extended to
+    FACT_ROLE_MISSING by F9-R19-A Finding 3): True for a FACT_ROLE_CONFLICT/
+    MIXED_KIND_INTENT/FACT_ROLE_MISSING decision where the candidates in
     THIS pool actually classify into more than one distinct procedure role --
     a genuine, observable ambiguity that could change which candidate family
-    wins, as opposed to a conflict/mixed state whose candidates all agree (or
-    none classify), where the ambiguity is moot for this specific pool. This
-    field names the condition; it is not yet wired into an upstream
-    hold/split -- the report is honest that the condition exists, without
-    claiming a line was actually stopped from releasing on it."""
+    wins, as opposed to a conflict/mixed/missing state whose candidates all
+    agree (or none classify), where the ambiguity is moot for this specific
+    pool. A fact whose OWN role could not be determined is not thereby
+    evidence its candidate pool is safe -- an anesthesia fact with no
+    classified role of its own must not let operative-surgery-classified
+    candidates reach the tie-breaker any more than a genuine role conflict
+    would. Wired into `resolution._propose_then_verify`'s pre-verification
+    partition: any candidate whose decision has `blocks_line=True` aborts
+    the WHOLE fact with the typed `classification_data_gap` hold, before any
+    verifier call is spent -- never a silent survivor."""
     status: RoleControlStatus
     fact_roles: tuple[str, ...]
     candidate_role: str | None
@@ -337,8 +343,21 @@ def _service_role_control(facts: list[ClinicalFact], candidates: list,
         classified = {(c.code, c.system): _candidate_procedure_role(c, source, dos=dos)
                      for c in candidates}
         distinct_roles = {r for r in classified.values() if r is not None}
+        # issue #6, Codex's independent re-review (F9-R19-A Finding 3): a
+        # fact whose OWN role could not be determined (FACT_ROLE_MISSING) is
+        # NOT evidence that its candidate pool is safe -- a pool that itself
+        # classifies into more than one distinct, incompatible procedure
+        # role (e.g. an anesthesia-role candidate and several operative-
+        # role candidates all surviving for one fact) is exactly as
+        # dangerous a composition/coder decision as a genuine FACT_ROLE_
+        # CONFLICT, regardless of WHY the fact's own role is unknown.
+        # Previously only FACT_ROLE_CONFLICT/MIXED_KIND_INTENT could ever
+        # block, so a fact whose role simply failed to classify let
+        # operative-classified candidates reach the clinical tie-breaker
+        # untouched -- reproduced directly on the designated operative note.
         blocks = (base_status in (RoleControlStatus.FACT_ROLE_CONFLICT,
-                                  RoleControlStatus.MIXED_KIND_INTENT)
+                                  RoleControlStatus.MIXED_KIND_INTENT,
+                                  RoleControlStatus.FACT_ROLE_MISSING)
                  and len(distinct_roles) > 1)
         return {(c.code, c.system): RoleControlDecision(
                     base_status, roles, classified[(c.code, c.system)], False, blocks,

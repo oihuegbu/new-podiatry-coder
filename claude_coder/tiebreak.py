@@ -75,6 +75,30 @@ AXIS_EXCLUSION_CLAUSE = "exclusion_clause"
 #: via the same `asserted_status`/`validated_requirement` machinery already
 #: proven safe for `laterality`/`inclusion_term`, never bag-of-words.
 AXIS_QUALIFIED_CHILD = "qualified_child"
+#: issue #6, Codex's independent re-review (F9-R19-A Finding 2): the shared
+#: pre-semicolon stem itself, as a REQUIRED precondition every member of a
+#: qualified-child family must clear before any of them may be considered
+#: supported. Compiles to `MUST_SUPPORT` exactly like `AXIS_QUALIFIED_CHILD`
+#: (same `selectable=True` treatment) -- but because every sibling in a
+#: family shares the IDENTICAL term here, a validated NOT_DOCUMENTED verdict
+#: eliminates the WHOLE family together, never just the one candidate whose
+#: own differentiator happened to be checked. This is what stops a
+#: differential question (e.g. "with material A vs with material B") from
+#: ever being asked before the shared family itself is confirmed to apply
+#: at all.
+AXIS_FAMILY_VIABILITY = "family_viability"
+#: Axes `narrow()`'s own positive-presence winner logic never evaluates at
+#: all -- both are pre-elimination GATES checked exclusively through
+#: `compile_requirements`/`resolution._grounded_elimination`/
+#: `_requirement_grounded_status`, either because their polarity is
+#: inverted (`AXIS_EXCLUSION_CLAUSE`) or because every sibling in a family
+#: shares the identical term (`AXIS_FAMILY_VIABILITY`, which could never
+#: settle to exactly one candidate through THIS mechanism by construction).
+#: Excluded from `narrow()`'s `support`/`documented_axes`/`settled`
+#: bookkeeping AND from `unsettled` -- a gate axis that can never settle
+#: must never be allowed to permanently block `narrow()`'s overall winner
+#: decision (`not unsettled`) for every OTHER, genuinely resolvable axis.
+_GATE_ONLY_AXES = frozenset({AXIS_EXCLUSION_CLAUSE, AXIS_FAMILY_VIABILITY})
 
 #: English and coding GRAMMAR that can never be a discriminating clinical axis:
 #: function words; the classification grammar of a residual bucket (a record states a
@@ -323,29 +347,56 @@ def _semicolon_prefix(descriptor: str) -> tuple[str, str] | None:
     return prefix, remainder
 
 
-def _qualified_child_terms(candidates: list[CandidateCode]) -> dict[str, tuple[str, ...]]:
-    """Which candidates share an IDENTICAL normalized pre-semicolon stem with
-    at least one other tied candidate — CPT's own family convention, never an
-    arbitrary prefix match — mapped to that candidate's own post-semicolon
-    qualifying clause. A candidate with no semicolon, or whose stem no
-    sibling in THIS shortlist shares, gets no entry: it is not part of a
-    documented family needing this differentiation, so nothing is required
-    of it on this axis (silence is never proof, same as every other axis
-    here)."""
+def _qualified_child_groups(candidates: list[CandidateCode]
+                            ) -> dict[str, list[CandidateCode]]:
+    """{normalized pre-semicolon stem -> members}, restricted to stems at
+    least two of the tied candidates genuinely share — CPT's own family
+    convention, never an arbitrary prefix match. A candidate with no
+    semicolon, or whose stem no sibling in THIS shortlist shares, is not
+    part of a documented family at all and appears in no group."""
     by_prefix: dict[str, list[CandidateCode]] = defaultdict(list)
-    parsed: dict[str, tuple[str, str]] = {}
     for c in candidates:
         got = _semicolon_prefix(c.descriptor)
         if got is None:
             continue
-        parsed[c.code] = got
         by_prefix[got[0]].append(c)
+    return {prefix: members for prefix, members in by_prefix.items() if len(members) >= 2}
+
+
+def _qualified_child_terms(candidates: list[CandidateCode]) -> dict[str, tuple[str, ...]]:
+    """Each family member's own post-semicolon qualifying clause -- the
+    DIFFERENTIAL that distinguishes it from its siblings once the shared
+    stem itself is established (see `_family_viability_terms` for that
+    separate, prerequisite check -- issue #6, Codex's independent re-review,
+    F9-R19-A Finding 2: a differential clause may narrow WHICH sibling, but
+    it must never be evaluated as if it alone proves the shared family
+    applies at all). A candidate with no entry here is not part of a
+    documented family needing this differentiation, so nothing is required
+    of it on this axis (silence is never proof, same as every other axis
+    here)."""
     out: dict[str, tuple[str, ...]] = {}
-    for prefix, members in by_prefix.items():
-        if len(members) < 2:
-            continue          # no sibling shares this stem -- nothing to differentiate
+    for prefix, members in _qualified_child_groups(candidates).items():
         for c in members:
-            out[c.code] = (parsed[c.code][1],)
+            parsed = _semicolon_prefix(c.descriptor)
+            out[c.code] = (parsed[1],)
+    return out
+
+
+def _family_viability_terms(candidates: list[CandidateCode]) -> dict[str, tuple[str, ...]]:
+    """issue #6, Codex's independent re-review (F9-R19-A Finding 2): the
+    shared pre-semicolon stem itself, as a REQUIRED precondition every
+    member of a qualified-child family must clear before any of them may be
+    considered supported -- never omitted just because it is IDENTICAL
+    across siblings (a shared term proves nothing about which sibling, but
+    it is not therefore optional: the family as a whole must still be
+    genuinely documented). Every member of a >=2 family gets the SAME term
+    (its own family's shared stem) -- a candidate with no family membership
+    (see `_qualified_child_groups`) gets no entry, exactly like the
+    differential axis."""
+    out: dict[str, tuple[str, ...]] = {}
+    for prefix, members in _qualified_child_groups(candidates).items():
+        for c in members:
+            out[c.code] = (prefix.rstrip(";").strip(),)
     return out
 
 
@@ -395,8 +446,28 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
             {code: ((key,) if key else ()) for code, key in ivs.items()},
             provable=False, selectable=False, queryable=True))
 
+    # issue #6, Codex's independent re-review (F9-R19-A): candidate-differential
+    # selection from the candidates' own authoritative descriptor STRUCTURE
+    # (never an arbitrary word list) -- an exclusion clause each candidate
+    # states independently, and a family-qualifying clause candidates sharing
+    # a semicolon stem each state relative to their siblings. Computed BEFORE
+    # `AXIS_DESCRIPTOR_TERM` below so those axes' own governed words can be
+    # subtracted from its raw bag-of-words the same way laterality's already
+    # are -- otherwise the identical words that let a SELECTABLE axis settle
+    # the tie would ALSO surface as a non-selectable, never-settling
+    # `descriptor_term` axis, which used to permanently block `narrow()`'s
+    # winner decision even after the real, governed axis had resolved it.
+    excl = {c.code: ((_exclusion_clause(c.descriptor),) if _exclusion_clause(c.descriptor)
+                     else ()) for c in candidates}
+    qualified = _qualified_child_terms(candidates)
+    viability = _family_viability_terms(candidates) if qualified else {}
+
     lat_words = {_sing(w) for terms in lat.values() for w in terms}
-    toks = {c.code: _descriptor_tokens(c.descriptor) - lat_words for c in candidates}
+    governed_words = set(lat_words)
+    for terms in (*excl.values(), *qualified.values(), *viability.values()):
+        governed_words |= {_sing(w) for phrase in terms
+                           for w in re.split(r"[^a-z0-9]+", phrase.lower()) if w}
+    toks = {c.code: _descriptor_tokens(c.descriptor) - governed_words for c in candidates}
     shared = set.intersection(*toks.values()) if toks else set()
     distinct = {code: tuple(sorted(t - shared)) for code, t in toks.items()}
     if any(distinct.values()):
@@ -404,23 +475,21 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
             AXIS_DESCRIPTOR_TERM, distinct,
             provable=True, selectable=False, queryable=False))
 
-    # issue #6, Codex's independent re-review (F9-R19-A): candidate-differential
-    # selection from the candidates' own authoritative descriptor STRUCTURE
-    # (never an arbitrary word list) -- an exclusion clause each candidate
-    # states independently, and a family-qualifying clause candidates sharing
-    # a semicolon stem each state relative to their siblings.
-    excl = {c.code: ((_exclusion_clause(c.descriptor),) if _exclusion_clause(c.descriptor)
-                     else ()) for c in candidates}
     if any(excl.values()):
         probes.append(AxisProbe(
             AXIS_EXCLUSION_CLAUSE, excl,
             provable=True, selectable=False, queryable=True))
 
-    qualified = _qualified_child_terms(candidates)
     if qualified:
         full = {c.code: qualified.get(c.code, ()) for c in candidates}
         probes.append(AxisProbe(
             AXIS_QUALIFIED_CHILD, full,
+            provable=True, selectable=True, queryable=True))
+        # issue #6, Codex's independent re-review (F9-R19-A Finding 2): the
+        # shared-stem viability check, compiled ALONGSIDE the differential
+        # (never instead of it) whenever a qualified-child family exists.
+        probes.append(AxisProbe(
+            AXIS_FAMILY_VIABILITY, {c.code: viability.get(c.code, ()) for c in candidates},
             provable=True, selectable=True, queryable=True))
     return tuple(probes)
 
@@ -654,16 +723,19 @@ def narrow(fact, candidates: list[CandidateCode],
     for probe in axes:
         if not probe.provable:
             continue
-        if probe.axis == AXIS_EXCLUSION_CLAUSE:
-            # issue #6, Codex's independent re-review (F9-R19-A): an exclusion
-            # clause's polarity is inverted from every other axis here --
-            # documenting it argues AGAINST the candidate that carries it, not
-            # for it. `narrow()`'s `support`/`documented_codes` bookkeeping
-            # below assumes positive-for-this-candidate polarity throughout,
-            # so this axis is deliberately excluded from it entirely; its
-            # (opposite-polarity) elimination is handled exclusively through
-            # `compile_requirements`'s `RequirementRole.EXCLUSION` ->
-            # `resolution._grounded_elimination`, never here.
+        if probe.axis in _GATE_ONLY_AXES:
+            # issue #6, Codex's independent re-review (F9-R19-A): both
+            # `AXIS_EXCLUSION_CLAUSE` (opposite polarity -- documenting it
+            # argues AGAINST the candidate that carries it) and
+            # `AXIS_FAMILY_VIABILITY` (every sibling in a family shares the
+            # IDENTICAL term, so a hit here would add EVERY sibling to
+            # `documented_codes` at once) are pre-elimination GATES, never
+            # part of this positive-selection bookkeeping -- both are
+            # checked exclusively through `compile_requirements`/
+            # `resolution._grounded_elimination`/`_requirement_grounded_
+            # status`, never here. Skipped entirely (never added to
+            # `support`/`documented_axes`/`settled`) -- see `unsettled`
+            # below for why they must ALSO be kept out of that check.
             continue
         # issue #6 F9-R6-R2, fourth re-review: laterality is settled EXCLUSIVELY
         # from the fact's own typed attribute now, never re-derived lexically --
@@ -692,7 +764,8 @@ def narrow(fact, candidates: list[CandidateCode],
 
     frozen_support = {k: tuple(dict.fromkeys(v)) for k, v in support.items()}
     documented_codes = [c for c in unique if frozen_support.get(c.code)]
-    unsettled = tuple(a.axis for a in axes if a.axis not in settled)
+    unsettled = tuple(a.axis for a in axes
+                      if a.axis not in settled and a.axis not in _GATE_ONLY_AXES)
 
     if len(documented_codes) == 1 and not unsettled:
         winner = documented_codes[0]
@@ -712,8 +785,23 @@ def narrow(fact, candidates: list[CandidateCode],
         detail = (f"{len(documented_codes)} candidates are each positively documented "
                   f"on a distinguishing axis, so the document singles out none of them")
     else:
-        detail = ("one candidate is documented but these discriminating axes remain "
-                  "unsettled: " + ", ".join(unsettled))
+        # issue #6, Codex's independent re-review (F9-R19-A Finding 4): a
+        # non-selectable axis (`descriptor_term`, ICD's `inclusion_term`, ...)
+        # can NEVER settle through this mechanism at all -- it is an internal
+        # schema/audit identifier, not a fact a coder or provider could ever
+        # act on by "documenting" it, and reporting it as "unsettled" implies
+        # a resolvable gap that does not exist. Only genuinely SELECTABLE
+        # axes (the ones that could actually decide this tie) are named here;
+        # `unsettled` itself (the typed field/audit record) is unchanged, so
+        # a caller that needs the complete picture still has it.
+        _reportable_unsettled = tuple(a.axis for a in axes
+                                      if a.selectable and a.axis not in settled)
+        if _reportable_unsettled:
+            detail = ("one candidate is documented but these discriminating axes "
+                      "remain unsettled: " + ", ".join(_reportable_unsettled))
+        else:
+            detail = ("one candidate is documented, but no governed, provider-"
+                      "answerable axis distinguishes the tied candidates")
     # Never build a provider question that names an axis the record already
     # documents (issue #6 F9-R2-B) -- only genuinely UNDOCUMENTED axes are askable.
     askable = tuple(a for a in axes if a.axis not in documented_axes)

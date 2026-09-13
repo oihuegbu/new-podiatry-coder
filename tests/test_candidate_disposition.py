@@ -257,25 +257,33 @@ class EliminationTest(unittest.TestCase):
     """`resolution._candidate_disposition_uniqueness` -- the elimination bar."""
 
     def test_disagreement_between_evaluators_leaves_the_candidate_standing(self):
+        """issue #6, Codex's independent re-review (F9-R19-A Finding 1): a
+        disagreement is a SYSTEM verification gap, not "still entailed" --
+        it must land in `system_unresolved`, never silently join `remaining`
+        (which now means only genuinely, validly supported)."""
         j0 = _judgement([_disp("CAND_ALPHA", "entailed"),
                         _disp("CAND_BETA", "not_documented")])
         j1 = _judgement([_disp("CAND_ALPHA", "entailed"),
                         _disp("CAND_BETA", "entailed")])
-        remaining, eliminated = res._candidate_disposition_uniqueness(
+        remaining, eliminated, system_unresolved = res._candidate_disposition_uniqueness(
             [ALPHA, BETA], ALPHA, [j0, j1], None, _Coverage(True))
-        self.assertIn(BETA, remaining)
+        self.assertNotIn(BETA, remaining)
+        self.assertIn("CAND_BETA", system_unresolved)
         self.assertEqual(eliminated, {})
 
     def test_not_documented_without_complete_coverage_leaves_it_standing(self):
+        """Incomplete coverage cannot validate an absence -- a SYSTEM gap,
+        not a positively supported candidate (F9-R19-A Finding 1)."""
         j0 = _judgement([_disp("CAND_ALPHA", "entailed"),
                         _disp("CAND_BETA", "not_documented",
                              missing_fact="a beta-specific finding")])
         j1 = _judgement([_disp("CAND_ALPHA", "entailed"),
                         _disp("CAND_BETA", "not_documented",
                              missing_fact="a beta-specific finding")])
-        remaining, eliminated = res._candidate_disposition_uniqueness(
+        remaining, eliminated, system_unresolved = res._candidate_disposition_uniqueness(
             [ALPHA, BETA], ALPHA, [j0, j1], None, _Coverage(False))
-        self.assertIn(BETA, remaining)
+        self.assertNotIn(BETA, remaining)
+        self.assertIn("CAND_BETA", system_unresolved)
         self.assertEqual(eliminated, {})
 
     def test_not_documented_with_complete_coverage_and_both_evaluators_agreeing_eliminates(self):
@@ -285,7 +293,7 @@ class EliminationTest(unittest.TestCase):
         j1 = _judgement([_disp("CAND_ALPHA", "entailed"),
                         _disp("CAND_BETA", "not_documented",
                              missing_fact="a beta-specific finding")])
-        remaining, eliminated = res._candidate_disposition_uniqueness(
+        remaining, eliminated, _system_unresolved = res._candidate_disposition_uniqueness(
             [ALPHA, BETA], ALPHA, [j0, j1], None, _Coverage(True))
         self.assertNotIn(BETA, remaining)
         self.assertIn("CAND_BETA", eliminated)
@@ -294,25 +302,30 @@ class EliminationTest(unittest.TestCase):
         """issue #6, Codex's independent re-review (F9-R16-B): an empty
         `missing_fact` cannot be turned into a precise provider question, so
         this must never eliminate on a vaguer basis than it could also route
-        a question from."""
+        a question from -- it is a SYSTEM gap (F9-R19-A Finding 1), never a
+        positively supported candidate."""
         j0 = _judgement([_disp("CAND_ALPHA", "entailed"),
                         _disp("CAND_BETA", "not_documented")])
         j1 = _judgement([_disp("CAND_ALPHA", "entailed"),
                         _disp("CAND_BETA", "not_documented")])
-        remaining, eliminated = res._candidate_disposition_uniqueness(
+        remaining, eliminated, system_unresolved = res._candidate_disposition_uniqueness(
             [ALPHA, BETA], ALPHA, [j0, j1], None, _Coverage(True))
-        self.assertIn(BETA, remaining)
+        self.assertNotIn(BETA, remaining)
+        self.assertIn("CAND_BETA", system_unresolved)
         self.assertEqual(eliminated, {})
 
     def test_contradicted_without_validated_spans_leaves_it_standing(self):
-        """A bare claim of contradiction, with no cited evidence, is not enough."""
+        """A bare claim of contradiction, with no cited evidence, is not
+        enough to eliminate -- and, per F9-R19-A Finding 1, is a SYSTEM gap,
+        not a positively supported candidate."""
         j0 = _judgement([_disp("CAND_ALPHA", "entailed"),
                         _disp("CAND_BETA", "contradicted")])
         j1 = _judgement([_disp("CAND_ALPHA", "entailed"),
                         _disp("CAND_BETA", "contradicted")])
-        remaining, eliminated = res._candidate_disposition_uniqueness(
+        remaining, eliminated, system_unresolved = res._candidate_disposition_uniqueness(
             [ALPHA, BETA], ALPHA, [j0, j1], None, _Coverage(True))
-        self.assertIn(BETA, remaining)
+        self.assertNotIn(BETA, remaining)
+        self.assertIn("CAND_BETA", system_unresolved)
 
     def test_contradicted_with_validated_spans_on_both_sides_eliminates(self):
         recon = _reconciliation({"s1": "AGREED", "s2": "AGREED"})
@@ -320,20 +333,23 @@ class EliminationTest(unittest.TestCase):
                         _disp("CAND_BETA", "contradicted", span_ids=("s1",))])
         j1 = _judgement([_disp("CAND_ALPHA", "entailed"),
                         _disp("CAND_BETA", "contradicted", span_ids=("s2",))])
-        remaining, eliminated = res._candidate_disposition_uniqueness(
+        remaining, eliminated, _system_unresolved = res._candidate_disposition_uniqueness(
             [ALPHA, BETA], ALPHA, [j0, j1], recon, _Coverage(True))
         self.assertNotIn(BETA, remaining)
         self.assertIn("CAND_BETA", eliminated)
 
     def test_an_unreconciled_span_never_validates_a_contradiction(self):
+        """A DISAGREED span cannot validate the contradiction -- a SYSTEM
+        gap (F9-R19-A Finding 1), never a positively supported candidate."""
         recon = _reconciliation({"s1": "DISAGREED", "s2": "AGREED"})
         j0 = _judgement([_disp("CAND_ALPHA", "entailed"),
                         _disp("CAND_BETA", "contradicted", span_ids=("s1",))])
         j1 = _judgement([_disp("CAND_ALPHA", "entailed"),
                         _disp("CAND_BETA", "contradicted", span_ids=("s2",))])
-        remaining, _ = res._candidate_disposition_uniqueness(
+        remaining, _, system_unresolved = res._candidate_disposition_uniqueness(
             [ALPHA, BETA], ALPHA, [j0, j1], recon, _Coverage(True))
-        self.assertIn(BETA, remaining)
+        self.assertNotIn(BETA, remaining)
+        self.assertIn("CAND_BETA", system_unresolved)
 
     def test_chosen_is_properly_eliminated_when_both_evaluators_structurally_contradict_it(self):
         """issue #6, Codex's independent re-review (F9-R16-B): `chosen` is no
@@ -349,7 +365,7 @@ class EliminationTest(unittest.TestCase):
                         _disp("CAND_BETA", "entailed")])
         j1 = _judgement([_disp("CAND_ALPHA", "contradicted", span_ids=("s2",)),
                         _disp("CAND_BETA", "entailed")])
-        remaining, eliminated = res._candidate_disposition_uniqueness(
+        remaining, eliminated, _system_unresolved = res._candidate_disposition_uniqueness(
             [ALPHA, BETA], ALPHA, [j0, j1], recon, _Coverage(True))
         self.assertNotIn(ALPHA, remaining)
         self.assertIn("CAND_ALPHA", eliminated)
@@ -363,21 +379,24 @@ class EliminationTest(unittest.TestCase):
         j1 = _judgement([_disp("CAND_ALPHA", "entailed"),
                         _disp("CAND_BETA", "not_documented",
                              missing_fact="something")])
-        remaining, eliminated = res._candidate_disposition_uniqueness(
+        remaining, eliminated, _system_unresolved = res._candidate_disposition_uniqueness(
             [ALPHA, BETA], ALPHA, [j0, j1], None, _Coverage(True))
         self.assertEqual(remaining, [ALPHA])
         self.assertIn("CAND_BETA", eliminated)
 
     def test_a_hash_that_does_not_match_the_real_descriptor_leaves_it_standing(self):
         """Defense in depth against a stale/mismatched entry, independent of
-        `verify._candidate_dispositions`'s own parse-time check."""
+        `verify._candidate_dispositions`'s own parse-time check -- an
+        unreproduced identity is a SYSTEM gap (F9-R19-A Finding 1), never a
+        positively supported candidate."""
         tampered = _disp("CAND_BETA", "not_documented", descriptor_sha256="0" * 64)
         j0 = _judgement([_disp("CAND_ALPHA", "entailed"), tampered])
         j1 = _judgement([_disp("CAND_ALPHA", "entailed"),
                         _disp("CAND_BETA", "not_documented")])
-        remaining, _ = res._candidate_disposition_uniqueness(
+        remaining, _, system_unresolved = res._candidate_disposition_uniqueness(
             [ALPHA, BETA], ALPHA, [j0, j1], None, _Coverage(True))
-        self.assertIn(BETA, remaining)
+        self.assertNotIn(BETA, remaining)
+        self.assertIn("CAND_BETA", system_unresolved)
 
     def test_fewer_than_two_judgements_defers_entirely(self):
         j0 = _judgement([_disp("CAND_ALPHA", "entailed")])
@@ -402,7 +421,7 @@ class EliminationTest(unittest.TestCase):
                              missing_fact="a beta finding"),
                         _disp("CAND_GAMMA", "not_documented",
                              missing_fact="a gamma finding")])
-        remaining, eliminated = res._candidate_disposition_uniqueness(
+        remaining, eliminated, _system_unresolved = res._candidate_disposition_uniqueness(
             [ALPHA, BETA, GAMMA], ALPHA, [j0, j1], None, _Coverage(True))
         self.assertEqual(remaining, [ALPHA])
         self.assertEqual(set(eliminated), {"CAND_BETA", "CAND_GAMMA"})
@@ -414,7 +433,7 @@ class EliminationTest(unittest.TestCase):
         j1 = _judgement([_disp("CAND_ALPHA", "entailed"),
                         _disp("CAND_BETA", "not_documented",
                              missing_fact="a beta finding")])
-        remaining, eliminated = res._candidate_disposition_uniqueness(
+        remaining, eliminated, _system_unresolved = res._candidate_disposition_uniqueness(
             [BETA, ALPHA], ALPHA, [j0, j1], None, _Coverage(True))
         self.assertEqual({c.code for c in remaining}, {"CAND_ALPHA"})
         self.assertEqual(set(eliminated), {"CAND_BETA"})

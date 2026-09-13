@@ -2447,6 +2447,119 @@ class ProposedCandidateServiceRoleTest(unittest.TestCase):
         self.assertEqual(line.chosen.code, "OP", line.rationale)
 
 
+class UnclassifiedFactRoleServiceConflictTest(unittest.TestCase):
+    """issue #6, Codex's independent re-review (F9-R19-A consolidated live-run
+    remediation, Finding 3): `blocks_line` used to fire ONLY for
+    FACT_ROLE_CONFLICT/MIXED_KIND_INTENT, never for FACT_ROLE_MISSING (no
+    fact documents a `service_role` attribute at all) -- so a fact whose OWN
+    role could not be determined let a candidate pool spanning genuinely
+    incompatible procedure roles (anesthesia and operative-surgery codes
+    both surviving) reach the clinical tie-breaker untouched. Reproduced
+    directly on the designated operative note: an anesthesia-care fact with
+    no classified `service_role` held with candidates including
+    gastrocnemius recession, osteotomy, radical resection and total ankle
+    replacement -- all operative, not anesthesia, procedures. Synthetic
+    descriptors/codes throughout."""
+
+    OP_DESC = "Operative act alpha on the structure"
+    ANES_DESC = "Anesthesia for act alpha on the structure"
+
+    def _src(self):
+        from claude_coder.data_access import MockSource
+        records = {("OP", "cpt"): {"long_description": self.OP_DESC, "active": True},
+                  ("ANES", "cpt"): {"long_description": self.ANES_DESC, "active": True}}
+        retrieval = {("*", "cpt"): [CandidateCode("OP", "cpt", self.OP_DESC, 0.9),
+                                    CandidateCode("ANES", "cpt", self.ANES_DESC, 0.85)]}
+        return MockSource(records=records, retrieval=retrieval,
+                          semantic_class={"OP": "surgical_procedure",
+                                          "ANES": "anesthesia"})
+
+    def _fact_with_no_service_role(self):
+        """No `service_role` attribute at all -- `_authorized_roles` finds
+        nothing, so `_service_role_control`'s base_status is
+        FACT_ROLE_MISSING, never FACT_ROLE_CONFLICT."""
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        span = EvidenceSpan("anesthesia care performed", anchored=True, span_id="s1")
+        return ClinicalFact(kind=FactKind.PROCEDURE, description="anesthesia care performed",
+                            evidence=[span], confidence=0.95)
+
+    def test_an_unclassified_fact_role_with_multi_role_candidates_aborts_before_verification(self):
+        from claude_coder.resolution import resolve
+        src = self._src()
+        llm = _sv.judge(entails=lambda d: True, reason="entailed")
+        line = resolve(_request(self._fact_with_no_service_role()), src,
+                       llm=_from(llm, "provider-a"))
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(line.documentation_gap, "classification_data_gap:service_role_conflict",
+                         line.rationale)
+
+    def test_an_unclassified_fact_role_with_only_one_classified_role_still_releases(self):
+        """The control must not become OVER-eager: a fact with no
+        documented role, but a candidate pool that classifies into only
+        ONE distinct procedure role, is not the ambiguity Finding 3
+        targets -- it must still release normally."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.resolution import resolve
+        src = MockSource(
+            records={("OP", "cpt"): {"long_description": self.OP_DESC, "active": True}},
+            retrieval={("*", "cpt"): [CandidateCode("OP", "cpt", self.OP_DESC, 0.9)]},
+            semantic_class={"OP": "surgical_procedure"})
+        llm = _sv.judge(entails=lambda d: True, reason="entailed")
+        line = resolve(_request(self._fact_with_no_service_role()), src,
+                       llm=_from(llm, "provider-a"))
+        self.assertIsNotNone(line.chosen, line.rationale)
+        self.assertEqual(line.chosen.code, "OP")
+
+
+class NonSeparatelyBillableCandidatePreFilterTest(unittest.TestCase):
+    """issue #6, Codex's independent re-review (F9-R19-A consolidated
+    live-run remediation, Finding 3): `AuthoritativeSource.
+    separately_billable` already existed and was already applied to a
+    resolved line's FINAL chosen code (`pipeline.py`, post-resolution) --
+    but a candidate that never won a tie (both sides stayed "entailed")
+    never reached that check, so a non-separately-reportable candidate
+    (e.g. an informational quality/performance-measure code) could still
+    contest a tie undetected. Reproduced directly on the designated
+    operative note: a real implant/supply code (an anchor/screw) tied
+    against an unrelated CMS quality-measure code with no shared clinical
+    meaning at all. Now applied as a candidate-pool pre-filter, at the same
+    stage as the service-role control, before any verifier call. Synthetic
+    codes throughout."""
+
+    SUPPLY_DESC = "Anchor/screw for soft tissue-to-bone fixation (implantable)"
+    MEASURE_DESC = "Patient had a quality measure assessment performed"
+
+    def test_a_non_separately_billable_candidate_is_excluded_before_verification(self):
+        """Direct call to `_propose_then_verify` with an explicit pool --
+        the same level `ProposedCandidateServiceRoleTest` above tests the
+        sibling service-role pre-filter at -- isolates this specific
+        candidate-pool partition from `resolve()`'s own upstream
+        deterministic-match dispatch, which is a separate concern."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder import resolution
+        src = MockSource(
+            records={("SUPPLY", "hcpcs"): {"long_description": self.SUPPLY_DESC,
+                                           "active": True},
+                    ("MEASURE", "hcpcs"): {"long_description": self.MEASURE_DESC,
+                                          "active": True}},
+            nonbillable={"MEASURE"})
+        span = EvidenceSpan("suture anchors used", anchored=True, span_id="s1")
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="suture anchors used",
+                            evidence=[span], confidence=0.95, fact_id="f1")
+        pool = [CandidateCode("SUPPLY", "hcpcs", self.SUPPLY_DESC, 0.9, "retrieval"),
+               CandidateCode("MEASURE", "hcpcs", self.MEASURE_DESC, 0.85, "retrieval")]
+        llm = _sv.judge(entails=lambda d: True, reason="entailed")
+        line = resolution._propose_then_verify(fact, src, pool, _from(llm, "provider-a"))
+        report = {r["code"]: r for r in (line.candidate_eligibility or [])}
+        self.assertIn("MEASURE", report)
+        self.assertFalse(report["MEASURE"]["eligible"])
+        self.assertEqual(report["MEASURE"]["reason"],
+                         "not separately reportable per authoritative data")
+        self.assertIsNotNone(line.chosen, line.rationale)
+        self.assertEqual(line.chosen.code, "SUPPLY", line.rationale)
+
+
 class ProposedCandidateDeterministicExclusionTest(unittest.TestCase):
     """issue #6 F9-R11-H-D, seventh re-review: `_evaluate` returns a bare
     `None` (no reason) for two DETERMINISTIC eliminations -- an explicit

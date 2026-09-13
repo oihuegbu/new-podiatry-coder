@@ -1907,6 +1907,27 @@ class ClaimBundle(_Strict):
                     content_digest(attested.get("authority") or {}):
                 out.append(f"the certificate attests a different authoritative "
                            f"record for claim line {line.code or '?'}")
+            # issue #6, Codex's independent re-review (F9-R19-A Finding 5): a
+            # line's SUBMISSION status (ready vs. held) is a claim-affecting
+            # fact the certificate must attest too, not merely the line's
+            # identity/evidence/authority -- both artifacts must agree on
+            # WHETHER a certified line is actually submittable. The two
+            # sides use DIFFERENT vocabularies by design (the certificate's
+            # `submission_status` is claude_coder's `ClaimSubmissionStatus`
+            # -- a resolver-level concept this contract never imports, by
+            # the same duck-typed-string convention `_append_diagnosis`/
+            # `_append_service` already use for it elsewhere in this file;
+            # `line.status` is this contract's own richer `LineStatus`
+            # taxonomy), so they are compared via the one concept both
+            # actually share -- held vs. not-held -- never by raw string
+            # equality across two unrelated enums.
+            attested_status = str(attested.get("submission_status") or "")
+            attested_held = attested_status == "held"
+            claim_held = line.status is LineStatus.HELD_POLICY_OR_DATA
+            if attested_status and attested_held != claim_held:
+                out.append(f"the certificate attests submission status "
+                           f"{attested_status!r} for claim line "
+                           f"{line.code or '?'}, the claim shows {line.status.value!r}")
             if isinstance(line, ServiceLine):
                 if attested.get("units") != line.units:
                     out.append(

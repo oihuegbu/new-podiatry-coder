@@ -423,6 +423,19 @@ class ClaimSubmissionStatus(str, Enum):
 #: never drift apart into two different literal strings.
 DEPENDENCY_SUBMISSION_HOLD_MARKER = "; submission held: entangled with"
 
+#: Marker prefixed onto `ResolvedLine.rationale` (issue #6, Codex's
+#: independent re-review, F9-R19-A Finding 1) whenever `resolution.
+#: _system_unresolved_line` could neither confirm nor eliminate one or more
+#: shortlisted candidates -- a SYSTEM verification gap (evaluator
+#: disagreement, an unreproduced descriptor identity, an uncited
+#: contradiction), never a documentation gap a provider could answer or a
+#: coding judgement a coder owns. `pipeline.py`'s per-fact loop reads this
+#: marker to synthesize the SAME retryable, `Destination.SYSTEM_HOLD`-routed
+#: gate shape every other system-integrity hold in this codebase already
+#: uses (e.g. `second_reading_relation_unplaced`) -- one shared constant so
+#: the writer (`resolution.py`) and reader (`pipeline.py`) can never drift.
+SYSTEM_UNRESOLVED_MARKER = "SYSTEM_UNRESOLVED:"
+
 
 @dataclass
 class ResolvedLine:

@@ -81,7 +81,27 @@ def build_certificate(result: CodingResult, note_text: str,
         # two different accounts of why a line released.
         "selection_proof": selection_proof_record(ln),
         "authority": ln.chosen.authority,
-    } for ln in result.billable_lines]
+        # issue #6, Codex's independent re-review (F9-R19-A Finding 5): a
+        # HELD line (`ClaimSubmissionStatus.HELD` -- e.g. an unresolved
+        # actor-ownership fact, or a dependency entanglement per F9-R20-A)
+        # is a real, coded, evidence-backed line that is simply not yet
+        # submission-ready. Recording its status here, on the SAME line the
+        # certificate now attests (see the comment on the source list just
+        # below), lets the certificate and the ClaimBundle agree on BOTH
+        # identity and disposition, never just identity.
+        "submission_status": ln.claim_submission_status.value,
+    # issue #6, Codex's independent re-review (F9-R19-A Finding 5): the
+    # certificate used to attest ONLY `result.billable_lines` (submission-
+    # READY lines), while `bundle_from_coding_result` (since F9-R20-A) also
+    # projects `result.submission_held_lines` into `ClaimBundle.diagnoses`/
+    # `service_lines` as `HELD_POLICY_OR_DATA` -- so a genuinely resolved,
+    # evidence-backed HELD line appeared in the bundle but was reported as
+    # unattested by the certificate ("the certificate does not attest claim
+    # line ..."), even though nothing was actually wrong with it. Both
+    # artifacts must certify the SAME coded-output line set; a line's
+    # SUBMISSION readiness (`submission_status` above) is a separate fact
+    # from whether it is a real, certified selection at all.
+    } for ln in (result.billable_lines + result.submission_held_lines)]
 
     intents = [{
         "intent_id": it.intent_id,

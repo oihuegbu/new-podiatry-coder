@@ -694,7 +694,7 @@ def _resolve_material_axis_conflict(
     d0 = entries[0].get(chosen.code)
     d1 = entries[1].get(chosen.code)
     if settled is not None:
-        remaining, eliminated = settled
+        remaining, eliminated, _system_unresolved = settled
         if chosen.code in eliminated:
             status = getattr(d0, "status", "")
             if status == "not_documented":
@@ -1746,6 +1746,93 @@ def _tie_escalation(fact: ClinicalFact, candidates: list[CandidateCode],
         rationale=f"{reason} -- {tie.detail}")
 
 
+def _requirement_grounded_status(fact: ClinicalFact, cand: CandidateCode,
+                                 requirements: tuple, judgements: list,
+                                 reconciliation, coverage
+                                 ) -> tuple[bool, str] | None:
+    """Whether `cand`'s OWN compiled MUST_SUPPORT/EXCLUSION requirements
+    ground a validated elimination -- UNCONDITIONALLY, never gated behind
+    whether either judging model's free-text, whole-shortlist verdict
+    happened to NAME `cand` as eliminated (issue #6, Codex's independent
+    re-review, F9-R19-A Finding 1: a validly, unanimously-judged
+    NOT_DOCUMENTED/CONTRADICTED required fact must be able to eliminate a
+    candidate on its own -- a model's holistic "entailed" call is a
+    different, coarser question than its own per-requirement answer, and
+    gating the finer signal behind the coarser one let a genuinely
+    unsupported family member (e.g. a qualified-child family whose shared
+    stem was never documented) survive as "entailed" merely because no
+    model's free-text reasoning happened to single it out).
+
+    Extracted from `_grounded_elimination`'s own by-axis requirement loop
+    (unchanged logic, unchanged message text) so BOTH that function's
+    existing `named`-gated pairwise path AND the new unconditional
+    candidate classifier (`_classify_candidates`) ground eliminations from
+    the exact same, single-sourced requirement evaluation -- never two
+    independently-drifting copies of this logic.
+
+    Returns `(True, detail)` when grounded, `None` when this candidate's
+    compiled requirements do not (or cannot yet) ground an elimination --
+    the caller falls through to whatever ELSE it uses to decide (a
+    pairwise/word-overlap fallback in `_grounded_elimination`; a
+    disposition-only verdict in `_classify_candidates`)."""
+    from . import requirement as _requirement
+    from . import verify as _verify
+    cand_reqs = [r for r in requirements
+                if r.candidate_code == cand.code
+                and r.role in (_requirement.RequirementRole.MUST_SUPPORT,
+                              _requirement.RequirementRole.EXCLUSION)]
+    by_axis: dict[str, list] = {}
+    for r in cand_reqs:
+        by_axis.setdefault(r.axis, []).append(r)
+    evidence_by_span_id = _verify.evidence_text_by_span_id(fact) if by_axis else {}
+    for axis, axis_reqs in by_axis.items():
+        # issue #6, Codex's independent re-review (F9-R19-A): an EXCLUSION-role
+        # axis group grounds on the OPPOSITE judgement status from every other
+        # elimination-eligible axis -- the candidate's own descriptor names a
+        # condition it does NOT apply under, so genuinely DOCUMENTING that
+        # condition (validated SUPPORTED) is what eliminates it, never its
+        # absence. `validated_requirement`'s SUPPORTED path grounds on the
+        # cited span's own reconciled content, not on `coverage.complete` (that
+        # gate exists only for the NOT_DOCUMENTED path's whole-corpus search),
+        # so an EXCLUSION group is checked regardless of `coverage` state.
+        is_exclusion = axis_reqs[0].role is _requirement.RequirementRole.EXCLUSION
+        target_status = ({_requirement.RequirementStatus.SUPPORTED} if is_exclusion
+                         else {_requirement.RequirementStatus.NOT_DOCUMENTED})
+        if not is_exclusion and (coverage is None or not coverage.complete):
+            continue          # NOT_DOCUMENTED needs a fully-covered, real corpus to search
+        grounded_reqs: list | None = []
+        for req in axis_reqs:
+            outcomes = [rj for j in judgements for rj in j.requirement_judgements
+                       if rj.requirement_id == req.requirement_id]
+            if not outcomes or len(outcomes) < len(judgements):
+                grounded_reqs = None
+                break            # not every evaluator answered -- whole axis standing
+            if not all(_requirement.validated_requirement(
+                    req, rj, evidence_by_span_id=evidence_by_span_id,
+                    reconciliation=reconciliation, coverage=coverage) for rj in outcomes):
+                grounded_reqs = None
+                break            # an uncited, unreproduced, or content-mismatched
+                                 # verdict -- whole axis standing
+            if {rj.status for rj in outcomes} != target_status:
+                grounded_reqs = None
+                break            # disagreement, or the wrong-polarity status among
+                                 # them -- this candidate is not groundedly eliminated
+            grounded_reqs.append(req)
+        if grounded_reqs:
+            names = ", ".join(sorted(r.requirement_id for r in grounded_reqs))
+            if is_exclusion:
+                detail = (f"every requirement on axis {axis!r} for {cand.code} "
+                          f"({names}) is validated SUPPORTED by every evaluator -- "
+                          f"{cand.code}'s own descriptor names a condition it does "
+                          f"not apply under, and that condition is documented")
+            else:
+                detail = (f"every alternative requirement on axis {axis!r} for "
+                          f"{cand.code} ({names}) is validated NOT_DOCUMENTED by "
+                          f"every evaluator, in a fully-covered, searched source")
+            return True, detail
+    return None
+
+
 def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: CandidateCode,
                           reconciliation, requirements: tuple = (),
                           judgements: list = (),
@@ -1829,61 +1916,10 @@ def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: Cand
     an anchored-but-disagreed span and an unanchored, un-locatable span are both "the
     reconciliation channel that was supplied could not confirm this," and must both refuse.
     """
-    from . import requirement as _requirement
-    from . import verify as _verify
-    loser_reqs = [r for r in requirements
-                 if r.candidate_code == loser.code
-                 and r.role in (_requirement.RequirementRole.MUST_SUPPORT,
-                               _requirement.RequirementRole.EXCLUSION)]
-    by_axis: dict[str, list] = {}
-    for r in loser_reqs:
-        by_axis.setdefault(r.axis, []).append(r)
-    evidence_by_span_id = _verify.evidence_text_by_span_id(fact) if by_axis else {}
-    for axis, axis_reqs in by_axis.items():
-        # issue #6, Codex's independent re-review (F9-R19-A): an EXCLUSION-role
-        # axis group grounds on the OPPOSITE judgement status from every other
-        # elimination-eligible axis -- the candidate's own descriptor names a
-        # condition it does NOT apply under, so genuinely DOCUMENTING that
-        # condition (validated SUPPORTED) is what eliminates it, never its
-        # absence. `validated_requirement`'s SUPPORTED path grounds on the
-        # cited span's own reconciled content, not on `coverage.complete` (that
-        # gate exists only for the NOT_DOCUMENTED path's whole-corpus search),
-        # so an EXCLUSION group is checked regardless of `coverage` state.
-        is_exclusion = axis_reqs[0].role is _requirement.RequirementRole.EXCLUSION
-        target_status = ({_requirement.RequirementStatus.SUPPORTED} if is_exclusion
-                         else {_requirement.RequirementStatus.NOT_DOCUMENTED})
-        if not is_exclusion and (coverage is None or not coverage.complete):
-            continue          # NOT_DOCUMENTED needs a fully-covered, real corpus to search
-        grounded_reqs: list | None = []
-        for req in axis_reqs:
-            outcomes = [rj for j in judgements for rj in j.requirement_judgements
-                       if rj.requirement_id == req.requirement_id]
-            if not outcomes or len(outcomes) < len(judgements):
-                grounded_reqs = None
-                break            # not every evaluator answered -- whole axis standing
-            if not all(_requirement.validated_requirement(
-                    req, rj, evidence_by_span_id=evidence_by_span_id,
-                    reconciliation=reconciliation, coverage=coverage) for rj in outcomes):
-                grounded_reqs = None
-                break            # an uncited, unreproduced, or content-mismatched
-                                 # verdict -- whole axis standing
-            if {rj.status for rj in outcomes} != target_status:
-                grounded_reqs = None
-                break            # disagreement, or the wrong-polarity status among
-                                 # them -- this candidate is not groundedly eliminated
-            grounded_reqs.append(req)
-        if grounded_reqs:
-            names = ", ".join(sorted(r.requirement_id for r in grounded_reqs))
-            if is_exclusion:
-                detail = (f"every requirement on axis {axis!r} for {loser.code} "
-                          f"({names}) is validated SUPPORTED by every evaluator -- "
-                          f"{loser.code}'s own descriptor names a condition it does "
-                          f"not apply under, and that condition is documented")
-            else:
-                detail = (f"every alternative requirement on axis {axis!r} for "
-                          f"{loser.code} ({names}) is validated NOT_DOCUMENTED by "
-                          f"every evaluator, in a fully-covered, searched source")
-            return True, detail
+    grounded = _requirement_grounded_status(fact, loser, requirements, judgements,
+                                            reconciliation, coverage)
+    if grounded is not None:
+        return grounded
     # issue #6 F9-R6 Phase 4 NOTE: `requirements` is deliberately NOT threaded into
     # this fallback narrow call. This call is the escape hatch for a loser the
     # requirement mechanism above did not (or could not) ground -- letting it see
@@ -2024,8 +2060,11 @@ def _disposition_spans_validated(d, settled, permitted) -> bool:
 
 
 def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: CandidateCode,
-                                      judgements: list, reconciliation, coverage
-                                      ) -> tuple[list[CandidateCode], dict[str, str]] | None:
+                                      judgements: list, reconciliation, coverage,
+                                      fact: "ClinicalFact | None" = None,
+                                      requirements: tuple = ()
+                                      ) -> tuple[list[CandidateCode], dict[str, str],
+                                                dict[str, str]] | None:
     """The candidate-level SEMANTIC entailment record (issue #6, Codex's
     independent re-review, F9-R15-B), replacing the reverted `requirement.
     _descriptor_term_requirements` (which promoted raw descriptor TOKENS into
@@ -2041,11 +2080,35 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
     Returns `None` when this shortlist cannot be settled this way at all
     (fewer than two judgements, or either judgement did not answer EVERY
     candidate) -- the caller falls back to the existing tie-narrowing/
-    escalation path completely unchanged. Otherwise returns
-    `(remaining, eliminated)` exactly like `_uniqueness_view`: `remaining` is
-    every candidate this mechanism could not validly dispose of (a candidate
-    BOTH evaluators call "entailed" is a SELECTION candidate, never treated as
-    eliminated here), `eliminated` maps every other candidate to why.
+    escalation path completely unchanged. Otherwise returns a THREE-way
+    `(remaining, eliminated, system_unresolved)` (issue #6, Codex's
+    independent re-review, F9-R19-A Finding 1: "not successfully eliminated
+    != positively supported" -- the original two-way split silently folded
+    every candidate this mechanism could not cleanly PROVE eliminated
+    (evaluator disagreement, an identity mismatch, an uncited contradiction,
+    an incomplete-coverage not_documented verdict) into the SAME `remaining`
+    bucket as a candidate BOTH evaluators genuinely, validly called
+    "entailed" -- so `_settle_uniqueness` reported a candidate the system
+    could simply not verify as if it were positively supported evidence,
+    exactly the invariant violation Finding 1 names). `remaining` is now
+    ONLY candidates both evaluators validly call "entailed" (identity-
+    matched) whose OWN compiled MUST_SUPPORT/EXCLUSION contract (viability,
+    differential, exclusion requirements -- Finding 2) also does not ground
+    an elimination; `eliminated` maps every candidate this mechanism could
+    positively dispose of (via disposition OR contract) to why;
+    `system_unresolved` maps every candidate this mechanism could neither
+    confirm NOR eliminate -- a system verification gap, never treated as
+    supporting evidence for a tie question.
+
+    `fact`/`requirements` (optional, default empty): when supplied, every
+    "entailed" candidate is ALSO checked against its own compiled
+    MUST_SUPPORT/EXCLUSION requirement contract via
+    `_requirement_grounded_status`, UNCONDITIONALLY -- never gated behind
+    whether either judgement's free-text elimination happened to name this
+    candidate (see that function's own docstring). Omitted (the default),
+    this behaves exactly as it always has for the single-candidate,
+    contract-free callers that predate F9-R19-A (e.g.
+    `_resolve_material_axis_conflict`'s attribute-axis-conflict check).
 
     issue #6, Codex's independent re-review (F9-R16-B): `chosen` is deliberately
     NOT special-cased -- it flows through the exact same per-candidate bar as
@@ -2124,6 +2187,7 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
 
     remaining: list[CandidateCode] = []
     eliminated: dict[str, str] = {}
+    system_unresolved: dict[str, str] = {}
     for cand in shortlist:
         # issue #6, Codex's independent re-review (F9-R16-B): `chosen` is NO
         # LONGER special-cased here. The prior version skipped validating
@@ -2141,10 +2205,15 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
         # correctly routes to the tie/hold path instead of a false release,
         # and never lets a DIFFERENT surviving candidate release in its place.
         d0, d1 = j0[cand.code], j1[cand.code]
-        if (d0.status != d1.status
-                or not _identity_matches(cand, d0)
-                or not _identity_matches(cand, d1)):
-            remaining.append(cand)
+        if d0.status != d1.status:
+            system_unresolved[cand.code] = (
+                f"independent evaluators disagreed on {cand.code}'s disposition "
+                f"({d0.status!r} vs {d1.status!r})")
+            continue
+        if not (_identity_matches(cand, d0) and _identity_matches(cand, d1)):
+            system_unresolved[cand.code] = (
+                f"a disposition for {cand.code} did not reproduce this candidate's "
+                f"own current official descriptor identity")
             continue
         status = d0.status
         if status in ("contradicted", "different_concept"):
@@ -2154,7 +2223,9 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
                     f"descriptor (identity {d0.descriptor_sha256[:12]}...), judged it "
                     f"{status} with source-confirmed evidence")
             else:
-                remaining.append(cand)
+                system_unresolved[cand.code] = (
+                    f"both evaluators judged {cand.code} {status}, but the verdict "
+                    f"lacks source-confirmed, reconciled evidence on both sides")
         elif status == "not_documented":
             # issue #6, Codex's independent re-review (F9-R16-B): a specific
             # missing fact is required on BOTH sides -- an empty `missing_fact`
@@ -2169,10 +2240,49 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
                     f"documented (missing: {d0.missing_fact!r}), against a complete, "
                     f"independently-read search of the whole document")
             else:
+                system_unresolved[cand.code] = (
+                    f"both evaluators judged {cand.code} not_documented, but this "
+                    f"could not be validated against a complete, independently-read "
+                    f"whole-document search")
+        elif status == "entailed":
+            # issue #6, Codex's independent re-review (F9-R19-A Finding 1/2):
+            # positive disposition support is necessary but not sufficient --
+            # this candidate's OWN VIABILITY/EXCLUSION contract must also not
+            # ground an elimination, checked UNCONDITIONALLY (never gated
+            # behind a model's free-text elimination reason). `fact`/
+            # `requirements` default to `None`/`()` for callers that predate
+            # this contract layer, in which case `_requirement_grounded_
+            # status` always returns `None` (nothing compiled) and behavior
+            # is unchanged.
+            #
+            # Deliberately EXCLUDES `qualified_child` (the differential, as
+            # opposed to `family_viability`, the precondition): unlike
+            # viability/exclusion, a differential's absence is not, by
+            # itself, proof against a candidate -- if NEITHER sibling's own
+            # clause is documented, eliminating both here would silently
+            # convert "please specify which" into "none of these apply",
+            # exactly the false-elimination shape Finding 2 exists to
+            # prevent. The differential instead resolves ENTIRELY through
+            # `tiebreak.narrow`'s existing positive-presence winner logic at
+            # `_settle_uniqueness`'s STEP 3/4 (selects when exactly one
+            # sibling's clause is documented; otherwise correctly leaves the
+            # tie open for a precise provider question) -- never duplicated
+            # or pre-empted here.
+            _contract_requirements = tuple(
+                r for r in requirements if r.axis != "qualified_child")
+            grounded = (_requirement_grounded_status(
+                            fact, cand, _contract_requirements, judgements,
+                            reconciliation, coverage)
+                       if fact is not None else None)
+            if grounded is not None:
+                eliminated[cand.code] = grounded[1]
+            else:
                 remaining.append(cand)
         else:
-            remaining.append(cand)     # "entailed" (or unknown) -- never eliminated here
-    return remaining, eliminated
+            system_unresolved[cand.code] = (
+                f"{cand.code}'s disposition status {status!r} is not a recognized "
+                f"evaluator verdict")
+    return remaining, eliminated, system_unresolved
 
 
 #: issue #6, Codex's independent re-review (F9-R13-C): these two axes are
@@ -2257,6 +2367,36 @@ def _exact_direct_code_term_signal(fact: ClinicalFact, candidates: list[Candidat
     return out
 
 
+def _system_unresolved_line(fact: ClinicalFact, shortlist: list[CandidateCode],
+                            system_unresolved: dict[str, str],
+                            eliminated: dict[str, str], record: dict) -> ResolvedLine:
+    """issue #6, Codex's independent re-review (F9-R19-A Finding 1): one or
+    more candidates' evidence state could be neither confirmed nor
+    eliminated (evaluator disagreement, an unreproduced descriptor
+    identity, an uncited contradiction, an unvalidated not_documented
+    verdict) -- a SYSTEM verification gap, never a documentation gap a
+    provider could answer and never a coding judgement a coder owns.
+    `documentation_gap` is deliberately left unset: `autonomy.decide`'s
+    routing only ever builds a PROVIDER_QUERY from a real documentation
+    gap, and this is explicitly not one. `rationale` carries
+    `models.SYSTEM_UNRESOLVED_MARKER` so `pipeline.py`'s per-fact loop can
+    synthesize the SAME retryable, `Destination.SYSTEM_HOLD`-routed gate
+    shape already used for every other system-integrity hold in this
+    codebase (e.g. `second_reading_relation_unplaced`) -- never a new,
+    parallel destination."""
+    from .models import SYSTEM_UNRESOLVED_MARKER
+    named = ", ".join(f"{code} ({reason})" for code, reason in sorted(system_unresolved.items()))
+    return ResolvedLine(
+        fact=fact, chosen=None, alternatives=shortlist[:5],
+        method=ResolutionMethod.ABSTAINED,
+        documentation_gap=None,
+        tie_record={**record, "system_unresolved": dict(sorted(system_unresolved.items())),
+                   "eliminated": dict(sorted(eliminated.items()))},
+        rationale=(f"{SYSTEM_UNRESOLVED_MARKER} candidate evidence could not be "
+                  f"independently verified for: {named} -- system retry needed, "
+                  f"never a provider question or a coder's judgement call"))
+
+
 def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
                        shortlist: list[CandidateCode], judgements: list,
                        eliminated_earlier: dict[str, str], why: str,
@@ -2301,9 +2441,11 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
     # re-admits anything `_uniqueness_view` already eliminated), so this can
     # only shrink the standing set further, never widen or replace it.
     _disposition_verdict = _candidate_disposition_uniqueness(
-        remaining, chosen, judgements, reconciliation, coverage)
+        remaining, chosen, judgements, reconciliation, coverage,
+        fact=fact, requirements=_elimination_requirements)
+    _system_unresolved: dict[str, str] = {}
     if _disposition_verdict is not None:
-        remaining, _further_eliminated = _disposition_verdict
+        remaining, _further_eliminated, _system_unresolved = _disposition_verdict
         eliminated.update(_further_eliminated)
     # Candidates eliminated BEFORE the shortlist existed (a failed deterministic
     # constraint) belong in the same accounting: the record has to show the whole
@@ -2351,6 +2493,20 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
     if len(remaining) == 1 and remaining[0].code == chosen.code:
         return _entailed_line(fact, chosen, shortlist, why, corroboration,
                               uniqueness=record)
+
+    # issue #6, Codex's independent re-review (F9-R19-A Finding 1): a
+    # candidate this mechanism could neither confirm NOR eliminate must
+    # never be silently treated as a tie rival or turned into a provider
+    # question about facts the record may already state -- it is a SYSTEM
+    # verification gap (evaluator disagreement, an unreproduced identity, an
+    # uncited verdict), never a documentation gap or a coding judgement.
+    # Reached only when the clean release above did not already fire --
+    # `remaining` no longer counts these candidates as rivals, so a genuine
+    # single winner still releases even when an unrelated sibling's
+    # disposition could not be verified.
+    if _system_unresolved:
+        return _system_unresolved_line(fact, shortlist, _system_unresolved,
+                                       eliminated, record)
 
     # issue #6, Codex's independent re-review (F9-R13-C): one additional
     # selection condition, tried BEFORE the original-document tie policy --
@@ -2491,6 +2647,27 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
             "role_control": {"status": "not_evaluated", "fact_roles": [],
                              "candidate_role": None, "blocks_line": False,
                              "authority_source_id": None, "authority_version": None}})
+    # issue #6, Codex's independent re-review (F9-R19-A Finding 3): a
+    # candidate the source's own authoritative data declares NOT separately
+    # reportable (bundled/non-covered/MUE 0 -- e.g. an informational quality/
+    # performance-measure code) must not compete with payable clinical
+    # candidates at all. `source.separately_billable` already existed and was
+    # already applied to a resolved LINE's final chosen code (`pipeline.py`,
+    # post-resolution) -- but a candidate that never WON a tie (both sides
+    # stayed "entailed") never reached that check, so it could still
+    # contest the tie undetected. Applied here, at the SAME candidate-pool
+    # partition stage as the service-role control, before any verifier call.
+    for record in candidate_eligibility:
+        if not record["eligible"]:
+            continue
+        try:
+            blocked = source.separately_billable(
+                record["code"], record["system"], dos) is Outcome.BLOCKED
+        except Exception:
+            blocked = False
+        if blocked:
+            record["eligible"] = False
+            record["reason"] = "not separately reportable per authoritative data"
     eligible_ids = {(r["code"], r["system"]) for r in candidate_eligibility
                     if r["eligible"]}
 

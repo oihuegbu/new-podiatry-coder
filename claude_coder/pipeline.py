@@ -24,7 +24,8 @@ from .arbitration import LLMFn
 from .autonomy import decide
 from .data_access import AuthoritativeSource, CodeSource
 from .models import (ClaimSubmissionStatus, CodingResult, DEPENDENCY_SUBMISSION_HOLD_MARKER,
-                     ResolutionMethod, ResolvedLine, UnresolvedRecoveredLine)
+                     ResolutionMethod, ResolvedLine, SYSTEM_UNRESOLVED_MARKER,
+                     UnresolvedRecoveredLine)
 
 
 logger = logging.getLogger(__name__)
@@ -1131,6 +1132,20 @@ def code_encounter(
         # issue #6 item 3/F8-R2: same reason, same pattern.
         if _advisory_terminology is not None:
             line.advisory_terminology = _advisory_terminology
+        # issue #6, Codex's independent re-review (F9-R19-A Finding 1):
+        # `resolution._system_unresolved_line` marks a line whose candidate
+        # evidence could be neither confirmed nor eliminated -- a SYSTEM
+        # verification gap, never a documentation gap or a coder's judgement.
+        # Synthesized here as the SAME retryable, scoped, `Destination.
+        # SYSTEM_HOLD`-routed gate shape every other system-integrity hold in
+        # this codebase already uses (e.g. `second_reading_relation_unplaced`
+        # above) -- never a new, parallel destination or routing path.
+        if SYSTEM_UNRESOLVED_MARKER in (line.rationale or ""):
+            pre_retrieval_gates.append(GateResult(
+                f"candidate_evidence_unresolved:{fact.fact_id}",
+                Outcome.UNKNOWN, line.rationale,
+                "propose-then-verify candidate disposition (issue #6 F9-R19-A)",
+                retryable=True, affected_fact_ids=(fact.fact_id,)))
         lines.append(line)
 
     # issue #6 item 8: the SAME grouping already computed above (and already fed
