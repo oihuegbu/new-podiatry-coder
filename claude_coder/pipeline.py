@@ -788,6 +788,9 @@ def code_encounter(
         # this to a real CoverageCorpus; every other branch (no intent, non-eligible,
         # duplicate-merge) must see None when the shared guard re-applies below.
         _line_coverage = None
+        # issue #6, Codex's independent re-review (F9-R18-A reopened P1): same
+        # reset, same reason, for the axis-conflict guard's bounded page text.
+        _line_page_text = None
         _it = _elig_state.get(fact.fact_id)
         if _it is None:
             line = ResolvedLine(
@@ -890,6 +893,23 @@ def code_encounter(
                      if source_evidence is not None and source_evidence.page(n) else "")
                     for n in recall.covered_pages))
                 if recall is not None else None)
+            # issue #6, Codex's independent re-review (F9-R18-A reopened P1):
+            # page_number -> that page's own primary-channel text, so
+            # `resolution._apply_attribute_axis_conflict_guard`'s bounded
+            # reconciliation step can search exactly the original-document
+            # region a fact's own evidence is anchored to -- never the whole
+            # document (which conflated a DIFFERENT event's page with this
+            # one's). `None` per page whose primary-channel reading is
+            # missing/unusable; the guard treats an absent page the same as
+            # an absent corpus -- nothing to authorize from.
+            _line_page_text = (
+                {n: (source_evidence.page(n).read_by(source_evidence.primary_channel_id).text
+                    if (source_evidence.page(n) is not None
+                        and source_evidence.page(n).read_by(
+                            source_evidence.primary_channel_id) is not None)
+                    else "")
+                 for n in recall.covered_pages}
+                if (recall is not None and source_evidence is not None) else None)
             logger.info("  resolving %s: %s", fact.fact_id, fact.description[:80])
             try:
                 if fact.kind is FactKind.EM:
@@ -909,7 +929,7 @@ def code_encounter(
                         # (`recall.text` -- never `fact.evidence` alone) actually
                         # swept every page AND is what gets deterministically
                         # searched.
-                        coverage=_line_coverage)
+                        coverage=_line_coverage, page_text=_line_page_text)
             except Exception as exc:
                 return _system_hold_result(encounter_id, date_of_service,
                                            f"retrieval_execution:{fact.fact_id}", exc, source)
@@ -998,6 +1018,20 @@ def code_encounter(
         # path through this loop can release a code for a fact whose own
         # attribute_evidence_gaps is still non-empty.
         line = resolution._apply_attribute_evidence_gap_guard(line, _line_coverage)
+        # issue #6, Codex's independent re-review (F9-R18-A reopened P1): same
+        # re-application need as the gap guard just above, for the exact same
+        # reason -- `resolution.resolve` already applies this guard once
+        # internally, but `arbitration.arbitrate`/`resolution.
+        # refine_diagnosis_specificity` above can each reconstruct `line` with
+        # a NEW `chosen` afterward, and `em.resolve_em` never applies it at
+        # all. Re-applied here, once, on whatever `line` looks like right
+        # before the modifier/units/bundling block below reads `line.chosen`,
+        # so no path through this loop can release a code for a fact whose
+        # own material, unresolved clinical-attribute conflict was never
+        # independently authorized.
+        line = resolution._apply_attribute_axis_conflict_guard(
+            line, source, verify_llm, corroborate_llm, source_reconciliation,
+            _line_coverage, _line_page_text)
         logger.info("    -> %s: %s", fact.fact_id,
                    (f"{line.chosen.system}/{line.chosen.code} ({line.method.value})"
                     if line.chosen else

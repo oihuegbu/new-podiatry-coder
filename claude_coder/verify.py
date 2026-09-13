@@ -666,16 +666,27 @@ def _judgement(ans: dict, candidates: list[CandidateCode],
 
 def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
                       source: CodeSource,
-                      requirements: tuple[DescriptorRequirement, ...] = ()
+                      requirements: tuple[DescriptorRequirement, ...] = (),
+                      *, force_disposition: bool = False
                       ) -> tuple[str, dict[str, str]]:
     """(prompt, id_to_span) -- the id_to_span map is needed by the caller to
     validate a model's cited requirement evidence ids afterward.
 
-    When `requirements` is empty AND fewer than 2 candidates are shown (nothing
-    to disambiguate, so the disposition contract below does not apply either),
-    renders BYTE-IDENTICAL to before either field existed (plain-text evidence,
-    no REQUIREMENTS section) -- zero format-regression risk for the shortlists
-    this phase doesn't touch.
+    When `requirements` is empty AND fewer than 2 candidates are shown AND
+    `force_disposition` is not set (nothing to disambiguate, so the disposition
+    contract below does not apply either), renders BYTE-IDENTICAL to before
+    either field existed (plain-text evidence, no REQUIREMENTS section) -- zero
+    format-regression risk for the shortlists this phase doesn't touch.
+
+    `force_disposition` (issue #6, Codex's independent re-review, F9-R18-A
+    reopened P1): a SINGLE candidate whose own descriptor carries an absolute
+    requirement matching an unresolved clinical-axis conflict (see
+    `resolution._apply_attribute_axis_conflict_guard`) needs the SAME
+    structured, evidence-cited disposition a tied shortlist already gets --
+    "nothing to disambiguate" is exactly wrong for that candidate; its own
+    unresolved axis IS the thing to disambiguate. Never set for an ordinary
+    singleton with no conflict, so every existing caller's rendering is
+    unaffected.
 
     issue #6, Codex's independent re-review (F9-R17-A): renders `c.descriptor`
     directly -- never re-derived here via `_best_descriptor(source, c)`, which
@@ -690,8 +701,9 @@ def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
     opts = "\n".join(f"{i + 1}. {c.descriptor}" for i, c in enumerate(candidates))
     # issue #6, Codex's independent re-review (F9-R15-B): bracketed evidence ids
     # are needed whenever the candidate-disposition contract applies (2+
-    # candidates), not only when descriptor requirements were compiled.
-    if requirements or len(candidates) >= 2:
+    # candidates, or a forced singleton per F9-R18-A above), not only when
+    # descriptor requirements were compiled.
+    if requirements or len(candidates) >= 2 or force_disposition:
         ev, id_to_span = _evidence_options(fact)
     else:
         ev, id_to_span = " | ".join(s.text for s in fact.evidence), {}
@@ -709,7 +721,8 @@ def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
 
 def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
                     source: CodeSource, llm: LLMFn,
-                    requirements: tuple[DescriptorRequirement, ...] = ()) -> Judgement:
+                    requirements: tuple[DescriptorRequirement, ...] = (),
+                    *, force_disposition: bool = False) -> Judgement:
     """ONE call over the whole shortlist: which candidates' OFFICIAL descriptors the
     documentation entails, which single one this model would code, and the named reason
     every other candidate is out. Judged on the authoritative descriptor text — the
@@ -723,12 +736,18 @@ def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
     identically to `select_entailed`/`corroborate`, so "both evaluators judged the
     same requirement" is structural (identical `requirement_id`s), not coincidental.
     When empty, the system/user prompt render byte-identical to before this field
-    existed."""
+    existed.
+
+    `force_disposition` (issue #6, Codex's independent re-review, F9-R18-A
+    reopened P1): see `_shortlist_prompt`'s docstring -- requests the structured
+    candidate-disposition contract even for a single candidate."""
     if not candidates:
         return Judgement(reason="no candidates")
     system = (_SELECT_SYSTEM + (_REQUIREMENTS_CONTRACT if requirements else "")
-             + (_CANDIDATE_DISPOSITION_CONTRACT if len(candidates) >= 2 else ""))
-    prompt, id_to_span = _shortlist_prompt(fact, candidates, source, requirements)
+             + (_CANDIDATE_DISPOSITION_CONTRACT
+               if len(candidates) >= 2 or force_disposition else ""))
+    prompt, id_to_span = _shortlist_prompt(fact, candidates, source, requirements,
+                                           force_disposition=force_disposition)
     return _judgement(
         _json(llm(system, prompt)), candidates, requirements, id_to_span,
         {"provider": VERIFY_PROVIDER})
@@ -736,19 +755,24 @@ def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
 
 def corroborate(fact: ClinicalFact, candidates: list[CandidateCode],
                 source: CodeSource, llm: LLMFn,
-                requirements: tuple[DescriptorRequirement, ...] = ()) -> Judgement:
+                requirements: tuple[DescriptorRequirement, ...] = (),
+                *, force_disposition: bool = False) -> Judgement:
     """The INDEPENDENT second judgement, over the SAME shortlist and the SAME contract.
 
     It is deliberately NOT told which candidate the first model picked: a corroborator that
     only re-confirms a supplied answer cannot notice that a DIFFERENT candidate is also
     entailed, which is exactly the gap this closes. A code therefore bills only when two
     independent judgements agree BOTH that it is entailed AND that nothing else on the
-    shortlist survives."""
+    shortlist survives.
+
+    `force_disposition`: see `select_entailed`."""
     if not candidates:
         return Judgement(reason="no candidates")
     system = (_CORROBORATE_SYSTEM + (_REQUIREMENTS_CONTRACT if requirements else "")
-             + (_CANDIDATE_DISPOSITION_CONTRACT if len(candidates) >= 2 else ""))
-    prompt, id_to_span = _shortlist_prompt(fact, candidates, source, requirements)
+             + (_CANDIDATE_DISPOSITION_CONTRACT
+               if len(candidates) >= 2 or force_disposition else ""))
+    prompt, id_to_span = _shortlist_prompt(fact, candidates, source, requirements,
+                                           force_disposition=force_disposition)
     return _judgement(
         _json(llm(system, prompt)), candidates, requirements, id_to_span,
         {"provider": CORROBORATE_PROVIDER})
