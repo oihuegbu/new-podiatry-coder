@@ -296,24 +296,25 @@ class AutonomousCoderTest(unittest.TestCase):
         self.assertEqual(hold.outcome, Outcome.BLOCKED)
         # issue #6, Codex's independent re-review (F9-R15-C): the blocked
         # procedure's gate is scoped to its own fact_id, not the whole
-        # encounter -- but the diagnosis is REASON_FOR-linked to (necessity-
-        # justifies) exactly that unbillable procedure, so it is dependency-
-        # held rather than surviving into `billable_lines` as if it were
-        # independently defensible. Nothing billable remains, so
-        # `verbatim_evidence` (which only scores `billable_lines`) is
-        # NOT_APPLICABLE rather than PASS.
-        self.assertEqual(ev.outcome, Outcome.NOT_APPLICABLE)
-        # issue #6, Codex's independent re-review (F9-R20-A clarification):
-        # "downstream controls classify; they do not erase" -- the linked
-        # diagnosis's own selection is unaffected by F1's eligibility hold,
-        # so it is HELD (code/evidence intact, visible), not excluded. A
-        # real, defensible held diagnosis line now needs a coder's
-        # attention -- REVIEW, the more precise destination -- rather than
-        # the coarser HOLD this asserted back when the diagnosis was simply
-        # erased and truly nothing survived to review.
+        # encounter.
+        #
+        # issue #6, Codex's independent re-review (F9-R22-B): the extractor's
+        # REASON_FOR edge (diagnosis -> this now-unbillable procedure) is
+        # asserted regardless of note content, but a note that never even
+        # documents the procedure at all can never GROUND that edge (no
+        # source text establishes the directional wording between the two)
+        # -- and a relation the record never actually established must not
+        # propagate a hold (previously this test asserted the OPPOSITE:
+        # that the diagnosis was dependency-held onto the procedure's own
+        # missing-evidence failure, which was exactly the "any REASON_FOR
+        # edge regardless of grounding" over-propagation this finding fixed).
+        # The diagnosis's own selection has real, independent evidence in
+        # the note, so it correctly releases on its own.
+        self.assertEqual(ev.outcome, Outcome.PASS)
         from claude_coder.models import Destination
-        self.assertEqual(r.destination, Destination.REVIEW)
-        self.assertEqual(r.verdict, Verdict.REVIEW_REQUIRED)
+        self.assertEqual(r.destination, Destination.AUTO_READY)
+        self.assertEqual(r.verdict, Verdict.AUTO_READY)
+        self.assertEqual([ln.chosen.code for ln in r.billable_lines], ["DX_ALPHA_RIGHT"])
 
     def test_missing_dos_blocks_release(self):
         r = self._run(dos=None)
@@ -623,6 +624,23 @@ class ClaimModifierTest(unittest.TestCase):
                          "the claim must not still be recorded")
 
 
+def _combined_intent(*clinical_event_ids, encounter_id="e", dos="2026-03-14"):
+    """issue #6, Codex's independent re-review (F9-R22-B): a real
+    `eligibility.ClaimLineIntent` composing `clinical_event_ids` into ONE
+    code-determining claim line -- the only thing (besides a grounded,
+    directional `REASON_FOR` edge) that may now let `autonomy._entangled`
+    treat a documented compositional relationship (e.g. "ancillary
+    component of procedure one") as claim-affecting. A bare `PART_OF` edge
+    is no longer its own propagation path."""
+    from claude_coder import eligibility as _elig
+    return _elig.ClaimLineIntent(
+        intent_id=f"intent-{'-'.join(clinical_event_ids)}", encounter_id=encounter_id,
+        component=_elig.ClaimComponent.SERVICE, clinical_event_ids=list(clinical_event_ids),
+        fact_kind="procedure", clinical_action="", attributes={}, date_of_service=dos,
+        billing_entity_id=None, source_span_ids=[],
+        state=_elig.EligibilityState.ELIGIBLE_FOR_RETRIEVAL)
+
+
 class ClaimAfterPruningReconciliationTest(unittest.TestCase):
     """issue #6 F9-R9-B, Codex's independent re-review of 6ff2761:
     `pipeline._reconcile_claim_after_pruning` re-derives modifiers/NCCI/
@@ -697,7 +715,7 @@ class ClaimAfterPruningReconciliationTest(unittest.TestCase):
 
         r = CodingResult(encounter_id="e", date_of_service="2026-03-14",
                          lines=[p1, p2, dx, f3], relations=relations, graph=compiled,
-                         claim_line_intents=list(intents))
+                         claim_line_intents=list(intents) + [_combined_intent("F3", "P1")])
         src = MockSource(
             records={("P1CODE", "cpt"): {"active": True}, ("P2CODE", "cpt"): {"active": True},
                     ("DXCODE", "icd10"): {"active": True}},
@@ -832,7 +850,7 @@ class ClaimAfterPruningReconciliationTest(unittest.TestCase):
 
         result = CodingResult(encounter_id="e", date_of_service="2026-03-14",
                               lines=[p, dx, u], relations=relations, graph=compiled,
-                              claim_line_intents=list(intents))
+                              claim_line_intents=list(intents) + [_combined_intent("DX", "U")])
         src = MockSource(records={("P_CODE", "cpt"): {"active": True},
                                   ("DX_CODE", "icd10"): {"active": True}})
         eng = ModifierEngine(defs={})
@@ -934,7 +952,8 @@ class ClaimAfterPruningReconciliationTest(unittest.TestCase):
 
         result = CodingResult(encounter_id="e", date_of_service="2026-03-14",
                               lines=[a, b, dxa, dxb, u], relations=relations,
-                              graph=compiled, claim_line_intents=list(intents))
+                              graph=compiled,
+                              claim_line_intents=list(intents) + [_combined_intent("U", "A")])
         src = MockSource(
             records={("A_CODE", "cpt"): {"active": True}, ("B_CODE", "cpt"): {"active": True},
                     ("DXA_CODE", "icd10"): {"active": True},
@@ -2558,6 +2577,75 @@ class NonSeparatelyBillableCandidatePreFilterTest(unittest.TestCase):
                          "not separately reportable per authoritative data")
         self.assertIsNotNone(line.chosen, line.rationale)
         self.assertEqual(line.chosen.code, "SUPPLY", line.rationale)
+
+
+class CandidateKindControlTest(unittest.TestCase):
+    """issue #6, Codex's independent re-review (F9-R21-C): a candidate's own
+    authoritative `semantic_class()` categorically incompatible with a
+    documented non-procedure fact (quality-measure, E&M, anesthesia-status)
+    is excluded from the shortlist before verification -- reproduced live: a
+    suture-anchor SUPPLY fact's candidate pool retained an unrelated
+    quality-measure candidate as "entailed". Synthetic codes throughout."""
+
+    SUPPLY_DESC = "Anchor/screw for soft tissue-to-bone fixation (implantable)"
+    MEASURE_DESC = "Patient had a quality measure assessment performed"
+
+    def test_a_quality_measure_candidate_is_excluded_from_a_supply_facts_pool(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder import resolution
+        src = MockSource(
+            records={("SUPPLY", "hcpcs"): {"long_description": self.SUPPLY_DESC,
+                                           "active": True},
+                    ("MEASURE", "hcpcs"): {"long_description": self.MEASURE_DESC,
+                                          "active": True}},
+            semantic_class={"MEASURE": "performance_measure_tracking"})
+        span = EvidenceSpan("suture anchors used", anchored=True, span_id="s1")
+        fact = ClinicalFact(kind=FactKind.SUPPLY, description="suture anchors used",
+                            evidence=[span], confidence=0.95, fact_id="f1")
+        pool = [CandidateCode("SUPPLY", "hcpcs", self.SUPPLY_DESC, 0.9, "retrieval"),
+               CandidateCode("MEASURE", "hcpcs", self.MEASURE_DESC, 0.85, "retrieval")]
+        llm = _sv.judge(entails=lambda d: True, reason="entailed")
+        line = resolution._propose_then_verify(fact, src, pool, _from(llm, "provider-a"))
+        report = {r["code"]: r for r in (line.candidate_eligibility or [])}
+        self.assertIn("MEASURE", report)
+        self.assertFalse(report["MEASURE"]["eligible"])
+        self.assertIn("performance_measure_tracking", report["MEASURE"]["reason"])
+        self.assertIsNotNone(line.chosen, line.rationale)
+        self.assertEqual(line.chosen.code, "SUPPLY", line.rationale)
+
+    def test_a_procedure_facts_pool_is_untouched_by_the_kind_control(self):
+        """`_service_role_control` (operative vs. anesthesia) already owns a
+        procedure fact's own role distinction -- this supplementary control
+        must not ALSO fire for a procedure fact, even one whose pool happens
+        to contain a candidate classified into one of these classes."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder import semantic_eligibility as semelig
+        src = MockSource(semantic_class={"E_M_CODE": "evaluation_management"})
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="procedure performed",
+                            evidence=[EvidenceSpan("x", anchored=True, span_id="s1")],
+                            confidence=0.9, fact_id="f1")
+        candidates = [CandidateCode("E_M_CODE", "cpt", "d", 0.9)]
+        self.assertEqual(
+            semelig._candidate_kind_control([fact], candidates, src, None), {})
+
+    def test_no_semantic_class_support_is_a_silent_no_op(self):
+        """Unlike `_service_role_control`, an unavailable classifier here is
+        not itself grounds to fail closed -- this is a supplementary safety
+        net layered on top of that control, not the primary one."""
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder import semantic_eligibility as semelig
+
+        class _NoSemanticClassSource:
+            pass
+
+        fact = ClinicalFact(kind=FactKind.SUPPLY, description="supply used",
+                            evidence=[EvidenceSpan("x", anchored=True, span_id="s1")],
+                            confidence=0.9, fact_id="f1")
+        candidates = [CandidateCode("X", "hcpcs", "d", 0.9)]
+        self.assertEqual(semelig._candidate_kind_control(
+            [fact], candidates, _NoSemanticClassSource(), None), {})
 
 
 class ProposedCandidateDeterministicExclusionTest(unittest.TestCase):

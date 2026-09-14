@@ -604,6 +604,19 @@ def medical_necessity_gate(result: CodingResult,
         no_link = (f"{label}: no record-grounded, evidence-anchored REASON_FOR link to a "
                    f"released diagnosis (neither the model's own confidence nor agreement "
                    f"between extraction runs is clinical support)")
+        # issue #6, Codex's independent re-review (F9-R22-B): the released diagnosis(es)
+        # this note documents as THIS procedure's OWN intended justification -- a
+        # REASON_FOR edge naming `pid`, regardless of whether it grounded -- are scoped
+        # into `affected` alongside the procedure itself when that link fails. This gate
+        # is the one place that actually knows WHICH diagnosis's sole documented role was
+        # to justify precisely this procedure, so it names both facts a failed link
+        # touches directly, rather than leaving it to be rediscovered (or missed) by
+        # `autonomy._entangled`'s graph-based propagation, which no longer infers a
+        # dependency in this direction from the edge alone.
+        intended_dx = sorted({r.subject_event_id for r in (result.relations or ())
+                              if r.predicate is RelationPredicate.REASON_FOR
+                              and r.object_event_id == pid
+                              and r.subject_event_id in released_dx})
         if qualifying is not None:
             # GOVERNED: encounter linkage AND policy compatibility, on the SAME diagnosis.
             accepted = sorted(set(linked) & policy_linked)
@@ -621,6 +634,7 @@ def medical_necessity_gate(result: CodingResult,
                         f"qualifies under CMS coverage policy")
                 if pid:
                     affected.append(pid)
+                affected.extend(intended_dx)
                 continue
         else:
             # UNGOVERNED: no policy exists for this service, so the encounter linkage is the
@@ -630,6 +644,7 @@ def medical_necessity_gate(result: CodingResult,
                 holds.append(no_link)
                 if pid:
                     affected.append(pid)
+                affected.extend(intended_dx)
                 continue
         bindings.append({
             "procedure_event_id": pid,

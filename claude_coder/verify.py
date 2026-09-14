@@ -33,7 +33,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 from .data_access import CodeSource
@@ -53,10 +53,17 @@ CORROBORATE_PROVIDER = "claude"
 def default_verify_llm(system: str, user: str) -> str:
     # use_batch=False: propose/verify are interactive, latency-sensitive calls; the
     # Batches API (~minutes/call) would make the loop unusable.
+    #
+    # issue #6, Codex's independent re-review (F9-R22-A): `json_schema=
+    # SHORTLIST_JUDGEMENT_SCHEMA` grammar-enforces every field's presence at the
+    # provider level, instead of merely asking for it in prompt text -- a
+    # malformed/omitted citation is now structurally impossible rather than
+    # silently read as "no evidence".
     from app.core.llm_client import chat_completion
     from app.core.config import OPENAI_MODEL
     out, _ = chat_completion(system, user, model=OPENAI_MODEL, provider=VERIFY_PROVIDER,
-                             temperature=0.0, json_mode=True, use_batch=False)
+                             temperature=0.0, json_schema=SHORTLIST_JUDGEMENT_SCHEMA,
+                             use_batch=False)
     return out
 
 
@@ -65,7 +72,10 @@ def default_corroborate_llm(system: str, user: str) -> str:
     MODEL/EFFORT, typically the Opus verification tier) so agreement is genuine
     cross-provider corroboration, not the same provider re-confirming itself. The
     verifier is pinned to OpenAI and this corroborator to Anthropic; an optional
-    CLAUDE_VERIFY_MODEL selects the Anthropic tier."""
+    CLAUDE_VERIFY_MODEL selects the Anthropic tier.
+
+    issue #6, Codex's independent re-review (F9-R22-A): `json_schema=
+    SHORTLIST_JUDGEMENT_SCHEMA`, same rationale as `default_verify_llm`."""
     from app.core.llm_client import chat_completion
     model = effort = None
     try:
@@ -76,7 +86,8 @@ def default_corroborate_llm(system: str, user: str) -> str:
         pass
     out, _ = chat_completion(system, user, model=model, effort=effort,
                              provider=CORROBORATE_PROVIDER,
-                             temperature=0.0, json_mode=True, use_batch=False)
+                             temperature=0.0, json_schema=SHORTLIST_JUDGEMENT_SCHEMA,
+                             use_batch=False)
     return out
 
 
@@ -353,6 +364,59 @@ skip one, never invent an option number. Add to your JSON:
  "status": "entailed"|"contradicted"|"different_concept"|"not_documented",
  "descriptor_sha256": "<the bracketed hash shown for this option>",
  "span_ids": ["<id>", ...], "missing_fact": "<specific missing fact, or empty>"}]"""
+
+
+# ---- structured-output enforcement for the shortlist judgement (F9-R22-A) --------------
+# issue #6, Codex's independent re-review (F9-R22-A): the shortlist contract above was
+# ordinary JSON mode -- a model could omit a required field (a citation, a disposition
+# entry) and the caller would silently read that as "no evidence" rather than "malformed
+# answer", which is exactly what starved the actual designated-note run (nearly every
+# candidate fell to SYSTEM_UNRESOLVED because a citation field was missing, not because
+# the documentation genuinely failed to support it). `chat_completion`'s `json_schema`
+# path grammar-enforces every field's presence at the PROVIDER level, so a malformed
+# field is now structurally impossible rather than merely discouraged by prompt text.
+def _closed(properties: dict) -> dict:
+    """A closed JSON-Schema object: every property enumerated and required,
+    `additionalProperties: false` -- the discipline `claude_coder.extraction`'s
+    own structured-output schemas already rely on (both providers' structured-
+    output grammar empirically requires it)."""
+    return {"type": "object", "properties": properties,
+           "required": list(properties), "additionalProperties": False}
+
+
+_ELIMINATED_ITEM_SCHEMA = _closed({
+    "option": {"type": "integer"},
+    "reason": {"type": "string"},
+    "missing_element": {"type": "boolean"},
+})
+
+_DISPOSITION_ITEM_SCHEMA = _closed({
+    "option": {"type": "integer"},
+    "status": {"type": "string", "enum": sorted(_CANDIDATE_DISPOSITION_STATUSES)},
+    "descriptor_sha256": {"type": "string"},
+    "span_ids": {"type": "array", "items": {"type": "string"}},
+    "missing_fact": {"type": "string"},
+})
+
+_REQUIREMENT_ITEM_SCHEMA = _closed({
+    "requirement_id": {"type": "string"},
+    "status": {"type": "string", "enum": [s.value for s in RequirementStatus]},
+    "span_ids": {"type": "array", "items": {"type": "string"}},
+    "quote": {"type": "string"},
+})
+
+#: One fixed schema for every shortlist judgement call (select_entailed, corroborate, and
+#: the bounded repair call below) -- `requirements`/`candidate_dispositions` are always
+#: present (an empty array when the prompt's own contract text did not ask for them this
+#: call), so the schema itself never needs to vary per call shape.
+SHORTLIST_JUDGEMENT_SCHEMA = _closed({
+    "choice": {"type": "integer"},
+    "entailed": {"type": "array", "items": {"type": "integer"}},
+    "reason": {"type": "string"},
+    "eliminated": {"type": "array", "items": _ELIMINATED_ITEM_SCHEMA},
+    "candidate_dispositions": {"type": "array", "items": _DISPOSITION_ITEM_SCHEMA},
+    "requirements": {"type": "array", "items": _REQUIREMENT_ITEM_SCHEMA},
+})
 
 
 def _descriptor_sha256(candidate: CandidateCode) -> str:
@@ -791,6 +855,125 @@ def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
     return prompt, id_to_span
 
 
+# ---- citation-contract validation and bounded repair (F9-R22-A) ------------------------
+def _agreed_citable_spans(span_ids: tuple[str, ...], fact: ClinicalFact,
+                          reconciliation) -> tuple[str, ...]:
+    """Which of `span_ids` are BOTH genuine target-event evidence for `fact`
+    (a member of `_citable_evidence(fact)`) AND reconciled AGREED -- never
+    VACUOUS, since punctuation/whitespace cannot substantively support a
+    disposition (issue #6, Codex's independent re-review, F9-R22-A). The
+    ONE shared bar a candidate disposition's citation must clear, reused by
+    both `validate_judgement_contract` below (the producer-side repair
+    trigger) and `resolution._disposition_spans_validated` (the consumer-
+    side gate) -- one evidence namespace, never two."""
+    if not span_ids or fact is None or reconciliation is None:
+        return ()
+    from app.contracts.source_evidence import ReconciliationStatus
+    citable = {str(getattr(s, "span_id", "") or "") for s in _citable_evidence(fact)}
+    citable.discard("")
+    settled = reconciliation.by_span_id()
+    return tuple(sid for sid in span_ids
+                if sid in citable and sid in settled
+                and settled[sid].status == ReconciliationStatus.AGREED)
+
+
+def validate_judgement_contract(judgement: "Judgement", candidates: list[CandidateCode],
+                                fact: ClinicalFact, reconciliation) -> dict[str, str]:
+    """candidate_code -> defect reason, for every candidate this shortlist's
+    `judgement` fails to answer within the citation contract (issue #6,
+    Codex's independent re-review, F9-R22-A): no disposition entry at all,
+    an `entailed`/`contradicted`/`different_concept` disposition citing no
+    span that is both genuine target-event evidence and reconciled AGREED,
+    or a `not_documented` disposition naming no `missing_fact`. Empty when
+    every candidate's disposition clears the bar -- the caller then treats
+    this evaluator's answer as structurally sound and never repairs it."""
+    defects: dict[str, str] = {}
+    by_code = {d.candidate_code: d for d in judgement.candidate_dispositions}
+    for cand in candidates:
+        d = by_code.get(cand.code)
+        if d is None:
+            defects[cand.code] = f"{cand.code}: no candidate_dispositions entry given"
+            continue
+        if d.status == "not_documented":
+            if not d.missing_fact:
+                defects[cand.code] = (f"{cand.code}: not_documented disposition names no "
+                                      f"missing_fact")
+            continue
+        if not _agreed_citable_spans(d.evidence_span_ids, fact, reconciliation):
+            defects[cand.code] = (f"{cand.code}: {d.status} disposition cites no "
+                                  f"target-event span reconciled AGREED")
+    return defects
+
+
+def _repair_prompt(original_ans: dict, id_to_span: dict[str, str],
+                   candidates: list[CandidateCode], defects: dict[str, str]) -> str:
+    """A BOUNDED same-evaluator repair turn (issue #6, Codex's independent
+    re-review, F9-R22-A) -- correction of a structurally invalid response,
+    never a second vote. Repeats the fixed candidate hashes and the allowed
+    evidence tags so the model cannot drift them, and names the EXACT
+    defects so it fixes only what is broken."""
+    hashes = "\n".join(f"{i + 1}. {_descriptor_sha256(c)}" for i, c in enumerate(candidates))
+    tags = ", ".join(sorted(t for t, real in id_to_span.items() if real)) or "(none)"
+    return (
+        "Your previous JSON answer had structural defects and must be corrected:\n"
+        + "\n".join(f"- {reason}" for reason in defects.values())
+        + f"\n\nFIXED CANDIDATE DESCRIPTOR HASHES (copy exactly, do not alter):\n{hashes}\n\n"
+        f"ALLOWED EVIDENCE TAGS: {tags}\n\n"
+        f"YOUR ORIGINAL ANSWER:\n{json.dumps(original_ans)}\n\n"
+        "Return a corrected, complete JSON answer fixing ONLY the defects named above -- "
+        "do not change any option's disposition that was not flagged.")
+
+
+def _validate_and_repair(raw_ans: dict, judgement: "Judgement",
+                         candidates: list[CandidateCode], fact: ClinicalFact,
+                         reconciliation, requirements: tuple[DescriptorRequirement, ...],
+                         id_to_span: dict[str, str], evaluator_origin: dict,
+                         llm: LLMFn, system: str) -> "Judgement":
+    """One bounded same-evaluator repair call (issue #6, Codex's independent
+    re-review, F9-R22-A) when the first answer's candidate dispositions fail
+    the citation contract -- never a second vote, and never a whole-
+    encounter retry: only the SAME evaluator, correcting its OWN
+    structurally invalid response. A disposition still defective after
+    repair is DROPPED (never auto-filled from every fact span -- that would
+    hide a malformed answer rather than repair it), so the caller's own
+    pre-existing 'no entry for this candidate' handling routes just that
+    one candidate toward SYSTEM_UNRESOLVED without erasing the rest of the
+    shortlist. Skipped entirely when `reconciliation` is absent -- nothing
+    a repair call could fix without it."""
+    if reconciliation is None or not candidates:
+        return judgement
+    defects = validate_judgement_contract(judgement, candidates, fact, reconciliation)
+    if not defects:
+        return judgement
+    try:
+        repaired_raw = _json(
+            llm(system, _repair_prompt(raw_ans, id_to_span, candidates, defects)))
+        repaired = _judgement(repaired_raw, candidates, requirements, id_to_span,
+                              evaluator_origin)
+    except Exception:
+        repaired = None
+    by_code_original = {d.candidate_code: d for d in judgement.candidate_dispositions}
+    if repaired is None:
+        kept = tuple(d for d in judgement.candidate_dispositions
+                    if d.candidate_code not in defects)
+        return replace(judgement, candidate_dispositions=kept)
+    repaired_defects = validate_judgement_contract(repaired, candidates, fact, reconciliation)
+    by_code_repaired = {d.candidate_code: d for d in repaired.candidate_dispositions}
+    final: list[CandidateDispositionEvidence] = []
+    for cand in candidates:
+        if cand.code not in defects:
+            d = by_code_original.get(cand.code)
+            if d is not None:
+                final.append(d)
+            continue
+        if cand.code not in repaired_defects:
+            d = by_code_repaired.get(cand.code)
+            if d is not None:
+                final.append(d)
+        # still defective after the one bounded repair attempt -- dropped
+    return replace(judgement, candidate_dispositions=tuple(final))
+
+
 def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
                     source: CodeSource, llm: LLMFn,
                     requirements: tuple[DescriptorRequirement, ...] = (),
@@ -825,9 +1008,11 @@ def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
     prompt, id_to_span = _shortlist_prompt(
         fact, candidates, source, requirements, force_disposition=force_disposition,
         reconciliation=reconciliation, coverage=coverage)
-    return _judgement(
-        _json(llm(system, prompt)), candidates, requirements, id_to_span,
-        {"provider": VERIFY_PROVIDER})
+    raw = _json(llm(system, prompt))
+    evaluator_origin = {"provider": VERIFY_PROVIDER}
+    judgement = _judgement(raw, candidates, requirements, id_to_span, evaluator_origin)
+    return _validate_and_repair(raw, judgement, candidates, fact, reconciliation,
+                                requirements, id_to_span, evaluator_origin, llm, system)
 
 
 def corroborate(fact: ClinicalFact, candidates: list[CandidateCode],
@@ -852,6 +1037,8 @@ def corroborate(fact: ClinicalFact, candidates: list[CandidateCode],
     prompt, id_to_span = _shortlist_prompt(
         fact, candidates, source, requirements, force_disposition=force_disposition,
         reconciliation=reconciliation, coverage=coverage)
-    return _judgement(
-        _json(llm(system, prompt)), candidates, requirements, id_to_span,
-        {"provider": CORROBORATE_PROVIDER})
+    raw = _json(llm(system, prompt))
+    evaluator_origin = {"provider": CORROBORATE_PROVIDER}
+    judgement = _judgement(raw, candidates, requirements, id_to_span, evaluator_origin)
+    return _validate_and_repair(raw, judgement, candidates, fact, reconciliation,
+                                requirements, id_to_span, evaluator_origin, llm, system)

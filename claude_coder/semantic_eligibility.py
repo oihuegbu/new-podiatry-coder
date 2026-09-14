@@ -393,6 +393,65 @@ def _service_role_exclusions(facts: list[ClinicalFact], candidates: list,
            for key, decision in control.items() if decision.excluded}
 
 
+#: issue #6, Codex's independent re-review (F9-R21-C): classes `semantic_
+#: class()` already resolves from authoritative CPT/HCPCS/CMS PFS data
+#: (`data/codes/coding_semantics.json` -- no code literals, config only) that
+#: describe a service KIND categorically incompatible with a documented
+#: event that is not itself a performed PROCEDURE: a quality-measure
+#: tracking code (Category II, `performance_measure_tracking`), an
+#: evaluation-and-management VISIT code, or an anesthesia-payment-status
+#: code can never be the right candidate for a fact the note documents as a
+#: SUPPLY, IMAGING study, DRUG, or DIAGNOSIS. Reproduced live: a suture-
+#: anchor SUPPLY fact's candidate pool retained unrelated quality-measure,
+#: imaging, and other candidates as "entailed" because nothing checked
+#: whether a candidate's own authoritative classification was even the
+#: RIGHT KIND of service for what the fact documents. Bounded on purpose
+#: (issue #6, Codex's independent re-review, F9-R21-C follow-up: "keep this
+#: a small existing-source classification step, not a generalized taxonomy
+#: project") -- reuses the classes `_service_role_control` already trusts
+#: rather than inventing a new taxonomy or a guessed descriptor-phrase list.
+_NON_PROCEDURE_INCOMPATIBLE_CLASSES = frozenset(
+    {"performance_measure_tracking", "evaluation_management", "anesthesia"})
+
+
+def _candidate_kind_control(facts: list[ClinicalFact], candidates: list,
+                            source, dos: str | None = None
+                            ) -> dict[tuple[str, str], str]:
+    """`{(code, system) -> reason}` for a candidate whose OWN authoritative
+    `semantic_class()` is categorically incompatible with a documented
+    event that is not itself a procedure. Runs ONLY when every fact in this
+    intent shares a single, non-PROCEDURE kind -- a procedure fact's own
+    role/family distinction is `_service_role_control`'s job, not this
+    one's, and a MIXED-kind intent has no single kind to check candidates
+    against. Silently skips (never excludes) when `source` does not
+    implement `semantic_class` at all -- unlike `_service_role_control`,
+    this is a supplementary safety net layered on top of that control, not
+    the primary discriminator, so an authority gap here is not itself
+    grounds to fail closed."""
+    kinds = {f.kind for f in facts}
+    if len(kinds) != 1:
+        return {}
+    (kind,) = kinds
+    if kind is FactKind.PROCEDURE:
+        return {}
+    classifier = getattr(source, "semantic_class", None)
+    if not callable(classifier):
+        return {}
+    out: dict[tuple[str, str], str] = {}
+    for c in candidates:
+        if c.system not in ("cpt", "hcpcs"):
+            continue
+        try:
+            cls = classifier(c.code, c.system, dos=dos)
+        except Exception:
+            continue
+        if cls in _NON_PROCEDURE_INCOMPATIBLE_CLASSES:
+            out[(c.code, c.system)] = (
+                f"candidate's authoritative classification is {cls!r}, categorically "
+                f"incompatible with this fact's documented kind ({kind.value!r})")
+    return out
+
+
 def _candidate_measurement_dimension(candidate, source) -> str | None:
     """The physical DIMENSION (area/length/mass) the candidate's own descriptor's
     bounded interval is stated in, or None when it cannot be determined (no unit

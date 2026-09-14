@@ -688,7 +688,7 @@ def _resolve_material_axis_conflict(
             f"only one independent evaluator is configured to confirm {label} for "
             f"{chosen.code} -- retained as a candidate, not billed")
     settled = _candidate_disposition_uniqueness(
-        [chosen], chosen, judgements, reconciliation, coverage)
+        [chosen], chosen, judgements, reconciliation, coverage, fact=fact)
     entries = [{d.candidate_code: d for d in getattr(j, "candidate_dispositions", ())}
               for j in judgements]
     d0 = entries[0].get(chosen.code)
@@ -2183,6 +2183,19 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
         return _disposition_identity_matches(cand, d)
 
     def _spans_validated(d) -> bool:
+        # issue #6, Codex's independent re-review (F9-R22-A): when `fact` is
+        # supplied (every real production caller), reuse the SAME shared,
+        # stricter bar `verify.validate_judgement_contract`'s repair loop
+        # already checked the disposition against -- target-event span
+        # MEMBERSHIP (never a span reconciled elsewhere in the document but
+        # irrelevant to this fact) and AGREED status ONLY (never VACUOUS,
+        # since punctuation/whitespace cannot substantively support a
+        # disposition). Falls back to the older, bare status-only check
+        # (AGREED or VACUOUS, no membership) only for the contract-free
+        # callers that predate `fact` being threaded through at all.
+        if fact is not None:
+            from .verify import _agreed_citable_spans
+            return bool(_agreed_citable_spans(d.evidence_span_ids, fact, reconciliation))
         return _disposition_spans_validated(d, settled, permitted)
 
     remaining: list[CandidateCode] = []
@@ -2687,6 +2700,21 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
         if blocked:
             record["eligible"] = False
             record["reason"] = "not separately reportable per authoritative data"
+    # issue #6, Codex's independent re-review (F9-R21-C): a candidate whose
+    # OWN authoritative classification is categorically the WRONG KIND of
+    # service for a non-procedure fact (a quality-measure/E&M/anesthesia-
+    # status code surviving for a documented SUPPLY/IMAGING/DRUG/DIAGNOSIS
+    # event) must not compete in that fact's shortlist at all -- reproduced
+    # live: a suture-anchor supply fact's pool retained unrelated quality-
+    # measure/imaging/other candidates as "entailed" with nothing checking
+    # whether they were even the right KIND of code.
+    for (code, system), reason in _semelig._candidate_kind_control(
+            facts_for_role_check, full_universe, source, dos).items():
+        for record in candidate_eligibility:
+            if (record["code"], record["system"]) == (code, system) and record["eligible"]:
+                record["eligible"] = False
+                record["reason"] = reason
+                break
     eligible_ids = {(r["code"], r["system"]) for r in candidate_eligibility
                     if r["eligible"]}
 

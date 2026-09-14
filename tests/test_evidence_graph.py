@@ -1786,9 +1786,18 @@ class DependencyScopedPartialRelease(unittest.TestCase):
     the REAL `autonomy.decide()`."""
 
     def test_a_shared_episode_entanglement_blocks_the_affected_set(self):
-        """F1 (resolved) is PART_OF F2 (unresolved) -- a real, documented
-        clinical relationship. Both must be excluded from this claim; neither
-        releases independently of the other."""
+        """F1 (resolved procedure) depends on F2 (unresolved diagnosis) via a
+        real, GROUNDED, documented REASON_FOR relationship -- F1 must not
+        release independently of F2's own resolution.
+
+        issue #6, Codex's independent re-review (F9-R22-B): this scenario
+        used to exercise a bare `PART_OF` edge between two procedures. A
+        generic standalone `PART_OF` assertion is no longer its own
+        propagation path -- it is not proof that a separately resolved
+        component changes its parent's own billing correctness (only joint
+        claim-line-intent membership, or a grounded, directional
+        `REASON_FOR` edge, is) -- so the scenario is now built from the
+        propagation path that DOES still apply."""
         from claude_coder.models import (CandidateCode, ClaimSubmissionStatus,
                                          CodingResult,
                                          RelationAssertion, RelationPredicate,
@@ -1797,12 +1806,14 @@ class DependencyScopedPartialRelease(unittest.TestCase):
 
         f1 = _fact("F1", FactKind.PROCEDURE, "procedure alpha",
                   spans=[_span("alpha performed", span_id="sp-F1")])
-        f2 = _fact("F2", FactKind.PROCEDURE, "procedure beta",
-                  spans=[_span("beta performed", span_id="sp-F2")])
+        f2 = _fact("F2", FactKind.DIAGNOSIS, "diagnosis for alpha",
+                  spans=[_span("diagnosis documented", span_id="sp-F2")])
         facts = [f1, f2]
-        rel = RelationAssertion(subject_event_id="F2", predicate=RelationPredicate.PART_OF,
+        rel = RelationAssertion(subject_event_id="F2", predicate=RelationPredicate.REASON_FOR,
                                 object_event_id="F1", state=RelationState.ASSERTED,
-                                evidence_span_ids=["sp-F1", "sp-F2"])
+                                evidence_span_ids=["sp-F1", "sp-F2"], confidence=0.95,
+                                reconciliation_status="source_directional",
+                                reconciliation_evidence=["sp-F1"])
         intents = eligibility.evaluate(facts, [rel], "enc", "2026-03-14")
         episodes, _ = eligibility.build_episodes(facts, [rel], "enc", "2026-03-14")
         compiled = graph.build_graph(facts, [rel], intents, encounter_id="enc",
@@ -1813,16 +1824,16 @@ class DependencyScopedPartialRelease(unittest.TestCase):
             ResolvedLine(fact=f1, chosen=CandidateCode("REC1", "cpt", "alpha"),
                         method=ResolutionMethod.DETERMINISTIC),
             ResolvedLine(fact=f2, chosen=None, method=ResolutionMethod.ABSTAINED,
-                        alternatives=[CandidateCode("ALT1", "cpt", "beta v1")],
-                        documentation_gap="which version of beta was performed?"),
+                        alternatives=[CandidateCode("ALT1", "icd10", "diagnosis v1")],
+                        documentation_gap="which diagnosis variant?"),
         ]
         result = CodingResult(encounter_id="enc", date_of_service="2026-03-14",
                               lines=lines, gates=[], graph=compiled,
                               claim_line_intents=list(intents), relations=[rel])
         decide(result, source=None)
         self.assertEqual(result.billable_lines, [],
-                         "F1 is entangled with the unresolved F2 via a documented "
-                         "PART_OF relationship and must not release alone")
+                         "F1 is entangled with the unresolved F2 via a grounded "
+                         "REASON_FOR relationship and must not release alone")
         # issue #6, Codex's independent re-review (F9-R20-A clarification):
         # entanglement is a submission problem, never proof F1's own
         # selection is invalid -- F1 is HELD (code/evidence intact, visible

@@ -22,32 +22,54 @@ from .models import (
     FactKind,
     Outcome,
     RelationPredicate,
+    RelationState,
     ResolutionMethod,
     ResolvedLine,
     Verdict,
 )
 
-#: issue #6, Codex's independent re-review (F9-R21-D): the ONLY relation
-#: predicates that may propagate a dependency hold from one fact to another.
-#: `PART_OF` is a genuine compositional dependency (a documented sub-
-#: component whose own resolution can change the parent's code, units, or
-#: modifiers); `REASON_FOR` is medical necessity -- a diagnosis and the
-#: service it justifies are each the OTHER's own claim dependency (an
-#: unresolved diagnosis leaves its service unjustified; a service that turns
-#: out unbillable can leave the diagnosis with nothing left to justify on
-#: this claim), so it propagates in BOTH directions, exactly like `PART_OF`
-#: -- unconditionally, never suppressed just because some OTHER fact also
-#: happens to relate to the same endpoint (issue #6 F9-R9-A, Codex's earlier
-#: independent re-review of 6ff2761: "materiality is graph-entanglement-
-#: based, not diagnosis-kind-based" -- a second, still-unresolved documented
-#: indication for a procedure must stay a visible open item even when a
-#: DIFFERENT indication already independently satisfies that procedure's
-#: necessity; a "does the other side have independent support" carve-out
-#: would silently let that second indication drop out of the claim's open
-#: items). Every other predicate -- `SAME_EPISODE_AS` above all -- describes
+#: issue #6, Codex's independent re-review (F9-R22-B): a relation may
+#: propagate a dependency hold ONLY when it is itself genuinely established
+#: by the record -- `ASSERTED` (never a `NEGATED`/`UNCERTAIN` edge), grounded
+#: by the deterministic provenance layer (`reconciliation_status` a member of
+#: `provenance.GROUNDED_RECONCILIATION_STATUSES`), and naming the evidence
+#: that grounded it (non-empty `reconciliation_evidence`). Before this fix,
+#: `_entangled` accepted ANY `PART_OF`/`REASON_FOR` edge regardless of state
+#: or reconciliation -- reproduced live: an explicitly `NEGATED`,
+#: unreconciled `PART_OF` assertion (evidence the source never actually
+#: established) still changed an independently resolved primary service from
+#: READY to HELD.
+#:
+#: `REASON_FOR` propagates ONLY in its documented direction -- diagnosis/
+#: indication TO the service whose necessity depends on it, never
+#: automatically in reverse: an unresolved diagnosis can leave its service
+#: unjustified, but an unresolved OR excluded service does not, by itself,
+#: retroactively invalidate a diagnosis that is otherwise a real, resolved
+#: selection. Propagation is unconditional otherwise -- never suppressed
+#: just because some OTHER fact also relates to the same endpoint (issue #6
+#: F9-R9-A: "materiality is graph-entanglement-based, not diagnosis-kind-
+#: based" -- a second, still-unresolved documented indication for a
+#: procedure must stay a visible open item even when a different indication
+#: already independently satisfies that procedure's necessity).
+#:
+#: `PART_OF` is deliberately NOT treated as its own claim-impact edge here,
+#: even when grounded: a generic standalone `PART_OF` assertion is not proof
+#: that a separately resolved component changes the parent's code, modifier,
+#: or units -- that is what joint `ClaimLineIntent` membership (below) is
+#: FOR, and already covers the case where the eligibility engine itself
+#: composed the two facts into one code-determining line. A component the
+#: eligibility engine did NOT compose into the same claim line must not
+#: entangle its parent merely because a `PART_OF` edge was documented between
+#: them.
+#:
+#: Every other predicate -- `SAME_EPISODE_AS` above all -- describes
 #: co-occurrence or clinical detail, never a claim-affecting dependency, and
 #: must never propagate a hold by itself.
-_CLAIM_IMPACT_PREDICATES = frozenset({RelationPredicate.PART_OF, RelationPredicate.REASON_FOR})
+def _grounded_asserted(rel) -> bool:
+    from . import provenance as _provenance
+    return (rel.state is RelationState.ASSERTED
+           and rel.reconciliation_status in _provenance.GROUNDED_RECONCILIATION_STATUSES
+           and bool(rel.reconciliation_evidence))
 
 
 def _necessity_authoritatively_met(result: CodingResult, source) -> bool:
@@ -207,24 +229,25 @@ def decide(result: CodingResult,
     # a gate-named procedure, blocks ONLY the facts it can actually affect --
     # never the whole encounter by default.
     #
-    # issue #6, Codex's independent re-review (F9-R21-D): this used to reuse
-    # `ClinicalGraph.binding_for` -- the release certificate's own AUDIT-
-    # scope binding, which pulls in every one-hop relation edge regardless
-    # of predicate (documented, deliberately, for "what does this released
-    # line's audit trail rest on"). Using that SAME broad closure to decide
-    # dependency PROPAGATION conflated "co-occurred in the same episode"
-    # with "can change this line's own billing correctness" -- reproduced
-    # directly on the designated operative note: an unresolved anesthesia
-    # event held the surgeon's own, independently and validly selected
-    # procedure line, solely because both shared a `SAME_EPISODE_AS`-style
-    # proximity in the graph, never a genuine dependency. `binding_for`
-    # itself is UNCHANGED and still used for certificate/audit scope
-    # elsewhere; this function is now a SEPARATE, narrower, directional
-    # claim-impact projection, built only from the two typed relation kinds
-    # that genuinely mean "this event affects that event's own billing
-    # correctness" (`_CLAIM_IMPACT_PREDICATES`), plus joint claim-line-intent
-    # membership (facts the eligibility engine already composed into ONE
-    # line, e.g. a duplicate-mention merge).
+    # issue #6, Codex's independent re-review (F9-R21-D, hardened by
+    # F9-R22-B): this used to reuse `ClinicalGraph.binding_for` -- the
+    # release certificate's own AUDIT-scope binding, which pulls in every
+    # one-hop relation edge regardless of predicate (documented,
+    # deliberately, for "what does this released line's audit trail rest
+    # on"). Using that SAME broad closure to decide dependency PROPAGATION
+    # conflated "co-occurred in the same episode" with "can change this
+    # line's own billing correctness" -- reproduced directly on the
+    # designated operative note: an unresolved anesthesia event held the
+    # surgeon's own, independently and validly selected procedure line,
+    # solely because both shared a `SAME_EPISODE_AS`-style proximity in the
+    # graph, never a genuine dependency. `binding_for` itself is UNCHANGED
+    # and still used for certificate/audit scope elsewhere; this function is
+    # a SEPARATE, narrower, directional claim-impact projection: joint
+    # claim-line-intent membership (facts the eligibility engine already
+    # composed into ONE code-determining line) plus a grounded, asserted,
+    # directional `REASON_FOR` edge (`_grounded_asserted`) -- see that
+    # constant's docstring above for why `PART_OF` is not its own
+    # propagation path even when grounded.
     def _entangled(fact_id: str) -> set[str]:
         if fact_id is None:
             return set()
@@ -233,26 +256,13 @@ def decide(result: CodingResult,
             ids = set(getattr(intent, "clinical_event_ids", None) or ())
             if fact_id in ids:
                 impacted |= (ids - {fact_id})
-        # Both claim-impact predicates propagate identically, in either
-        # direction, UNCONDITIONALLY -- no "does the other side have
-        # independent support" carve-out. For `PART_OF` (X part of Y): X
-        # unresolved -> Y's own correctness may depend on X; Y unresolved ->
-        # X has nothing resolved to attach to yet. For `REASON_FOR`
-        # (diagnosis reason for service): issue #6 F9-R9-A, Codex's earlier
-        # independent re-review of 6ff2761, "materiality is graph-
-        # entanglement-based, not diagnosis-kind-based" -- a second, still-
-        # unresolved documented indication for a procedure must stay a
-        # visible, blocking open item even when a DIFFERENT indication
-        # already independently satisfies that procedure's necessity; a
-        # carve-out would let that second indication silently drop out of
-        # the claim's open items the moment any other support existed.
         for rel in (getattr(result, "relations", None) or ()):
-            if rel.predicate not in _CLAIM_IMPACT_PREDICATES:
+            if rel.predicate is not RelationPredicate.REASON_FOR:
+                continue
+            if not _grounded_asserted(rel):
                 continue
             if rel.subject_event_id == fact_id:
                 impacted.add(rel.object_event_id)
-            elif rel.object_event_id == fact_id:
-                impacted.add(rel.subject_event_id)
         return impacted
 
     blocked_fact_ids: set[str] = set()

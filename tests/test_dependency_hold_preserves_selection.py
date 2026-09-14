@@ -12,17 +12,22 @@ signal issue #6 item 7 already built for an unresolved actor-ownership
 fact) is now used instead, so the code/evidence/provenance stay visible
 while the claim correctly stays non-releasable.
 
-issue #6, Codex's independent re-review (F9-R21-D): entanglement used to be
-computed from `ClinicalGraph.binding_for`'s AUDIT-scope closure, which pulls
-in every one-hop relation regardless of predicate -- conflating "co-occurred
-in the same clinical episode" with "can change this line's own billing
-correctness" (reproduced live: an unresolved anesthesia event held an
-independently valid, resolved procedure line via mere `SAME_EPISODE_AS`
-proximity). `autonomy._entangled` is now built ONLY from typed claim-impact
-relations (`PART_OF`, directional `REASON_FOR`) plus joint claim-line-intent
-membership -- so these tests construct real `RelationAssertion`s of those
-kinds instead of a duck-typed graph-closure stub, and a new class below
-proves the negative: `SAME_EPISODE_AS` alone must never propagate a hold.
+issue #6, Codex's independent re-review (F9-R21-D, hardened by F9-R22-B):
+entanglement used to be computed from `ClinicalGraph.binding_for`'s AUDIT-
+scope closure, which pulls in every one-hop relation regardless of predicate
+-- conflating "co-occurred in the same clinical episode" with "can change
+this line's own billing correctness" (reproduced live: an unresolved
+anesthesia event held an independently valid, resolved procedure line via
+mere `SAME_EPISODE_AS` proximity). `autonomy._entangled` is now built ONLY
+from joint claim-line-intent membership plus a GROUNDED, ASSERTED,
+directional `REASON_FOR` edge (diagnosis -> service, never automatically in
+reverse) -- so these tests construct real, grounded `RelationAssertion`s
+(and real claim-line-intent stand-ins) instead of a duck-typed graph-closure
+stub. A bare `PART_OF` edge is deliberately NOT its own propagation path any
+more (F9-R22-B: a generic standalone `PART_OF` assertion is not proof that a
+separately resolved component changes its parent's code/modifier/units --
+joint claim-line-intent membership is what represents that), and a negated/
+unreconciled edge of ANY predicate must never propagate a hold either.
 
 Synthetic facts/codes throughout.
 """
@@ -32,7 +37,7 @@ from claude_coder import autonomy
 from claude_coder.models import (CandidateCode, ClaimSubmissionStatus, ClinicalFact,
                                  CodingResult, Destination, FactKind, GateResult,
                                  Outcome, RelationAssertion, RelationPredicate,
-                                 ResolutionMethod, ResolvedLine, Verdict)
+                                 RelationState, ResolutionMethod, ResolvedLine, Verdict)
 
 
 def _fact(fact_id, kind=FactKind.PROCEDURE):
@@ -55,16 +60,49 @@ def _unresolved_line(fact_id, kind=FactKind.PROCEDURE):
                         method=ResolutionMethod.ABSTAINED, rationale="held")
 
 
-def _reason_for(diagnosis_id, service_id):
+def _reason_for(diagnosis_id, service_id, *, grounded=True):
+    """A documented diagnosis-justifies-service edge -- GROUNDED by default
+    (`ASSERTED`, a `GROUNDED_RECONCILIATION_STATUSES` member, non-empty
+    `reconciliation_evidence`), since that is the only shape F9-R22-B lets
+    propagate a hold. Pass `grounded=False` to build the negative case (an
+    edge the record never actually established)."""
+    if grounded:
+        return RelationAssertion(subject_event_id=diagnosis_id,
+                                 predicate=RelationPredicate.REASON_FOR,
+                                 object_event_id=service_id,
+                                 state=RelationState.ASSERTED,
+                                 reconciliation_status="source_directional",
+                                 reconciliation_evidence=[f"s-{diagnosis_id}"])
     return RelationAssertion(subject_event_id=diagnosis_id,
                              predicate=RelationPredicate.REASON_FOR,
                              object_event_id=service_id)
 
 
-def _result(lines, relations=(), gates=()):
+def _intent(*clinical_event_ids):
+    """A real `eligibility.ClaimLineIntent` -- `certificate.build_certificate`
+    reads its full field set unconditionally whenever `result.claim_line_
+    intents` is set, so a bare duck-typed stand-in (only `.clinical_event_
+    ids`, what `_entangled` itself reads) is not enough for the bundle/
+    certificate end-to-end tests below."""
+    from claude_coder import eligibility as _elig
+    return _elig.ClaimLineIntent(
+        intent_id=f"intent-{'-'.join(clinical_event_ids)}",
+        encounter_id="enc-1",
+        component=_elig.ClaimComponent.SERVICE,
+        clinical_event_ids=list(clinical_event_ids),
+        fact_kind="procedure",
+        clinical_action="",
+        attributes={},
+        date_of_service="2026-01-01",
+        billing_entity_id=None,
+        source_span_ids=[],
+        state=_elig.EligibilityState.ELIGIBLE_FOR_RETRIEVAL)
+
+
+def _result(lines, relations=(), gates=(), intents=()):
     return CodingResult(encounter_id="enc-1", date_of_service="2026-01-01",
                         lines=list(lines), gates=list(gates),
-                        relations=list(relations))
+                        relations=list(relations), claim_line_intents=list(intents))
 
 
 class DependencyHoldTest(unittest.TestCase):
@@ -163,6 +201,64 @@ class SameEpisodeProximityNeverHoldsTest(unittest.TestCase):
         self.assertEqual(procedure.claim_submission_status, ClaimSubmissionStatus.READY)
         self.assertIn(procedure, result.billable_lines)
 
+    def test_a_negated_unreconciled_reason_for_does_not_hold_the_resolved_line(self):
+        """issue #6, Codex's independent re-review (F9-R22-B): a relation
+        must itself be genuinely established by the record before it may
+        propagate anything -- an explicitly `NEGATED`, unreconciled
+        `REASON_FOR` assertion (evidence the source never actually
+        established) must not hold the independently resolved service."""
+        diagnosis = _unresolved_line("D1", kind=FactKind.DIAGNOSIS)
+        service = _resolved_line("P1", "SERVICE_A")
+        relation = RelationAssertion(subject_event_id="D1",
+                                     predicate=RelationPredicate.REASON_FOR,
+                                     object_event_id="P1",
+                                     state=RelationState.NEGATED)
+        result = _result([diagnosis, service], relations=[relation])
+
+        autonomy.decide(result)
+
+        self.assertEqual(service.claim_submission_status, ClaimSubmissionStatus.READY)
+        self.assertIn(service, result.billable_lines)
+
+    def test_an_ungrounded_reason_for_does_not_hold_the_resolved_line(self):
+        """An `ASSERTED` `REASON_FOR` edge that never reconciled against the
+        source (still `unreconciled`, no `reconciliation_evidence`) is just
+        as ungrounded as a negated one -- state alone is not enough."""
+        diagnosis = _unresolved_line("D1", kind=FactKind.DIAGNOSIS)
+        service = _resolved_line("P1", "SERVICE_A")
+        relation = _reason_for("D1", "P1", grounded=False)
+        result = _result([diagnosis, service], relations=[relation])
+
+        autonomy.decide(result)
+
+        self.assertEqual(service.claim_submission_status, ClaimSubmissionStatus.READY)
+        self.assertIn(service, result.billable_lines)
+
+    def test_an_unresolved_separate_component_part_of_does_not_hold_the_primary(self):
+        """issue #6, Codex's independent re-review (F9-R22-B): a bare,
+        grounded `PART_OF` edge is no longer, by itself, proof that a
+        separately resolved component changes its parent's own billing
+        correctness -- only joint claim-line-intent membership (the
+        eligibility engine's own "these facts are ONE code-determining
+        line" decision) does. An unresolved separate supply/component that
+        the engine did NOT compose into the primary service's own claim
+        line must not hold it, even with a fully grounded `PART_OF` edge
+        between them."""
+        component = _unresolved_line("U1")
+        primary = _resolved_line("P1", "SERVICE_A")
+        relation = RelationAssertion(subject_event_id="U1",
+                                     predicate=RelationPredicate.PART_OF,
+                                     object_event_id="P1",
+                                     state=RelationState.ASSERTED,
+                                     reconciliation_status="source_directional",
+                                     reconciliation_evidence=["s-U1"])
+        result = _result([component, primary], relations=[relation])
+
+        autonomy.decide(result)
+
+        self.assertEqual(primary.claim_submission_status, ClaimSubmissionStatus.READY)
+        self.assertIn(primary, result.billable_lines)
+
     def test_a_second_unresolved_indication_still_holds_the_service(self):
         """issue #6 F9-R9-A, Codex's earlier independent re-review of
         6ff2761: propagation is UNCONDITIONAL, with no "does the other side
@@ -194,13 +290,14 @@ class DependencyHoldBundleTest(unittest.TestCase):
                                                 bundle_from_coding_result)
         diagnosis = _resolved_line("D1", "DX_A", kind=FactKind.DIAGNOSIS)
         procedure = _unresolved_line("P1")
-        # PART_OF propagates bidirectionally (F9-R21-D): D1 documented as part
-        # of the still-unresolved P1 leaves D1 with nothing resolved to attach
-        # to yet, so D1 (not P1) is the one held here.
-        relation = RelationAssertion(subject_event_id="D1",
-                                     predicate=RelationPredicate.PART_OF,
-                                     object_event_id="P1")
-        result = _result([diagnosis, procedure], relations=[relation])
+        # issue #6, Codex's independent re-review (F9-R22-B): a bare
+        # `PART_OF` edge is no longer its own propagation path -- joint
+        # claim-line-intent membership (the eligibility engine's own "these
+        # facts are ONE code-determining line" decision) is what represents
+        # this now. D1 composed into the same claim line as the still-
+        # unresolved P1 leaves D1 with nothing resolved to attach to yet, so
+        # D1 (not P1) is the one held here.
+        result = _result([diagnosis, procedure], intents=[_intent("D1", "P1")])
         autonomy.decide(result)
 
         bundle = bundle_from_coding_result(
@@ -227,10 +324,7 @@ class DependencyHoldBundleTest(unittest.TestCase):
         from claude_coder import certificate
         diagnosis = _resolved_line("D1", "DX_A", kind=FactKind.DIAGNOSIS)
         procedure = _unresolved_line("P1")
-        relation = RelationAssertion(subject_event_id="D1",
-                                     predicate=RelationPredicate.PART_OF,
-                                     object_event_id="P1")
-        result = _result([diagnosis, procedure], relations=[relation])
+        result = _result([diagnosis, procedure], intents=[_intent("D1", "P1")])
         autonomy.decide(result)
 
         cert = certificate.build_certificate(result, "note text")
