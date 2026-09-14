@@ -160,6 +160,27 @@ class ReleaseGateContextRequirementTest(unittest.TestCase):
         self.assertIn(str(billing), args)
         self.assertIn("--encounter-context", args)
         self.assertIn(str(encounter), args)
+        self.assertEqual(_kwargs["env"]["ANTHROPIC_USE_BATCH"], "0")
+
+    def test_acceptance_run_overrides_a_batch_enabled_parent_environment(self):
+        """The paid release-gate run must be interactive even when production
+        throughput configuration enables Anthropic's batch API."""
+        m = _mod()
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            billing = pathlib.Path(td) / "billing.json"
+            billing.write_text(json.dumps(_VALID_BILLING))
+            encounter = pathlib.Path(td) / "encounter.json"
+            encounter.write_text(json.dumps(_VALID_ENCOUNTER))
+            with mock.patch.object(m, "BILLING_CONTEXT", billing), \
+                    mock.patch.object(m, "ENCOUNTER_CONTEXT", encounter), \
+                    mock.patch.dict(m.os.environ, {"ANTHROPIC_USE_BATCH": "1"}), \
+                    mock.patch.object(m.subprocess, "call", return_value=0) as fake_call:
+                rc = m.main([])
+                parent_value_after_call = m.os.environ["ANTHROPIC_USE_BATCH"]
+        self.assertEqual(rc, 0)
+        self.assertEqual(fake_call.call_args.kwargs["env"]["ANTHROPIC_USE_BATCH"], "0")
+        self.assertEqual(parent_value_after_call, "1")
 
 
 if __name__ == "__main__":

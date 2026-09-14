@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -112,8 +113,20 @@ def main(argv: list[str] | None = None) -> int:
         "--billing-context", str(BILLING_CONTEXT),
         "--encounter-context", str(ENCOUNTER_CONTEXT),
     ]
+    # Acceptance testing needs interactive, observable model calls.  Force the
+    # Anthropic client down its non-batch path even when the caller's shell or
+    # deployment .env enables batch processing for production throughput.
+    # This is intentionally scoped to this child process: it does not mutate
+    # production configuration or the parent environment.
+    run_environment = os.environ.copy()
+    run_environment["ANTHROPIC_USE_BATCH"] = "0"
+    print("test model execution: ANTHROPIC_USE_BATCH=0")
     print("exact command:", " ".join(command))
-    return subprocess.call(command, cwd=str(REPO_ROOT))
+    return subprocess.call(
+        command,
+        cwd=str(REPO_ROOT),
+        env=run_environment,
+    )
 
 
 if __name__ == "__main__":
