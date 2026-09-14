@@ -309,6 +309,45 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
                          "an unresolved eligible rival must block release, never be "
                          "silently ignored")
 
+    def test_one_supported_candidate_plus_one_gate_a_failing_candidate_is_a_system_hold(self):
+        """issue #6, Codex's independent re-review (F9-R23 clarification,
+        "Gate B"): the safety property Gate B asks for -- an UNGROUNDED
+        recall hit must never manufacture a tie or a provider question --
+        is already delivered by Gate A working together with this SAME
+        pre-existing rival-blocks-release mechanism (F9-R21-A), proven
+        above for "evaluators disagree". Here the rival's own citation is
+        structurally perfect (a real, anchored, `AGREED` span both
+        evaluators independently cite) but fails Gate A's content check
+        (the span's text is unrelated to both the rival's own descriptor
+        and the fact's description) -- `_settle_uniqueness` must still
+        hold, never release CAND_CHOSEN through a false single-survivor
+        narrowing, and never escalate to a provider question either."""
+        chosen = _cand("CAND_CHOSEN", "assembly service, clean")
+        rival = _cand("CAND_RIVAL", "gadget housing, unrelated device")
+        fact = _fact("assembly service, clean, performed today")
+        span = EvidenceSpan(text="assembly service, clean, performed today",
+                            anchored=True, span_id="s1")
+        unrelated_span = EvidenceSpan(text="patient reports no known drug allergies",
+                                      anchored=True, span_id="s2")
+        fact.evidence = [span, unrelated_span]
+        recon = self._reconciliation({"s1": "AGREED", "s2": "AGREED"})
+        j0 = _verify.Judgement(
+            chosen=chosen, entailed=("CAND_CHOSEN", "CAND_RIVAL"), declared=True,
+            candidate_dispositions=(_disp(chosen, "entailed", evidence_span_ids=("s1",)),
+                                    _disp(rival, "entailed", evidence_span_ids=("s2",))))
+        j1 = _verify.Judgement(
+            chosen=chosen, entailed=("CAND_CHOSEN", "CAND_RIVAL"), declared=True,
+            candidate_dispositions=(_disp(chosen, "entailed", evidence_span_ids=("s1",)),
+                                    _disp(rival, "entailed", evidence_span_ids=("s2",))))
+        line = resolution._settle_uniqueness(
+            fact, chosen, [chosen, rival], [j0, j1], {}, "entailed", "", recon)
+        self.assertIsNone(line.chosen,
+                         "a Gate-A-failing rival must block release, never be silently "
+                         "treated as proven wrong or ignored")
+        self.assertIsNone(line.documentation_gap,
+                          "a Gate-A citation failure is a system evidence gap, never a "
+                          "provider-answerable question")
+
     def test_one_supported_candidate_plus_one_positively_excluded_candidate_releases(self):
         """A rival BOTH evaluators validly, cleanly eliminate (agreement +
         reconciled evidence) is proven wrong -- it must not block release."""

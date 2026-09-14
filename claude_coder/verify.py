@@ -855,26 +855,74 @@ def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
     return prompt, id_to_span
 
 
-# ---- citation-contract validation and bounded repair (F9-R22-A) ------------------------
+# ---- citation-contract validation and bounded repair (F9-R22-A / F9-R23 Gate A) --------
+def _span_relates_to_candidate(span_text: str, fact: ClinicalFact,
+                               candidate: CandidateCode) -> bool:
+    """Whether `span_text` has any genuine CONTENT relationship to what a
+    disposition citing it claims to support (issue #6, Codex's independent
+    re-review, F9-R23 clarification, "Gate A"): anchoring/reconciliation
+    proves the text exists at a verified location; it does not prove the
+    text supports the extracted clinical assertion. A span can be anchored,
+    reconciled AGREED, and correctly scoped to the right fact, and still be
+    about something else entirely -- an unrelated observation, or an
+    inherited attribute mention about a different axis than the one being
+    cited for. Reproduced by Codex's own adversarial case: both evaluators
+    cited a real, `AGREED` span attached to the fact whose complete text
+    was `"unrelated observation"`, and the candidate released anyway.
+
+    Reuses `tiebreak._descriptor_tokens`, the SAME discriminating-
+    vocabulary extraction the tied-shortlist axis-discovery system already
+    trusts, so a citation is held to an equivalent content bar rather than
+    a separate, invented one. Deliberately GENEROUS -- any one shared
+    discriminating word, checked against EITHER the candidate's own
+    descriptor OR the fact's own documented description -- rather than
+    exact-phrase matching: a genuine synonym/paraphrase (the shortlist
+    contract's own instructions to evaluators give "motorized" for
+    "powered" as a legitimate match) almost always still shares SOME
+    clinical vocabulary with the descriptor or the fact description, and
+    exact matching would silently convert every such paraphrase into a
+    false Gate-A failure -- the same false-elimination shape this
+    codebase's history already rejected once for `AXIS_DESCRIPTOR_TERM`."""
+    from . import tiebreak as _tiebreak
+    span_terms = _tiebreak._descriptor_tokens(span_text)
+    if not span_terms:
+        return False
+    cand_terms = _tiebreak._descriptor_tokens(candidate.descriptor)
+    fact_terms = _tiebreak._descriptor_tokens(str(getattr(fact, "description", "") or ""))
+    return bool(span_terms & (cand_terms | fact_terms))
+
+
 def _agreed_citable_spans(span_ids: tuple[str, ...], fact: ClinicalFact,
-                          reconciliation) -> tuple[str, ...]:
-    """Which of `span_ids` are BOTH genuine target-event evidence for `fact`
-    (a member of `_citable_evidence(fact)`) AND reconciled AGREED -- never
-    VACUOUS, since punctuation/whitespace cannot substantively support a
-    disposition (issue #6, Codex's independent re-review, F9-R22-A). The
-    ONE shared bar a candidate disposition's citation must clear, reused by
+                          candidate: CandidateCode, reconciliation) -> tuple[str, ...]:
+    """Which of `span_ids` clear the FULL citation bar for a disposition on
+    `candidate`: genuine target-event evidence for `fact` (a member of
+    `_citable_evidence(fact)`), reconciled AGREED -- never VACUOUS, since
+    punctuation/whitespace cannot substantively support a disposition
+    (issue #6, Codex's independent re-review, F9-R22-A) -- AND genuinely
+    content-related to what the citation claims to support
+    (`_span_relates_to_candidate`, F9-R23 clarification "Gate A"). The ONE
+    shared bar a candidate disposition's citation must clear, reused by
     both `validate_judgement_contract` below (the producer-side repair
     trigger) and `resolution._disposition_spans_validated` (the consumer-
     side gate) -- one evidence namespace, never two."""
-    if not span_ids or fact is None or reconciliation is None:
+    if not span_ids or fact is None or candidate is None or reconciliation is None:
         return ()
     from app.contracts.source_evidence import ReconciliationStatus
-    citable = {str(getattr(s, "span_id", "") or "") for s in _citable_evidence(fact)}
-    citable.discard("")
+    citable = {str(getattr(s, "span_id", "") or ""): s for s in _citable_evidence(fact)}
+    citable.pop("", None)
     settled = reconciliation.by_span_id()
-    return tuple(sid for sid in span_ids
-                if sid in citable and sid in settled
-                and settled[sid].status == ReconciliationStatus.AGREED)
+    out: list[str] = []
+    for sid in span_ids:
+        span = citable.get(sid)
+        if span is None:
+            continue
+        rec = settled.get(sid)
+        if rec is None or rec.status != ReconciliationStatus.AGREED:
+            continue
+        if not _span_relates_to_candidate(span.text, fact, candidate):
+            continue
+        out.append(sid)
+    return tuple(out)
 
 
 def validate_judgement_contract(judgement: "Judgement", candidates: list[CandidateCode],
@@ -899,9 +947,10 @@ def validate_judgement_contract(judgement: "Judgement", candidates: list[Candida
                 defects[cand.code] = (f"{cand.code}: not_documented disposition names no "
                                       f"missing_fact")
             continue
-        if not _agreed_citable_spans(d.evidence_span_ids, fact, reconciliation):
+        if not _agreed_citable_spans(d.evidence_span_ids, fact, cand, reconciliation):
             defects[cand.code] = (f"{cand.code}: {d.status} disposition cites no "
-                                  f"target-event span reconciled AGREED")
+                                  f"target-event span reconciled AGREED and genuinely "
+                                  f"related to this candidate")
     return defects
 
 
@@ -933,13 +982,26 @@ def _validate_and_repair(raw_ans: dict, judgement: "Judgement",
     re-review, F9-R22-A) when the first answer's candidate dispositions fail
     the citation contract -- never a second vote, and never a whole-
     encounter retry: only the SAME evaluator, correcting its OWN
-    structurally invalid response. A disposition still defective after
-    repair is DROPPED (never auto-filled from every fact span -- that would
-    hide a malformed answer rather than repair it), so the caller's own
-    pre-existing 'no entry for this candidate' handling routes just that
-    one candidate toward SYSTEM_UNRESOLVED without erasing the rest of the
-    shortlist. Skipped entirely when `reconciliation` is absent -- nothing
-    a repair call could fix without it."""
+    structurally invalid response.
+
+    A candidate the repair still cannot validate keeps whichever real
+    disposition entry it has (the repaired one if the model gave one, else
+    the original) -- it is NEVER auto-filled from every fact span (that
+    would hide a malformed answer rather than repair it), but it is also
+    never SILENTLY DROPPED merely because its own citation still fails
+    Gate A/the citation bar: the caller's own downstream span-validation
+    already, correctly reads a real-but-invalid disposition as unvalidated
+    (routing it to SYSTEM_UNRESOLVED). Dropping it instead would make this
+    judgement APPEAR to never have answered that candidate at all, which
+    silently defers `_candidate_disposition_uniqueness` for the WHOLE
+    shortlist back to the weaker legacy elimination path -- exactly the
+    gap a still-answered-but-unvalidated candidate must not open. A
+    candidate that genuinely has no entry from EITHER answer stays absent,
+    which is the pre-existing, correct "this evaluator never addressed
+    this candidate" signal, unrelated to Gate A.
+
+    Skipped entirely when `reconciliation` is absent -- nothing a repair
+    call could fix without it."""
     if reconciliation is None or not candidates:
         return judgement
     defects = validate_judgement_contract(judgement, candidates, fact, reconciliation)
@@ -953,24 +1015,19 @@ def _validate_and_repair(raw_ans: dict, judgement: "Judgement",
     except Exception:
         repaired = None
     by_code_original = {d.candidate_code: d for d in judgement.candidate_dispositions}
-    if repaired is None:
-        kept = tuple(d for d in judgement.candidate_dispositions
-                    if d.candidate_code not in defects)
-        return replace(judgement, candidate_dispositions=kept)
-    repaired_defects = validate_judgement_contract(repaired, candidates, fact, reconciliation)
-    by_code_repaired = {d.candidate_code: d for d in repaired.candidate_dispositions}
+    by_code_repaired = ({d.candidate_code: d for d in repaired.candidate_dispositions}
+                        if repaired is not None else {})
     final: list[CandidateDispositionEvidence] = []
     for cand in candidates:
         if cand.code not in defects:
             d = by_code_original.get(cand.code)
-            if d is not None:
-                final.append(d)
-            continue
-        if cand.code not in repaired_defects:
-            d = by_code_repaired.get(cand.code)
-            if d is not None:
-                final.append(d)
-        # still defective after the one bounded repair attempt -- dropped
+        else:
+            # Prefer the repaired entry (fixed or not); fall back to the
+            # original only when repair gave nothing for this candidate at
+            # all.
+            d = by_code_repaired.get(cand.code) or by_code_original.get(cand.code)
+        if d is not None:
+            final.append(d)
     return replace(judgement, candidate_dispositions=tuple(final))
 
 

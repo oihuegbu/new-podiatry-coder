@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, replace as _dc_replace
+from enum import Enum
 
 from .data_access import CodeSource
 from .models import CandidateCode, ClinicalFact, FactKind, Outcome, ResolutionMethod, ResolvedLine
@@ -2182,20 +2183,24 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
     def _identity_matches(cand: CandidateCode, d) -> bool:
         return _disposition_identity_matches(cand, d)
 
-    def _spans_validated(d) -> bool:
-        # issue #6, Codex's independent re-review (F9-R22-A): when `fact` is
-        # supplied (every real production caller), reuse the SAME shared,
-        # stricter bar `verify.validate_judgement_contract`'s repair loop
-        # already checked the disposition against -- target-event span
-        # MEMBERSHIP (never a span reconciled elsewhere in the document but
-        # irrelevant to this fact) and AGREED status ONLY (never VACUOUS,
-        # since punctuation/whitespace cannot substantively support a
-        # disposition). Falls back to the older, bare status-only check
-        # (AGREED or VACUOUS, no membership) only for the contract-free
-        # callers that predate `fact` being threaded through at all.
+    def _spans_validated(d, cand: CandidateCode) -> bool:
+        # issue #6, Codex's independent re-review (F9-R22-A, hardened by the
+        # F9-R23 clarification "Gate A"): when `fact` is supplied (every
+        # real production caller), reuse the SAME shared, stricter bar
+        # `verify.validate_judgement_contract`'s repair loop already
+        # checked the disposition against -- target-event span MEMBERSHIP
+        # (never a span reconciled elsewhere in the document but irrelevant
+        # to this fact), AGREED status ONLY (never VACUOUS, since
+        # punctuation/whitespace cannot substantively support a
+        # disposition), AND genuine CONTENT relatedness to `cand`'s own
+        # descriptor or the fact's description (never a real, anchored,
+        # AGREED span that is simply about something else). Falls back to
+        # the older, bare status-only check (AGREED or VACUOUS, no
+        # membership or content check) only for the contract-free callers
+        # that predate `fact` being threaded through at all.
         if fact is not None:
             from .verify import _agreed_citable_spans
-            return bool(_agreed_citable_spans(d.evidence_span_ids, fact, reconciliation))
+            return bool(_agreed_citable_spans(d.evidence_span_ids, fact, cand, reconciliation))
         return _disposition_spans_validated(d, settled, permitted)
 
     remaining: list[CandidateCode] = []
@@ -2218,62 +2223,34 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
         # correctly routes to the tie/hold path instead of a false release,
         # and never lets a DIFFERENT surviving candidate release in its place.
         d0, d1 = j0[cand.code], j1[cand.code]
-        if d0.status != d1.status:
-            system_unresolved[cand.code] = (
-                f"independent evaluators disagreed on {cand.code}'s disposition "
-                f"({d0.status!r} vs {d1.status!r})")
-            continue
         if not (_identity_matches(cand, d0) and _identity_matches(cand, d1)):
             system_unresolved[cand.code] = (
                 f"a disposition for {cand.code} did not reproduce this candidate's "
                 f"own current official descriptor identity")
             continue
-        status = d0.status
-        if status in ("contradicted", "different_concept"):
-            if _spans_validated(d0) and _spans_validated(d1):
-                eliminated[cand.code] = (
-                    f"both independent evaluators, on {cand.code}'s own official "
-                    f"descriptor (identity {d0.descriptor_sha256[:12]}...), judged it "
-                    f"{status} with source-confirmed evidence")
-            else:
-                system_unresolved[cand.code] = (
-                    f"both evaluators judged {cand.code} {status}, but the verdict "
-                    f"lacks source-confirmed, reconciled evidence on both sides")
-        elif status == "not_documented":
-            # issue #6, Codex's independent re-review (F9-R16-B): a specific
-            # missing fact is required on BOTH sides -- an empty `missing_fact`
-            # for a NOT_DOCUMENTED verdict cannot be turned into a precise
-            # provider question, and this mechanism must never eliminate on a
-            # vaguer basis than it could also route a question from.
-            if (coverage is not None and getattr(coverage, "complete", False)
-                    and d0.missing_fact and d1.missing_fact):
-                eliminated[cand.code] = (
-                    f"both independent evaluators judged {cand.code}'s own official "
-                    f"descriptor (identity {d0.descriptor_sha256[:12]}...) not "
-                    f"documented (missing: {d0.missing_fact!r}), against a complete, "
-                    f"independently-read search of the whole document")
-            else:
-                system_unresolved[cand.code] = (
-                    f"both evaluators judged {cand.code} not_documented, but this "
-                    f"could not be validated against a complete, independently-read "
-                    f"whole-document search")
-        elif status == "entailed":
-            # issue #6, Codex's independent re-review (F9-R21-A): a bare
-            # "entailed" claim from both evaluators is not, by itself,
-            # positive support -- exactly the same evidentiary bar
-            # `contradicted`/`different_concept` already clear above.
-            # Without this, two unvalidated model assertions (no cited
-            # span, or a span never reconciled to the target event) reached
-            # `remaining` and could release as `verified_entailment` with
-            # zero source-grounded evidence -- reproduced directly by
-            # Codex's independent exact-SHA synthetic test. Missing/
-            # unvalidated evidence here is a SYSTEM gap, never proof either
-            # way.
-            if not (_spans_validated(d0) and _spans_validated(d1)):
-                system_unresolved[cand.code] = (
-                    f"both evaluators judged {cand.code} entailed, but positive "
-                    f"support lacks reconciled target-event evidence on both sides")
-                continue
+        # issue #6, Codex's independent re-review (F9-R23 root finding 2):
+        # each evaluator's raw status is normalized to its OWN validated
+        # billing-disposition CLASS -- supported, rejected, or unresolved --
+        # before the two evaluators are compared, rather than comparing raw
+        # status strings for exact equality. Before this, `contradicted` on
+        # one side and `different_concept` on the other -- both a validated
+        # REJECTION of the candidate, just naming a different sub-reason --
+        # was read as "the evaluators disagreed" and fell to
+        # `system_unresolved`, even though both evaluators, independently
+        # and with source-confirmed evidence, rejected the same candidate.
+        # Reproduced repeatedly on the designated note. The finer sub-reason
+        # (which raw status each evaluator actually gave) is retained in the
+        # audit message; only the SELECTION-relevant class is compared.
+        d0_class = _validated_disposition_class(d0, cand, coverage, _spans_validated)
+        d1_class = _validated_disposition_class(d1, cand, coverage, _spans_validated)
+        if d0_class == "rejected" and d1_class == "rejected":
+            eliminated[cand.code] = (
+                f"both independent evaluators, on {cand.code}'s own official "
+                f"descriptor (identity {d0.descriptor_sha256[:12]}...), independently "
+                f"rejected it with source-confirmed evidence (raw verdicts: "
+                f"{d0.status!r}; {d1.status!r})")
+            continue
+        if d0_class == "supported" and d1_class == "supported":
             # issue #6, Codex's independent re-review (F9-R19-A Finding 1/2):
             # positive disposition support is necessary but not sufficient --
             # this candidate's OWN VIABILITY/EXCLUSION contract must also not
@@ -2307,11 +2284,49 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
                 eliminated[cand.code] = grounded[1]
             else:
                 remaining.append(cand)
-        else:
-            system_unresolved[cand.code] = (
-                f"{cand.code}'s disposition status {status!r} is not a recognized "
-                f"evaluator verdict")
+            continue
+        if d0_class == "unresolved" and d1_class == "unresolved" and d0.status == d1.status:
+            reason = (f"both evaluators judged {cand.code} {d0.status!r}, but the "
+                     f"verdict lacks source-confirmed, reconciled evidence on both "
+                     f"sides" if d0.status != "not_documented" else
+                     f"both evaluators judged {cand.code} not_documented, but this "
+                     f"could not be validated against a complete, independently-read "
+                     f"whole-document search")
+            system_unresolved[cand.code] = reason
+            continue
+        system_unresolved[cand.code] = (
+            f"independent evaluators disagreed on {cand.code}'s disposition "
+            f"({d0.status!r} vs {d1.status!r})")
     return remaining, eliminated, system_unresolved
+
+
+def _validated_disposition_class(d, cand: CandidateCode, coverage, spans_validated) -> str:
+    """This ONE evaluator's disposition, normalized to the SELECTION-
+    relevant class it validly establishes -- "supported", "rejected", or
+    "unresolved" -- independent of the raw status string (issue #6, Codex's
+    independent re-review, F9-R23 root finding 2). `spans_validated` is the
+    caller's own closure (already bound to `fact`/`reconciliation`), so
+    this function stays free of the identity/evidence-lookup plumbing --
+    the identity check itself is the caller's job: it must fire before
+    either side's status is even read, so it stays a single shared check,
+    not duplicated per side.
+
+    "supported": an "entailed" verdict citing at least one target-event
+    span reconciled AGREED and genuinely content-related to `cand` (F9-R23
+    clarification "Gate A").
+    "rejected": a "contradicted"/"different_concept" verdict citing at
+    least one such span, OR a "not_documented" verdict backed by complete
+    whole-document coverage and a named `missing_fact`.
+    "unresolved": anything short of that, including an unrecognized status
+    string."""
+    if d.status == "entailed":
+        return "supported" if spans_validated(d, cand) else "unresolved"
+    if d.status in ("contradicted", "different_concept"):
+        return "rejected" if spans_validated(d, cand) else "unresolved"
+    if d.status == "not_documented":
+        complete = coverage is not None and getattr(coverage, "complete", False)
+        return "rejected" if complete and d.missing_fact else "unresolved"
+    return "unresolved"
 
 
 #: issue #6, Codex's independent re-review (F9-R13-C): these two axes are
@@ -2394,6 +2409,189 @@ def _exact_direct_code_term_signal(fact: ClinicalFact, candidates: list[Candidat
         if code in codes:
             out.setdefault(code, []).append(dict(atom))
     return out
+
+
+# ---- pre-verification candidate admission (issue #6, Codex's independent re-review, ------
+# F9-R23 Root Finding 1 / the Gate A-B clarification): "broad retrieval supplies recall;
+# positive evidence supplies standing; complete candidate requirements authorize selection."
+# A candidate reaching `select_entailed`/`corroborate` at all used to require nothing more
+# than surviving the pool-construction/role/kind/separately-billable filters above -- a bare
+# RAG or UMLS recall hit, or an LLM's own unconfirmed proposal, could still contest
+# uniqueness on equal footing with a candidate the record's own words directly named. This
+# decides EVERY candidate's admission standing before either evaluator is ever asked,
+# reusing only EXISTING, already-authoritative signals -- never a new taxonomy, never a
+# code/term list.
+class CandidateStanding(str, Enum):
+    SUPPORTED = "supported"       #: may enter the decisive shortlist and contest uniqueness
+    CONTRADICTED = "contradicted"  #: audited as excluded; can never contest
+    UNGROUNDED = "ungrounded"     #: recall-only; can never contest, tie, or ask a question
+
+
+@dataclass(frozen=True)
+class CandidateAdmission:
+    """One candidate's full pre-verification admission record."""
+    candidate_key: tuple[str, str]
+    standing: CandidateStanding
+    positive_axes: tuple[str, ...]
+    contradicted_axes: tuple[str, ...]
+    unresolved_axes: tuple[str, ...]
+    evidence_span_ids: tuple[str, ...]
+    descriptor_snapshot: dict
+    source_lineage: tuple[str, ...]
+    reason: str = ""
+
+    def as_record(self) -> dict:
+        return {"candidate_key": list(self.candidate_key), "standing": self.standing.value,
+                "positive_axes": list(self.positive_axes),
+                "contradicted_axes": list(self.contradicted_axes),
+                "unresolved_axes": list(self.unresolved_axes),
+                "evidence_span_ids": list(self.evidence_span_ids),
+                "descriptor_snapshot": dict(self.descriptor_snapshot),
+                "source_lineage": list(self.source_lineage), "reason": self.reason}
+
+
+def candidate_admission(fact: ClinicalFact, candidate: CandidateCode,
+                        requirements: tuple, source: CodeSource, reconciliation,
+                        coverage: "_requirement.CoverageCorpus | None" = None,
+                        dos: str | None = None) -> CandidateAdmission:
+    """One candidate's pre-verification admission standing.
+
+    CONTRADICTED first, unconditionally: `semantic_eligibility.
+    _service_role_control`/`_candidate_kind_control` -- the SAME
+    authoritative role/kind compatibility controls already applied as a
+    candidate-pool pre-filter elsewhere -- run again here, per-candidate,
+    so a role/kind conflict disqualifies before any requirement is even
+    read.
+
+    Otherwise: every compiled `DescriptorRequirement` targeting this
+    candidate is judged by the SAME judgement-independent status function
+    the disposition/elimination layers already trust for it --
+    `requirement.semantic_axis_status` (concept-equivalence, for
+    `semantic_action`/`semantic_qualifier`) or `requirement.
+    deterministic_status` (a real, independently-read search of the
+    document) for every other axis -- never re-derived here, never an
+    evaluator's own self-report. A CONTRADICTED axis disqualifies
+    outright. Otherwise, standing is SUPPORTED when some POSITIVE IDENTITY
+    signal exists: a compiled axis genuinely SUPPORTED; the record's own
+    words literally being this candidate's official atom wording
+    (`AuthoritativeSource.exact_direct_code_term`, elevated here from its
+    prior audit-only role to one input among several -- never sole
+    authorization on its own); the model naming this code directly and
+    having it validated against the real authoritative registry
+    (`source="llm-proposed-validated"`); a UMLS CUI/atom lineage hit
+    (`source="umls_recall"`, tracked through `_merge_candidate`'s
+    namespaced `authority["sources"]` even after a pool merge); or the
+    candidate's own descriptor sharing genuine discriminating vocabulary
+    with the fact's own description. A candidate with none of these is
+    UNGROUNDED: recall supplied it, nothing has yet supplied standing for
+    it. An unresolved `MUST_SUPPORT` axis is recorded (`unresolved_axes`)
+    but does not by itself withhold standing -- its own resolution,
+    including a valid NOT_DOCUMENTED elimination, is the downstream
+    disposition/elimination machinery's job, not a pre-verification
+    exclusion."""
+    from . import requirement as _requirement
+    from . import semantic_eligibility as _semelig
+    key = (candidate.code, candidate.system)
+    role = _semelig._service_role_control([fact], [candidate], source, reconciliation, dos)
+    role_decision = role.get(key)
+    if role_decision is not None and role_decision.excluded:
+        return CandidateAdmission(
+            key, CandidateStanding.CONTRADICTED, (), ("service_role",), (), (),
+            {"code": candidate.code, "descriptor": candidate.descriptor},
+            (candidate.source,),
+            reason=(f"candidate's authoritative classification "
+                   f"{role_decision.candidate_role!r} is incompatible with the fact's "
+                   f"own documented service_role {role_decision.fact_roles[0]!r}"
+                   if role_decision.fact_roles else
+                   f"candidate's authoritative classification "
+                   f"{role_decision.candidate_role!r} is incompatible with the fact's "
+                   f"own documented service_role"))
+    kind_blocked = _semelig._candidate_kind_control([fact], [candidate], source, dos)
+    if key in kind_blocked:
+        return CandidateAdmission(
+            key, CandidateStanding.CONTRADICTED, (), ("candidate_kind",), (), (),
+            {"code": candidate.code, "descriptor": candidate.descriptor},
+            (candidate.source,), reason=kind_blocked[key])
+
+    positive: set[str] = set()
+    contradicted: set[str] = set()
+    unresolved: set[str] = set()
+    own_requirements = tuple(r for r in requirements if r.candidate_code == candidate.code)
+    for req in own_requirements:
+        status = (_requirement.semantic_axis_status(req, fact, reconciliation, source)
+                 if req.axis in _SEMANTIC_AXES
+                 else _requirement.deterministic_status(req, coverage))
+        if status is _requirement.RequirementStatus.SUPPORTED:
+            positive.add(req.axis)
+        elif status is _requirement.RequirementStatus.CONTRADICTED:
+            contradicted.add(req.axis)
+        elif req.role is _requirement.RequirementRole.MUST_SUPPORT:
+            unresolved.add(req.axis)
+
+    direct_hits = _exact_direct_code_term_signal(fact, [candidate], source)
+    if direct_hits.get(candidate.code):
+        positive.add("direct_term")
+    if candidate.source == "llm-proposed-validated":
+        positive.add("authoritative_index")
+    if (candidate.source == "umls_recall"
+            or "umls_recall" in (candidate.authority or {}).get("sources", ())):
+        positive.add("umls_cui")
+    # issue #6, Codex's independent re-review (F9-R23 Root Finding 1): a
+    # FIFTH identity signal, in the same spirit as the four named ones --
+    # the candidate's OWN authoritative descriptor shares genuine,
+    # discriminating vocabulary with the fact's own documented description
+    # (the SAME content-relatedness bar `verify._span_relates_to_candidate`
+    # already holds a cited EVIDENCE SPAN to for Gate A, applied here
+    # between the candidate's descriptor and the fact description itself).
+    # Without this, a shortlist with no COMPILED requirement at all (no
+    # sibling candidate to discriminate against -- the ordinary case for a
+    # single, genuinely well-matched candidate) had no way to ever earn
+    # identity, which would have silently converted "nothing to
+    # discriminate on" into "nothing has standing", breaking the
+    # foundational propose-then-verify design (`verify.py`'s own module
+    # docstring: recall widens the pool, authoritative descriptor
+    # entailment is truth). This signal is exactly what still correctly
+    # EXCLUDES a topically unrelated recall hit (Root Finding 1's own named
+    # reproduction: quality-measure/catheter/imaging/telehealth/prosthetic
+    # candidates sharing no real vocabulary with a documented SUPPLY fact)
+    # while admitting a genuinely on-topic candidate to the verifier that
+    # decides its actual entailment.
+    fact_terms = _tiebreak._descriptor_tokens(str(getattr(fact, "description", "") or ""))
+    cand_terms = _tiebreak._descriptor_tokens(candidate.descriptor)
+    if fact_terms & cand_terms:
+        positive.add("descriptor_topic_match")
+
+    # issue #6, Codex's independent re-review (F9-R23 Root Finding 1): an
+    # unresolved MUST_SUPPORT axis is recorded (`unresolved_axes`, for
+    # audit) but deliberately does NOT, by itself, withhold standing here.
+    # That axis's own resolution -- including the case where BOTH
+    # evaluators independently confirm genuine, complete-coverage
+    # NOT_DOCUMENTED and it validly grounds an elimination -- is exactly
+    # what the EXISTING, already-correct `resolution._grounded_elimination`/
+    # disposition machinery downstream exists to decide, via the
+    # evaluators' own STRUCTURED judgement (never a bare deterministic
+    # text search standing in for it). Gating pre-verification standing on
+    # it here would short-circuit that mechanism before the verifier ever
+    # gets a chance to confirm or contradict it -- an axis genuinely
+    # undocumented on BOTH sides of a laterality-style split is a real,
+    # already-tested elimination path, not a reason to withhold every
+    # candidate from verification entirely.
+    if contradicted:
+        standing = CandidateStanding.CONTRADICTED
+        reason = (f"the documentation positively contradicts this candidate's own "
+                 f"required axis/axes: {', '.join(sorted(contradicted))}")
+    elif positive:
+        standing = CandidateStanding.SUPPORTED
+        reason = f"positive identity/axis evidence: {', '.join(sorted(positive))}"
+    else:
+        standing = CandidateStanding.UNGROUNDED
+        reason = ("retrieval/proposal alone -- no positive identity signal and no "
+                 "independently documented axis of its own")
+    return CandidateAdmission(
+        key, standing, tuple(sorted(positive)), tuple(sorted(contradicted)),
+        tuple(sorted(unresolved)), (),
+        {"code": candidate.code, "descriptor": candidate.descriptor}, (candidate.source,),
+        reason=reason)
 
 
 def _system_unresolved_line(fact: ClinicalFact, shortlist: list[CandidateCode],
@@ -2819,6 +3017,76 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
     # entries whose candidate is in the option list actually passed).
     from . import requirement as _requirement
     requirements = _requirement.compile_requirements(shortlist, source)
+    # issue #6, Codex's independent re-review (F9-R23 Root Finding 1 / Gate
+    # A-B clarification): decide EVERY candidate's pre-verification
+    # admission standing before either evaluator is ever asked -- "broad
+    # retrieval supplies recall; positive evidence supplies standing;
+    # complete candidate requirements authorize selection." A CONTRADICTED
+    # candidate (role/kind incompatible, or a compiled requirement the
+    # record positively contradicts) is excluded outright here, never
+    # shown to a verifier -- the same, already-established pre-filter
+    # pattern `_service_role_control`/`_candidate_kind_control`/
+    # `separately_billable` already apply earlier in this same function.
+    #
+    # An UNGROUNDED candidate (recall/proposal alone, no positive identity
+    # signal) is deliberately NOT ALSO removed from the shortlist shown to
+    # the verifiers here -- doing so changes the shortlist's own SIZE,
+    # which changes whether the verifiers and `tiebreak.narrow` see a
+    # genuine TIE to force axis discovery against, and independently
+    # reproduced a regression: removing an ungrounded sibling let the one
+    # remaining candidate release on an axis that was STILL genuinely
+    # unresolved for it too, because a single-candidate shortlist no
+    # longer forced that axis to be discovered and checked. Standing is
+    # instead enforced the SAME way `verify._agreed_citable_spans`/Gate A
+    # already enforces disposition-level evidence: on the WINNING
+    # candidate, after the fact -- see `_propose_then_verify_core`'s
+    # thin wrapper below, which converts a release onto an UNGROUNDED
+    # `chosen` into a system-hold rather than ever returning it.
+    admissions = {c.code: candidate_admission(fact, c, requirements, source,
+                                              reconciliation, coverage, dos)
+                 for c in shortlist}
+    # issue #6, Codex's independent re-review (F9-R23 Root Finding 1): the
+    # pre-verification pool filter is deliberately NARROWER than
+    # `CandidateStanding.CONTRADICTED` itself -- only a role/kind
+    # incompatibility (the SAME two categorical exclusions
+    # `_service_role_control`/`_candidate_kind_control` already apply
+    # elsewhere in this function, unrelated to this round's change and
+    # already proven safe) removes a candidate from the shortlist shown to
+    # the verifiers. A CONTRADICTED compiled-REQUIREMENT axis (e.g.
+    # laterality) stays visible in `admissions` for audit, but is left for
+    # the EXISTING, already-tested `_grounded_elimination`/disposition
+    # machinery to act on post-verification -- independently reproduced:
+    # removing a requirement-contradicted sibling pre-verification changed
+    # the remaining candidate's shortlist from a genuine TIE to a solo
+    # entry, which stopped `tiebreak.narrow`/the verifiers from ever being
+    # forced to discover and check that SAME axis for the survivor too.
+    _categorical_axes = frozenset({"service_role", "candidate_kind"})
+    verifiable = [c for c in shortlist
+                 if not (admissions[c.code].standing is CandidateStanding.CONTRADICTED
+                        and set(admissions[c.code].contradicted_axes) & _categorical_axes)]
+
+    def _with_admissions(line: ResolvedLine) -> ResolvedLine:
+        if line.tie_record is None:
+            return line
+        return _dc_replace(line, tie_record={
+            **line.tie_record,
+            "candidate_admissions": {code: a.as_record() for code, a in admissions.items()}})
+
+    if not verifiable:
+        contradicted_admissions = {code: a.reason for code, a in admissions.items()
+                                   if a.standing is CandidateStanding.CONTRADICTED}
+        record = {"stage": "candidate_admission",
+                 "shortlist": [c.code for c in shortlist],
+                 "admissions": {code: a.as_record() for code, a in admissions.items()}}
+        # Every candidate was positively, validly disqualified -- nothing
+        # is left standing to ask a provider or a coder about either; this
+        # documented event has no defensible candidate in this pool.
+        return ResolvedLine(
+            fact=fact, chosen=None, alternatives=shortlist[:5],
+            method=ResolutionMethod.ABSTAINED, tie_record=record,
+            rationale=(f"no candidate in this pool has positive standing -- every "
+                      f"candidate was positively disqualified: "
+                      f"{'; '.join(f'{c} ({r})' for c, r in sorted(contradicted_admissions.items()))}"))
     # issue #6, Codex's independent re-review (F9-R18-A, reopened P1): clinical-
     # attribute axis-conflict enforcement is no longer branch-local here -- a
     # check confined to this one propose-then-verify path could never see the
@@ -2839,7 +3107,7 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                              for c in unsupported}
     last_reason = ""
     for _ in range(1 + MAX_RESELECT):
-        cands = [c for c in shortlist if c.code not in tried]
+        cands = [c for c in verifiable if c.code not in tried]
         if not cands:
             break
         primary = _verify.select_entailed(fact, cands, source, llm, requirements,
@@ -2849,10 +3117,10 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
             # Tie policy step 5: nothing was entailed, so the useful output is WHICH
             # documented fact would settle it -- a targeted provider query naming the
             # candidates' own discriminating axes, never a generic coder queue.
-            return _tie_escalation(
-                fact, shortlist, reconciliation,
+            return _with_admissions(_tie_escalation(
+                fact, verifiable, reconciliation,
                 "no candidate's authoritative descriptor is fully entailed by the "
-                "documentation (verified)", requirements=requirements)
+                "documentation (verified)", requirements=requirements))
         chosen_match = _evaluate(fact, chosen, source, reconciliation)
         if chosen_match is None:
             return ResolvedLine(
@@ -2900,10 +3168,11 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
             # makes it DEFENSIBLE, not UNIQUE -- which is the whole finding -- so release
             # only if nothing else on the shortlist survived, and otherwise settle it
             # against the original document through the same tie policy.
-            return _settle_uniqueness(fact, chosen, shortlist, judgements,
-                                      {**constraint_eliminated, **tried}, why,
-                                      corroboration, reconciliation, requirements,
-                                      coverage, source)
+            return _with_admissions(_settle_uniqueness(
+                fact, chosen, verifiable, judgements,
+                {**constraint_eliminated, **tried}, why,
+                corroboration, reconciliation, requirements,
+                coverage, source))
         if missing:
             # The code is the right KIND of service but its descriptor requires an
             # element the note does not state. Re-selecting a code that omits the
@@ -2927,11 +3196,11 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
     # The question is asked about the candidates that were actually SELECTED AND
     # REJECTED, not about the whole shortlist: the directive asks for ONE targeted
     # query, and a question naming every code retrieval happened to return is not one.
-    contested = [c for c in shortlist if c.code in tried] or shortlist
-    return _tie_escalation(
+    contested = [c for c in verifiable if c.code in tried] or verifiable
+    return _with_admissions(_tie_escalation(
         fact, contested, reconciliation,
         f"independent second-model verification confirmed no candidate after "
-        f"re-selection ({last_reason})", requirements=requirements)
+        f"re-selection ({last_reason})", requirements=requirements))
 
 
 def _bounded_interval_hold(fact: ClinicalFact,

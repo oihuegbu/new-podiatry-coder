@@ -216,14 +216,35 @@ def decide(result: CodingResult,
     for g in result.gates:
         if g.outcome is Outcome.UNKNOWN:
             scoped = bool(g.affected_fact_ids)
+            # issue #6, Codex's independent re-review (F9-R23 system-hold
+            # audit addendum): scoping a gate must never silently convert
+            # "the ONLY thing in this encounter is stuck behind a
+            # retryable/judgement gap" into a bare NON_BILLABLE/EXCLUDED
+            # disposal (`Destination.HOLD`, via the `_all_disposed`
+            # catch-all below, once every line's own `excluded_reason` is
+            # set). Reproduced live: a single-fact encounter whose only
+            # fact had a correctly-SCOPED, retryable `eligibility_intent`
+            # gate silently fell through to a generic HOLD instead of
+            # SYSTEM_HOLD, because scoping made the gate non-blocking with
+            # nothing else in the encounter left to protect. When NOTHING
+            # else is already independently billable, this gate IS the
+            # whole encounter's material content and must stay blocking --
+            # exactly the same reasoning section 3's own unresolved-fact
+            # scoping below already applies, for the identical reason.
+            _affected = set(g.affected_fact_ids)
+            _other_billable = any(
+                ln.resolved and ln.fact.billable and not ln.excluded_reason
+                and ln.fact.fact_id not in _affected
+                for ln in result.lines)
+            _gate_blocks = not scoped or not _other_billable
             if g.retryable:
                 route(Destination.SYSTEM_HOLD, g.name,
                       f"authority unavailable ({g.detail}) — retry, do not send to a coder",
-                      blocking=not scoped)
+                      blocking=_gate_blocks)
             else:
                 route(Destination.REVIEW, g.name,
                       f"unverifiable, needs coding/clinical judgement ({g.detail})",
-                      blocking=not scoped)
+                      blocking=_gate_blocks)
 
     # issue #6 F9-R8-A: dependency-scoped partial release. An unresolved fact, or
     # a gate-named procedure, blocks ONLY the facts it can actually affect --

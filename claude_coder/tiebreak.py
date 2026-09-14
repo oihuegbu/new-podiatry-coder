@@ -476,9 +476,17 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
             provable=True, selectable=False, queryable=False))
 
     if any(excl.values()):
+        # issue #6, Codex's independent re-review (F9-R23 root finding 3):
+        # `queryable=True` let a gate-only exclusion clause leak into a
+        # provider question asking the provider to "document" a fact the
+        # note ALREADY states (that is exactly what makes it eligible to
+        # eliminate a sibling candidate in the first place) -- reproduced
+        # live on the designated note. `AXIS_EXCLUSION_CLAUSE` is a member
+        # of `_GATE_ONLY_AXES`: it can eliminate an inapplicable candidate,
+        # it can never become a provider-answerable open question.
         probes.append(AxisProbe(
             AXIS_EXCLUSION_CLAUSE, excl,
-            provable=True, selectable=False, queryable=True))
+            provable=True, selectable=False, queryable=False))
 
     if qualified:
         full = {c.code: qualified.get(c.code, ()) for c in candidates}
@@ -618,7 +626,12 @@ def provider_query(fact, axes: tuple[AxisProbe, ...]) -> str:
     retrieval's own leftover vocabulary."""
     named = []
     for probe in axes:
-        if not probe.queryable:
+        # issue #6, Codex's independent re-review (F9-R23 root finding 3):
+        # a second, independent defense against a gate-only axis reaching a
+        # provider question -- never trust `queryable` alone to have been
+        # set correctly at every construction site; a gate-only axis is
+        # refused here even if it were.
+        if probe.axis in _GATE_ONLY_AXES or not probe.queryable:
             continue
         options = sorted({" ".join(terms) for terms in probe.terms_by_code.values()
                           if terms})

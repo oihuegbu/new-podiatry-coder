@@ -1,15 +1,18 @@
-"""issue #6, Codex's independent re-review (F9-R22-A): the candidate-
-disposition citation contract is now schema-enforced (`SHORTLIST_JUDGEMENT_
-SCHEMA`) and, when an answer's `candidate_dispositions` still fail the
-citation bar (a missing entry, an uncited entailed/contradicted/
-different_concept disposition, an unnamed not_documented `missing_fact`),
-`verify.select_entailed`/`corroborate` make ONE bounded same-evaluator
-repair call before falling back to dropping just the defective candidate(s).
-`_agreed_citable_spans` is the shared bar itself: a cited span counts only
-when it is BOTH genuine target-event evidence for the fact AND reconciled
-AGREED -- never VACUOUS (punctuation/whitespace cannot substantively
-support a disposition), never a span reconciled elsewhere in the document
-but irrelevant to this fact.
+"""issue #6, Codex's independent re-review (F9-R22-A, hardened by the
+F9-R23 clarification "Gate A"): the candidate-disposition citation contract
+is now schema-enforced (`SHORTLIST_JUDGEMENT_SCHEMA`) and, when an answer's
+`candidate_dispositions` still fail the citation bar (a missing entry, an
+uncited entailed/contradicted/different_concept disposition, an unnamed
+not_documented `missing_fact`, or a cited span with no genuine content
+relationship to the candidate), `verify.select_entailed`/`corroborate` make
+ONE bounded same-evaluator repair call before falling back to dropping just
+the defective candidate(s). `_agreed_citable_spans` is the shared bar
+itself: a cited span counts only when it is genuine target-event evidence
+for the fact, reconciled AGREED -- never VACUOUS (punctuation/whitespace
+cannot substantively support a disposition), never a span reconciled
+elsewhere in the document but irrelevant to this fact -- AND genuinely
+content-related to the candidate it is cited for (never a real, anchored,
+AGREED span that simply talks about something else).
 
 Synthetic facts/codes throughout.
 """
@@ -22,15 +25,16 @@ from claude_coder import verify
 from claude_coder.models import CandidateCode, ClinicalFact, EvidenceSpan, FactKind
 
 
-def _fact(fact_id="F1"):
-    return ClinicalFact(kind=FactKind.PROCEDURE, description="assembly service",
+def _fact(fact_id="F1", description="assembly service",
+         span_text="assembly performed", span_id="s1"):
+    return ClinicalFact(kind=FactKind.PROCEDURE, description=description,
                         confidence=0.9, fact_id=fact_id,
-                        evidence=[EvidenceSpan("assembly performed", anchored=True,
-                                               span_id="s1")])
+                        evidence=[EvidenceSpan(span_text, anchored=True, span_id=span_id)])
 
 
-def _cand(code):
-    return CandidateCode(code=code, system="cpt", descriptor=f"{code} official descriptor",
+def _cand(code, descriptor=None):
+    return CandidateCode(code=code, system="cpt",
+                         descriptor=descriptor or f"{code} assembly descriptor",
                          score=0.9, source="retrieval")
 
 
@@ -70,27 +74,46 @@ class AgreedCitableSpansTest(unittest.TestCase):
 
     def test_a_genuinely_agreed_citable_span_counts(self):
         fact = _fact()
+        cand = _cand("ALPHA")
         reconciliation = _reconciliation({"s1": "AGREED"})
-        self.assertEqual(verify._agreed_citable_spans(("s1",), fact, reconciliation), ("s1",))
+        self.assertEqual(
+            verify._agreed_citable_spans(("s1",), fact, cand, reconciliation), ("s1",))
 
     def test_an_irrelevant_agreed_span_does_not_count(self):
         """A span reconciled AGREED elsewhere in the document, but that is
         not this fact's own target-event evidence, must not count."""
         fact = _fact()
+        cand = _cand("ALPHA")
         reconciliation = _reconciliation({"s-unrelated": "AGREED"})
         self.assertEqual(
-            verify._agreed_citable_spans(("s-unrelated",), fact, reconciliation), ())
+            verify._agreed_citable_spans(("s-unrelated",), fact, cand, reconciliation), ())
 
     def test_a_vacuous_span_does_not_count(self):
         """Punctuation/whitespace cannot substantively support a disposition
         -- VACUOUS is never enough, even for the fact's own real span."""
         fact = _fact()
+        cand = _cand("ALPHA")
         reconciliation = _reconciliation({"s1": "VACUOUS"})
-        self.assertEqual(verify._agreed_citable_spans(("s1",), fact, reconciliation), ())
+        self.assertEqual(verify._agreed_citable_spans(("s1",), fact, cand, reconciliation), ())
 
     def test_no_reconciliation_means_nothing_counts(self):
         fact = _fact()
-        self.assertEqual(verify._agreed_citable_spans(("s1",), fact, None), ())
+        cand = _cand("ALPHA")
+        self.assertEqual(verify._agreed_citable_spans(("s1",), fact, cand, None), ())
+
+    def test_an_attached_but_semantically_unrelated_span_does_not_count(self):
+        """issue #6, Codex's independent re-review (F9-R23 clarification,
+        "Gate A"): the mandatory regression. A span that IS the fact's own,
+        genuinely anchored, reconciled AGREED evidence -- so it clears
+        every location/membership/status check -- must still fail to
+        validate a disposition when its own TEXT shares nothing with
+        either the candidate's descriptor or the fact's description.
+        Location/reconciliation proof is not content proof."""
+        fact = _fact(description="assembly service",
+                     span_text="patient reports no known drug allergies")
+        cand = _cand("ALPHA", descriptor="ALPHA assembly descriptor")
+        reconciliation = _reconciliation({"s1": "AGREED"})
+        self.assertEqual(verify._agreed_citable_spans(("s1",), fact, cand, reconciliation), ())
 
 
 class ValidateJudgementContractTest(unittest.TestCase):
@@ -166,10 +189,15 @@ class RepairLoopTest(unittest.TestCase):
                                reconciliation=reconciliation)
         self.assertEqual(len(llm.calls), 1)
 
-    def test_failed_repair_drops_only_the_affected_candidate(self):
+    def test_failed_repair_leaves_only_the_affected_candidate_unvalidated(self):
         """The required regression: a failed repair holds only the one
         candidate that never cleared the citation bar -- a sibling
-        candidate's own, already-valid disposition is untouched."""
+        candidate's own, already-valid disposition is untouched. The
+        still-defective disposition is NOT silently dropped (that would
+        make this judgement look like it never addressed ALPHA at all,
+        deferring `_candidate_disposition_uniqueness` for the WHOLE
+        shortlist back to the weaker legacy path) -- it stays present, but
+        genuinely fails to validate."""
         alpha, beta = _cand("ALPHA"), _cand("BETA")
         fact = _fact()
         reconciliation = _reconciliation({"s1": "AGREED"})
@@ -187,10 +215,16 @@ class RepairLoopTest(unittest.TestCase):
         j = verify.select_entailed(fact, [alpha, beta], None, llm,
                                    reconciliation=reconciliation)
 
-        codes = {d.candidate_code for d in j.candidate_dispositions}
-        self.assertNotIn("ALPHA", codes,
-                         "still-defective disposition dropped after the one bounded repair")
-        self.assertIn("BETA", codes, "BETA's own already-valid disposition survives untouched")
+        by_code = {d.candidate_code: d for d in j.candidate_dispositions}
+        self.assertIn("ALPHA", by_code, "still answered for, just not validly")
+        self.assertEqual(
+            verify._agreed_citable_spans(by_code["ALPHA"].evidence_span_ids, fact, alpha,
+                                         reconciliation), (),
+            "ALPHA's citation never cleared the bar, even after repair")
+        self.assertEqual(
+            verify._agreed_citable_spans(by_code["BETA"].evidence_span_ids, fact, beta,
+                                         reconciliation), ("s1",),
+            "BETA's own already-valid disposition is untouched")
 
     def test_evaluator_origin_survives_repair(self):
         cand = _cand("ALPHA")
@@ -219,6 +253,54 @@ class RepairLoopTest(unittest.TestCase):
         verify.select_entailed(fact, [cand], None, llm, force_disposition=True,
                                reconciliation=None)
         self.assertEqual(len(llm.calls), 1)
+
+
+class GateAEndToEndTest(unittest.TestCase):
+    """issue #6, Codex's independent re-review (F9-R23 clarification, "Gate
+    A"): the full mandatory regression, end to end through
+    `resolution._candidate_disposition_uniqueness` -- both evaluators
+    return STRUCTURALLY PERFECT, independently corroborated JSON (correct
+    schema, correct descriptor hash, a real, anchored, reconciled AGREED
+    span), and that span is still semantically unrelated to the candidate.
+    Expected: no SUPPORTED standing, no selected code -- and this is a
+    SYSTEM gap (`system_unresolved`), never a positive elimination and
+    never grounds for a provider question, since the record was never
+    actually read as saying anything against the candidate either."""
+
+    def test_a_structurally_perfect_but_semantically_irrelevant_citation_never_releases(self):
+        from claude_coder import resolution as res
+
+        cand = _cand("ALPHA", descriptor="ALPHA assembly descriptor")
+        fact = _fact(description="assembly service",
+                     span_text="patient reports no known drug allergies")
+        reconciliation = _reconciliation({"s1": "AGREED"})
+        digest = verify._descriptor_sha256(cand)
+        # Both evaluators independently cite the SAME real, anchored, AGREED
+        # span for this fact -- structurally flawless, just semantically
+        # unrelated to the candidate.
+        ans = _answer(1, [_disposition(1, "entailed", digest, ["e1"])])
+        # Two answers each: the repair attempt reasserts the same (still
+        # unrelated) citation -- repair cannot manufacture a relationship
+        # the source text does not have.
+        llm0 = ScriptedLLM([ans, ans])
+        llm1 = ScriptedLLM([ans, ans])
+
+        j0 = verify.select_entailed(fact, [cand], None, llm0, force_disposition=True,
+                                    reconciliation=reconciliation)
+        j1 = verify.corroborate(fact, [cand], None, llm1, force_disposition=True,
+                                reconciliation=reconciliation)
+
+        # Neither evaluator's own repair loop found a fix -- the span itself
+        # never relates to the candidate, so repair cannot manufacture one.
+        self.assertEqual(len(llm0.calls), 2, "the unrelated citation triggers one bounded "
+                                             "repair attempt, which cannot fix it")
+
+        remaining, eliminated, system_unresolved = res._candidate_disposition_uniqueness(
+            [cand], cand, [j0, j1], reconciliation, None, fact=fact)
+        self.assertNotIn(cand, remaining, "no code releases on an irrelevant citation")
+        self.assertEqual(eliminated, {}, "an unrelated citation disproves nothing -- it is "
+                                         "a system evidence gap, not a validated rejection")
+        self.assertIn("ALPHA", system_unresolved)
 
 
 if __name__ == "__main__":

@@ -316,6 +316,41 @@ class AutonomousCoderTest(unittest.TestCase):
         self.assertEqual(r.verdict, Verdict.AUTO_READY)
         self.assertEqual([ln.chosen.code for ln in r.billable_lines], ["DX_ALPHA_RIGHT"])
 
+    def test_a_missing_eligibility_intent_holds_only_its_own_fact(self):
+        """issue #6, Codex's independent re-review (F9-R23 system-hold audit
+        addendum): the `eligibility_intent:<fact_id>` gate omitted
+        `affected_fact_ids`, and `autonomy.decide` explicitly reads an empty
+        scope as encounter-wide -- a single fact with no produced
+        eligibility intent held the WHOLE encounter, even when a different,
+        independently-supported fact had nothing to do with it. F1
+        (procedure) is made to have NO eligibility intent at all; F2
+        (diagnosis) must still resolve and release, and F1's own hold must
+        be a scoped, retryable SYSTEM_HOLD -- never a provider question or
+        a coder review item."""
+        from unittest.mock import patch
+        from claude_coder import eligibility as _elig
+        from claude_coder.models import Destination
+
+        real_evaluate = _elig.evaluate
+
+        def _drop_f1_intent(facts, relations, encounter_id, date_of_service, source=None):
+            intents = real_evaluate(facts, relations, encounter_id, date_of_service,
+                                    source=source)
+            return [it for it in intents if "F1" not in it.clinical_event_ids]
+
+        with patch("claude_coder.eligibility.evaluate", side_effect=_drop_f1_intent):
+            r = self._run()
+
+        self.assertEqual([ln.chosen.code for ln in r.billable_lines], ["DX_ALPHA_RIGHT"],
+                         "F2's own resolution is independent of F1's missing intent")
+        gate = next(g for g in r.gates if g.name == "eligibility_intent:F1")
+        self.assertEqual(gate.affected_fact_ids, ("F1",))
+        item = next(rt for rt in r.routing if rt["subject"] == "eligibility_intent:F1")
+        self.assertEqual(item["destination"], Destination.SYSTEM_HOLD.value)
+        self.assertNotEqual(r.destination, Destination.BLOCKED,
+                            "a scoped, fact-local integrity gap must never hard-stop the "
+                            "whole encounter")
+
     def test_missing_dos_blocks_release(self):
         r = self._run(dos=None)
         dos = next(g for g in r.gates if g.name == "date_of_service")
@@ -2646,6 +2681,98 @@ class CandidateKindControlTest(unittest.TestCase):
         candidates = [CandidateCode("X", "hcpcs", "d", 0.9)]
         self.assertEqual(semelig._candidate_kind_control(
             [fact], candidates, _NoSemanticClassSource(), None), {})
+
+
+class CandidateAdmissionTest(unittest.TestCase):
+    """issue #6, Codex's independent re-review (F9-R23 Root Finding 1):
+    `resolution.candidate_admission` -- the pre-verification admission
+    standing "broad retrieval supplies recall; positive evidence supplies
+    standing; complete candidate requirements authorize selection."
+    Synthetic codes throughout."""
+
+    def test_a_role_incompatible_candidate_is_contradicted(self):
+        # A claim-authorized service_role needs the fully evidenced shape
+        # `graph_consensus.claim_authorized_value` requires (scope-valid,
+        # source-reconciled, ASSERTED) -- mirrors
+        # RoleControlBackstopTest._fact above.
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,
+                                         FactKind, RelationState)
+        from claude_coder import resolution
+        src = MockSource(semantic_class={"ANESTH": "anesthesia",
+                                        "OP": "surgical_procedure"})
+        span = EvidenceSpan("operative act alpha performed", anchored=True, span_id="s1")
+        fact = ClinicalFact(
+            kind=FactKind.PROCEDURE, description="operative act alpha on the structure",
+            evidence=[span], confidence=0.95, fact_id="f1",
+            attributes={"service_role": "operative"},
+            attribute_evidence={"service_role": (
+                AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                  value="operative"),)})
+        candidate = CandidateCode("ANESTH", "cpt", "anesthesia service", 0.9, "retrieval")
+        admission = resolution.candidate_admission(fact, candidate, (), src, None, None, None)
+        self.assertEqual(admission.standing, resolution.CandidateStanding.CONTRADICTED)
+        self.assertIn("service_role", admission.contradicted_axes)
+
+    def test_a_topically_unrelated_recall_hit_is_ungrounded(self):
+        """The named Root Finding 1 reproduction: a candidate whose own
+        descriptor shares NOTHING with the documented fact -- no compiled
+        requirement, no direct-term/authoritative-index/UMLS lineage, no
+        topical overlap -- has no positive standing of its own."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder import resolution
+        src = MockSource()
+        fact = ClinicalFact(kind=FactKind.SUPPLY, description="suture anchor implanted",
+                            evidence=[EvidenceSpan("suture anchor implanted",
+                                                   anchored=True, span_id="s1")],
+                            confidence=0.95, fact_id="f1")
+        candidate = CandidateCode("Q999", "hcpcs",
+                                  "telehealth originating site facility fee", 0.4,
+                                  "retrieval")
+        admission = resolution.candidate_admission(fact, candidate, (), src, None, None, None)
+        self.assertEqual(admission.standing, resolution.CandidateStanding.UNGROUNDED)
+        self.assertEqual(admission.positive_axes, ())
+
+    def test_a_topically_related_candidate_is_supported_with_no_compiled_requirement(self):
+        """A single, genuinely on-topic candidate with nothing to
+        discriminate against (no compiled requirement at all -- the
+        ordinary case for a well-matched shortlist of one) still earns
+        standing from its own descriptor's topical relationship to the
+        fact -- never silently converted into "nothing has standing"."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder import resolution
+        src = MockSource()
+        fact = ClinicalFact(kind=FactKind.SUPPLY, description="suture anchor implanted",
+                            evidence=[EvidenceSpan("suture anchor implanted",
+                                                   anchored=True, span_id="s1")],
+                            confidence=0.95, fact_id="f1")
+        candidate = CandidateCode("ANCHOR1", "hcpcs",
+                                  "suture anchor, implantable, single", 0.9, "retrieval")
+        admission = resolution.candidate_admission(fact, candidate, (), src, None, None, None)
+        self.assertEqual(admission.standing, resolution.CandidateStanding.SUPPORTED)
+        self.assertIn("descriptor_topic_match", admission.positive_axes)
+
+    def test_a_direct_term_hit_is_positive_identity(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder import resolution
+
+        class _DirectTermSource(MockSource):
+            def exact_direct_code_term(self, term):
+                return [{"code": "ANCHOR1", "term": term}] if term == "suture anchor" else []
+
+        src = _DirectTermSource()
+        fact = ClinicalFact(kind=FactKind.SUPPLY, description="suture anchor",
+                            evidence=[EvidenceSpan("suture anchor", anchored=True,
+                                                   span_id="s1")],
+                            confidence=0.95, fact_id="f1")
+        candidate = CandidateCode("ANCHOR1", "hcpcs", "suture anchor, implantable", 0.9,
+                                  "retrieval")
+        admission = resolution.candidate_admission(fact, candidate, (), src, None, None, None)
+        self.assertEqual(admission.standing, resolution.CandidateStanding.SUPPORTED)
+        self.assertIn("direct_term", admission.positive_axes)
 
 
 class ProposedCandidateDeterministicExclusionTest(unittest.TestCase):

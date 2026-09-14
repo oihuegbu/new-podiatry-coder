@@ -452,6 +452,19 @@ def code_encounter(
             audit_hashes.append(audit_repository.append(
                 encounter_id, "source_evidence_reconciliation",
                 source_reconciliation.certificate_record()))
+        # ---- Source-grounded REASON_FOR completion (issue #6, Codex's independent
+        # re-review, F9-R21-E/F9-R23 root finding 4) ------------------------------------
+        # `validate_relations`/`reconcile_relations` above only ever PROVE or DISPROVE an
+        # edge the extractor already asserted -- they cannot recover a diagnosis-to-
+        # service linkage the source text states directionally but neither extraction
+        # call happened to emit as a relation. Runs over the FINAL fact/relation state
+        # (after second-reading recovery and page-level source reconciliation, so it sees
+        # every fact this encounter actually carries and each fact's most fully verified
+        # spans), and only ever ADDS an edge the SAME deterministic directional-proof
+        # grammar `reconcile_relations` already uses independently proves from the
+        # record -- never from repetition, model confidence, or a bare code/kind pairing.
+        relations = _prov.complete_reason_for_relations(facts, relations, note_text,
+                                                         readings=readings)
         audit_hashes.append(audit_repository.append(encounter_id, "relation_graph", {
             "schema_version": extracted.schema_version,
             # the extraction call this graph came from -- the unit of assertion independence
@@ -799,10 +812,19 @@ def code_encounter(
                 fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
                 rationale="missing ClaimLineIntent — retrieval prohibited",
                 excluded_reason="pre-retrieval integrity hold")
+            # issue #6, Codex's independent re-review (F9-R23 system-hold
+            # audit addendum): `affected_fact_ids` was omitted, and
+            # `autonomy.decide` explicitly reads an empty scope as
+            # encounter-wide -- a single fact with no eligibility intent
+            # held the WHOLE encounter, even when every other fact resolved
+            # independently. This gate already names the one fact it is
+            # about; it must be scoped to exactly that fact, like every
+            # other per-fact pre-retrieval hold in this loop.
             pre_retrieval_gates.append(GateResult(
                 f"eligibility_intent:{fact.fact_id}", Outcome.UNKNOWN,
                 "no eligibility intent was produced for the extracted event",
-                "eligibility-before-retrieval", retryable=True))
+                "eligibility-before-retrieval", retryable=True,
+                affected_fact_ids=(fact.fact_id,)))
         elif _it.state is not _ES.ELIGIBLE_FOR_RETRIEVAL:
             # ALL non-PASS decisions for the human-readable rationale; only the
             # decisions that actually produced the state for the ROUTING decision. A

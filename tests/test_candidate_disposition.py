@@ -338,6 +338,61 @@ class EliminationTest(unittest.TestCase):
         self.assertNotIn(BETA, remaining)
         self.assertIn("CAND_BETA", eliminated)
 
+    def test_contradicted_vs_different_concept_both_validated_eliminates(self):
+        """issue #6, Codex's independent re-review (F9-R23 root finding 2):
+        two evaluators independently REJECTING the same candidate, each
+        with source-confirmed evidence, must eliminate it even when they
+        name a different sub-reason (`contradicted` vs `different_concept`)
+        -- the raw status strings differing is not evaluator disagreement
+        about the BILLING outcome, only about which explanation applies.
+        Reproduced repeatedly on the designated note, which previously sent
+        every such pair to `system_unresolved` as if the evaluators
+        disagreed."""
+        recon = _reconciliation({"s1": "AGREED", "s2": "AGREED"})
+        j0 = _judgement([_disp("CAND_ALPHA", "entailed"),
+                        _disp("CAND_BETA", "contradicted", span_ids=("s1",))])
+        j1 = _judgement([_disp("CAND_ALPHA", "entailed"),
+                        _disp("CAND_BETA", "different_concept", span_ids=("s2",))])
+        remaining, eliminated, system_unresolved = res._candidate_disposition_uniqueness(
+            [ALPHA, BETA], ALPHA, [j0, j1], recon, _Coverage(True))
+        self.assertNotIn(BETA, remaining)
+        self.assertIn("CAND_BETA", eliminated)
+        self.assertNotIn("CAND_BETA", system_unresolved)
+
+    def test_not_documented_vs_different_concept_eliminates_only_when_both_validate(self):
+        """The same cross-status elimination applies to `not_documented`
+        paired with `different_concept` -- but only once EACH side clears
+        its own, separate evidentiary bar (complete coverage + named
+        missing_fact for not_documented; a validated span for
+        different_concept)."""
+        recon = _reconciliation({"s2": "AGREED"})
+        j0 = _judgement([_disp("CAND_ALPHA", "entailed"),
+                        _disp("CAND_BETA", "not_documented",
+                             missing_fact="a beta-specific finding")])
+        j1 = _judgement([_disp("CAND_ALPHA", "entailed"),
+                        _disp("CAND_BETA", "different_concept", span_ids=("s2",))])
+        remaining, eliminated, system_unresolved = res._candidate_disposition_uniqueness(
+            [ALPHA, BETA], ALPHA, [j0, j1], recon, _Coverage(True))
+        self.assertNotIn(BETA, remaining)
+        self.assertIn("CAND_BETA", eliminated)
+        self.assertNotIn("CAND_BETA", system_unresolved)
+
+    def test_entailed_vs_a_validated_rejection_stays_unresolved(self):
+        """A genuine substantive disagreement -- one evaluator says
+        supported, the other says rejected -- must still land in
+        `system_unresolved`; normalizing sub-reasons must never blur an
+        actual disagreement about the billing outcome itself."""
+        recon = _reconciliation({"s1": "AGREED", "s2": "AGREED"})
+        j0 = _judgement([_disp("CAND_ALPHA", "entailed"),
+                        _disp("CAND_BETA", "entailed", span_ids=("s1",))])
+        j1 = _judgement([_disp("CAND_ALPHA", "entailed"),
+                        _disp("CAND_BETA", "different_concept", span_ids=("s2",))])
+        remaining, eliminated, system_unresolved = res._candidate_disposition_uniqueness(
+            [ALPHA, BETA], ALPHA, [j0, j1], recon, _Coverage(True))
+        self.assertNotIn(BETA, remaining)
+        self.assertIn("CAND_BETA", system_unresolved)
+        self.assertEqual(eliminated, {})
+
     def test_an_unreconciled_span_never_validates_a_contradiction(self):
         """A DISAGREED span cannot validate the contradiction -- a SYSTEM
         gap (F9-R19-A Finding 1), never a positively supported candidate."""

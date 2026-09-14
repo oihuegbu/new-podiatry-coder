@@ -32,7 +32,7 @@ from typing import Any
 from .checkpoint import (ADOPT_ENV, REQUIRED_ENV, AnchorFormatError, Checkpoint,
                          CheckpointError, checkpoint_adoption_allowed, checkpoint_required,
                          resolve_checkpoint_anchor)
-from .models import (EvidenceSpan, RelationAssertion, RelationPredicate,
+from .models import (EvidenceSpan, FactKind, RelationAssertion, RelationPredicate,
                      RelationState)
 
 
@@ -678,6 +678,66 @@ def reconcile_relations(relations: list[RelationAssertion], facts: list, note_te
                            reconciliation_evidence=list(proof),
                            corroboration_status=corroboration))
     return out
+
+
+def complete_reason_for_relations(facts: list, relations: list[RelationAssertion],
+                                  note_text: str, *, readings: dict[str, str] | None = None
+                                  ) -> list[RelationAssertion]:
+    """Recover a diagnosis-to-service `REASON_FOR` edge the SOURCE TEXT itself
+    states directionally, even when neither extraction call ever asserted it
+    as a relation (issue #6, Codex's independent re-review, F9-R21-E /
+    F9-R23 root finding 4).
+
+    `validate_relations`/`reconcile_relations` above only ever PROVE or
+    DISPROVE an edge the extractor already emitted -- `reconcile_relations`
+    iterates `relations or []`, so an omitted edge is simply never examined,
+    regardless of what the record actually says. Reproduced live: the
+    designated note's primary procedure never released because nothing
+    proved which diagnosis justified it, even though the note states it
+    directly -- the extractor just never emitted the relation.
+
+    For every (diagnosis, billable non-diagnosis fact) pair not already
+    asserted as `REASON_FOR` (in either direction check -- an existing edge,
+    however it reconciled, is never duplicated or second-guessed here), a
+    PROVISIONAL edge citing every one of both facts' own evidence spans is
+    built and run through the SAME `reconcile_relations`/`_directional_proof`
+    grammar every asserted edge is held to -- never a separate, less-proven
+    path. Only a provisional edge that reconciles `SOURCE_DIRECTIONAL` (the
+    document's own linking phrase, in the right orientation, between the two
+    facts' own disjoint verified mentions) is kept; `SOURCE_COLOCATED` (mere
+    co-occurrence) and `UNRECONCILED` completions are discarded outright --
+    this must never infer a linkage from repetition, model confidence, or a
+    bare fact-kind/code pairing, only from what the source text itself
+    states.
+    """
+    existing = {(r.subject_event_id, r.predicate, r.object_event_id)
+               for r in (relations or [])}
+    diagnoses = [f for f in facts if getattr(f, "kind", None) is FactKind.DIAGNOSIS]
+    services = [f for f in facts if getattr(f, "kind", None) is not FactKind.DIAGNOSIS
+               and getattr(f, "billable", False)]
+    provisional: list[RelationAssertion] = []
+    for dx in diagnoses:
+        dx_span_ids = [s.span_id for s in (dx.evidence or []) if getattr(s, "span_id", None)]
+        if not dx_span_ids:
+            continue
+        for service in services:
+            key = (dx.fact_id, RelationPredicate.REASON_FOR, service.fact_id)
+            if key in existing:
+                continue
+            svc_span_ids = [s.span_id for s in (service.evidence or [])
+                            if getattr(s, "span_id", None)]
+            if not svc_span_ids:
+                continue
+            provisional.append(RelationAssertion(
+                subject_event_id=dx.fact_id, predicate=RelationPredicate.REASON_FOR,
+                object_event_id=service.fact_id, state=RelationState.ASSERTED,
+                evidence_span_ids=tuple(dict.fromkeys(dx_span_ids + svc_span_ids)),
+                confidence=1.0, extraction_source="source_relation_completion"))
+    if not provisional:
+        return list(relations or [])
+    reconciled = reconcile_relations(provisional, facts, note_text, readings=readings)
+    grounded = [r for r in reconciled if r.reconciliation_status in GROUNDED_RECONCILIATION_STATUSES]
+    return merge_relations(list(relations or []) + grounded)
 
 
 def validate_relations(relations: list[RelationAssertion], facts: list,
