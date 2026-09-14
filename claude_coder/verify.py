@@ -857,7 +857,8 @@ def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
 
 # ---- citation-contract validation and bounded repair (F9-R22-A / F9-R23 Gate A) --------
 def _span_relates_to_candidate(span_text: str, fact: ClinicalFact,
-                               candidate: CandidateCode) -> bool:
+                               candidate: CandidateCode,
+                               disposition_status: str = "entailed") -> bool:
     """Whether `span_text` has any genuine CONTENT relationship to what a
     disposition citing it claims to support (issue #6, Codex's independent
     re-review, F9-R23 clarification, "Gate A"): anchoring/reconciliation
@@ -883,17 +884,49 @@ def _span_relates_to_candidate(span_text: str, fact: ClinicalFact,
     exact matching would silently convert every such paraphrase into a
     false Gate-A failure -- the same false-elimination shape this
     codebase's history already rejected once for `AXIS_DESCRIPTOR_TERM`."""
+    # A citation attached to a fact is not authorizing evidence when the fact
+    # itself is not claimable. This is typed extraction state, not vocabulary.
+    if fact is None or candidate is None or not fact.billable:
+        return False
     from . import tiebreak as _tiebreak
     span_terms = _tiebreak._descriptor_tokens(span_text)
     if not span_terms:
         return False
     cand_terms = _tiebreak._descriptor_tokens(candidate.descriptor)
     fact_terms = _tiebreak._descriptor_tokens(str(getattr(fact, "description", "") or ""))
-    return bool(span_terms & (cand_terms | fact_terms))
+    shared = span_terms & (cand_terms | fact_terms)
+    if not shared:
+        return False
+    # Token relatedness is a recall/scope check only. Every term offered as
+    # that relationship must also be positively asserted in its own clause.
+    # Negated, ruled-out, or denied text can never become evidence merely
+    # because it repeats the descriptor's words.
+    states = {term: _tiebreak.asserted_status((term,), span_text) for term in shared}
+    if disposition_status == "entailed":
+        # A positive generic overlap cannot conceal a negated candidate
+        # qualifier. Descriptor-declared exclusions and "with or without"
+        # clauses are grammar-defined cases where a negated value is
+        # compatible with the candidate. Both are derived from the current
+        # descriptor, never from a clinical term list.
+        permitted_negated = _tiebreak._descriptor_tokens(
+            _tiebreak._exclusion_clause(candidate.descriptor) or "")
+        optional = _tiebreak._OPTIONAL_COORDINATION_RE.search(candidate.descriptor)
+        if optional is not None:
+            permitted_negated |= _tiebreak._descriptor_tokens(
+                candidate.descriptor[optional.end():])
+        negated = {term for term, state in states.items() if state == "negated"}
+        if negated - permitted_negated:
+            return False
+        return "supported" in states.values()
+    # A negative source assertion may validly support a rejection, but never
+    # a positive entailment. The caller binds this decision to the structured
+    # disposition status rather than losing polarity in a generic boolean.
+    return bool(set(states.values()) & {"supported", "negated"})
 
 
 def _agreed_citable_spans(span_ids: tuple[str, ...], fact: ClinicalFact,
-                          candidate: CandidateCode, reconciliation) -> tuple[str, ...]:
+                          candidate: CandidateCode, reconciliation,
+                          disposition_status: str = "entailed") -> tuple[str, ...]:
     """Which of `span_ids` clear the FULL citation bar for a disposition on
     `candidate`: genuine target-event evidence for `fact` (a member of
     `_citable_evidence(fact)`), reconciled AGREED -- never VACUOUS, since
@@ -919,7 +952,8 @@ def _agreed_citable_spans(span_ids: tuple[str, ...], fact: ClinicalFact,
         rec = settled.get(sid)
         if rec is None or rec.status != ReconciliationStatus.AGREED:
             continue
-        if not _span_relates_to_candidate(span.text, fact, candidate):
+        if not _span_relates_to_candidate(
+                span.text, fact, candidate, disposition_status):
             continue
         out.append(sid)
     return tuple(out)
@@ -947,7 +981,8 @@ def validate_judgement_contract(judgement: "Judgement", candidates: list[Candida
                 defects[cand.code] = (f"{cand.code}: not_documented disposition names no "
                                       f"missing_fact")
             continue
-        if not _agreed_citable_spans(d.evidence_span_ids, fact, cand, reconciliation):
+        if not _agreed_citable_spans(
+                d.evidence_span_ids, fact, cand, reconciliation, d.status):
             defects[cand.code] = (f"{cand.code}: {d.status} disposition cites no "
                                   f"target-event span reconciled AGREED and genuinely "
                                   f"related to this candidate")

@@ -2734,25 +2734,22 @@ class CandidateAdmissionTest(unittest.TestCase):
         self.assertEqual(admission.standing, resolution.CandidateStanding.UNGROUNDED)
         self.assertEqual(admission.positive_axes, ())
 
-    def test_a_topically_related_candidate_is_supported_with_no_compiled_requirement(self):
-        """A single, genuinely on-topic candidate with nothing to
-        discriminate against (no compiled requirement at all -- the
-        ordinary case for a well-matched shortlist of one) still earns
-        standing from its own descriptor's topical relationship to the
-        fact -- never silently converted into "nothing has standing"."""
+    def test_topical_overlap_is_recall_only_not_candidate_standing(self):
+        """Shared words are recall, not proof that a candidate identifies
+        the documented service. Entailment may promote it later."""
         from claude_coder.data_access import MockSource
         from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
         from claude_coder import resolution
         src = MockSource()
-        fact = ClinicalFact(kind=FactKind.SUPPLY, description="suture anchor implanted",
-                            evidence=[EvidenceSpan("suture anchor implanted",
+        fact = ClinicalFact(kind=FactKind.SUPPLY, description="manual repair structure alpha",
+                            evidence=[EvidenceSpan("manual repair structure alpha",
                                                    anchored=True, span_id="s1")],
                             confidence=0.95, fact_id="f1")
         candidate = CandidateCode("ANCHOR1", "hcpcs",
-                                  "suture anchor, implantable, single", 0.9, "retrieval")
+                                  "powered repair structure beta", 0.9, "retrieval")
         admission = resolution.candidate_admission(fact, candidate, (), src, None, None, None)
-        self.assertEqual(admission.standing, resolution.CandidateStanding.SUPPORTED)
-        self.assertIn("descriptor_topic_match", admission.positive_axes)
+        self.assertEqual(admission.standing, resolution.CandidateStanding.UNGROUNDED)
+        self.assertEqual(admission.positive_axes, ())
 
     def test_a_direct_term_hit_is_positive_identity(self):
         from claude_coder.data_access import MockSource
@@ -2773,6 +2770,51 @@ class CandidateAdmissionTest(unittest.TestCase):
         admission = resolution.candidate_admission(fact, candidate, (), src, None, None, None)
         self.assertEqual(admission.standing, resolution.CandidateStanding.SUPPORTED)
         self.assertIn("direct_term", admission.positive_axes)
+
+    def test_registry_validated_and_umls_recall_sources_do_not_create_standing(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder import resolution
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="service alpha",
+                            evidence=[EvidenceSpan("service alpha", anchored=True,
+                                                   span_id="s1")], fact_id="f1")
+        for source_name, authority in (
+                ("llm-proposed-validated", {}),
+                ("retrieval", {"sources": ["umls_recall"]})):
+            with self.subTest(source=source_name):
+                candidate = CandidateCode("SYN", "cpt", "service alpha", 0.9,
+                                          source_name, authority=authority)
+                admission = resolution.candidate_admission(
+                    fact, candidate, (), MockSource(), None, None, None)
+                self.assertEqual(admission.standing,
+                                 resolution.CandidateStanding.UNGROUNDED)
+
+    def test_raw_descriptor_term_support_is_recall_only_not_identity(self):
+        """An exact leftover descriptor word is not a governed concept and
+        therefore cannot independently promote a candidate."""
+        import hashlib
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder import requirement, resolution
+        text = "assembly service in mode alpha"
+        fact = ClinicalFact(
+            kind=FactKind.PROCEDURE, description=text,
+            evidence=[EvidenceSpan(text, anchored=True, span_id="s1")], fact_id="f1")
+        candidate = CandidateCode(
+            "CAND_ALPHA", "cpt", "assembly service, mode alpha", 0.9, "retrieval")
+        sibling = CandidateCode(
+            "CAND_BETA", "cpt", "assembly service, mode beta", 0.9, "retrieval")
+        requirements = requirement.compile_requirements([candidate, sibling])
+        coverage = requirement.CoverageCorpus(
+            channel_id="test-channel", text=text,
+            text_sha256=hashlib.sha256(text.encode()).hexdigest(),
+            covered_pages=(1,), page_image_sha256=("stub-hash",))
+
+        admission = resolution.candidate_admission(
+            fact, candidate, requirements, MockSource(), None, coverage, None)
+
+        self.assertEqual(admission.standing, resolution.CandidateStanding.UNGROUNDED)
+        self.assertIn("descriptor_term", admission.positive_axes)
 
 
 class ProposedCandidateDeterministicExclusionTest(unittest.TestCase):

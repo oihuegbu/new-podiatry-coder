@@ -697,8 +697,7 @@ def complete_reason_for_relations(facts: list, relations: list[RelationAssertion
     directly -- the extractor just never emitted the relation.
 
     For every (diagnosis, billable non-diagnosis fact) pair not already
-    asserted as `REASON_FOR` (in either direction check -- an existing edge,
-    however it reconciled, is never duplicated or second-guessed here), a
+    asserted in the required `REASON_FOR` direction, a
     PROVISIONAL edge citing every one of both facts' own evidence spans is
     built and run through the SAME `reconcile_relations`/`_directional_proof`
     grammar every asserted edge is held to -- never a separate, less-proven
@@ -708,7 +707,9 @@ def complete_reason_for_relations(facts: list, relations: list[RelationAssertion
     co-occurrence) and `UNRECONCILED` completions are discarded outright --
     this must never infer a linkage from repetition, model confidence, or a
     bare fact-kind/code pairing, only from what the source text itself
-    states.
+    states.  An extractor-emitted reverse edge does not suppress completion:
+    direction is part of relation identity, and only the source-grounded
+    diagnosis-to-service orientation can satisfy medical necessity.
     """
     existing = {(r.subject_event_id, r.predicate, r.object_event_id)
                for r in (relations or [])}

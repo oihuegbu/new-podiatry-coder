@@ -2063,7 +2063,8 @@ def _disposition_spans_validated(d, settled, permitted) -> bool:
 def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: CandidateCode,
                                       judgements: list, reconciliation, coverage,
                                       fact: "ClinicalFact | None" = None,
-                                      requirements: tuple = ()
+                                      requirements: tuple = (),
+                                      admissions: dict[str, "CandidateAdmission"] | None = None,
                                       ) -> tuple[list[CandidateCode], dict[str, str],
                                                 dict[str, str]] | None:
     """The candidate-level SEMANTIC entailment record (issue #6, Codex's
@@ -2200,13 +2201,19 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
         # that predate `fact` being threaded through at all.
         if fact is not None:
             from .verify import _agreed_citable_spans
-            return bool(_agreed_citable_spans(d.evidence_span_ids, fact, cand, reconciliation))
+            return bool(_agreed_citable_spans(
+                d.evidence_span_ids, fact, cand, reconciliation, d.status))
         return _disposition_spans_validated(d, settled, permitted)
 
     remaining: list[CandidateCode] = []
     eliminated: dict[str, str] = {}
     system_unresolved: dict[str, str] = {}
     for cand in shortlist:
+        admission = (admissions or {}).get(cand.code)
+        recall_only = bool(
+            admission is not None
+            and admission.standing is CandidateStanding.UNGROUNDED
+        )
         # issue #6, Codex's independent re-review (F9-R16-B): `chosen` is NO
         # LONGER special-cased here. The prior version skipped validating
         # `chosen`'s own disposition entirely, so a judgement whose LEGACY
@@ -2224,6 +2231,12 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
         # and never lets a DIFFERENT surviving candidate release in its place.
         d0, d1 = j0[cand.code], j1[cand.code]
         if not (_identity_matches(cand, d0) and _identity_matches(cand, d1)):
+            if recall_only:
+                eliminated[cand.code] = (
+                    "recall-only candidate did not earn evidence standing: its "
+                    "evaluator disposition was not bound to the current authoritative "
+                    "descriptor")
+                continue
             system_unresolved[cand.code] = (
                 f"a disposition for {cand.code} did not reproduce this candidate's "
                 f"own current official descriptor identity")
@@ -2292,7 +2305,17 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
                      f"both evaluators judged {cand.code} not_documented, but this "
                      f"could not be validated against a complete, independently-read "
                      f"whole-document search")
-            system_unresolved[cand.code] = reason
+            if recall_only:
+                eliminated[cand.code] = (
+                    "recall-only candidate did not earn evidence standing: " + reason)
+            else:
+                system_unresolved[cand.code] = reason
+            continue
+        if recall_only:
+            eliminated[cand.code] = (
+                "recall-only candidate did not earn evidence standing: independent "
+                f"evaluators did not agree it was supported ({d0.status!r} vs "
+                f"{d1.status!r})")
             continue
         system_unresolved[cand.code] = (
             f"independent evaluators disagreed on {cand.code}'s disposition "
@@ -2424,7 +2447,7 @@ def _exact_direct_code_term_signal(fact: ClinicalFact, candidates: list[Candidat
 class CandidateStanding(str, Enum):
     SUPPORTED = "supported"       #: may enter the decisive shortlist and contest uniqueness
     CONTRADICTED = "contradicted"  #: audited as excluded; can never contest
-    UNGROUNDED = "ungrounded"     #: recall-only; can never contest, tie, or ask a question
+    UNGROUNDED = "ungrounded"     #: recall-only until verified evidence earns standing
 
 
 @dataclass(frozen=True)
@@ -2450,6 +2473,13 @@ class CandidateAdmission:
                 "source_lineage": list(self.source_lineage), "reason": self.reason}
 
 
+# Schema-level governed identity axes, not clinical vocabulary. Raw
+# descriptor-token differences are explicitly audit/recall-only in
+# `tiebreak`; treating that axis as identity here would promote the exact
+# weak lexical hit this lifecycle exists to contain.
+_IDENTITY_REQUIREMENT_AXES = frozenset({"semantic_action"})
+
+
 def candidate_admission(fact: ClinicalFact, candidate: CandidateCode,
                         requirements: tuple, source: CodeSource, reconciliation,
                         coverage: "_requirement.CoverageCorpus | None" = None,
@@ -2471,24 +2501,16 @@ def candidate_admission(fact: ClinicalFact, candidate: CandidateCode,
     deterministic_status` (a real, independently-read search of the
     document) for every other axis -- never re-derived here, never an
     evaluator's own self-report. A CONTRADICTED axis disqualifies
-    outright. Otherwise, standing is SUPPORTED when some POSITIVE IDENTITY
-    signal exists: a compiled axis genuinely SUPPORTED; the record's own
-    words literally being this candidate's official atom wording
-    (`AuthoritativeSource.exact_direct_code_term`, elevated here from its
-    prior audit-only role to one input among several -- never sole
-    authorization on its own); the model naming this code directly and
-    having it validated against the real authoritative registry
-    (`source="llm-proposed-validated"`); a UMLS CUI/atom lineage hit
-    (`source="umls_recall"`, tracked through `_merge_candidate`'s
-    namespaced `authority["sources"]` even after a pool merge); or the
-    candidate's own descriptor sharing genuine discriminating vocabulary
-    with the fact's own description. A candidate with none of these is
-    UNGROUNDED: recall supplied it, nothing has yet supplied standing for
-    it. An unresolved `MUST_SUPPORT` axis is recorded (`unresolved_axes`)
-    but does not by itself withhold standing -- its own resolution,
-    including a valid NOT_DOCUMENTED elimination, is the downstream
-    disposition/elimination machinery's job, not a pre-verification
-    exclusion."""
+    outright. Otherwise, standing is SUPPORTED only when a governed
+    identity axis is independently supported or the record's normalized
+    term exactly matches a current authoritative atom
+    (`AuthoritativeSource.exact_direct_code_term`). Registry validity,
+    UMLS lineage, retrieval rank, and raw descriptor overlap supply recall,
+    never standing. A recall-only candidate may earn standing later only
+    when both independent evaluators support its authoritative descriptor
+    with validated, reconciled evidence. An unresolved `MUST_SUPPORT` axis
+    is recorded (`unresolved_axes`) but does not itself withhold standing;
+    the downstream disposition/requirement machinery resolves it."""
     from . import requirement as _requirement
     from . import semantic_eligibility as _semelig
     key = (candidate.code, candidate.system)
@@ -2514,6 +2536,7 @@ def candidate_admission(fact: ClinicalFact, candidate: CandidateCode,
             (candidate.source,), reason=kind_blocked[key])
 
     positive: set[str] = set()
+    identity_positive: set[str] = set()
     contradicted: set[str] = set()
     unresolved: set[str] = set()
     own_requirements = tuple(r for r in requirements if r.candidate_code == candidate.code)
@@ -2523,6 +2546,8 @@ def candidate_admission(fact: ClinicalFact, candidate: CandidateCode,
                  else _requirement.deterministic_status(req, coverage))
         if status is _requirement.RequirementStatus.SUPPORTED:
             positive.add(req.axis)
+            if req.axis in _IDENTITY_REQUIREMENT_AXES:
+                identity_positive.add(req.axis)
         elif status is _requirement.RequirementStatus.CONTRADICTED:
             contradicted.add(req.axis)
         elif req.role is _requirement.RequirementRole.MUST_SUPPORT:
@@ -2531,36 +2556,7 @@ def candidate_admission(fact: ClinicalFact, candidate: CandidateCode,
     direct_hits = _exact_direct_code_term_signal(fact, [candidate], source)
     if direct_hits.get(candidate.code):
         positive.add("direct_term")
-    if candidate.source == "llm-proposed-validated":
-        positive.add("authoritative_index")
-    if (candidate.source == "umls_recall"
-            or "umls_recall" in (candidate.authority or {}).get("sources", ())):
-        positive.add("umls_cui")
-    # issue #6, Codex's independent re-review (F9-R23 Root Finding 1): a
-    # FIFTH identity signal, in the same spirit as the four named ones --
-    # the candidate's OWN authoritative descriptor shares genuine,
-    # discriminating vocabulary with the fact's own documented description
-    # (the SAME content-relatedness bar `verify._span_relates_to_candidate`
-    # already holds a cited EVIDENCE SPAN to for Gate A, applied here
-    # between the candidate's descriptor and the fact description itself).
-    # Without this, a shortlist with no COMPILED requirement at all (no
-    # sibling candidate to discriminate against -- the ordinary case for a
-    # single, genuinely well-matched candidate) had no way to ever earn
-    # identity, which would have silently converted "nothing to
-    # discriminate on" into "nothing has standing", breaking the
-    # foundational propose-then-verify design (`verify.py`'s own module
-    # docstring: recall widens the pool, authoritative descriptor
-    # entailment is truth). This signal is exactly what still correctly
-    # EXCLUDES a topically unrelated recall hit (Root Finding 1's own named
-    # reproduction: quality-measure/catheter/imaging/telehealth/prosthetic
-    # candidates sharing no real vocabulary with a documented SUPPLY fact)
-    # while admitting a genuinely on-topic candidate to the verifier that
-    # decides its actual entailment.
-    fact_terms = _tiebreak._descriptor_tokens(str(getattr(fact, "description", "") or ""))
-    cand_terms = _tiebreak._descriptor_tokens(candidate.descriptor)
-    if fact_terms & cand_terms:
-        positive.add("descriptor_topic_match")
-
+        identity_positive.add("direct_term")
     # issue #6, Codex's independent re-review (F9-R23 Root Finding 1): an
     # unresolved MUST_SUPPORT axis is recorded (`unresolved_axes`, for
     # audit) but deliberately does NOT, by itself, withhold standing here.
@@ -2580,17 +2576,36 @@ def candidate_admission(fact: ClinicalFact, candidate: CandidateCode,
         standing = CandidateStanding.CONTRADICTED
         reason = (f"the documentation positively contradicts this candidate's own "
                  f"required axis/axes: {', '.join(sorted(contradicted))}")
-    elif positive:
+    elif identity_positive:
         standing = CandidateStanding.SUPPORTED
-        reason = f"positive identity/axis evidence: {', '.join(sorted(positive))}"
+        reason = ("positive identity evidence: "
+                  f"{', '.join(sorted(identity_positive))}; supported axes: "
+                  f"{', '.join(sorted(positive))}")
     else:
         standing = CandidateStanding.UNGROUNDED
-        reason = ("retrieval/proposal alone -- no positive identity signal and no "
-                 "independently documented axis of its own")
+        reason = ("candidate recall/code-existence/topical similarity did not establish "
+                  "identity; supported non-identity axes: "
+                  f"{', '.join(sorted(positive)) or 'none'}")
+    evidence_span_ids: tuple[str, ...] = ()
+    if standing is CandidateStanding.SUPPORTED and reconciliation is not None:
+        from app.contracts.source_evidence import ReconciliationStatus
+        settled = reconciliation.by_span_id()
+        evidence_span_ids = tuple(dict.fromkeys(
+            s.span_id for s in (fact.evidence or [])
+            if getattr(s, "anchored", False) and getattr(s, "span_id", None)
+            and settled.get(s.span_id) is not None
+            and settled[s.span_id].status is ReconciliationStatus.AGREED
+        ))
+    sources = {str(candidate.source)} if candidate.source else set()
+    sources.update(str(s) for s in (candidate.authority or {}).get("sources", ()) if s)
+    descriptor_snapshot = dict(
+        (candidate.authority or {}).get("evaluation_descriptor_snapshot") or {})
+    descriptor_snapshot.update({"code": candidate.code,
+                                "descriptor": candidate.descriptor})
     return CandidateAdmission(
         key, standing, tuple(sorted(positive)), tuple(sorted(contradicted)),
-        tuple(sorted(unresolved)), (),
-        {"code": candidate.code, "descriptor": candidate.descriptor}, (candidate.source,),
+        tuple(sorted(unresolved)), evidence_span_ids,
+        descriptor_snapshot, tuple(sorted(sources)),
         reason=reason)
 
 
@@ -2630,7 +2645,8 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
                        corroboration: str, reconciliation,
                        requirements: tuple = (),
                        coverage: "_requirement.CoverageCorpus | None" = None,
-                       source: Any = None
+                       source: Any = None,
+                       admissions: dict[str, CandidateAdmission] | None = None,
                        ) -> ResolvedLine:
     """Release ONLY when exactly one shortlisted candidate is still entailed; otherwise
     hand the survivors to the tie policy the deterministic path already uses.
@@ -2669,7 +2685,8 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
     # only shrink the standing set further, never widen or replace it.
     _disposition_verdict = _candidate_disposition_uniqueness(
         remaining, chosen, judgements, reconciliation, coverage,
-        fact=fact, requirements=_elimination_requirements)
+        fact=fact, requirements=_elimination_requirements,
+        admissions=admissions)
     _system_unresolved: dict[str, str] = {}
     if _disposition_verdict is not None:
         remaining, _further_eliminated, _system_unresolved = _disposition_verdict
@@ -3172,7 +3189,7 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                 fact, chosen, verifiable, judgements,
                 {**constraint_eliminated, **tried}, why,
                 corroboration, reconciliation, requirements,
-                coverage, source))
+                coverage, source, admissions=admissions))
         if missing:
             # The code is the right KIND of service but its descriptor requires an
             # element the note does not state. Re-selecting a code that omits the

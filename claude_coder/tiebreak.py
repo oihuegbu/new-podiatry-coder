@@ -313,6 +313,70 @@ _EXCLUSION_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(m) for m in _EXCLUSION_MARKERS) + r")\b\s*(.+)",
     re.IGNORECASE)
 
+# Descriptor coordination grammar, never clinical vocabulary.  A coordinator
+# joins alternatives only when it is not part of a comparative threshold or
+# the conventional optional phrase "with or without".  The alternatives are
+# still copied from the authoritative descriptor; this code merely preserves
+# their boolean shape instead of treating an entire compound clause as one
+# literal phrase.
+_ALTERNATIVE_RE = re.compile(r"\s+(?:or|and/or)\s+", re.IGNORECASE)
+_OPTIONAL_COORDINATION_RE = re.compile(r"\bwith\s+or\s+without\b", re.IGNORECASE)
+_COMPARATIVE_VALUE_RE = re.compile(
+    r"^(?:greater|less|more|fewer|equal|above|below)\b", re.IGNORECASE)
+
+
+def _descriptor_alternatives(text: str) -> tuple[str, ...]:
+    """Return descriptor-stated OR alternatives without inventing synonyms.
+
+    The returned strings are verbatim fragments of ``text``.  This is a
+    boolean/grammar parse only: it contains no code, specialty, anatomy,
+    procedure, product, or diagnosis vocabulary.  Threshold grammar and
+    ``with or without`` remain indivisible because their ``or`` does not join
+    two alternative clinical values.
+    """
+    phrase = (text or "").strip(" ,;.")
+    if not phrase:
+        return ()
+    cuts: list[tuple[int, int]] = []
+    for match in _ALTERNATIVE_RE.finditer(phrase):
+        before = phrase[:match.start()]
+        after = phrase[match.end():]
+        # Protect only THIS coordinator. Other genuine alternatives in the
+        # same clause must still be split.
+        optional = (bool(re.search(r"\bwith\s*$", before, re.IGNORECASE))
+                    and bool(re.match(r"^without\b", after, re.IGNORECASE)))
+        comparative = bool(_COMPARATIVE_VALUE_RE.match(after))
+        if not optional and not comparative:
+            cuts.append((match.start(), match.end()))
+    if not cuts:
+        return (phrase,)
+    parts: list[str] = []
+    start = 0
+    for left, right in cuts:
+        part = phrase[start:left].strip(" ,;.")
+        if part:
+            parts.append(part)
+        start = right
+    final = phrase[start:].strip(" ,;.")
+    if final:
+        parts.append(final)
+    return tuple(parts) or (phrase,)
+
+
+def _positive_qualifier_clause(text: str) -> str:
+    """The positive portion of a family qualifier, excluding its exception.
+
+    Exclusion semantics are compiled independently as
+    :data:`AXIS_EXCLUSION_CLAUSE`.  Leaving the exception attached to the
+    positive child axis duplicates opposite-polarity facts in one selectable
+    phrase and can manufacture a provider question from a candidate's own
+    exclusion.  The split is driven only by the descriptor's grammar marker.
+    """
+    match = _EXCLUSION_RE.search(text or "")
+    if not match:
+        return (text or "").strip(" ,;.")
+    return (text or "")[:match.start()].strip(" ,;.")
+
 
 def _exclusion_clause(descriptor: str) -> str | None:
     """The clause following an "except"/"excluding"/"other than" marker within
@@ -378,7 +442,8 @@ def _qualified_child_terms(candidates: list[CandidateCode]) -> dict[str, tuple[s
     for prefix, members in _qualified_child_groups(candidates).items():
         for c in members:
             parsed = _semicolon_prefix(c.descriptor)
-            out[c.code] = (parsed[1],)
+            positive = _positive_qualifier_clause(parsed[1])
+            out[c.code] = _descriptor_alternatives(positive)
     return out
 
 
@@ -457,13 +522,17 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
     # the tie would ALSO surface as a non-selectable, never-settling
     # `descriptor_term` axis, which used to permanently block `narrow()`'s
     # winner decision even after the real, governed axis had resolved it.
-    excl = {c.code: ((_exclusion_clause(c.descriptor),) if _exclusion_clause(c.descriptor)
-                     else ()) for c in candidates}
+    excl = {c.code: _descriptor_alternatives(_exclusion_clause(c.descriptor) or "")
+            for c in candidates}
     qualified = _qualified_child_terms(candidates)
     viability = _family_viability_terms(candidates) if qualified else {}
 
     lat_words = {_sing(w) for terms in lat.values() for w in terms}
-    governed_words = set(lat_words)
+    # The marker itself belongs to the exclusion grammar just as surely as
+    # the clause it introduces.  If left in the residual token bag it creates
+    # a permanently-unsettled audit-only axis even after the structured
+    # positive and exclusion clauses have resolved the candidate family.
+    governed_words = set(lat_words) | {_sing(word) for word in _EXCLUSION_MARKERS}
     for terms in (*excl.values(), *qualified.values(), *viability.values()):
         governed_words |= {_sing(w) for phrase in terms
                            for w in re.split(r"[^a-z0-9]+", phrase.lower()) if w}

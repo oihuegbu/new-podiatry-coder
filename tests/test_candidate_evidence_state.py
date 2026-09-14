@@ -348,6 +348,45 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
                           "a Gate-A citation failure is a system evidence gap, never a "
                           "provider-answerable question")
 
+    def test_ungrounded_recall_rival_cannot_block_a_supported_candidate(self):
+        """Standing is load-bearing: a recall-only rival that evaluators do
+        not independently support is audited out and cannot create a tie,
+        system hold, or provider question."""
+        chosen = _cand("CAND_CHOSEN", "assembly service, clean")
+        rival = _cand("CAND_RIVAL", "unrelated device")
+        fact = _fact("assembly service, clean, performed today")
+        span = EvidenceSpan(text="assembly service, clean, performed today",
+                            anchored=True, span_id="s1")
+        fact.evidence = [span]
+        recon = self._reconciliation({"s1": "AGREED"})
+        j0 = _verify.Judgement(
+            chosen=chosen, entailed=("CAND_CHOSEN",), declared=True,
+            candidate_dispositions=(
+                _disp(chosen, "entailed", evidence_span_ids=("s1",)),
+                _disp(rival, "entailed")))
+        j1 = _verify.Judgement(
+            chosen=chosen, entailed=("CAND_CHOSEN",), declared=True,
+            candidate_dispositions=(
+                _disp(chosen, "entailed", evidence_span_ids=("s1",)),
+                _disp(rival, "different_concept")))
+        admissions = {
+            chosen.code: resolution.CandidateAdmission(
+                (chosen.code, chosen.system), resolution.CandidateStanding.SUPPORTED,
+                ("descriptor_term",), (), (), ("s1",),
+                {"code": chosen.code, "descriptor": chosen.descriptor},
+                (chosen.source,), "synthetic supported identity"),
+            rival.code: resolution.CandidateAdmission(
+                (rival.code, rival.system), resolution.CandidateStanding.UNGROUNDED,
+                (), (), (), (),
+                {"code": rival.code, "descriptor": rival.descriptor},
+                (rival.source,), "synthetic recall-only candidate"),
+        }
+        line = resolution._settle_uniqueness(
+            fact, chosen, [chosen, rival], [j0, j1], {}, "entailed",
+            "distinct_origin", recon, admissions=admissions)
+        self.assertEqual(line.chosen.code if line.chosen else None, "CAND_CHOSEN")
+        self.assertIsNone(line.documentation_gap)
+
     def test_one_supported_candidate_plus_one_positively_excluded_candidate_releases(self):
         """A rival BOTH evaluators validly, cleanly eliminate (agreement +
         reconciled evidence) is proven wrong -- it must not block release."""

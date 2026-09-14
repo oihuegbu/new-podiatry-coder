@@ -152,6 +152,109 @@ def test_distinct_edges_preserved():
     assert len(prov.merge_relations(rels)) == 3
 
 
+# ------------------------------------------------ source relation completion
+def _completion_facts(primary_text, reason_text, service_text, *,
+                      service_reading=None, service_reading_id=None):
+    """Two synthetic facts with source-verifiable, disjoint endpoint spans."""
+    reason_span = prov.anchor_span(primary_text, EvidenceSpan(text=reason_text))
+    source = primary_text if service_reading is None else service_reading
+    service_span = prov.anchor_span(
+        source, EvidenceSpan(text=service_text),
+        reading_channel_id=service_reading_id,
+    )
+    reason = ClinicalFact(
+        FactKind.DIAGNOSIS, "reason event", evidence=[reason_span], fact_id="E_REASON")
+    service = ClinicalFact(
+        FactKind.PROCEDURE, "service event", evidence=[service_span], fact_id="E_SERVICE")
+    return reason, service
+
+
+def test_relation_completion_recovers_subject_first_link_omitted_by_extractors():
+    note = "Reason alpha treated with service beta."
+    facts = _completion_facts(note, "Reason alpha", "service beta")
+
+    completed = prov.complete_reason_for_relations(list(facts), [], note)
+
+    assert len(completed) == 1
+    edge = completed[0]
+    assert edge.subject_event_id == "E_REASON"
+    assert edge.object_event_id == "E_SERVICE"
+    assert edge.predicate is RelationPredicate.REASON_FOR
+    assert edge.reconciliation_status == prov.SOURCE_DIRECTIONAL
+    assert set(edge.reconciliation_evidence) == {
+        facts[0].evidence[0].span_id, facts[1].evidence[0].span_id}
+
+
+def test_relation_completion_recovers_object_first_link_omitted_by_extractors():
+    note = "Service beta performed for reason alpha."
+    facts = _completion_facts(note, "reason alpha", "Service beta")
+
+    completed = prov.complete_reason_for_relations(list(facts), [], note)
+
+    assert len(completed) == 1
+    assert completed[0].subject_event_id == "E_REASON"
+    assert completed[0].object_event_id == "E_SERVICE"
+    assert completed[0].reconciliation_status == prov.SOURCE_DIRECTIONAL
+
+
+def test_relation_completion_rejects_colocation_negation_and_clause_crossing():
+    cases = (
+        "Reason alpha and service beta were documented.",
+        "Reason alpha was not treated with service beta.",
+        "Reason alpha. Treated with service beta.",
+    )
+    for note in cases:
+        facts = _completion_facts(note, "Reason alpha", "service beta")
+        assert prov.complete_reason_for_relations(list(facts), [], note) == []
+
+
+def test_relation_completion_never_measures_between_independent_readings():
+    primary = "Reason alpha is documented."
+    second = "Service beta performed for reason alpha."
+    facts = _completion_facts(
+        primary, "Reason alpha", "Service beta",
+        service_reading=second, service_reading_id="independent-reading",
+    )
+
+    completed = prov.complete_reason_for_relations(
+        list(facts), [], primary,
+        readings={"independent-reading": second},
+    )
+
+    assert completed == []
+
+
+def test_reverse_extractor_edge_cannot_suppress_source_grounded_completion():
+    note = "Service beta performed for reason alpha."
+    reason, service = _completion_facts(note, "reason alpha", "Service beta")
+    cited = [reason.evidence[0].span_id, service.evidence[0].span_id]
+    reverse = _rel(
+        "E_SERVICE", RelationPredicate.REASON_FOR, "E_REASON", ev=cited)
+
+    completed = prov.complete_reason_for_relations(
+        [reason, service], [reverse], note)
+
+    assert len(completed) == 2
+    correct = next(edge for edge in completed
+                   if edge.subject_event_id == "E_REASON"
+                   and edge.object_event_id == "E_SERVICE")
+    assert correct.reconciliation_status == prov.SOURCE_DIRECTIONAL
+
+
+def test_existing_correct_relation_is_not_duplicated_by_completion():
+    note = "Reason alpha treated with service beta."
+    reason, service = _completion_facts(note, "Reason alpha", "service beta")
+    existing = _rel(
+        "E_REASON", RelationPredicate.REASON_FOR, "E_SERVICE",
+        ev=[reason.evidence[0].span_id, service.evidence[0].span_id],
+    )
+
+    completed = prov.complete_reason_for_relations(
+        [reason, service], [existing], note)
+
+    assert completed == [existing]
+
+
 # ---------------------------------------------- attribute-evidence scope validation
 # Issue #6 F9-R5-A, Codex's exact reopened reproduction: `same_episode_as`, a reversed
 # `part_of`, and a negated `part_of` were all wrongly accepted as authorizing an

@@ -115,6 +115,41 @@ class AgreedCitableSpansTest(unittest.TestCase):
         reconciliation = _reconciliation({"s1": "AGREED"})
         self.assertEqual(verify._agreed_citable_spans(("s1",), fact, cand, reconciliation), ())
 
+    def test_a_negated_agreed_span_does_not_count(self):
+        """Location and vocabulary cannot turn an explicitly negated event
+        into support for a candidate."""
+        fact = _fact(description="assembly service",
+                     span_text="No assembly service was performed")
+        cand = _cand("ALPHA", descriptor="assembly service")
+        reconciliation = _reconciliation({"s1": "AGREED"})
+        self.assertEqual(
+            verify._agreed_citable_spans(("s1",), fact, cand, reconciliation), ())
+
+    def test_positive_core_word_cannot_hide_a_negated_candidate_qualifier(self):
+        """A citation preserves polarity for candidate-specific content,
+        rather than passing because some generic shared token is positive."""
+        fact = _fact(
+            description="assembly service",
+            span_text="Assembly service was performed, but not in mode alpha")
+        cand = _cand("ALPHA", descriptor="assembly service, mode alpha")
+        reconciliation = _reconciliation({"s1": "AGREED"})
+
+        self.assertEqual(
+            verify._agreed_citable_spans(("s1",), fact, cand, reconciliation), ())
+
+    def test_descriptor_declared_exception_preserves_valid_negative_support(self):
+        """Negating a descriptor's own exception is compatible with the
+        candidate and must not be mistaken for negating the service."""
+        fact = _fact(
+            description="assembly service",
+            span_text="Assembly service was performed; branch gamma was not used")
+        cand = _cand("ALPHA", descriptor="assembly service, except branch gamma")
+        reconciliation = _reconciliation({"s1": "AGREED"})
+
+        self.assertEqual(
+            verify._agreed_citable_spans(("s1",), fact, cand, reconciliation),
+            ("s1",))
+
 
 class ValidateJudgementContractTest(unittest.TestCase):
     """`verify.validate_judgement_contract` -- structural defect detection."""

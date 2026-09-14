@@ -478,6 +478,27 @@ class TypedLateralitySelectionTest(unittest.TestCase):
 # ------------------------------------------------- steps 3 and 4: narrow and release
 class TieNarrowsAgainstTheOriginalDocumentTest(unittest.TestCase):
 
+    def test_compound_exclusion_does_not_create_a_false_missing_fact(self):
+        """Opposite-polarity exception text must not be folded into the
+        positive child axis.  A source-supported alternative identifies the
+        matching sibling without asking the provider to restate an exclusion."""
+        broad = _cand(
+            "CAND_BROAD",
+            "assembly service; branch alpha or branch beta, except branch gamma or branch delta",
+            0.9,
+        )
+        narrow = _cand(
+            "CAND_NARROW",
+            "assembly service; branch gamma or branch delta",
+            0.9,
+        )
+        fact = _fact("assembly service", "assembly service on branch gamma")
+        outcome = tiebreak.narrow(fact, [broad, narrow], _agreed("span-0"))
+
+        self.assertEqual(outcome.winner.code if outcome.winner else None,
+                         "CAND_NARROW")
+        self.assertEqual(outcome.provider_question, "")
+
     def test_untyped_descriptor_word_is_audited_but_does_not_release(self):
         """A raw descriptor-token difference is source-visible but has no governed
         semantic role. It remains in the audit record and cannot select a code."""

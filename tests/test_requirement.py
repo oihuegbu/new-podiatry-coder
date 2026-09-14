@@ -1185,3 +1185,67 @@ class QualifiedChildRequirementTest(unittest.TestCase):
         self.assertEqual(len(qualified), 1)
         self.assertTrue(qualified[0].selectable)
         self.assertTrue(qualified[0].provable)
+
+    def test_compound_exception_is_not_part_of_the_positive_child_axis(self):
+        """A descriptor's exception has inverse polarity and therefore belongs
+        only to the exclusion requirement.  Its coordinated alternatives are
+        preserved as independent source-derived values; they are never copied
+        into the positive family-child requirement."""
+        broad = _cand(
+            "CAND_BROAD",
+            "assembly service; branch alpha or branch beta, except branch gamma or branch delta",
+        )
+        narrow = _cand(
+            "CAND_NARROW",
+            "assembly service; branch gamma or branch delta",
+        )
+        compiled = req.compile_requirements([broad, narrow])
+        by_axis_code = {(r.axis, r.candidate_code): r for r in compiled}
+
+        self.assertEqual(
+            by_axis_code[("qualified_child", "CAND_BROAD")].expected,
+            ("branch alpha", "branch beta"),
+        )
+        self.assertEqual(
+            by_axis_code[("exclusion_clause", "CAND_BROAD")].expected,
+            ("branch gamma", "branch delta"),
+        )
+
+    def test_threshold_and_optional_or_grammar_remain_indivisible(self):
+        """The word 'or' is not always an alternative-value coordinator."""
+        threshold_a = _cand("CAND_A", "assembly service; 3 units or greater")
+        threshold_b = _cand("CAND_B", "assembly service; less than 3 units")
+        optional_a = _cand("CAND_C", "component service; with or without attachment")
+        optional_b = _cand("CAND_D", "component service; separate attachment")
+
+        threshold = {r.candidate_code: r.expected for r in req.compile_requirements(
+            [threshold_a, threshold_b]) if r.axis == "qualified_child"}
+        optional = {r.candidate_code: r.expected for r in req.compile_requirements(
+            [optional_a, optional_b]) if r.axis == "qualified_child"}
+
+        self.assertEqual(threshold["CAND_A"], ("3 units or greater",))
+        self.assertEqual(optional["CAND_C"], ("with or without attachment",))
+
+    def test_real_alternative_still_splits_beside_protected_or_grammar(self):
+        """Protected coordination is local to its own 'or', not a reason to
+        flatten every alternative elsewhere in the same source clause."""
+        mixed_a = _cand(
+            "CAND_A", "assembly service; mode alpha or mode beta with or without attachment")
+        mixed_b = _cand("CAND_B", "assembly service; mode gamma")
+        comparison_a = _cand(
+            "CAND_C", "component service; tier alpha or tier beta, 3 units or greater")
+        comparison_b = _cand("CAND_D", "component service; tier gamma")
+
+        mixed = {r.candidate_code: r.expected for r in req.compile_requirements(
+            [mixed_a, mixed_b]) if r.axis == "qualified_child"}
+        compared = {r.candidate_code: r.expected for r in req.compile_requirements(
+            [comparison_a, comparison_b]) if r.axis == "qualified_child"}
+
+        self.assertEqual(
+            mixed["CAND_A"],
+            ("mode alpha", "mode beta with or without attachment"),
+        )
+        self.assertEqual(
+            compared["CAND_C"],
+            ("tier alpha", "tier beta, 3 units or greater"),
+        )
