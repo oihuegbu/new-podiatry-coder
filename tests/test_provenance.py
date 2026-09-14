@@ -255,6 +255,148 @@ def test_existing_correct_relation_is_not_duplicated_by_completion():
     assert completed == [existing]
 
 
+class _UniqueRelatedConceptSource:
+    """Synthetic governed relation source; identifiers are deliberately non-clinical."""
+
+    def concept_relation_detail(self, left, right):
+        return {
+            "verdict": "ancestor_descendant",
+            "source_identity": {"source_id": "synthetic-concepts", "sha256": "a" * 64},
+            "term_a": {"unique": True, "candidates": ["concept-a"]},
+            "term_b": {"unique": True, "candidates": ["concept-b"]},
+        }
+
+
+class _AmbiguousRelatedConceptSource(_UniqueRelatedConceptSource):
+    def concept_relation_detail(self, left, right):
+        detail = super().concept_relation_detail(left, right)
+        detail["term_a"] = {"unique": False,
+                            "candidates": ["concept-a", "concept-other"]}
+        return detail
+
+
+def _structured_relation_case(*, second_service=False, second_diagnosis=False,
+                              procedure_detail=False, reconcile=True):
+    note = ("PREOPERATIVE ASSESSMENT\n"
+            "Condition alpha."
+            + (" Condition delta." if second_diagnosis else "")
+            + "\n"
+            + ("PROCEDURE IN DETAIL\n" if procedure_detail else "PROCEDURE\n")
+            + "Service beta."
+            + (" Service gamma." if second_service else ""))
+
+    def _proved(text):
+        span = prov.anchor_span(note, EvidenceSpan(text=text))
+        return replace(span, source_reconciliation="AGREED" if reconcile else None)
+
+    diagnosis = ClinicalFact(
+        FactKind.DIAGNOSIS, "condition event",
+        attributes={"laterality": "right", "anatomy": "structure alpha"},
+        evidence=[_proved("Condition alpha")], fact_id="E_REASON")
+    service = ClinicalFact(
+        FactKind.PROCEDURE, "service event",
+        attributes={"laterality": "right", "anatomy": "structure beta"},
+        evidence=[_proved("Service beta")], fact_id="E_SERVICE")
+    facts = [diagnosis, service]
+    if second_diagnosis:
+        facts.append(ClinicalFact(
+            FactKind.DIAGNOSIS, "competing condition event",
+            attributes={"laterality": "right", "anatomy": "structure alpha"},
+            evidence=[_proved("Condition delta")], fact_id="E_REASON_2"))
+    if second_service:
+        facts.append(ClinicalFact(
+            FactKind.PROCEDURE, "second service event",
+            attributes={"laterality": "right", "anatomy": "structure beta"},
+            evidence=[_proved("Service gamma")], fact_id="E_SERVICE_2"))
+    relation = _rel(
+        diagnosis.fact_id, RelationPredicate.REASON_FOR, service.fact_id,
+        ev=[diagnosis.evidence[0].span_id, service.evidence[0].span_id], conf=0.9)
+    return note, facts, relation
+
+
+def test_structured_fields_ground_an_existing_reason_for_edge():
+    """Separate labelled fields can ground the extractor's existing edge when
+    the original document confirms both endpoints and every configured axis."""
+    note, facts, relation = _structured_relation_case()
+
+    completed = prov.complete_reason_for_relations(
+        facts, [relation], note, source=_UniqueRelatedConceptSource())
+
+    assert len(completed) == 1
+    assert completed[0].reconciliation_status == prov.SOURCE_STRUCTURED_PRIMARY
+    assert set(completed[0].reconciliation_evidence) == {
+        facts[0].evidence[0].span_id, facts[1].evidence[0].span_id}
+
+
+def test_relation_contract_canonicalizes_reversed_reason_for_before_grounding():
+    """A model may name the correct pair/predicate but reverse its endpoints.
+    The versioned predicate domain/range corrects that mechanical error before
+    any eligibility or necessity consumer reads the edge."""
+    note, facts, relation = _structured_relation_case()
+    reversed_edge = replace(
+        relation, subject_event_id=relation.object_event_id,
+        object_event_id=relation.subject_event_id)
+
+    (canonical,) = prov.validate_relations([reversed_edge], facts, note)
+    assert canonical.subject_event_id == facts[0].fact_id
+    assert canonical.object_event_id == facts[1].fact_id
+
+    (grounded,) = prov.complete_reason_for_relations(
+        facts, [canonical], note, source=_UniqueRelatedConceptSource())
+    assert grounded.reconciliation_status == prov.SOURCE_STRUCTURED_PRIMARY
+
+
+def test_relation_contract_does_not_guess_when_neither_orientation_matches():
+    note, facts, relation = _structured_relation_case(second_service=True)
+    invalid = replace(relation, subject_event_id=facts[1].fact_id,
+                      object_event_id=facts[2].fact_id)
+    (unchanged,) = prov.validate_relations([invalid], facts, note)
+    assert unchanged.subject_event_id == facts[1].fact_id
+    assert unchanged.object_event_id == facts[2].fact_id
+    assert unchanged.reconciliation_status not in prov.GROUNDED_RECONCILIATION_STATUSES
+
+
+def test_structured_fields_never_invent_a_reason_for_edge():
+    note, facts, _relation = _structured_relation_case()
+    assert prov.complete_reason_for_relations(
+        facts, [], note, source=_UniqueRelatedConceptSource()) == []
+
+
+def test_structured_fields_require_source_reconciled_endpoints():
+    note, facts, relation = _structured_relation_case(reconcile=False)
+    (unchanged,) = prov.complete_reason_for_relations(
+        facts, [relation], note, source=_UniqueRelatedConceptSource())
+    assert unchanged.reconciliation_status != prov.SOURCE_STRUCTURED_PRIMARY
+
+
+def test_structured_fields_allow_one_diagnosis_to_support_multiple_services():
+    note, facts, relation = _structured_relation_case(second_service=True)
+    completed = prov.complete_reason_for_relations(
+        facts, [relation], note, source=_UniqueRelatedConceptSource())
+    assert completed[0].reconciliation_status == prov.SOURCE_STRUCTURED_PRIMARY
+
+
+def test_structured_fields_support_procedure_in_detail_heading():
+    note, facts, relation = _structured_relation_case(procedure_detail=True)
+    completed = prov.complete_reason_for_relations(
+        facts, [relation], note, source=_UniqueRelatedConceptSource())
+    assert completed[0].reconciliation_status == prov.SOURCE_STRUCTURED_PRIMARY
+
+
+def test_structured_fields_reject_equal_competing_diagnoses_for_one_service():
+    note, facts, relation = _structured_relation_case(second_diagnosis=True)
+    (unchanged,) = prov.complete_reason_for_relations(
+        facts, [relation], note, source=_UniqueRelatedConceptSource())
+    assert unchanged.reconciliation_status != prov.SOURCE_STRUCTURED_PRIMARY
+
+
+def test_structured_fields_reject_ambiguous_concept_compatibility():
+    note, facts, relation = _structured_relation_case()
+    (unchanged,) = prov.complete_reason_for_relations(
+        facts, [relation], note, source=_AmbiguousRelatedConceptSource())
+    assert unchanged.reconciliation_status != prov.SOURCE_STRUCTURED_PRIMARY
+
+
 # ---------------------------------------------- attribute-evidence scope validation
 # Issue #6 F9-R5-A, Codex's exact reopened reproduction: `same_episode_as`, a reversed
 # `part_of`, and a negated `part_of` were all wrongly accepted as authorizing an

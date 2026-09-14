@@ -6,6 +6,7 @@ LLMs) — a repeatable measurement of coding-correctness properties. Synthetic c
 only. Modeled on the retrocalcaneal-exostectomy note's structure.
 """
 import json
+from dataclasses import replace
 from claude_coder.models import (ClinicalFact, CandidateCode, ResolvedLine, ResolutionMethod,
                                  FactKind, EvidenceSpan, CodingResult, Disposition, Outcome)
 from claude_coder.data_access import MockSource
@@ -580,6 +581,34 @@ def test_residual_catchall_without_grounding_escalates():
         fact("Calcification at Achilles tendon insertion"),
         cand("Calcific tendinitis, right ankle and foot"))
 
+    # A residual descriptor need not repeat a source synonym. A complete,
+    # versioned governed term-to-code match supplies that semantic grounding.
+    governed = CandidateCode(
+        "X", "icd10", "Other specified category", source="snomed-crosswalk",
+        authority={"term_to_code_match": {
+            "method": "distinctive_source_token",
+            "normalized_query": "documented alpha",
+            "source_terms": ["alpha state"],
+            "mapped_code": "X",
+            "source_identity": {
+                "source_id": "synthetic-map",
+                "sha256": "sha256:synthetic-content-address",
+                "size": 1,
+            },
+        }})
+    assert not _residual_without_grounding(fact("Documented alpha"), governed)
+
+    unbound = replace(
+        governed,
+        authority={"term_to_code_match": {
+            "method": "distinctive_source_token",
+            "normalized_query": "documented alpha",
+            "source_terms": ["alpha state"],
+            "mapped_code": "X",
+            "source_identity": {},
+        }})
+    assert _residual_without_grounding(fact("Documented alpha"), unbound)
+
 
 def test_residual_catchall_escalates_through_resolve():
     """End-to-end: resolve() escalates a diagnosis that verifies to a residual/catch-all
@@ -614,6 +643,19 @@ def test_residual_catchall_escalates_through_resolve():
                          evidence=[EvidenceSpan("Retrocalcaneal bursitis")])
     line2 = resolution.resolve(_request(fact2), src2, llm=stub, corroborate=stub)
     assert line2.resolved and line2.chosen.code == "Z998"
+
+    # A governed term map can ground a synonym that a residual descriptor does
+    # not repeat, but the mapped candidate is still accepted only after both
+    # entailment evaluators confirm it.
+    src3 = MockSource(
+        records={("ZX99", "icd10"): {
+            "long_description": "Other specified category", "active": True}},
+        snomed={"documented alpha": {"ZX99"}})
+    fact3 = ClinicalFact(FactKind.DIAGNOSIS, "documented alpha",
+                         evidence=[EvidenceSpan("documented alpha")])
+    line3 = resolution.resolve(_request(fact3), src3, llm=stub, corroborate=stub)
+    assert line3.resolved and line3.chosen.source == "snomed-crosswalk"
+    assert line3.chosen.authority["term_to_code_match"]["source_identity"]
 
 
 # ---- reviewer-feedback fixes: surfacing, routing, gate transparency --------------

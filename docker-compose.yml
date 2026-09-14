@@ -179,7 +179,7 @@ services:
         # entrypoint.main() in-process (which never go through this
         # compose entrypoint) are never gated by a check they have no
         # licensed RF2 release to satisfy.
-        python -c "from run import ensure_procedure_authority; ensure_procedure_authority()" || exit 1
+        python -c "from run import ensure_terminology_authorities; ensure_terminology_authorities()" || exit 1
         exec "$@"
       - --
     # The deployed coding run. Since issue #6 finding F6-R4-A1 this entrypoint

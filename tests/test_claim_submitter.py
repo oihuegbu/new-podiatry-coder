@@ -528,8 +528,8 @@ class DxPointerTest(unittest.TestCase):
             release=ReleaseStatus(destination=ReleaseDestination.AUTO_READY),
         ))
         self.assertEqual(bundle.service_lines[0].diagnosis_pointers, ())
-        self.assertIn("service line Y has no diagnosis linkage",
-                      bundle.release_blockers())
+        self.assertIn("service line Y has no diagnosis linkage to a "
+                      "submission-ready diagnosis", bundle.release_blockers())
 
         event = {"registry_version": 2, "verification": "auto",
                  "claim_bundle": bundle.to_payload()}
@@ -537,6 +537,43 @@ class DxPointerTest(unittest.TestCase):
                                          _practice_config())
         self.assertIsNone(payload)
         self.assertTrue(any("no diagnosis pointer" in b for b in blocks), blocks)
+
+    def test_native_submission_omits_selected_but_held_lines(self):
+        """A line-local hold stays visible but cannot enter or block the 837P."""
+        from app.contracts.claim_bundle import LineStatus, ServiceLine
+
+        result = _result()
+        event = _reg_event(result)
+        config = _practice_config()
+        bundle = cs.bundle_for(event, result)
+        held_data = bundle.service_lines[0].model_dump(mode="json")
+        held_data.update({
+            "sequence": len(bundle.service_lines) + 1,
+            "code": "HELD_TEST_LINE",
+            "diagnosis_pointers": [],
+            "status": LineStatus.HELD_POLICY_OR_DATA.value,
+            "external_disposition": "EXCLUDED",
+            "blocking_stage": "submission",
+            "reason_code": "held_policy_or_data",
+        })
+        held = ServiceLine.model_validate(held_data)
+        mixed = bundle.model_copy(update={
+            "service_lines": tuple(bundle.service_lines) + (held,),
+        })
+
+        self.assertIn(held, mixed.service_lines)
+        self.assertNotIn(held, mixed.submission_service_lines)
+        with mock.patch.object(cs, "bundle_for", return_value=mixed):
+            payload, blocks = cs.build_claim(
+                "note_x", event, result, config)
+        self.assertEqual(blocks, [])
+        self.assertIsNotNone(payload)
+        submitted = payload["claimInformation"]["serviceLines"]
+        self.assertEqual(len(submitted), len(bundle.service_lines))
+        self.assertNotIn(
+            "HELD_TEST_LINE",
+            [line["professionalService"]["procedureCode"] for line in submitted],
+        )
 
 
 if __name__ == "__main__":

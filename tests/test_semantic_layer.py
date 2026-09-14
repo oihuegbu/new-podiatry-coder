@@ -784,5 +784,93 @@ class ExactDirectCodeTermSignalTest(unittest.TestCase):
         self.assertEqual(out, {})
 
 
+class TerminologyDistinctiveTokenRecallTest(unittest.TestCase):
+    def test_rare_unambiguous_source_token_widens_recall_only(self):
+        from claude_coder.terminology import TerminologyIndex
+        idx = TerminologyIndex({
+            "synthetic-alpha": ["Namedalpha state", "Namedalpha form"],
+            "synthetic-beta": ["Common finding one"],
+            "synthetic-gamma": ["Common finding two"],
+        })
+        self.assertEqual(idx.candidates("Painful Namedalpha-type prominence"), set())
+        self.assertEqual(idx.recall_candidates("Painful Namedalpha-type prominence"),
+                         {"SYN.THETIC-ALPHA"})
+        match = idx.recall_matches("Painful Namedalpha-type prominence")[
+            "SYN.THETIC-ALPHA"]
+        self.assertEqual(match["method"], "distinctive_source_token")
+        self.assertEqual(match["matched_tokens"], ["namedalpha"])
+        self.assertEqual(match["source_terms"],
+                         ["namedalpha form", "namedalpha state"])
+
+    def test_shared_or_short_tokens_never_widen_recall(self):
+        from claude_coder.terminology import TerminologyIndex
+        idx = TerminologyIndex({
+            "synthetic-alpha": ["Shared finding alpha"],
+            "synthetic-beta": ["Shared finding beta"],
+            "synthetic-gamma": ["Rare sign"],
+        })
+        self.assertEqual(idx.recall_candidates("shared pattern"), set())
+        self.assertEqual(idx.recall_candidates("rare pattern"), set())
+
+
+class GovernedMappingIdentityTest(unittest.TestCase):
+    def _candidate(self, *, mapped_code="SYNTH-A", source="snomed-crosswalk",
+                   nested=False):
+        from claude_coder.models import CandidateCode
+        match = {
+            "method": "exact_normalized_term",
+            "normalized_query": "synthetic condition",
+            "source_terms": ["synthetic condition"],
+            "mapped_code": mapped_code,
+            "source_identity": {
+                "source_id": "synthetic_governed_map",
+                "sha256": "sha256:" + "a" * 64,
+                "size": 42,
+            },
+        }
+        payload = {"term_to_code_match": match}
+        authority = {"snomed-crosswalk": payload} if nested else payload
+        return CandidateCode(code="SYNTH-A", system="icd10",
+                             descriptor="synthetic residual category", score=0.9,
+                             source=source, authority=authority)
+
+    def test_complete_source_bound_mapping_establishes_identity(self):
+        from claude_coder.resolution import _governed_term_mapping_grounded
+        self.assertTrue(_governed_term_mapping_grounded(self._candidate()))
+
+    def test_mapping_for_a_different_code_never_establishes_identity(self):
+        from claude_coder.resolution import _governed_term_mapping_grounded
+        self.assertFalse(_governed_term_mapping_grounded(
+            self._candidate(mapped_code="SYNTH-B")))
+
+    def test_merged_candidate_preserves_governed_identity(self):
+        from claude_coder.resolution import _governed_term_mapping_grounded
+        self.assertTrue(_governed_term_mapping_grounded(
+            self._candidate(source="retrieval", nested=True)))
+
+
+class ConceptRelationPairCoverageTest(unittest.TestCase):
+    def _index(self):
+        from claude_coder.terminology import ConceptRelationIndex
+        return ConceptRelationIndex({
+            "P": {"terms": ["parent structure", "shared all", "shared some"],
+                  "parents": []},
+            "C": {"terms": ["child structure", "shared all"], "parents": ["P"]},
+            "X": {"terms": ["unrelated structure", "shared some"], "parents": []},
+        })
+
+    def test_ambiguous_term_whose_every_interpretation_is_related_is_all(self):
+        detail = self._index().relation_detail("shared all", "parent structure")
+        self.assertEqual(detail.verdict, "ancestor_descendant")
+        self.assertEqual(detail.pair_coverage, "all")
+        self.assertEqual(detail.related_pair_count, detail.total_pair_count)
+
+    def test_partial_ambiguous_overlap_is_not_universally_related(self):
+        detail = self._index().relation_detail("shared some", "parent structure")
+        self.assertEqual(detail.verdict, "ancestor_descendant")
+        self.assertEqual(detail.pair_coverage, "some")
+        self.assertLess(detail.related_pair_count, detail.total_pair_count)
+
+
 if __name__ == "__main__":
     unittest.main()

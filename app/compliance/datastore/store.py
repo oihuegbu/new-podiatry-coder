@@ -932,6 +932,7 @@ class ComplianceDataStore:
             DROP TABLE IF EXISTS mce_edit;
             DROP TABLE IF EXISTS mce_age_range;
             DROP TABLE IF EXISTS hcpcs_coverage;
+            DROP TABLE IF EXISTS icd10_chronic;
 
             CREATE TABLE code_set (
                 code_system   TEXT NOT NULL,

@@ -172,18 +172,18 @@ class HeldSubmissionIsEnforcedNotOnlyStamped(unittest.TestCase):
                            corroborate_llm=_sel, audit_repository=NullAuditRepository())
         self.assertNotEqual(r.destination, Destination.AUTO_READY)
         self.assertNotEqual(r.verdict, Verdict.AUTO_READY)
-        self.assertTrue(any(item["destination"] == Destination.PROVIDER_QUERY.value
-                            and item["blocking"] for item in r.routing))
+        self.assertTrue(any(item["blocking"] for item in r.routing))
 
-    def test_bundle_carries_the_held_line_as_held_not_erased_but_enforcement_still_blocks(self):
+    def test_bundle_carries_the_held_line_as_held_not_erased_but_no_ready_claim_still_blocks(self):
         """issue #6 F9-R7 item 4 supersedes this test's ORIGINAL assertion (that a
         HELD line was excluded from `service_lines` entirely, visible only as an
         untyped audit dict): that shape was itself the erasure bug the product-
         priority reset named -- a discovered, recommended code disappearing from
-        the artifact instead of being carried with an explicit status. The
-        ENFORCEMENT this test exists to prove (HELD blocks autonomous release, not
-        merely a stamp) is unchanged and still checked below, via
-        `release_blockers()`, not via absence from `service_lines`."""
+        the artifact instead of being carried with an explicit status. A bundle
+        containing ONLY a held service still cannot release because it
+        has no submission-ready claim.  A held line is not itself encounter-wide:
+        when an unrelated RECOMMENDED service exists, the canonical submission
+        projection may release that service without transmitting this one."""
         from app.contracts.claim_bundle import (AuthorityBinding, EncounterContext,
                                                  LineStatus, SourceDocument,
                                                  bundle_from_coding_result)
@@ -200,14 +200,51 @@ class HeldSubmissionIsEnforcedNotOnlyStamped(unittest.TestCase):
                      if e.get("code") == "PROC_X"]
         self.assertTrue(held_audit, "the coded line must still be visible in the audit trail")
         self.assertEqual(held_audit[0]["claim_submission_status"], "held")
-        self.assertTrue(bundle.release_blockers(),
-                        "a HELD line present anywhere in this encounter must always "
-                        "produce at least one release blocker")
+        blockers = bundle.release_blockers()
+        self.assertTrue(any("no submission-ready service" in b for b in blockers),
+                        blockers)
 
-    def test_release_blockers_flags_a_held_line_even_if_destination_disagrees(self):
-        """Consumer-side independent re-derivation (F8-R3's own acceptance
-        criterion: BOTH producer and consumer must recompute non-releasability),
-        not only trust of the producer's own `release.destination` value."""
+    def test_held_line_is_visible_but_does_not_block_a_ready_submission_projection(self):
+        """One uncertain selected line neither transmits nor erases a ready line."""
+        from app.contracts.claim_bundle import (
+            BundleOrigin, ClaimBundle, DiagnosisLine, EncounterIdentity,
+            ExternalDisposition, LineStatus, ReleaseDestination, ReleaseStatus,
+            ServiceLine,
+        )
+
+        diagnosis = DiagnosisLine(
+            sequence=1, system="test-dx", code="DX_TEST", primary=True,
+            clinical_event_id="D1")
+        ready = ServiceLine(
+            sequence=1, system="test-service", code="SERVICE_READY", units=1,
+            diagnosis_pointers=(1,), clinical_event_id="S1")
+        held = ServiceLine(
+            sequence=2, system="test-service", code="SERVICE_HELD", units=1,
+            diagnosis_pointers=(), clinical_event_id="S2",
+            status=LineStatus.HELD_POLICY_OR_DATA,
+            external_disposition=ExternalDisposition.EXCLUDED,
+            blocking_stage="submission", reason_code="held_policy_or_data")
+        bundle = ClaimBundle(
+            produced_by=BundleOrigin.CLAUDE_CODER,
+            encounter=EncounterIdentity(encounter_id="e", document_id="e",
+                                        date_of_service="2026-01-01"),
+            diagnoses=(diagnosis,), service_lines=(ready, held),
+            release=ReleaseStatus(destination=ReleaseDestination.AUTO_READY),
+        )
+
+        self.assertEqual(bundle.submission_diagnoses, (diagnosis,))
+        self.assertEqual(bundle.submission_service_lines, (ready,))
+        self.assertEqual(bundle.submission_diagnosis_pointers(ready), (1,))
+        self.assertEqual([line["code"] for line in bundle.claim_content()["service_lines"]],
+                         ["SERVICE_READY"])
+        blockers = bundle.release_blockers()
+        self.assertFalse(any("coded line's submission is HELD" in b for b in blockers),
+                         blockers)
+        self.assertFalse(any("SERVICE_HELD has no diagnosis" in b for b in blockers),
+                         blockers)
+
+    def test_release_blockers_refuses_auto_ready_when_only_service_is_held(self):
+        """A forged AUTO_READY destination cannot turn a held-only artifact into a claim."""
         from app.contracts.claim_bundle import (AuthorityBinding, EncounterContext,
                                                  ReleaseDestination, SourceDocument,
                                                  bundle_from_coding_result)
@@ -217,15 +254,51 @@ class HeldSubmissionIsEnforcedNotOnlyStamped(unittest.TestCase):
         bundle = bundle_from_coding_result(
             r, source_document=SourceDocument(), context=EncounterContext(),
             authority=AuthorityBinding())
-        # simulate a producer defect: force the destination to claim AUTO_READY
-        # despite a held line still sitting in audit.excluded_lines
+        # Simulate a producer defect: force AUTO_READY even though the only
+        # selected service is held and the submission projection is empty.
         tampered = bundle.model_copy(update={
             "release": bundle.release.model_copy(
                 update={"destination": ReleaseDestination.AUTO_READY,
                        "producer_releasable": True})})
         blockers = tampered.release_blockers()
-        self.assertTrue(any("HELD" in b for b in blockers),
-                        "the consumer must catch this even when the producer disagrees")
+        self.assertTrue(any("no submission-ready service" in b for b in blockers),
+                        blockers)
+
+    def test_held_primary_diagnosis_is_removed_and_ready_pointer_is_compacted(self):
+        """The canonical payload and pointer map agree after a held diagnosis drops."""
+        from app.contracts.claim_bundle import (
+            BundleOrigin, ClaimBundle, DiagnosisLine, EncounterIdentity,
+            ExternalDisposition, LineStatus, ReleaseDestination, ReleaseStatus,
+            ServiceLine,
+        )
+
+        held_primary = DiagnosisLine(
+            sequence=1, system="test-dx", code="DX_HELD", primary=True,
+            clinical_event_id="D1", status=LineStatus.HELD_POLICY_OR_DATA,
+            external_disposition=ExternalDisposition.EXCLUDED,
+            blocking_stage="submission", reason_code="held_policy_or_data")
+        ready_diagnosis = DiagnosisLine(
+            sequence=2, system="test-dx", code="DX_READY", primary=False,
+            clinical_event_id="D2")
+        ready_service = ServiceLine(
+            sequence=1, system="test-service", code="SERVICE_READY", units=1,
+            diagnosis_pointers=(2,), clinical_event_id="S1")
+        bundle = ClaimBundle(
+            produced_by=BundleOrigin.CLAUDE_CODER,
+            encounter=EncounterIdentity(encounter_id="e", document_id="e",
+                                        date_of_service="2026-01-01"),
+            diagnoses=(held_primary, ready_diagnosis),
+            service_lines=(ready_service,),
+            release=ReleaseStatus(destination=ReleaseDestination.AUTO_READY),
+        )
+
+        content = bundle.claim_content()
+        self.assertEqual(content["diagnoses"], [{
+            "sequence": 1, "system": "test-dx", "code": "DX_READY",
+            "primary": True, "clinical_event_id": "D2",
+        }])
+        self.assertEqual(content["service_lines"][0]["diagnosis_pointers"], [1])
+        self.assertEqual(bundle.submission_diagnosis_pointers(ready_service), (1,))
 
 
 if __name__ == "__main__":

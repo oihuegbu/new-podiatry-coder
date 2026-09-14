@@ -387,6 +387,109 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
         self.assertEqual(line.chosen.code if line.chosen else None, "CAND_CHOSEN")
         self.assertIsNone(line.documentation_gap)
 
+    def test_unique_governed_identity_outranks_only_recall_only_topical_rival(self):
+        """Both descriptors may be semantically compatible, but only the candidate
+        with governed identity lineage identifies the documented concept.  The
+        recall-only rival cannot manufacture a tie after both descriptors have
+        independently passed their own verification."""
+        chosen = _cand("CAND_CHOSEN", "assembly service, broad category")
+        rival = _cand("CAND_RIVAL", "assembly service, alternate category")
+        fact = _fact("assembly service documented")
+        s1 = EvidenceSpan(text="assembly service documented", anchored=True, span_id="s1")
+        s2 = EvidenceSpan(text="assembly service documented", anchored=True, span_id="s2")
+        fact.evidence = [s1, s2]
+        recon = self._reconciliation({"s1": "AGREED", "s2": "AGREED"})
+        j0 = _verify.Judgement(candidate_dispositions=(
+            _disp(chosen, "entailed", evidence_span_ids=("s1",)),
+            _disp(rival, "entailed", evidence_span_ids=("s2",))), declared=True)
+        j1 = _verify.Judgement(candidate_dispositions=(
+            _disp(chosen, "entailed", evidence_span_ids=("s1",)),
+            _disp(rival, "entailed", evidence_span_ids=("s2",))), declared=True)
+        admissions = {
+            chosen.code: resolution.CandidateAdmission(
+                (chosen.code, chosen.system), resolution.CandidateStanding.SUPPORTED,
+                ("governed_term_mapping",), (), (), ("s1",),
+                {"code": chosen.code, "descriptor": chosen.descriptor},
+                ("governed-map",), "source-bound identity"),
+            rival.code: resolution.CandidateAdmission(
+                (rival.code, rival.system), resolution.CandidateStanding.UNGROUNDED,
+                (), (), (), (),
+                {"code": rival.code, "descriptor": rival.descriptor},
+                ("retrieval",), "topical recall only"),
+        }
+
+        remaining, eliminated, unresolved = resolution._candidate_disposition_uniqueness(
+            [chosen, rival], chosen, [j0, j1], recon, coverage=None,
+            fact=fact, admissions=admissions)
+
+        self.assertEqual([candidate.code for candidate in remaining], ["CAND_CHOSEN"])
+        self.assertIn("CAND_RIVAL", eliminated)
+        self.assertEqual(unresolved, {})
+
+    def test_unique_governed_survivor_replaces_a_wrong_initial_proposal(self):
+        governed = _cand("CAND_GOVERNED", "assembly service, broad category")
+        proposed = _cand("CAND_PROPOSED", "assembly service, alternate category")
+        fact = _fact("assembly service documented")
+        s1 = EvidenceSpan(text="assembly service documented", anchored=True, span_id="s1")
+        s2 = EvidenceSpan(text="assembly service documented", anchored=True, span_id="s2")
+        fact.evidence = [s1, s2]
+        recon = self._reconciliation({"s1": "AGREED", "s2": "AGREED"})
+        judgements = [_verify.Judgement(
+            chosen=proposed, entailed=(governed.code, proposed.code), declared=True,
+            candidate_dispositions=(
+                _disp(governed, "entailed", evidence_span_ids=("s1",)),
+                _disp(proposed, "entailed", evidence_span_ids=("s2",))))
+            for _ in range(2)]
+        admissions = {
+            governed.code: resolution.CandidateAdmission(
+                (governed.code, governed.system), resolution.CandidateStanding.SUPPORTED,
+                ("governed_term_mapping",), (), (), ("s1",),
+                {"code": governed.code, "descriptor": governed.descriptor},
+                ("governed-map",), "source-bound identity"),
+            proposed.code: resolution.CandidateAdmission(
+                (proposed.code, proposed.system), resolution.CandidateStanding.UNGROUNDED,
+                (), (), (), (),
+                {"code": proposed.code, "descriptor": proposed.descriptor},
+                ("retrieval",), "topical recall only"),
+        }
+
+        line = resolution._settle_uniqueness(
+            fact, proposed, [governed, proposed], judgements, {}, "verified", "",
+            recon, admissions=admissions)
+
+        self.assertEqual(line.chosen.code if line.chosen else None, "CAND_GOVERNED")
+        self.assertTrue(line.tie_record["reselected_from_verified_survivor"])
+        self.assertEqual(line.tie_record["proposed"], "CAND_PROPOSED")
+
+    def test_two_governed_identity_candidates_remain_a_real_tie(self):
+        chosen = _cand("CAND_CHOSEN", "assembly service, broad category")
+        rival = _cand("CAND_RIVAL", "assembly service, alternate category")
+        fact = _fact("assembly service documented")
+        s1 = EvidenceSpan(text="assembly service documented", anchored=True, span_id="s1")
+        fact.evidence = [s1]
+        recon = self._reconciliation({"s1": "AGREED"})
+        judgements = [_verify.Judgement(candidate_dispositions=(
+            _disp(chosen, "entailed", evidence_span_ids=("s1",)),
+            _disp(rival, "entailed", evidence_span_ids=("s1",))), declared=True)
+            for _ in range(2)]
+        admissions = {
+            candidate.code: resolution.CandidateAdmission(
+                (candidate.code, candidate.system), resolution.CandidateStanding.SUPPORTED,
+                ("governed_term_mapping",), (), (), ("s1",),
+                {"code": candidate.code, "descriptor": candidate.descriptor},
+                ("governed-map",), "source-bound identity")
+            for candidate in (chosen, rival)
+        }
+
+        remaining, eliminated, unresolved = resolution._candidate_disposition_uniqueness(
+            [chosen, rival], chosen, judgements, recon, coverage=None,
+            fact=fact, admissions=admissions)
+
+        self.assertEqual(sorted(candidate.code for candidate in remaining),
+                         ["CAND_CHOSEN", "CAND_RIVAL"])
+        self.assertEqual(eliminated, {})
+        self.assertEqual(unresolved, {})
+
     def test_one_supported_candidate_plus_one_positively_excluded_candidate_releases(self):
         """A rival BOTH evaluators validly, cleanly eliminate (agreement +
         reconciled evidence) is proven wrong -- it must not block release."""

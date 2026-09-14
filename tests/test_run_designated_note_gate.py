@@ -150,7 +150,9 @@ class ReleaseGateContextRequirementTest(unittest.TestCase):
             encounter.write_text(json.dumps(_VALID_ENCOUNTER))
             with mock.patch.object(m, "BILLING_CONTEXT", billing), \
                     mock.patch.object(m, "ENCOUNTER_CONTEXT", encounter), \
-                    mock.patch.object(m.subprocess, "call", return_value=0) as fake_call:
+                    mock.patch.object(m.subprocess, "call", return_value=0) as fake_call, \
+                    mock.patch.object(m, "_verify_written_result",
+                                      return_value=(True, "verified")):
                 rc = m.main([])
         self.assertEqual(rc, 0)
         (args,), _kwargs = fake_call.call_args
@@ -175,12 +177,46 @@ class ReleaseGateContextRequirementTest(unittest.TestCase):
             with mock.patch.object(m, "BILLING_CONTEXT", billing), \
                     mock.patch.object(m, "ENCOUNTER_CONTEXT", encounter), \
                     mock.patch.dict(m.os.environ, {"ANTHROPIC_USE_BATCH": "1"}), \
-                    mock.patch.object(m.subprocess, "call", return_value=0) as fake_call:
+                    mock.patch.object(m.subprocess, "call", return_value=0) as fake_call, \
+                    mock.patch.object(m, "_verify_written_result",
+                                      return_value=(True, "verified")):
                 rc = m.main([])
                 parent_value_after_call = m.os.environ["ANTHROPIC_USE_BATCH"]
         self.assertEqual(rc, 0)
         self.assertEqual(fake_call.call_args.kwargs["env"]["ANTHROPIC_USE_BATCH"], "0")
         self.assertEqual(parent_value_after_call, "1")
+
+    def test_zero_process_exit_is_not_a_pass_when_written_bundle_is_not_releasable(self):
+        m = _mod()
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            billing = pathlib.Path(td) / "billing.json"
+            billing.write_text(json.dumps(_VALID_BILLING))
+            encounter = pathlib.Path(td) / "encounter.json"
+            encounter.write_text(json.dumps(_VALID_ENCOUNTER))
+            with mock.patch.object(m, "BILLING_CONTEXT", billing), \
+                    mock.patch.object(m, "ENCOUNTER_CONTEXT", encounter), \
+                    mock.patch.object(m.subprocess, "call", return_value=0), \
+                    mock.patch.object(m, "_verify_written_result",
+                                      return_value=(False, "claim has no service")):
+                rc = m.main([])
+        self.assertEqual(rc, 3)
+
+    def test_nonzero_process_exit_is_preserved_without_reading_stale_output(self):
+        m = _mod()
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            billing = pathlib.Path(td) / "billing.json"
+            billing.write_text(json.dumps(_VALID_BILLING))
+            encounter = pathlib.Path(td) / "encounter.json"
+            encounter.write_text(json.dumps(_VALID_ENCOUNTER))
+            with mock.patch.object(m, "BILLING_CONTEXT", billing), \
+                    mock.patch.object(m, "ENCOUNTER_CONTEXT", encounter), \
+                    mock.patch.object(m.subprocess, "call", return_value=7), \
+                    mock.patch.object(m, "_verify_written_result") as verify:
+                rc = m.main([])
+        self.assertEqual(rc, 7)
+        verify.assert_not_called()
 
 
 if __name__ == "__main__":

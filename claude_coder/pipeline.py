@@ -463,8 +463,8 @@ def code_encounter(
         # spans), and only ever ADDS an edge the SAME deterministic directional-proof
         # grammar `reconcile_relations` already uses independently proves from the
         # record -- never from repetition, model confidence, or a bare code/kind pairing.
-        relations = _prov.complete_reason_for_relations(facts, relations, note_text,
-                                                         readings=readings)
+        relations = _prov.complete_reason_for_relations(
+            facts, relations, note_text, readings=readings, source=source)
         audit_hashes.append(audit_repository.append(encounter_id, "relation_graph", {
             "schema_version": extracted.schema_version,
             # the extraction call this graph came from -- the unit of assertion independence

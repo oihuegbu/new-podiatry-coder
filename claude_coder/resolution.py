@@ -101,13 +101,48 @@ def _distinctive_tokens(text: str) -> set[str]:
             if len(t) > 4 and t not in _GENERIC_TOKENS}
 
 
+def _governed_term_mapping_grounded(chosen: CandidateCode) -> bool:
+    """Did a versioned term-to-code source provide an auditable semantic bridge?
+
+    A residual descriptor intentionally does not repeat every synonym/eponym it
+    classifies.  Literal descriptor overlap is therefore not the only possible
+    grounding: a governed mapping may supply the missing term identity, but only
+    when the candidate preserves the match method, matching source term(s), mapped
+    code, and versioned source identity.  Merely labelling a candidate with a source
+    name is insufficient.
+    """
+    authority = dict(chosen.authority or {})
+    payloads = []
+    if chosen.source == "snomed-crosswalk":
+        payloads.append(authority)
+    nested = authority.get("snomed-crosswalk")
+    if isinstance(nested, dict):
+        payloads.append(nested)
+    for payload in payloads:
+        match = dict(payload.get("term_to_code_match") or {})
+        identity = dict(match.get("source_identity") or {})
+        if (match.get("method")
+                and match.get("normalized_query")
+                and match.get("source_terms")
+                and str(match.get("mapped_code") or "").replace(".", "").upper()
+                    == str(chosen.code or "").replace(".", "").upper()
+                and identity.get("source_id")
+                and identity.get("sha256")
+                and identity.get("size")):
+            return True
+    return False
+
+
 def _residual_without_grounding(fact: ClinicalFact, chosen: CandidateCode) -> bool:
     """A DIAGNOSIS resolved to a RESIDUAL/catch-all code whose descriptor shares NO
-    distinctive clinical term with the documented condition -- an ungrounded guess."""
+    distinctive clinical term with the documented condition AND carries no governed,
+    source-bound term-to-code match -- an ungrounded guess."""
     desc = chosen.descriptor.lower()
     if not any(m in desc for m in _RESIDUAL_MARKERS):
         return False
-    return not (_distinctive_tokens(fact.description) & _distinctive_tokens(desc))
+    if _distinctive_tokens(fact.description) & _distinctive_tokens(desc):
+        return False
+    return not _governed_term_mapping_grounded(chosen)
 
 
 def _needs_verification(fact: ClinicalFact, cand: CandidateCode, reconciliation=None) -> bool:
@@ -1017,9 +1052,24 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
         # A single crosswalk hit is a strong CANDIDATE, not a verdict: the concept's
         # default ICD map can be less specific than, or wrong for, the documented
         # condition, so it is ALWAYS entailment-confirmed (never trusted blindly).
-        snomed = source.snomed_codes(fact.description, fact.system)
-        if len(snomed) == 1:
-            pool = _authoritative_pool(next(iter(snomed)), source)
+        match_fn = getattr(source, "snomed_code_matches", None)
+        if callable(match_fn):
+            snomed_matches = dict(match_fn(fact.description, fact.system) or {})
+        else:
+            # Backward-compatible protocol fallback.  It remains ungrounded for a
+            # residual descriptor because it carries no match/source identity.
+            snomed_matches = {code: {} for code in
+                              source.snomed_codes(fact.description, fact.system)}
+        if len(snomed_matches) == 1:
+            mapped_code, match = next(iter(snomed_matches.items()))
+            pool = _authoritative_pool(
+                mapped_code, source,
+                candidate_source="snomed-crosswalk",
+                authority={
+                    "source": "SNOMED CT -> ICD-10-CM map",
+                    "term_to_code_match": dict(match or {}),
+                },
+            )
             if pool:
                 r = _take(pool, "SNOMED CT -> ICD-10-CM map", always_verify=True)
                 if r is not None:
@@ -1303,7 +1353,8 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
                 alternatives=[line.chosen],
                 rationale=("the documented condition mapped only to a residual/catch-all "
                     f"code ({line.chosen.code}) whose descriptor shares no distinctive "
-                    "clinical term with the documentation -- a coder CLASSIFICATION/mapping "
+                    "clinical term with the documentation and carries no versioned, "
+                    "source-bound term-to-code match -- a coder CLASSIFICATION/mapping "
                     "decision (identify the specific code, or confirm the residual bucket); "
                     "not a provider documentation gap, and not billed on a non-specific code"))
             line.candidate_eligibility = _prior_eligibility
@@ -1585,22 +1636,29 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
     return line
 
 
-def _candidate_from_code(code: str, source: CodeSource) -> CandidateCode:
+def _candidate_from_code(code: str, source: CodeSource, *,
+                         candidate_source: str = "icd10-index",
+                         authority: dict | None = None) -> CandidateCode:
     """Wrap an authoritative-Index code as a top-relevance candidate, descriptor
     from the authoritative record."""
     rec = source.lookup(code, "icd10") or {}
     desc = (rec.get("long_description") or rec.get("description")
             or rec.get("short_description") or "")
     return CandidateCode(code=code, system="icd10", descriptor=str(desc), score=1.0,
-                         source="icd10-index",
-                         authority={"source": "ICD-10-CM Alphabetic Index"})
+                         source=candidate_source,
+                         authority=(dict(authority) if authority is not None else
+                                    {"source": "ICD-10-CM Alphabetic Index"}))
 
 
-def _authoritative_pool(code: str, source: CodeSource) -> list[CandidateCode]:
+def _authoritative_pool(code: str, source: CodeSource, *,
+                        candidate_source: str = "icd10-index",
+                        authority: dict | None = None) -> list[CandidateCode]:
     """Expand an authoritative code to its billable LEAVES — a leaf stays itself,
     a category becomes its more-specific billable children — so the
     structured decision can pick the specific code by documented laterality."""
-    return [_candidate_from_code(c, source) for c in source.leaf_codes(code, "icd10")]
+    return [_candidate_from_code(c, source, candidate_source=candidate_source,
+                                 authority=authority)
+            for c in source.leaf_codes(code, "icd10")]
 
 
 VERIFY_K = 8           # shortlist size sent to the entailment-selection call
@@ -2320,6 +2378,32 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: Ca
         system_unresolved[cand.code] = (
             f"independent evaluators disagreed on {cand.code}'s disposition "
             f"({d0.status!r} vs {d1.status!r})")
+    # Evaluator entailment can confirm that a broad topical descriptor is
+    # compatible with the record; it cannot by itself make that recall hit the
+    # documented concept's identity.  If exactly one surviving candidate has
+    # governed identity standing and every rival is explicitly recall-only,
+    # retain the identity-grounded candidate and audit the topical rivals.  A
+    # second grounded candidate, a missing admission, or any unresolved
+    # evaluator contract still fails closed as a tie/system hold.
+    identity_grounded = [
+        cand for cand in remaining
+        if (admissions or {}).get(cand.code) is not None
+        and (admissions or {})[cand.code].standing is CandidateStanding.SUPPORTED
+    ]
+    if len(identity_grounded) == 1:
+        winner = identity_grounded[0]
+        rivals = [cand for cand in remaining if cand.code != winner.code]
+        if rivals and all(
+                (admissions or {}).get(cand.code) is not None
+                and (admissions or {})[cand.code].standing is CandidateStanding.UNGROUNDED
+                for cand in rivals):
+            for cand in rivals:
+                eliminated[cand.code] = (
+                    "recall-only candidate was semantically plausible but did not "
+                    "identify the documented concept; another surviving candidate "
+                    "has unique governed identity evidence and independently passed "
+                    "descriptor/requirement verification")
+            remaining = [winner]
     return remaining, eliminated, system_unresolved
 
 
@@ -2557,6 +2641,13 @@ def candidate_admission(fact: ClinicalFact, candidate: CandidateCode,
     if direct_hits.get(candidate.code):
         positive.add("direct_term")
         identity_positive.add("direct_term")
+    # A source-bound term mapping establishes concept identity, not code
+    # approval.  The candidate still has to survive its authoritative
+    # descriptor, compiled requirements, two independent evaluations, and all
+    # downstream claim controls.  Bare UMLS/RAG lineage remains recall-only.
+    if _governed_term_mapping_grounded(candidate):
+        positive.add("governed_term_mapping")
+        identity_positive.add("governed_term_mapping")
     # issue #6, Codex's independent re-review (F9-R23 Root Finding 1): an
     # unresolved MUST_SUPPORT axis is recorded (`unresolved_axes`, for
     # audit) but deliberately does NOT, by itself, withhold standing here.
@@ -2742,18 +2833,35 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
         return _system_unresolved_line(fact, shortlist, _system_unresolved,
                                        eliminated, record)
 
-    # issue #6, Codex's independent re-review (F9-R16-B): membership, not just
-    # count -- `_candidate_disposition_uniqueness` no longer special-cases
-    # `chosen`, so `remaining` narrowing to exactly one candidate no longer
-    # guarantees that candidate IS `chosen` (it can now be validly eliminated,
-    # or a different candidate can be the sole survivor). Releasing whichever
-    # single candidate happens to remain, regardless of whether it is the one
-    # BOTH models' own propose-then-verify pick actually was, would be a
-    # different, unverified leap; anything other than "exactly chosen, alone"
-    # falls through to the tie/hold path below unchanged.
-    if len(remaining) == 1 and remaining[0].code == chosen.code:
-        return _entailed_line(fact, chosen, shortlist, why, corroboration,
-                              uniqueness=record)
+    # The initial `chosen` value is a proposal, not an authority.  Ordinarily
+    # the unique survivor is the proposal itself.  If the complete structured
+    # disposition pass instead eliminates that proposal and leaves a different
+    # sole survivor, reselection is safe only when that pass actually ran AND
+    # the survivor has governed identity standing.  In that case both
+    # evaluators already validated the survivor's current descriptor and every
+    # rival has been accounted for; holding merely because the first proposal
+    # was wrong would invert propose-then-verify into propose-as-truth.
+    if len(remaining) == 1:
+        survivor = remaining[0]
+        if survivor.code == chosen.code:
+            return _entailed_line(fact, survivor, shortlist, why, corroboration,
+                                  uniqueness=record)
+        survivor_admission = (admissions or {}).get(survivor.code)
+        if (_disposition_verdict is not None
+                and survivor_admission is not None
+                and survivor_admission.standing is CandidateStanding.SUPPORTED):
+            reselection_record = {
+                **record,
+                "proposed": chosen.code,
+                "selected": survivor.code,
+                "reselected_from_verified_survivor": True,
+            }
+            note = (f"the initial proposal {chosen.code} was eliminated; "
+                    f"{survivor.code} is the sole independently verified candidate "
+                    "with governed identity standing")
+            return _entailed_line(
+                fact, survivor, shortlist, f"{why}; {note}" if why else note,
+                corroboration, uniqueness=reselection_record)
 
     # issue #6, Codex's independent re-review (F9-R13-C): one additional
     # selection condition, tried BEFORE the original-document tie policy --

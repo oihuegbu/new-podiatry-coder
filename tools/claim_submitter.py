@@ -505,21 +505,26 @@ def build_claim(doc: str, reg_event: dict, result: dict,
     # in-sequence by `ClaimBundle.integrity_problems()`. Re-sorting here would
     # be a second, competing opinion about the claim's diagnosis order — the
     # order the pointers below are relative to.
-    ordered_dx = list(bundle.diagnoses)
+    # `diagnoses`/`service_lines` also preserve selected-but-held codes for
+    # auditability.  The contract's canonical submission projection is the only
+    # source of outbound claim lines, so a held line can neither transmit nor
+    # prevent an unrelated RECOMMENDED line from being submitted.
+    ordered_dx = list(bundle.submission_diagnoses)
     if not ordered_dx:
         blocks.append("verified claim has no diagnoses")
 
     # -- service lines --------------------------------------------------------
-    if not bundle.service_lines:
+    submitted_services = list(bundle.submission_service_lines)
+    if not submitted_services:
         blocks.append("verified claim has no billable service lines")
     service_lines, total = [], 0.0
-    for line in bundle.service_lines:
+    for line in submitted_services:
         code = line.code.upper()
         units = line.units
         # Linkage is checked BEFORE price, deliberately: a line the record never
         # justified is a claim-integrity failure whether or not the practice has
         # a fee for it, and reporting the fee gap first would bury it.
-        pointers = [p for p in line.diagnosis_pointers if 1 <= p <= len(ordered_dx)]
+        pointers = list(bundle.submission_diagnosis_pointers(line))
         if not pointers:
             # No fallback to "every documented diagnosis". A service line whose
             # diagnosis linkage the record never established must not acquire

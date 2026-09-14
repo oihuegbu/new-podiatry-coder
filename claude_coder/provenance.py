@@ -335,7 +335,8 @@ _RELATION_GRAMMAR_CACHE: tuple | None = None
 _RELATION_PATTERN_CACHE: dict[str, dict] = {}
 _REQUIRED_GRAMMAR_KEYS = ("version", "control_mode", "authority", "max_linking_chars",
                           "clause_terminators", "negation_markers",
-                          "min_independent_assertions", "predicates")
+                          "min_independent_assertions", "structured_reason_for",
+                          "predicates")
 
 
 class RelationGrammarError(RuntimeError):
@@ -375,12 +376,43 @@ def load_relation_grammar() -> dict:
         if not isinstance(cfg[key], list) or not cfg[key] or \
                 not all(isinstance(x, str) and x for x in cfg[key]):
             raise RelationGrammarError(f"{key} must be a non-empty array of strings")
+    structured = cfg["structured_reason_for"]
+    if not isinstance(structured, dict):
+        raise RelationGrammarError("structured_reason_for must be an object")
+    for key in ("diagnosis_header_patterns", "service_header_patterns"):
+        patterns = structured.get(key)
+        if not isinstance(patterns, list) or not patterns or \
+                not all(isinstance(pattern, str) and pattern.strip()
+                        for pattern in patterns):
+            raise RelationGrammarError(
+                f"structured_reason_for {key} must be a non-empty array of regex strings")
+        for pattern in patterns:
+            try:
+                re.compile(pattern, re.IGNORECASE)
+            except re.error as exc:
+                raise RelationGrammarError(
+                    f"structured_reason_for {key} contains an invalid regex: {exc}") from exc
+    axes = structured.get("required_compatible_axes")
+    if not isinstance(axes, list) or not axes or \
+            not all(isinstance(axis, str) and axis.strip() for axis in axes):
+        raise RelationGrammarError(
+            "structured_reason_for required_compatible_axes must be a non-empty "
+            "array of strings")
     preds = cfg["predicates"]
     if not isinstance(preds, dict) or not preds:
         raise RelationGrammarError("predicates must be a non-empty object")
     for name, entry in preds.items():
         if not isinstance(entry, dict):
             raise RelationGrammarError(f"predicate {name!r} must be an object")
+        roles = entry.get("endpoint_roles")
+        if roles is not None:
+            allowed_roles = {"diagnosis", "billable_service", "non_diagnosis"}
+            if not isinstance(roles, dict) or set(roles) != {"subject", "object"}:
+                raise RelationGrammarError(
+                    f"predicate {name!r} endpoint_roles must contain subject and object")
+            if any(role not in allowed_roles for role in roles.values()):
+                raise RelationGrammarError(
+                    f"predicate {name!r} endpoint_roles contains an unsupported role")
         cues = [c for key in ("subject_first_cues", "object_first_cues")
                 for c in (entry.get(key) or [])]
         for key in ("subject_first_cues", "object_first_cues"):
@@ -426,7 +458,19 @@ def _grammar_patterns(grammar: dict) -> dict:
             str(name).strip().lower(): {
                 "subject_first": _cue_pattern(entry.get("subject_first_cues")),
                 "object_first": _cue_pattern(entry.get("object_first_cues")),
+                "endpoint_roles": dict(entry.get("endpoint_roles") or {}),
             } for name, entry in (grammar.get("predicates") or {}).items()
+        },
+        "structured_reason_for": {
+            "diagnosis_headers": tuple(
+                re.compile(r"^(?:" + pattern + r")$", re.IGNORECASE)
+                for pattern in grammar["structured_reason_for"]["diagnosis_header_patterns"]),
+            "service_headers": tuple(
+                re.compile(r"^(?:" + pattern + r")$", re.IGNORECASE)
+                for pattern in grammar["structured_reason_for"]["service_header_patterns"]),
+            "required_axes": tuple(
+                str(axis).strip()
+                for axis in grammar["structured_reason_for"]["required_compatible_axes"]),
         },
     }
     _RELATION_PATTERN_CACHE[key] = compiled
@@ -494,6 +538,12 @@ UNRECONCILED = "unreconciled"
 # own verified verbatim mentions sit either side of a linking phrase from the reviewed
 # grammar, in the orientation that phrase declares.
 SOURCE_DIRECTIONAL = "source_directional"
+# A structured operative record places the diagnosis and the primary service in
+# separate, explicitly labelled fields.  This status is stamped only when the
+# deterministic structured proof below verifies both source-reconciled endpoints,
+# a unique summary service, and every configured compatibility axis for an EXISTING
+# extractor-proposed edge.  It is source grounding, not model agreement.
+SOURCE_STRUCTURED_PRIMARY = "source_structured_primary"
 # OBSERVATIONAL ONLY -- both endpoints are documented in one verified passage, but nothing in
 # that passage states the DIRECTIONAL claim. Co-occurrence is not a clinical proposition, so
 # this status exists to record what was seen, not to satisfy a release control.
@@ -505,11 +555,13 @@ SOURCE_COLOCATED = "source_colocated"
 # against it (see `gates.load_necessity_control`) rather than being trusted to list only
 # safe values. A status is a member because a deterministic re-read of the source proved it,
 # never because assertions agreed.
-GROUNDED_RECONCILIATION_STATUSES = frozenset({SOURCE_DIRECTIONAL})
+GROUNDED_RECONCILIATION_STATUSES = frozenset({SOURCE_DIRECTIONAL,
+                                              SOURCE_STRUCTURED_PRIMARY})
 # Every status this layer can stamp. UNRECONCILED and SOURCE_COLOCATED are deliberately NOT
 # grounded: they record, respectively, that nothing was proved and that co-occurrence was
 # observed.
-RECONCILIATION_STATUSES = frozenset({UNRECONCILED, SOURCE_DIRECTIONAL, SOURCE_COLOCATED})
+RECONCILIATION_STATUSES = frozenset({UNRECONCILED, SOURCE_DIRECTIONAL,
+                                     SOURCE_STRUCTURED_PRIMARY, SOURCE_COLOCATED})
 # Values that WERE reconciliation statuses and no longer are. Named so that a control config
 # (or a persisted record) still carrying one fails loudly with the reason, instead of quietly
 # matching nothing -- or, worse, being re-added by a config edit and silently reinstating the
@@ -680,8 +732,116 @@ def reconcile_relations(relations: list[RelationAssertion], facts: list, note_te
     return out
 
 
+def _structured_reason_for_proof(rel: RelationAssertion, facts: list, note_text: str,
+                                 source: Any, compiled: dict) -> list[str] | None:
+    """Return endpoint spans proving one structured diagnosis-to-service edge.
+
+    This is deliberately narrower than relation completion.  It may UPGRADE only an
+    edge an extractor already proposed; it never manufactures every possible pair.
+    The source record must independently confirm both endpoint quotations, put them
+    in the two configured structured fields, and make the proposed diagnosis the
+    uniquely best governed-axis match for this service among the structured
+    diagnoses.  A diagnosis may legitimately support more than one service; an
+    equal competing diagnosis, missing data, an ungoverned synonym, an ambiguous
+    concept match, or a source exception leaves the edge unchanged.
+    """
+    if source is None or rel.predicate is not RelationPredicate.REASON_FOR \
+            or rel.state is not RelationState.ASSERTED:
+        return None
+    by_id = {getattr(fact, "fact_id", ""): fact for fact in facts}
+    diagnosis = by_id.get(rel.subject_event_id)
+    service = by_id.get(rel.object_event_id)
+    if diagnosis is None or service is None \
+            or getattr(diagnosis, "kind", None) is not FactKind.DIAGNOSIS \
+            or getattr(service, "kind", None) is FactKind.DIAGNOSIS \
+            or not getattr(service, "billable", False):
+        return None
+
+    from app.contracts.source_evidence import CLEARED_STATUSES
+    from .composition import _sections, _segment_for
+    from .coreference import SAME_EVENT, axis_relation_detail
+    from .terminology import CONCEPT_RELATED
+
+    cleared = {status.value for status in CLEARED_STATUSES}
+    sections = _sections(note_text)
+    structured = compiled["structured_reason_for"]
+    primary_readings = {"": note_text}
+    primary_shas = {"": _sha(note_text)}
+
+    def _spans_under(fact, header_patterns) -> list:
+        matched = []
+        for span in (getattr(fact, "evidence", None) or []):
+            if reading_of(span) or getattr(span, "source_reconciliation", None) not in cleared:
+                continue
+            if not _usable_span(span, primary_readings, primary_shas):
+                continue
+            segment = _segment_for(span.start, sections)
+            if segment is None:
+                continue
+            header = sections[segment][0] or ""
+            if any(pattern.fullmatch(header) for pattern in header_patterns):
+                matched.append(span)
+        return sorted(matched, key=lambda span: (span.start, span.end, span.span_id))
+
+    diagnosis_spans = _spans_under(diagnosis, structured["diagnosis_headers"])
+    service_spans = _spans_under(service, structured["service_headers"])
+    if not diagnosis_spans or not service_spans:
+        return None
+
+    def _compatibility_score(candidate_diagnosis) -> int | None:
+        score = 0
+        for axis in structured["required_axes"]:
+            left = str((getattr(candidate_diagnosis, "attributes", None) or {}).get(
+                axis, "") or "").strip()
+            right = str((getattr(service, "attributes", None) or {}).get(
+                axis, "") or "").strip()
+            if not left or not right:
+                return None
+            verdict, detail = axis_relation_detail(axis, left, right, source)
+            if verdict == SAME_EVENT:
+                score += 2
+                continue
+            # Anatomy commonly appears at different levels of specificity across
+            # fields.  A unique source-bound ancestor/descendant relation is a
+            # weaker match than identity, but still establishes compatibility.
+            term_a, term_b = detail.get("term_a") or {}, detail.get("term_b") or {}
+            if (detail.get("verdict") == CONCEPT_RELATED
+                    and detail.get("source_identity")
+                    and ((term_a.get("unique") is True
+                          and term_b.get("unique") is True)
+                         or detail.get("pair_coverage") == "all")
+                    and term_a.get("candidates")
+                    and term_b.get("candidates")):
+                score += 1
+                continue
+            return None
+        return score
+
+    # Multiple procedures in one operative record are normal.  The safe ambiguity
+    # test is therefore diagnosis-per-service: the extractor-proposed diagnosis
+    # must be the unique highest-scoring compatible diagnosis for this service,
+    # based only on the configured governed axes.  The extractor cannot break an
+    # equal score; an equal competitor leaves the relation ungrounded.
+    diagnosis_scores = {}
+    for candidate in facts:
+        if (getattr(candidate, "kind", None) is not FactKind.DIAGNOSIS
+                or not getattr(candidate, "billable", False)
+                or not _spans_under(candidate, structured["diagnosis_headers"])):
+            continue
+        candidate_score = _compatibility_score(candidate)
+        if candidate_score is not None:
+            diagnosis_scores[candidate.fact_id] = candidate_score
+    proposed_score = diagnosis_scores.get(diagnosis.fact_id)
+    if proposed_score is None or list(diagnosis_scores.values()).count(proposed_score) != 1 \
+            or proposed_score != max(diagnosis_scores.values(), default=-1):
+        return None
+
+    return [diagnosis_spans[0].span_id, service_spans[0].span_id]
+
+
 def complete_reason_for_relations(facts: list, relations: list[RelationAssertion],
-                                  note_text: str, *, readings: dict[str, str] | None = None
+                                  note_text: str, *, readings: dict[str, str] | None = None,
+                                  source: Any = None
                                   ) -> list[RelationAssertion]:
     """Recover a diagnosis-to-service `REASON_FOR` edge the SOURCE TEXT itself
     states directionally, even when neither extraction call ever asserted it
@@ -695,6 +855,12 @@ def complete_reason_for_relations(facts: list, relations: list[RelationAssertion
     designated note's primary procedure never released because nothing
     proved which diagnosis justified it, even though the note states it
     directly -- the extractor just never emitted the relation.
+
+    Before that completion pass, an EXISTING asserted pair may also be grounded
+    by the reviewed structured-record route: independently reconciled endpoint
+    quotations under explicit diagnosis/service-summary headings, exactly one
+    billable summary service, and source-backed compatibility on every configured
+    axis.  That route upgrades a proposed edge only; it never generates a pair.
 
     For every (diagnosis, billable non-diagnosis fact) pair not already
     asserted in the required `REASON_FOR` direction, a
@@ -711,8 +877,23 @@ def complete_reason_for_relations(facts: list, relations: list[RelationAssertion
     direction is part of relation identity, and only the source-grounded
     diagnosis-to-service orientation can satisfy medical necessity.
     """
+    grammar = load_relation_grammar()
+    compiled = _grammar_patterns(grammar)
+    upgraded: list[RelationAssertion] = []
+    for rel in (relations or []):
+        proof = _structured_reason_for_proof(rel, facts, note_text, source, compiled)
+        if proof:
+            rel = replace(
+                rel,
+                evidence_span_ids=list(dict.fromkeys(
+                    list(rel.evidence_span_ids or []) + list(proof))),
+                reconciliation_status=SOURCE_STRUCTURED_PRIMARY,
+                reconciliation_evidence=list(proof),
+            )
+        upgraded.append(rel)
+
     existing = {(r.subject_event_id, r.predicate, r.object_event_id)
-               for r in (relations or [])}
+               for r in upgraded}
     diagnoses = [f for f in facts if getattr(f, "kind", None) is FactKind.DIAGNOSIS]
     services = [f for f in facts if getattr(f, "kind", None) is not FactKind.DIAGNOSIS
                and getattr(f, "billable", False)]
@@ -735,10 +916,10 @@ def complete_reason_for_relations(facts: list, relations: list[RelationAssertion
                 evidence_span_ids=tuple(dict.fromkeys(dx_span_ids + svc_span_ids)),
                 confidence=1.0, extraction_source="source_relation_completion"))
     if not provisional:
-        return list(relations or [])
+        return upgraded
     reconciled = reconcile_relations(provisional, facts, note_text, readings=readings)
     grounded = [r for r in reconciled if r.reconciliation_status in GROUNDED_RECONCILIATION_STATUSES]
-    return merge_relations(list(relations or []) + grounded)
+    return merge_relations(upgraded + grounded)
 
 
 def validate_relations(relations: list[RelationAssertion], facts: list,
@@ -754,7 +935,42 @@ def validate_relations(relations: list[RelationAssertion], facts: list,
     be supplied. Spans that do not re-verify against it simply cannot localise an endpoint.
     """
     event_ids = {f.fact_id for f in facts if f.fact_id}
+    facts_by_id = {f.fact_id: f for f in facts if f.fact_id}
     span_ids = {s.span_id for f in facts for s in (f.evidence or []) if s.span_id}
+    compiled = _grammar_patterns(load_relation_grammar())
+
+    def _matches_endpoint_role(fact, role: str) -> bool:
+        """Match a graph endpoint against one configured schema-level role."""
+        if role == "diagnosis":
+            return getattr(fact, "kind", None) is FactKind.DIAGNOSIS
+        if role == "billable_service":
+            return (getattr(fact, "kind", None) is not FactKind.DIAGNOSIS
+                    and bool(getattr(fact, "billable", False)))
+        if role == "non_diagnosis":
+            return getattr(fact, "kind", None) is not FactKind.DIAGNOSIS
+        return False
+
+    def _canonical_direction(rel: RelationAssertion, pred: str) -> RelationAssertion:
+        """Correct only an unambiguously reversed governed predicate.
+
+        The extractor still chooses the event pair and predicate.  This layer merely
+        enforces the predicate domain/range declared in the versioned grammar.  An
+        edge fitting neither orientation is left ungrounded, never guessed or dropped.
+        """
+        roles = dict((compiled["predicates"].get(pred) or {}).get("endpoint_roles") or {})
+        if not roles:
+            return rel
+        subject = facts_by_id[rel.subject_event_id]
+        obj = facts_by_id[rel.object_event_id]
+        forward = (_matches_endpoint_role(subject, roles["subject"])
+                   and _matches_endpoint_role(obj, roles["object"]))
+        reverse = (_matches_endpoint_role(obj, roles["subject"])
+                   and _matches_endpoint_role(subject, roles["object"]))
+        if reverse and not forward:
+            return replace(rel, subject_event_id=rel.object_event_id,
+                           object_event_id=rel.subject_event_id)
+        return rel
+
     normalized: list[RelationAssertion] = []
     for rel in relations or []:
         if rel.subject_event_id not in event_ids or rel.object_event_id not in event_ids:
@@ -770,7 +986,7 @@ def validate_relations(relations: list[RelationAssertion], facts: list,
         if set(rel.evidence_span_ids or []) - span_ids:
             raise RelationIntegrityError(
                 f"relation {rel.relation_id} references unverified evidence spans")
-        current = rel
+        current = _canonical_direction(rel, pred)
         if pred in _SYMMETRIC and rel.subject_event_id > rel.object_event_id:
             current = replace(rel, subject_event_id=rel.object_event_id,
                               object_event_id=rel.subject_event_id)

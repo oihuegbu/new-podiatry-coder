@@ -49,7 +49,9 @@ No real medical code appears anywhere in this file; the fixture note is syntheti
 """
 import ast
 import json
+import subprocess
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -97,6 +99,57 @@ def test_the_entrypoint_imports_the_claude_coder_pipeline_and_not_the_retired_on
     assert not [name for name in imported if name.startswith("app.pipeline")], (
         f"the deployed entrypoint imports the retired app.pipeline again: "
         f"{sorted(n for n in imported if n.startswith('app.pipeline'))}")
+
+
+def test_terminology_bootstrap_builds_procedure_and_diagnosis_artifacts(monkeypatch):
+    """A fresh data volume must not start with procedure terminology alone."""
+    from claude_coder import data_access, terminology
+
+    ready = {"procedure": False, "diagnosis": False}
+    calls = []
+
+    def load_snapshot(*, source_id):
+        if source_id != "snomed_procedure_terms" or not ready["procedure"]:
+            raise RuntimeError("not built")
+        return object(), {"source_id": source_id}
+
+    def declared_snapshot(source_id, error):
+        if source_id != "snomed_crosswalk" or not ready["diagnosis"]:
+            raise error("not built")
+        return {"terms": {"synthetic governed term": ["synthetic-code"]}}, {
+            "source_id": source_id}
+
+    def run_refresh(command, **kwargs):
+        calls.append(command)
+        ready.update(procedure=True, diagnosis=True)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(terminology.ConceptRelationIndex, "load_snapshot", load_snapshot)
+    monkeypatch.setattr(data_access, "declared_document_snapshot", declared_snapshot)
+    monkeypatch.setattr(subprocess, "run", run_refresh)
+
+    entrypoint.ensure_terminology_authorities()
+
+    assert len(calls) == 1
+    assert "snomed_procedure_terms" in calls[0]
+    assert "snomed_icd10" in calls[0]
+
+
+def test_terminology_bootstrap_is_a_noop_when_both_artifacts_load(monkeypatch):
+    from claude_coder import data_access, terminology
+
+    monkeypatch.setattr(
+        terminology.ConceptRelationIndex, "load_snapshot",
+        lambda *, source_id: (object(), {"source_id": source_id}))
+    monkeypatch.setattr(
+        data_access, "declared_document_snapshot",
+        lambda source_id, error: ({"terms": {"term": ["synthetic-code"]}},
+                                  {"source_id": source_id}))
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *args, **kwargs: pytest.fail("ready artifacts must not rebuild"))
+
+    entrypoint.ensure_terminology_authorities()
 
 
 def test_retired_consistency_flags_are_refused_not_silently_downgraded():

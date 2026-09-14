@@ -35,10 +35,42 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DESIGNATED_NOTE = "Right_Retrocalcaneal_Exostectomy_Operative_Note.pdf"
 BILLING_CONTEXT = REPO_ROOT / "data" / "context" / "billing_context.json"
 ENCOUNTER_CONTEXT = REPO_ROOT / "data" / "context" / "acceptance_encounter_context.json"
+RESULT_PATH = (REPO_ROOT / "output" / "results" /
+               f"{Path(DESIGNATED_NOTE).stem}_results.json")
 
 
 def _fingerprint(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _verify_written_result(path: Path = RESULT_PATH) -> tuple[bool, str]:
+    """Independently re-read the artifact this acceptance run just produced.
+
+    Process exit zero means only that the batch completed.  The release gate is
+    satisfied only when the canonical ClaimBundle consumer derives no blocker
+    from the written bytes and its submission projection contains at least one
+    diagnosis-linked service.  This uses the production contract itself rather
+    than duplicating any medical-code or claim-control rule here.
+    """
+    try:
+        from app.contracts.claim_bundle import load_bundle
+        bundle = load_bundle(json.loads(path.read_text()))
+    except Exception as exc:
+        return False, f"written ClaimBundle is absent or invalid: {type(exc).__name__}: {exc}"
+    blockers = bundle.release_blockers()
+    if blockers:
+        return False, "; ".join(blockers)
+    if not bundle.submission_diagnoses or not bundle.submission_service_lines:
+        return False, "written ClaimBundle has no non-empty submission projection"
+    for line in bundle.submission_service_lines:
+        if not bundle.submission_diagnosis_pointers(line):
+            return False, (
+                f"submission-ready service event {line.clinical_event_id or '<none>'} "
+                "has no submission-ready diagnosis linkage")
+    return True, (
+        f"{len(bundle.submission_diagnoses)} diagnosis line(s), "
+        f"{len(bundle.submission_service_lines)} service line(s), "
+        "all ClaimBundle release checks clear")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -122,11 +154,19 @@ def main(argv: list[str] | None = None) -> int:
     run_environment["ANTHROPIC_USE_BATCH"] = "0"
     print("test model execution: ANTHROPIC_USE_BATCH=0")
     print("exact command:", " ".join(command))
-    return subprocess.call(
+    child_status = subprocess.call(
         command,
         cwd=str(REPO_ROOT),
         env=run_environment,
     )
+    if child_status:
+        return child_status
+    accepted, detail = _verify_written_result()
+    if not accepted:
+        print(f"release-gate run failed: {detail}", file=sys.stderr)
+        return 3
+    print(f"release-gate run passed: {detail}")
+    return 0
 
 
 if __name__ == "__main__":

@@ -572,8 +572,17 @@ def reject_retired_flags(args) -> int | None:
     return None
 
 
-def ensure_procedure_authority() -> None:
-    """Bootstrap check, run ONCE per deployment invocation, before any note is
+def ensure_terminology_authorities() -> None:
+    """Bootstrap the governed terminology artifacts before any note is processed.
+
+    The supplied SNOMED CT US RF2 release is the source for two runtime artifacts:
+    the Procedure hierarchy used for semantic-action comparison and the official
+    SNOMED-to-ICD-10-CM map used for diagnosis recall. A fresh named volume must not
+    silently contain one but omit the other. Missing artifacts are built together by
+    the registered refresh tool and loaded back through the declared-source API, so a
+    clean deployment reaches the same state without a hand copy.
+
+    This bootstrap check runs once per deployment invocation, before any note is
     processed (issue #6, Codex's independent re-review, F9-R13-C P1-A): the
     governed `semantic_action` requirement axis depends on `data/codes/
     snomed_procedure_terms.json` (the SNOMED CT Procedure hierarchy snapshot
@@ -593,21 +602,37 @@ def ensure_procedure_authority() -> None:
     proceeding with `semantic_action` compiling nothing for every candidate,
     which would look identical to "the note simply had no governed action to
     find" instead of "the required authority was never available"."""
+    from claude_coder.data_access import (AuthoritativeDataUnavailable,
+                                          declared_document_snapshot)
     from claude_coder.terminology import ConceptRelationIndex
-    try:
-        ConceptRelationIndex.load_snapshot(source_id="snomed_procedure_terms")
+
+    def procedure_ready() -> bool:
+        try:
+            ConceptRelationIndex.load_snapshot(source_id="snomed_procedure_terms")
+            return True
+        except Exception:
+            return False
+
+    def diagnosis_map_ready() -> bool:
+        try:
+            document, _identity = declared_document_snapshot(
+                "snomed_crosswalk", AuthoritativeDataUnavailable)
+            return bool((document or {}).get("terms"))
+        except Exception:
+            return False
+
+    if procedure_ready() and diagnosis_map_ready():
         return
-    except Exception:
-        pass
     import subprocess
     root = Path(__file__).resolve().parent
     completed = subprocess.run(
         [sys.executable, "tools/refresh_authoritative_data.py",
-         "snomed_procedure_terms", "--no-integrate"],
+         "snomed_procedure_terms", "snomed_icd10", "--no-integrate"],
         cwd=str(root), check=False)
     if completed.returncode:
         raise RuntimeError(
-            "required procedure terminology snapshot (snomed_procedure_terms) could "
+            "required terminology snapshots (snomed_procedure_terms and "
+            "snomed_icd10_map) could "
             "not be built -- confirm the licensed SNOMED CT RF2 release is mounted "
             "and readable (SNOMED_RF2_DIR / data/sources), then retry")
     try:
@@ -617,6 +642,21 @@ def ensure_procedure_authority() -> None:
             "procedure terminology snapshot was rebuilt but still does not load "
             f"({type(exc).__name__}: {exc}) -- the semantic_action axis cannot run "
             "safely until this is resolved") from exc
+    try:
+        document, _identity = declared_document_snapshot(
+            "snomed_crosswalk", AuthoritativeDataUnavailable)
+        if not (document or {}).get("terms"):
+            raise ValueError("empty terms table")
+    except Exception as exc:
+        raise RuntimeError(
+            "SNOMED-to-ICD terminology snapshot was rebuilt but still does not load "
+            f"({type(exc).__name__}: {exc}) -- governed diagnosis recall cannot run "
+            "safely until this is resolved") from exc
+
+
+# Compatibility for operators or tests that imported the old narrow name. The
+# implementation is intentionally the complete bootstrap, not the old partial check.
+ensure_procedure_authority = ensure_terminology_authorities
 
 
 # ------------------------------------------------------------------------ main
@@ -698,13 +738,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.setup_only:
         try:
             AuthoritativeSource().prepare(force_rebuild_index=args.rebuild_index)
-            ensure_procedure_authority()
+            ensure_terminology_authorities()
         except AuthoritativeDataUnavailable as exc:
             logger.error(f"--setup-only: claim-assembly data is not readable: {exc}")
             return 1
         except Exception as exc:
-            logger.error(f"--setup-only: procedure terminology authority is not "
-                        f"ready: {exc}")
+            logger.error(f"--setup-only: terminology authority is not "
+                         f"ready: {exc}")
             return 1
         logger.info("\n--setup-only: dependencies loaded, no notes processed. Exiting.")
         return 0

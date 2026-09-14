@@ -317,7 +317,7 @@ def make_fingerprint(result: dict) -> dict:
             "note_category": "",
             "chief_complaint": "",
             "assessment": "",
-            "procedures": [line.descriptor for line in bundle.service_lines
+            "procedures": [line.descriptor for line in bundle.submission_service_lines
                            if line.descriptor],
         }
     sections = result.get("note_sections") or {}

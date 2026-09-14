@@ -49,6 +49,10 @@ def _dot(code: str) -> str:
     return c if len(c) <= 3 else f"{c[:3]}.{c[3:]}"
 
 
+_MIN_DISTINCTIVE_TOKEN_LENGTH = 5
+_MAX_DISTINCTIVE_SOURCE_TERMS = 3
+
+
 class TerminologyIndex:
     """Inverts the authoritative {code: [index terms]} into term→codes lookups:
     an exact normalized-term map, and an order-independent token-set map that
@@ -84,6 +88,15 @@ class TerminologyIndex:
         self._exact: dict[str, set[str]] = {}
         self._despaced: dict[str, set[str]] = {}   # 'two words' <-> 'twowords'
         self._byset: dict[frozenset[str], set[str]] = {}   # order + plural independent
+        # Exact-token statistics support a deliberately narrow RECALL fallback for
+        # governed synonym maps. This is not fuzzy matching: a query token must occur
+        # verbatim in the source terminology, be rare in that terminology, and point
+        # to exactly one code. The only production caller is the SNOMED-to-ICD recall
+        # layer, whose result is always descriptor-entailment verified before selection.
+        # The direct ICD Alphabetic Index path never calls this fallback.
+        self._token_codes: dict[str, set[str]] = {}
+        self._token_terms: dict[str, set[str]] = {}
+        self._terms_by_code: dict[str, set[str]] = {}
         self._index_terms(terms_by_code)
         # A separate, direct-only index (issue #6 F9-R12-A, reopened) --
         # recursing with no cross-reference argument terminates immediately
@@ -102,26 +115,36 @@ class TerminologyIndex:
                 if not n:
                     continue
                 self._exact.setdefault(n, set()).add(dotted)
+                self._terms_by_code.setdefault(dotted, set()).add(n)
                 self._despaced.setdefault(n.replace(" ", ""), set()).add(dotted)
                 toks = frozenset(_sing(t) for t in n.split() if len(t) > 2)
                 if toks:
                     self._byset.setdefault(toks, set()).add(dotted)
+                for token in toks:
+                    self._token_codes.setdefault(token, set()).add(dotted)
+                    self._token_terms.setdefault(token, set()).add(n)
+
+    def _whole_match(self, description: str) -> tuple[set[str], str, object]:
+        """(codes, method, comparison key) for the established whole-term match."""
+        n = _norm(description)
+        if not n:
+            return set(), "none", ""
+        if n in self._exact:
+            return set(self._exact[n]), "exact", n
+        despaced = n.replace(" ", "")
+        if despaced in self._despaced:
+            return set(self._despaced[despaced]), "despaced", despaced
+        toks = frozenset(_sing(t) for t in n.split() if len(t) > 2)
+        if toks and toks in self._byset:
+            return set(self._byset[toks]), "token_set", toks
+        return set(), "none", ""
 
     def candidates(self, description: str) -> set[str]:
         """Authoritative ICD-10-CM codes for a clinician term (dotted). Matches in
         order: exact normalized, compound-word (despaced), then order/plural-
         independent token set. Empty if the Index does not carry the phrasing
         (→ caller falls back to retrieval)."""
-        n = _norm(description)
-        if not n:
-            return set()
-        if n in self._exact:
-            return set(self._exact[n])
-        despaced = n.replace(" ", "")
-        if despaced in self._despaced:
-            return set(self._despaced[despaced])
-        toks = frozenset(_sing(t) for t in n.split() if len(t) > 2)
-        return set(self._byset.get(toks, set())) if toks else set()
+        return self._whole_match(description)[0]
 
     def direct_candidates(self, description: str) -> set[str]:
         """Like `candidates()`, but ONLY through a DIRECT Index entry --
@@ -129,6 +152,62 @@ class TerminologyIndex:
         F9-R12-A, reopened). A caller uses this to require a hit be direct
         before trusting a single-code match deterministically."""
         return self._direct.candidates(description)
+
+    def recall_matches(self, description: str) -> dict[str, dict]:
+        """Auditable source-derived matches for a longer clinical phrase.
+
+        Whole-term matching remains authoritative and is tried first. If it has no
+        hit, an exact query token may seed a candidate only when the loaded terminology
+        itself proves that token is distinctive using the generic limits above. Each
+        result records the source terms and method that produced it so a later selector
+        can distinguish a governed term-to-code mapping from vector similarity. This is
+        recall only; callers must independently verify the current descriptor and all
+        documented requirements.
+        """
+        normalized = _norm(description)
+        codes, method, key = self._whole_match(description)
+        if codes:
+            matches: dict[str, dict] = {}
+            for code in sorted(codes):
+                source_terms = self._terms_by_code.get(code, set())
+                if method == "exact":
+                    terms = [term for term in source_terms if term == key]
+                elif method == "despaced":
+                    terms = [term for term in source_terms if term.replace(" ", "") == key]
+                else:
+                    terms = [term for term in source_terms
+                             if frozenset(_sing(t) for t in term.split() if len(t) > 2) == key]
+                matches[code] = {
+                    "method": method,
+                    "normalized_query": normalized,
+                    "source_terms": sorted(terms),
+                }
+            return matches
+
+        matches: dict[str, dict] = {}
+        tokens = {_sing(t) for t in normalized.split()
+                  if len(t) >= _MIN_DISTINCTIVE_TOKEN_LENGTH}
+        for token in sorted(tokens):
+            codes = self._token_codes.get(token) or set()
+            terms = self._token_terms.get(token) or set()
+            if (len(codes) != 1 or not terms
+                    or len(terms) > _MAX_DISTINCTIVE_SOURCE_TERMS):
+                continue
+            code = next(iter(codes))
+            record = matches.setdefault(code, {
+                "method": "distinctive_source_token",
+                "normalized_query": normalized,
+                "matched_tokens": [],
+                "source_terms": [],
+            })
+            record["matched_tokens"].append(token)
+            record["source_terms"] = sorted(
+                set(record["source_terms"]) | set(terms))
+        return matches
+
+    def recall_candidates(self, description: str) -> set[str]:
+        """Candidate-code compatibility wrapper over :meth:`recall_matches`."""
+        return set(self.recall_matches(description))
 
     @classmethod
     def load_snapshot(cls) -> tuple["TerminologyIndex", dict]:
@@ -220,6 +299,15 @@ class ConceptRelationDetail:
     match_a: ConceptMatch
     match_b: ConceptMatch
     confidence: float
+    # Coverage of the Cartesian product of candidate concepts.  "all" means
+    # every possible interpretation on both sides is equal or linked by the
+    # governed hierarchy; "some" means only at least one interpretation is;
+    # "none" means none are.  This keeps an ambiguous compound term from being
+    # treated like an arbitrary single match while allowing callers to
+    # distinguish universally compatible ambiguity from partial overlap.
+    pair_coverage: str = "none"
+    related_pair_count: int = 0
+    total_pair_count: int = 0
 
     @property
     def alternatives_a(self) -> tuple[str, ...]:
@@ -387,17 +475,23 @@ class ConceptRelationIndex:
         ma, mb = matcher(term_a), matcher(term_b)
         a, b = set(ma.candidates), set(mb.candidates)
         if not a or not b:
-            return ConceptRelationDetail(CONCEPT_UNRESOLVED, ma, mb, 0.0)
+            return ConceptRelationDetail(CONCEPT_UNRESOLVED, ma, mb, 0.0,
+                                         "none", 0, len(a) * len(b))
         if ma.unique and mb.unique and a == b:
-            return ConceptRelationDetail(CONCEPT_SAME, ma, mb, 1.0)
+            return ConceptRelationDetail(CONCEPT_SAME, ma, mb, 1.0, "all", 1, 1)
+        total = len(a) * len(b)
+        related = 0
         for ca in a:
             ancestors_a = self._ancestors(ca)
             for cb in b:
-                if cb in ancestors_a or ca in self._ancestors(cb):
-                    return ConceptRelationDetail(CONCEPT_RELATED, ma, mb, 0.0)
-        if a & b:
-            return ConceptRelationDetail(CONCEPT_RELATED, ma, mb, 0.0)
-        return ConceptRelationDetail(CONCEPT_UNRESOLVED, ma, mb, 0.0)
+                if ca == cb or cb in ancestors_a or ca in self._ancestors(cb):
+                    related += 1
+        if related:
+            coverage = "all" if related == total else "some"
+            return ConceptRelationDetail(CONCEPT_RELATED, ma, mb, 0.0,
+                                         coverage, related, total)
+        return ConceptRelationDetail(CONCEPT_UNRESOLVED, ma, mb, 0.0,
+                                     "none", 0, total)
 
     def relation(self, term_a: str, term_b: str) -> str:
         """One of the CONCEPT_* verdicts above for two clinical terms -- see

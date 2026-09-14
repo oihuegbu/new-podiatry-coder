@@ -480,7 +480,7 @@ class LineStatus(str, Enum):
 
 
 #: issue #6 F9-R10-B, Codex's independent re-review of 9038a83: `_CodedLine`
-#: (`diagnoses`/`service_lines` -- what a consumer actually submits) and
+#: (`diagnoses`/`service_lines` -- every event that reached a selected code) and
 #: `CandidateLine` (`candidate_lines` -- what did NOT reach a coded, billable
 #: decision) must carry DISJOINT status domains. Before this, the F9-R9-E
 #: consistency validator only checked that a line's OWN `external_
@@ -784,9 +784,10 @@ class _CodedLine(_Strict):
     @model_validator(mode="after")
     def _disposition_matches_status(self) -> "_CodedLine":
         _check_external_disposition_consistent(self)
-        # issue #6 F9-R10-B: `diagnoses`/`service_lines` are what a consumer
-        # actually submits -- only a status this container was DESIGNED to
-        # carry may appear here, never one of the candidate-only statuses.
+        # issue #6 F9-R10-B: `diagnoses`/`service_lines` are the selected-code
+        # containers -- only a status this container was DESIGNED to carry may
+        # appear here, never one of the candidate-only statuses. Submission is
+        # the narrower `ClaimBundle.submission_*` projection below.
         if self.status not in CODED_LINE_STATUSES:
             raise ValueError(
                 f"status {self.status!r} cannot appear in a coded claim line "
@@ -1575,6 +1576,44 @@ class ClaimBundle(_Strict):
 
     # ---------------------------------------------------------------- content
 
+    @property
+    def submission_diagnoses(self) -> tuple[DiagnosisLine, ...]:
+        """The diagnosis lines eligible for the outbound claim.
+
+        `diagnoses` deliberately preserves selected-but-held codes so the coding
+        result remains useful and auditable.  That visibility must not make a held
+        code part of the claim payload.  This is the single status-to-submission
+        boundary used by fingerprints, release authorization and the 837P builder.
+        """
+        return tuple(line for line in self.diagnoses
+                     if line.status is LineStatus.RECOMMENDED)
+
+    @property
+    def submission_service_lines(self) -> tuple[ServiceLine, ...]:
+        """The service lines eligible for the outbound claim; held lines stay visible."""
+        return tuple(line for line in self.service_lines
+                     if line.status is LineStatus.RECOMMENDED)
+
+    def submission_diagnosis_pointers(self, line: ServiceLine) -> tuple[int, ...]:
+        """Map a stored service's pointers into the compact submitted diagnosis list.
+
+        Stored pointers address `diagnoses`, which also contains visible held codes.
+        A submitted service may point only to RECOMMENDED diagnoses, and the 837P
+        positions must be contiguous after held diagnoses are removed.  Unknown,
+        held and repeated targets are omitted here and rejected as an empty/invalid
+        linkage by `release_blockers()` before submission.
+        """
+        old_to_new = {
+            diagnosis.sequence: new_sequence
+            for new_sequence, diagnosis in enumerate(self.submission_diagnoses, start=1)
+        }
+        mapped: list[int] = []
+        for pointer in line.diagnosis_pointers:
+            new_pointer = old_to_new.get(pointer)
+            if new_pointer is not None and new_pointer not in mapped:
+                mapped.append(new_pointer)
+        return tuple(mapped)
+
     def claim_content(self) -> dict[str, Any]:
         """The canonical billable payload — everything that can change the claim.
 
@@ -1589,17 +1628,23 @@ class ClaimBundle(_Strict):
             "date_of_service": self.encounter.date_of_service,
             "source_document": self.encounter.source_document.model_dump(mode="json"),
             "diagnoses": [
-                {"sequence": d.sequence, "system": d.system, "code": d.code,
-                 "primary": d.primary, "clinical_event_id": d.clinical_event_id}
-                for d in self.diagnoses
+                {"sequence": sequence, "system": d.system, "code": d.code,
+                 # First-listed is a property of the outbound projection.  If an
+                 # earlier selected diagnosis is held line-locally, the first
+                 # remaining submitted diagnosis becomes the transaction's primary
+                 # diagnosis; recording the held container's stale `primary` flag
+                 # here would make the fingerprint disagree with the 837P builder.
+                 "primary": sequence == 1,
+                 "clinical_event_id": d.clinical_event_id}
+                for sequence, d in enumerate(self.submission_diagnoses, start=1)
             ],
             "service_lines": [
-                {"sequence": s.sequence, "system": s.system, "code": s.code,
+                {"sequence": sequence, "system": s.system, "code": s.code,
                  "units": s.units, "modifiers": list(s.modifiers),
-                 "diagnosis_pointers": list(s.diagnosis_pointers),
+                 "diagnosis_pointers": list(self.submission_diagnosis_pointers(s)),
                  "place_of_service": s.place_of_service, "ndc": s.ndc,
                  "clinical_event_id": s.clinical_event_id}
-                for s in self.service_lines
+                for sequence, s in enumerate(self.submission_service_lines, start=1)
             ],
             "context_fingerprint": self.context.fingerprint,
         }
@@ -1964,52 +2009,25 @@ class ClaimBundle(_Strict):
             out.append("producer did not assert an autonomous release "
                        "(no AUTO_READY verdict with a certificate)")
         out.extend(self.release.holds)
-        # issue #6 item 7/F8-R3, updated by F9-R7 item 4: re-derived from the
-        # bundle's OWN stored content, never from trusting
-        # `self.release.destination` alone -- a coded line held for an
-        # unresolved administrative/policy/data fact must block release even
-        # if some producer defect claimed AUTO_READY anyway. A no-op in the
-        # correctly-working case (that destination check above already caught
-        # it); a genuine safety net if it did not.
-        #
-        # Before schema v4, a HELD line was never in `diagnoses`/
-        # `service_lines` at all -- only in `audit.excluded_lines` -- so this
-        # checked that instead. v4 moved it INTO `diagnoses`/`service_lines`
-        # (status=HELD_POLICY_OR_DATA) so the discovered code stays visible;
-        # this check follows it there rather than continuing to look in the
-        # place the code no longer disappears to. `candidate_lines` is
-        # deliberately NOT checked here: a CANDIDATES_NEEDING_FACT/
-        # NO_SUPPORTED_CANDIDATE line is an uncertainty on ONE documented
-        # event, never a reason to block an unrelated, independently
-        # defensible line elsewhere in the same claim.
-        #
-        # issue #6 F9-R10-B, Codex's independent re-review of 9038a83:
-        # `status is not RECOMMENDED`, not `status is HELD_POLICY_OR_DATA`
-        # specifically -- the model_validator on `_CodedLine` now guarantees
-        # only those two values can ever appear here, so this is currently
-        # equivalent, but stating the real invariant (a coded, submitted
-        # line's status must be RECOMMENDED) is the defense-in-depth the
-        # reviewer asked for: it stays correct even if a future value is
-        # added to `CODED_LINE_STATUSES` without this line being updated too.
-        if self.release.destination is ReleaseDestination.AUTO_READY and any(
-                line.status is not LineStatus.RECOMMENDED
-                for line in (*self.diagnoses, *self.service_lines)):
-            out.append("a coded line's submission is HELD (unresolved "
-                       "administrative/policy/data fact) but the release "
-                       "destination claims AUTO_READY -- producer/consumer "
-                       "disagreement, never released")
+        # A selected-but-held line is visible in the coded-line containers and
+        # certificate, but is absent from the canonical submission projection.
+        # It therefore cannot transmit and cannot erase an unrelated defensible
+        # line.  This is the same line-local rule `candidate_lines` already use;
+        # only an encounter-wide hold in `release.holds` blocks the projection.
         if self.certificate is None:
             out.append("no release certificate")
         out.extend(self.context.problems())
         out.extend(self.authority.problems())
-        if not self.diagnoses:
-            out.append("claim has no diagnosis lines")
-        if not self.service_lines:
-            out.append("claim has no service lines")
-        for line in self.service_lines:
-            if not line.diagnosis_pointers:
+        submitted_diagnoses = self.submission_diagnoses
+        submitted_services = self.submission_service_lines
+        if not submitted_diagnoses:
+            out.append("claim has no submission-ready diagnosis lines")
+        if not submitted_services:
+            out.append("claim has no submission-ready service lines")
+        for line in submitted_services:
+            if not self.submission_diagnosis_pointers(line):
                 out.append(f"service line {line.code or '?'} has no diagnosis "
-                           f"linkage")
+                           f"linkage to a submission-ready diagnosis")
         if not self.encounter.date_of_service:
             out.append("encounter has no date of service")
         # Every released line must name the clinical-graph event it bills, and that

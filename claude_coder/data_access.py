@@ -196,6 +196,8 @@ class CodeSource(Protocol):
 
     def snomed_codes(self, description: str, system: str) -> set[str]: ...
 
+    def snomed_code_matches(self, description: str, system: str) -> dict[str, dict]: ...
+
     def cpt_index_codes(self, description: str, system: str) -> set[str]: ...
 
     def learned_index_codes(self, description: str, system: str) -> set[str]: ...
@@ -276,6 +278,7 @@ class AuthoritativeSource:
         self._pfs_bound = False
         self._idx = None
         self._snomed = None
+        self._snomed_identity = None
         self._concept_relation_index = None
         self._concept_relation_identity = None
         self._procedure_relation_index = None
@@ -389,14 +392,8 @@ class AuthoritativeSource:
                 out.append(v)
         return out
 
-    def snomed_codes(self, description: str, system: str) -> set[str]:
-        """Long-tail authoritative term->ICD-10-CM via the SNOMED CT -> ICD-10-CM
-        map (NLM/UMLS): the comprehensive clinical-synonym/eponym layer that
-        resolves long-tail eponym/synonym phrasings the ICD Alphabetic Index does
-        not carry. Fail-safe: empty when the map file is absent — it needs a (free)
-        UMLS license to build; see tools/build_snomed_icd10_map.py."""
-        if system != "icd10":
-            return set()
+    def _ensure_snomed_term_index(self):
+        """Load and bind the governed SNOMED-to-ICD term map once."""
         if self._snomed is None:
             try:
                 from .terminology import TerminologyIndex
@@ -411,16 +408,42 @@ class AuthoritativeSource:
                     for c in codes:
                         inv.setdefault(c, []).append(term)
                 self._snomed = TerminologyIndex(inv)
+                self._snomed_identity = dict(identity)
                 self._bound_sources.bind(identity)
             except Exception:
                 # A reviewed-OPTIONAL recall aid: absence removes candidates and can never
                 # admit one, so it degrades rather than holding. Nothing is bound in that
                 # case, which is correct -- no bytes were parsed to attest to.
                 self._snomed = False
-        if not self._snomed:
-            return set()
-        return {c for c in self._snomed.candidates(description)
-                if self.leaf_codes(c, "icd10")}
+                self._snomed_identity = None
+        return self._snomed
+
+    def snomed_code_matches(self, description: str, system: str) -> dict[str, dict]:
+        """Mapped-code -> auditable governed term match for diagnosis recall.
+
+        The caller still expands the mapped code to current billable leaves and
+        independently verifies descriptor requirements.  This record preserves the
+        missing semantic bridge: which exact source term/method proposed the code and
+        which versioned bytes supplied that mapping.  Empty remains the safe behavior
+        when the reviewed-optional map is unavailable.
+        """
+        if system != "icd10" or not self._ensure_snomed_term_index():
+            return {}
+        matches = self._snomed.recall_matches(description)
+        out: dict[str, dict] = {}
+        for mapped_code, match in matches.items():
+            if not self.leaf_codes(mapped_code, "icd10"):
+                continue
+            out[mapped_code] = {
+                **dict(match),
+                "mapped_code": mapped_code,
+                "source_identity": dict(self._snomed_identity or {}),
+            }
+        return out
+
+    def snomed_codes(self, description: str, system: str) -> set[str]:
+        """Compatibility view of :meth:`snomed_code_matches` for existing callers."""
+        return set(self.snomed_code_matches(description, system))
 
     def _ensure_concept_relation_index(self):
         from . import terminology as _term
@@ -499,6 +522,9 @@ class AuthoritativeSource:
                       "candidates": list(detail.match_b.candidates),
                       "method": detail.match_b.method,
                       "unique": detail.match_b.unique},
+            "pair_coverage": detail.pair_coverage,
+            "related_pair_count": detail.related_pair_count,
+            "total_pair_count": detail.total_pair_count,
             "source_identity": dict(self._concept_relation_identity or {}),
         }
 
@@ -566,6 +592,9 @@ class AuthoritativeSource:
                       "candidates": list(detail.match_b.candidates),
                       "method": detail.match_b.method,
                       "unique": detail.match_b.unique},
+            "pair_coverage": detail.pair_coverage,
+            "related_pair_count": detail.related_pair_count,
+            "total_pair_count": detail.total_pair_count,
             "source_identity": dict(self._procedure_relation_identity or {}),
         }
 
@@ -2108,6 +2137,24 @@ class MockSource:
 
     def snomed_codes(self, description, system):
         return set(self._snomed_map.get(description, set())) if system == "icd10" else set()
+
+    def snomed_code_matches(self, description, system):
+        if system != "icd10":
+            return {}
+        return {
+            code: {
+                "method": "synthetic_governed_term",
+                "normalized_query": str(description).strip().lower(),
+                "source_terms": [str(description).strip().lower()],
+                "mapped_code": code,
+                "source_identity": {
+                    "source_id": "synthetic-snomed-map",
+                    "sha256": "sha256:synthetic-snomed-map",
+                    "size": 1,
+                },
+            }
+            for code in self._snomed_map.get(description, set())
+        }
 
     def cpt_index_codes(self, description, system):
         return set(self._cpt_index.get(description, set())) if system == "cpt" else set()
