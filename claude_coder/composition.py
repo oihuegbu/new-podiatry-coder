@@ -17,7 +17,8 @@ import hashlib
 import re
 from dataclasses import dataclass
 
-from .models import ClinicalFact, RelationAssertion, RelationPredicate, RelationState
+from .models import (AttributeEvidence, ClinicalFact, RelationAssertion,
+                     RelationPredicate, RelationState)
 
 #: A section header, as a document-FORMATTING convention: the entire line, nothing
 #: else on it (no same-line label:value pair -- that is what separates a real heading
@@ -40,6 +41,13 @@ _HEADER_LINE = re.compile(r"^[ \t]*([A-Z][A-Z0-9 /&()\-]{1,60})[ \t]*:?[ \t]*$")
 #: performed component is non-reportable; reportability is decided only after each
 #: service has candidates, using authoritative descriptor and claim-edit data.
 _COMPOSING_PREDICATES = frozenset({RelationPredicate.PART_OF})
+
+# Attributes whose meaning is explicitly scoped by the document section rather
+# than by clinical ontology.  This is intentionally a tiny schema-level set:
+# laterality is a closed claim-context axis and can be stated once in a procedure
+# heading for every service documented beneath it.  Open clinical vocabularies
+# (anatomy, approach, product, objective, and so on) are never propagated.
+_SECTION_SCOPED_AXES = frozenset({"laterality"})
 
 
 def _sections(note_text: str) -> list[tuple[str | None, int, int]]:
@@ -128,6 +136,105 @@ def compose(facts: list[ClinicalFact], note_text: str) -> list[RelationAssertion
                     confidence=1.0,
                 ))
     return relations
+
+
+def reconcile_section_context(facts: list[ClinicalFact], note_text: str,
+                              reconciliation=None) -> list[dict]:
+    """Propagate one unambiguous, source-authorized section context value.
+
+    Clinical notes commonly state a closed context attribute once in a section
+    heading or lead service and then list several component/independent services
+    beneath it.  Requiring every sentence to repeat that context loses valid
+    modifiers; globally copying it across an encounter is unsafe when a note has
+    multiple sites or sides.  This function uses the document's physical section
+    boundaries as the middle ground:
+
+    * only facts anchored in the same deterministic section participate;
+    * at least one fact must carry local, value-bound, ASSERTED evidence that the
+      source reconciliation authorizes;
+    * every authorized local value in the section must agree;
+    * an explicit different value is never overwritten;
+    * only a one-sided cross-reading omission for that same value is cleared.
+
+    The copied evidence remains the original anchored span and is marked
+    ``scope='section'`` with a stable section-context id and source fact id.  It
+    therefore remains auditable and cannot be confused with sentence-local proof.
+    Returns compact audit records for every propagation.
+    """
+    from . import graph_consensus as _gc
+
+    sections = _sections(note_text)
+    by_segment: dict[int, list[ClinicalFact]] = {}
+    for fact in facts:
+        offset = _primary_offset(fact)
+        if offset is None:
+            continue
+        segment = _segment_for(offset, sections)
+        if segment is not None:
+            by_segment.setdefault(segment, []).append(fact)
+
+    audit: list[dict] = []
+    for segment, members in by_segment.items():
+        _header, start, end = sections[segment]
+        context_id = "section-context:" + hashlib.sha256(
+            f"{start}:{end}:{note_text[start:end]}".encode("utf-8")
+        ).hexdigest()[:16]
+        for axis in _SECTION_SCOPED_AXES:
+            sources: list[tuple[ClinicalFact, AttributeEvidence, str]] = []
+            for fact in members:
+                value = _gc.claim_authorized_value(fact, axis, reconciliation)
+                if value is None:
+                    continue
+                for entry in (fact.attribute_evidence or {}).get(axis, ()):
+                    if (entry.scope == "local"
+                            and entry.assertion_state is RelationState.ASSERTED
+                            and _gc._norm(entry.value) == _gc._norm(value)
+                            and _gc._spans_support(
+                                [entry.span], reconciliation)[0]):
+                        sources.append((fact, entry, value))
+            values = {_gc._norm(value) for _fact, _entry, value in sources if value}
+            if len(values) != 1:
+                continue
+            source_fact, source_entry, value = min(
+                sources,
+                key=lambda item: (
+                    getattr(item[1].span, "start", None)
+                    if isinstance(getattr(item[1].span, "start", None), int)
+                    else 10**18,
+                    item[0].fact_id))
+
+            for fact in members:
+                current = str((fact.attributes or {}).get(axis) or "").strip()
+                if current and _gc._norm(current) != _gc._norm(value):
+                    continue
+                if _gc.claim_authorized_value(fact, axis, reconciliation) is not None:
+                    continue
+                conflict = (fact.attribute_axis_conflicts or {}).get(axis)
+                if conflict is not None:
+                    stated = {_gc._norm(v) for v in
+                              (conflict.value_primary, conflict.value_second) if v}
+                    if stated - {_gc._norm(value)}:
+                        continue
+                fact.attributes[axis] = value
+                entries = list((fact.attribute_evidence or {}).get(axis, ()))
+                entries.append(AttributeEvidence(
+                    span=source_entry.span, scope="section",
+                    parent_fact_id=source_fact.fact_id,
+                    source_relation_id=context_id, scope_validated=True,
+                    assertion_state=RelationState.ASSERTED, value=value))
+                fact.attribute_evidence[axis] = tuple(entries)
+                fact.attribute_evidence_gaps.pop(axis, None)
+                if conflict is not None:
+                    fact.attribute_axis_conflicts.pop(axis, None)
+                audit.append({
+                    "fact_id": fact.fact_id,
+                    "axis": axis,
+                    "value": value,
+                    "source_fact_id": source_fact.fact_id,
+                    "source_span_id": source_entry.span.span_id,
+                    "context_id": context_id,
+                })
+    return audit
 
 
 @dataclass

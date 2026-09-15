@@ -426,22 +426,32 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
     other guarantee still applies."""
     line = _resolve_core(request, source, top_k=top_k, llm=llm, corroborate=corroborate,
                          dos=dos, reconciliation=reconciliation, coverage=coverage)
-    line = _apply_attribute_evidence_gap_guard(line, coverage)
+    line = _apply_attribute_evidence_gap_guard(
+        line, coverage, source=source, dos=dos)
     return _apply_attribute_axis_conflict_guard(
         line, source, llm, corroborate, reconciliation, coverage, page_text, dos)
 
 
-def _apply_attribute_evidence_gap_guard(line: ResolvedLine, coverage) -> ResolvedLine:
-    """A fact whose own `attribute_evidence_gaps` is non-empty must never release
-    with a selected code (issue #6, Codex's independent re-review, F9-R14-A):
-    extraction already proved it has no relation-valid, value-bound evidence for a
-    code-changing axis (every axis that can appear here IS code-changing --
-    `extraction.finalize_attribute_evidence` never records a gap for the actor-
-    identity axes, which are context-resolved, not document-read), and nothing
-    inside `_resolve_core`'s several independent selection paths re-checks that
-    before returning. Applied exactly ONCE, after every path already decided its
-    own candidate -- never duplicated per code path, and never a parallel
-    selector: it only ever withdraws a selection `_resolve_core` already made.
+def _apply_attribute_evidence_gap_guard(line: ResolvedLine, coverage,
+                                        source: CodeSource | None = None,
+                                        dos: str | None = None) -> ResolvedLine:
+    """Record every fact-local attribute evidence gap, but withdraw a selected
+    candidate only when that candidate's own authoritative contract consumes the
+    gapped axis.
+
+    An extraction attribute is not automatically a claim input.  A note can carry
+    attributes such as laterality, anatomy, approach, or a device property even
+    when a particular candidate's descriptor, modifiers, and units do not depend
+    on that attribute.  Treating every gap as code-changing made one unsupported
+    component attribute erase otherwise valid selections across a multi-service
+    encounter.  Materiality is therefore derived from the same compiled candidate
+    requirements and ``ClaimInputContract`` already used by the axis-conflict
+    guard below -- never from a medical-term list or a code-family heuristic.
+
+    The typed gap is still stamped for audit even when it is immaterial to the
+    selected candidate.  If no candidate has been selected there is nothing to
+    withdraw, and the gap remains visible for whichever candidate is considered
+    later.
 
     issue #6, Codex's independent re-review (F9-R15-A), two corrections to the
     first version of this guard:
@@ -489,14 +499,23 @@ def _apply_attribute_evidence_gap_guard(line: ResolvedLine, coverage) -> Resolve
                        "rejected_relation_id": str(
                            getattr(gap, "rejected_relation_id", "") or "")}
                for axis, gap in gaps.items()}
-    disposition = {"fact_id": fact.fact_id, "axes": axes, "reason": reason,
+    material_axes = _material_evidence_gap_axes(line.chosen, gaps, source, dos)
+    disposition = {"fact_id": fact.fact_id, "axes": axes,
+                   "material_axes": material_axes, "reason": reason,
                    "per_axis": per_axis}
     if line.chosen is None:
         return _dc_replace(line, attribute_evidence_gap=disposition)
+    if not material_axes:
+        return _dc_replace(line, attribute_evidence_gap=disposition)
     withdrawn = [line.chosen] + [c for c in line.alternatives if c.code != line.chosen.code]
+    material_reason = (f"axis {material_axes[0]!r} is required by the selected "
+                       f"candidate but has no relation-valid, value-bound evidence"
+                       if len(material_axes) == 1 else
+                       f"axes {material_axes} are required by the selected candidate "
+                       f"but have no relation-valid, value-bound evidence")
     return _dc_replace(
         line, chosen=None, alternatives=withdrawn[:5], method=ResolutionMethod.ABSTAINED,
-        rationale=f"selected code withdrawn for {fact.fact_id}: {reason}",
+        rationale=f"selected code withdrawn for {fact.fact_id}: {material_reason}",
         attribute_evidence_gap=disposition)
 
 
@@ -558,6 +577,41 @@ def claim_input_contract(chosen: CandidateCode, source: CodeSource,
         from .ontology import parse_dose_denominator
         dose = bool(parse_dose_denominator(chosen.descriptor))
     return ClaimInputContract(laterality=laterality, quantity_axes=quantity_axes, dose=dose)
+
+
+def _material_evidence_gap_axes(chosen: CandidateCode | None, gaps: dict,
+                                source: CodeSource | None,
+                                dos: str | None) -> list[str]:
+    """Return only gap axes that can change ``chosen``'s code/modifiers/units.
+
+    This is intentionally candidate-local and data-driven.  The union is:
+    compiled MUST_SUPPORT requirements from the authoritative descriptors, axes
+    consumed by downstream claim assembly, and a rejected value literally present
+    in the bound descriptor.  The last signal covers a descriptor-specific value
+    even when a source has no richer compiled metadata.  Absence from all three is
+    not proof the extracted attribute was correct; it means only that this selected
+    line does not consume it, so it cannot justify suppressing that line.
+    """
+    if chosen is None or not gaps:
+        return []
+    from . import requirement as _requirement
+    required: set[str] = set()
+    if source is not None:
+        requirements = _requirement.compile_requirements([chosen], source)
+        required.update(req.axis for req in requirements
+                        if req.candidate_code == chosen.code
+                        and req.role == _requirement.RequirementRole.MUST_SUPPORT)
+    contract = claim_input_contract(chosen, source, dos)
+    if contract.laterality:
+        required.add("laterality")
+    required.update(contract.quantity_axes)
+    if contract.dose:
+        required.add("dose")
+    for axis, gap in gaps.items():
+        rejected = str(getattr(gap, "rejected_value", "") or "").strip()
+        if rejected and _requirement._find_clause(chosen.descriptor, rejected) is not None:
+            required.add(axis)
+    return sorted(set(gaps) & required)
 
 
 def _material_axis_conflicts_for(chosen: CandidateCode, conflicts: dict,
@@ -1744,7 +1798,6 @@ def _active_only(cands: list[CandidateCode], source: CodeSource,
             pass
         keep.append(c)
     return keep
-MAX_RESELECT = 2       # re-selection attempts after a WRONG-CODE (not documentation-gap) rejection
 
 
 def _ranked(fact: ClinicalFact, pool: list[CandidateCode],
@@ -3291,6 +3344,7 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
     # Keyed by code (not a bare set) because a release now has to be able to say WHY every
     # alternative is gone, not merely that it was skipped.
     tried: dict[str, str] = {}
+    missing_tried: dict[str, str] = {}
     # Deterministically eliminated before any model saw them: a required bounded interval
     # the documentation does not support. Named in the uniqueness record so the audit trail
     # shows the whole pool being accounted for, not just the part the models judged.
@@ -3298,7 +3352,12 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                                       "documentation does not support")
                              for c in unsupported}
     last_reason = ""
-    for _ in range(1 + MAX_RESELECT):
+    # Every bounded shortlist candidate gets one chance.  The former fixed
+    # re-selection count could stop before a lower-ranked but fully supported
+    # candidate was ever evaluated.  This bound is still finite (the shortlist
+    # is already capped above) and ``tried`` removes at least one candidate on
+    # every continuing iteration, so it cannot loop indefinitely.
+    for _ in range(len(verifiable)):
         cands = [c for c in verifiable if c.code not in tried]
         if not cands:
             break
@@ -3319,6 +3378,26 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                         if _independently_corroborated(corroboration)
                         else "a second disposition was obtained, but not from an "
                              "independent origin")
+                # A prior candidate may have failed solely for a missing
+                # requirement.  If both evaluators now eliminate every remaining
+                # candidate, the prior gap is the only live path and must retain
+                # its provider-query classification.  Do this only after the
+                # remaining pool has actually been evaluated; if either evaluator
+                # still entails an alternative, normal uniqueness settlement below
+                # remains authoritative.
+                if (missing_tried
+                        and all(not primary.entails(c.code)
+                                and not second.entails(c.code) for c in cands)):
+                    details = list(dict.fromkeys(missing_tried.values()))
+                    question = "; ".join(details)
+                    return _with_admissions(ResolvedLine(
+                        fact=fact, chosen=None, alternatives=verifiable[:5],
+                        method=ResolutionMethod.ABSTAINED,
+                        documentation_gap=question,
+                        rationale=("PROVIDER QUERY — every otherwise-plausible "
+                                   "remaining candidate requires an element the "
+                                   "documentation does not establish "
+                                   f"({question})")))
                 return _with_admissions(_settle_uniqueness(
                     fact, None, cands, [primary, second],
                     {**constraint_eliminated, **tried},
@@ -3368,6 +3447,8 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                 last_reason = why2
                 missing = second.missing_element.get(chosen.code, False)
                 tried[chosen.code] = why2
+                if missing:
+                    missing_tried[chosen.code] = why2
             else:
                 judgements.append(second)
                 note = ("independently confirmed"
@@ -3384,20 +3465,32 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                 {**constraint_eliminated, **tried}, why,
                 corroboration, reconciliation, requirements,
                 coverage, source, admissions=admissions))
-        if missing:
-            # The code is the right KIND of service but its descriptor requires an
-            # element the note does not state. Re-selecting a code that omits the
-            # element would UNDER-code, so escalate as a provider query instead.
-            return ResolvedLine(
-                fact=fact, chosen=None, alternatives=[chosen] + shortlist[:4],
-                method=ResolutionMethod.ABSTAINED,
-                documentation_gap=why2,
-                rationale=f"PROVIDER QUERY — the best-matching code ({chosen.code}) "
-                          f"requires an element the documentation does not state "
-                          f"({why2}); confirm it was performed / amend the note, "
-                          f"else a less-specific code applies")
-        # otherwise: a WRONG code -> `tried` already carries the named reason, so the next
-        # round re-selects from the candidates that remain.
+        # A missing element disqualifies THIS candidate; it does not prove every
+        # other authoritative candidate is an under-code.  Continue through the
+        # remaining pool exactly as for any other named elimination.  If nothing
+        # else survives, `_tie_escalation` below still converts the compiled missing
+        # requirement into one targeted provider question.  This avoids the generic
+        # failure where a first-ranked overqualified candidate prevented a later,
+        # fully supported candidate from ever being evaluated.
+        #
+        # Otherwise this is a WRONG code; `tried` already carries the named reason,
+        # so the next round likewise re-selects from the candidates that remain.
+    # If every candidate has now been eliminated and at least one survivor-in-
+    # principle failed only because a required element is not documented, the
+    # unresolved work is a provider question.  Reaching this point proves the
+    # whole pool was tried; this is deliberately later than reselection so one
+    # overqualified first pick cannot hide a fully supported alternative.
+    if missing_tried and all(c.code in tried for c in verifiable):
+        details = list(dict.fromkeys(missing_tried.values()))
+        question = "; ".join(details)
+        return _with_admissions(ResolvedLine(
+            fact=fact, chosen=None, alternatives=verifiable[:5],
+            method=ResolutionMethod.ABSTAINED,
+            documentation_gap=question,
+            rationale=("PROVIDER QUERY — every otherwise-plausible remaining candidate "
+                       "requires an element the documentation does not establish "
+                       f"({question})")))
+
     # Tie policy step 5, and the case the directive names explicitly: THE MODELS
     # DISAGREED. That is never a reason to send an otherwise-resolved line to a generic
     # coder queue. The candidates the two models argued over are re-inspected against

@@ -449,9 +449,15 @@ class ClinicalGraph:
                          for ep in self.episodes],
             "intents": [{"intent_id": i.intent_id, "component": i.component.value,
                          "state": i.state.value,
+                         "claim_submission_status": i.claim_submission_status.value,
                          "clinical_event_ids": list(i.clinical_event_ids or []),
                          "mention_count": i.mention_count,
-                         "distinctness_facts": list(i.distinctness_facts or [])}
+                         "distinctness_facts": list(i.distinctness_facts or []),
+                         "decisions": [{"gate": d.gate,
+                                        "outcome": d.outcome.value,
+                                        "detail": d.detail,
+                                        "authority": d.authority}
+                                       for d in i.decisions]}
                         for i in self.intents],
             "cannot_links": [c.as_record() for c in self.cannot_links],
             "axis_resolutions": [r.as_record() if hasattr(r, "as_record") else dict(r)

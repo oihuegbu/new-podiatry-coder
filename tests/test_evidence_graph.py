@@ -6086,5 +6086,24 @@ class OccurrenceCardinality(unittest.TestCase):
         self.assertIn("PROC_X", held.documentation_gap)
 
 
+class IntentDecisionAuditTest(unittest.TestCase):
+    def test_graph_record_carries_the_precise_reason_a_service_was_held(self):
+        fact = ClinicalFact(
+            FactKind.PROCEDURE, "generic service", fact_id="F1", evidence=[],
+            disposition=Disposition.PERFORMED,
+            attributes={"performer_id": "actor-1", "billing_entity_id": "actor-1"})
+        intents = eligibility.evaluate([fact], [], "enc", "2026-03-14")
+        compiled = graph.build_graph(
+            [fact], [], intents, encounter_id="enc", date_of_service="2026-03-14")
+
+        record = compiled.as_record()["intents"][0]
+
+        self.assertEqual(record["state"], "auto_hold")
+        self.assertEqual(record["claim_submission_status"], "ready")
+        decisions = {decision["gate"]: decision for decision in record["decisions"]}
+        self.assertEqual(decisions["evidence_required"]["outcome"], "BLOCKED")
+        self.assertIn("no evidence span", decisions["evidence_required"]["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()

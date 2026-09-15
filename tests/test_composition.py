@@ -7,8 +7,11 @@ so nothing here needs a real clinical term to exercise it honestly.
 """
 import unittest
 
+from app.contracts.source_evidence import (ReconciliationStatus, SourceReconciliation,
+                                            SpanReconciliation)
 from claude_coder import composition
-from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+from claude_coder.models import (AttributeAxisConflict, AttributeEvidence,
+                                 ClinicalFact, EvidenceSpan, FactKind,
                                  RelationAssertion, RelationPredicate, RelationState)
 
 
@@ -107,6 +110,79 @@ class ComposeEmitsSameEpisodeAs(unittest.TestCase):
         pairs = {frozenset((r.subject_event_id, r.object_event_id)) for r in rels}
         self.assertEqual(pairs, {frozenset(("F1", "F2")), frozenset(("F1", "F3")),
                                  frozenset(("F2", "F3"))})
+
+
+class SectionContextReconciliation(unittest.TestCase):
+    """Closed section context applies to every independently coded service in
+    that section, while conflicting values and other sections stay isolated."""
+
+    @staticmethod
+    def _source_fact(note, fact_id, phrase, value):
+        start = note.index(phrase)
+        span = EvidenceSpan(text=phrase, start=start, end=start + len(phrase),
+                            anchored=True, span_id=f"span-{fact_id}")
+        return ClinicalFact(
+            FactKind.PROCEDURE, phrase, fact_id=fact_id, evidence=[span],
+            attributes={"laterality": value},
+            attribute_evidence={"laterality": (AttributeEvidence(
+                span=span, scope="local", assertion_state=RelationState.ASSERTED,
+                value=value),)})
+
+    @staticmethod
+    def _reconciliation(*facts):
+        return SourceReconciliation(spans=tuple(
+            SpanReconciliation(span_id=f.evidence[0].span_id,
+                               status=ReconciliationStatus.AGREED)
+            for f in facts))
+
+    def test_one_section_value_reaches_every_component_service(self):
+        note = "SECTION A\nright context for first service; second service; third service.\n"
+        source = self._source_fact(note, "F1", "right context for first service", "right")
+        second = _fact("F2", "second service", note.index("second service"),
+                       note.index("second service") + len("second service"))
+        third = _fact("F3", "third service", note.index("third service"),
+                      note.index("third service") + len("third service"))
+        second.attributes["laterality"] = "right"
+        second.attribute_axis_conflicts["laterality"] = AttributeAxisConflict(
+            axis="laterality", provider_question="which side", value_primary="right",
+            value_second="")
+
+        audit = composition.reconcile_section_context(
+            [source, second, third], note,
+            self._reconciliation(source, second, third))
+
+        self.assertEqual(second.attributes["laterality"], "right")
+        self.assertEqual(third.attributes["laterality"], "right")
+        self.assertNotIn("laterality", second.attribute_axis_conflicts)
+        self.assertEqual(
+            second.attribute_evidence["laterality"][-1].scope, "section")
+        self.assertEqual({record["fact_id"] for record in audit}, {"F2", "F3"})
+
+    def test_conflicting_local_values_never_propagate(self):
+        note = "SECTION A\nright first service and left second service; third service.\n"
+        first = self._source_fact(note, "F1", "right first service", "right")
+        second = self._source_fact(note, "F2", "left second service", "left")
+        third = _fact("F3", "third service", note.index("third service"),
+                      note.index("third service") + len("third service"))
+
+        audit = composition.reconcile_section_context(
+            [first, second, third], note,
+            self._reconciliation(first, second, third))
+
+        self.assertEqual(audit, [])
+        self.assertNotIn("laterality", third.attributes)
+
+    def test_section_context_never_crosses_a_heading_boundary(self):
+        note = "SECTION A\nright first service.\nSECTION B\nsecond service.\n"
+        first = self._source_fact(note, "F1", "right first service", "right")
+        second = _fact("F2", "second service", note.index("second service"),
+                       note.index("second service") + len("second service"))
+
+        audit = composition.reconcile_section_context(
+            [first, second], note, self._reconciliation(first, second))
+
+        self.assertEqual(audit, [])
+        self.assertNotIn("laterality", second.attributes)
 
 
 class ServiceIntentsReachability(unittest.TestCase):

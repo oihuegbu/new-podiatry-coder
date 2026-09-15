@@ -341,7 +341,8 @@ def code_encounter(
         logger.info("  primary extraction starting (provider=%s)...",
                    (profiles.get("extraction") or {}).get("provider", "unknown"))
         extracted = extraction.extract_note(note_text, extract_llm, billing_context,
-                                            model_profile=profiles.get("extraction"))
+                                            model_profile=profiles.get("extraction"),
+                                            require_anchored_evidence=True)
         logger.info("  primary extraction complete: %d fact(s)", len(extracted.facts))
         facts = extracted.facts
         _prov.anchor_facts(note_text, facts, document_version=document_version)
@@ -452,6 +453,21 @@ def code_encounter(
             audit_hashes.append(audit_repository.append(
                 encounter_id, "source_evidence_reconciliation",
                 source_reconciliation.certificate_record()))
+        # Reconcile closed document-section context only AFTER the original page has
+        # confirmed the source spans.  A value stated once in a heading/lead service
+        # can then support every service physically documented in that same section,
+        # while a second side/value or an explicit contradiction prevents propagation.
+        # Open clinical vocabularies are never inherited.  Re-sanitize afterward:
+        # relation validation may have dropped provisional inherited evidence that
+        # extraction's earlier finalizer still counted, and unsupported raw values
+        # must not survive into candidate selection or modifier assignment.
+        section_context = _compose.reconcile_section_context(
+            facts, note_text, source_reconciliation)
+        extraction.finalize_attribute_evidence(facts)
+        if section_context:
+            audit_hashes.append(audit_repository.append(
+                encounter_id, "section_context_reconciliation",
+                {"assertions": section_context}))
         # ---- Source-grounded REASON_FOR completion (issue #6, Codex's independent
         # re-review, F9-R21-E/F9-R23 root finding 4) ------------------------------------
         # `validate_relations`/`reconcile_relations` above only ever PROVE or DISPROVE an
@@ -1046,7 +1062,8 @@ def code_encounter(
         # before the modifier/units/bundling block below reads `line.chosen`, so no
         # path through this loop can release a code for a fact whose own
         # attribute_evidence_gaps is still non-empty.
-        line = resolution._apply_attribute_evidence_gap_guard(line, _line_coverage)
+        line = resolution._apply_attribute_evidence_gap_guard(
+            line, _line_coverage, source=source, dos=date_of_service)
         # issue #6, Codex's independent re-review (F9-R18-A reopened P1): same
         # re-application need as the gap guard just above, for the exact same
         # reason -- `resolution.resolve` already applies this guard once
@@ -1648,7 +1665,8 @@ def _run_graph_consensus(note_text, facts, billing_context, extract_llm_b, profi
     extracted_b = extraction.extract_note(
         recall_text, extract_llm_b, billing_context,
         run_id=_SECOND_READING_RUN_ID,
-        model_profile=profiles.get("second_extraction"))
+        model_profile=profiles.get("second_extraction"),
+        require_anchored_evidence=True)
     logger.info("  second-reading extraction complete: %d fact(s)", len(extracted_b.facts))
     # Anchored into the reading it was extracted from, and stamped with WHICH reading
     # that is, so nothing downstream slices the wrong string.

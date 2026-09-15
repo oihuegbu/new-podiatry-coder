@@ -53,22 +53,40 @@ class ApplyAttributeEvidenceGapGuardTest(unittest.TestCase):
         self.assertIsNotNone(out.attribute_evidence_gap)
         self.assertEqual(out.attribute_evidence_gap["fact_id"], "F1")
 
-    def test_a_gapped_fact_never_releases_its_selected_code(self):
-        """The core invariant: no unresolved attribute_evidence_gap may coexist
-        with a released selected code."""
+    def test_a_candidate_material_gap_withdraws_the_selected_code(self):
+        """A gap in a value literally required by the selected descriptor is
+        material and must withdraw that candidate."""
         fact = _fact(attribute_evidence_gaps={
-            "laterality": AttributeEvidenceGap(axis="laterality", reason="no evidence")})
-        chosen = _cand()
+            "laterality": AttributeEvidenceGap(
+                axis="laterality", reason="no evidence", rejected_value="right")})
+        chosen = _cand(descriptor="assembly service, right")
         line = ResolvedLine(fact=fact, chosen=chosen, method=ResolutionMethod.VERIFIED)
         out = resolution._apply_attribute_evidence_gap_guard(line, None)
         self.assertIsNone(out.chosen)
         self.assertIn(chosen, out.alternatives)
         self.assertEqual(out.method, ResolutionMethod.ABSTAINED)
+        self.assertEqual(out.attribute_evidence_gap["material_axes"], ["laterality"])
+
+    def test_an_immaterial_gap_is_audited_without_erasing_the_selection(self):
+        """A selected candidate that consumes none of the gapped axes remains
+        selected; the exact gap stays visible for audit.  This is the line-local
+        invariant needed for notes containing several independent services."""
+        fact = _fact(attribute_evidence_gaps={
+            "laterality": AttributeEvidenceGap(
+                axis="laterality", reason="no evidence", rejected_value="right")})
+        chosen = _cand(descriptor="assembly service")
+        line = ResolvedLine(fact=fact, chosen=chosen, method=ResolutionMethod.VERIFIED)
+        out = resolution._apply_attribute_evidence_gap_guard(line, None)
+        self.assertEqual(out.chosen, chosen)
+        self.assertEqual(out.method, ResolutionMethod.VERIFIED)
+        self.assertEqual(out.attribute_evidence_gap["material_axes"], [])
 
     def test_withdrawn_code_names_the_exact_fact_and_axis(self):
         fact = _fact(attribute_evidence_gaps={
-            "laterality": AttributeEvidenceGap(axis="laterality", reason="no evidence")})
-        line = ResolvedLine(fact=fact, chosen=_cand(), method=ResolutionMethod.VERIFIED)
+            "laterality": AttributeEvidenceGap(
+                axis="laterality", reason="no evidence", rejected_value="right")})
+        line = ResolvedLine(fact=fact, chosen=_cand(descriptor="assembly service, right"),
+                            method=ResolutionMethod.VERIFIED)
         out = resolution._apply_attribute_evidence_gap_guard(line, None)
         gap = out.attribute_evidence_gap
         self.assertEqual(gap["fact_id"], "F1")
@@ -115,10 +133,11 @@ class ApplyAttributeEvidenceGapGuardTest(unittest.TestCase):
         persistently gapped fact must hold only its own line -- a separate,
         cleanly evidenced fact's line is untouched by this guard."""
         gapped = _fact(fact_id="F1", attribute_evidence_gaps={
-            "laterality": AttributeEvidenceGap(axis="laterality", reason="no evidence")})
+            "laterality": AttributeEvidenceGap(
+                axis="laterality", reason="no evidence", rejected_value="right")})
         clean = _fact(fact_id="F2")
         gapped_line = resolution._apply_attribute_evidence_gap_guard(
-            ResolvedLine(fact=gapped, chosen=_cand("CAND_A"),
+            ResolvedLine(fact=gapped, chosen=_cand("CAND_A", "assembly service, right"),
                         method=ResolutionMethod.VERIFIED), None)
         clean_line = resolution._apply_attribute_evidence_gap_guard(
             ResolvedLine(fact=clean, chosen=_cand("CAND_B"),

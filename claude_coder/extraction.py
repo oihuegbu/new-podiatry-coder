@@ -944,14 +944,29 @@ _RETRY_VALIDATION_FEEDBACK = (
     "entry with no matching part_of relation in the exact right direction is dropped "
     "entirely and leaves the axis unsupported, which is exactly what was rejected. If "
     "you are unsure a fact truly shares the parent's value, do not emit the axis for "
-    "that fact at all rather than guessing."
+    "that fact at all rather than guessing. (5) every retained fact needs at least "
+    "one evidence quote copied character-for-character from the supplied note. A "
+    "summary or paraphrase is not evidence, even when clinically accurate."
 )
 
 
 def extract_note(note_text: str, llm: LLMFn | None = None,
                  billing_context: dict[str, Any] | None = None, *,
                  run_id: str | None = None,
-                 model_profile: dict[str, Any] | None = None) -> ExtractionResult:
+                 model_profile: dict[str, Any] | None = None,
+                 require_anchored_evidence: bool = False) -> ExtractionResult:
+    """Extract a complete typed fact graph.
+
+    Production callers set ``require_anchored_evidence`` so a model response that
+    paraphrases its evidence is automatically regenerated.  Anchoring remains exact:
+    there is no fuzzy medical-text repair and no inferred offset.  The retry is
+    bounded, and if the final otherwise-valid response still contains an unanchored
+    fact it is returned unchanged so the ordinary fact-local eligibility gate holds
+    only that fact instead of destroying the rest of a multi-service encounter.
+
+    The option defaults off for low-level/parser callers that deliberately exercise
+    unanchored inputs; the end-to-end pipeline always enables it.
+    """
     llm = llm or _default_llm
     # Validate the authoritative encounter context BEFORE spending an extraction call: a
     # malformed roster can never produce trustworthy ownership, so it fails closed up front.
@@ -968,9 +983,34 @@ def extract_note(note_text: str, llm: LLMFn | None = None,
             # like a malformed-shape response already parsed by
             # `_parse_extraction_response` below, not escape the retry loop.
             raw_response = llm(_SYSTEM, user)
-            return _parse_extraction_response(
+            result = _parse_extraction_response(
                 raw_response, participants, billing_context, note_text,
                 run_id=run_id, model_profile=model_profile)
+            if require_anchored_evidence:
+                # Validate the response against the source while it is still inside
+                # the existing bounded extraction loop.  Previously this happened
+                # only after extract_note returned, so a single paraphrased evidence
+                # string permanently removed an otherwise documented procedure from
+                # retrieval.  Exact anchoring is idempotent; pipeline.py re-anchors
+                # with the external document version before durable audit emission.
+                from . import provenance as _provenance
+                _provenance.anchor_facts(note_text, result.facts)
+                unanchored = [
+                    fact for fact in result.facts
+                    if not any(getattr(span, "anchored", False)
+                               for span in (fact.evidence or []))
+                ]
+                if unanchored and attempt < _EXTRACTION_MAX_ATTEMPTS:
+                    from app.core.logger import get_logger
+                    get_logger(__name__).warning(
+                        "  Extraction attempt %d returned %d retained fact(s) without "
+                        "an exact source quote -- regenerating the complete extraction",
+                        attempt, len(unanchored))
+                    user = json.dumps({**base_payload,
+                                      "validation_feedback": _RETRY_VALIDATION_FEEDBACK},
+                                     sort_keys=True)
+                    continue
+            return result
         except ExtractionSchemaError as exc:
             if attempt == _EXTRACTION_MAX_ATTEMPTS:
                 raise

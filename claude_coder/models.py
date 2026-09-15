@@ -114,14 +114,22 @@ class AttributeEvidence:
     is not a second evidence system, just a per-attribute pointer into the SAME kind
     of verified quote a fact's own `evidence` list already carries.
 
-    `scope` is `"local"` when the quote sits in THIS fact's own sentence, or
-    `"inherited"` when the value is stated once in a linked parent/section and this
-    fact inherits it. Inheritance is never assumed: it requires `source_relation_id`
+    `scope` is `"local"` when the quote sits in THIS fact's own sentence,
+    `"inherited"` when the value is stated once in a linked parent event and this
+    fact inherits it, or `"section"` when the deterministic document-structure
+    resolver proves one unambiguous closed context value applies throughout the
+    exact section containing this fact. Parent inheritance is never assumed: it
+    requires `source_relation_id`
     to name an actual `RelationAssertion` connecting the two facts, so an inherited
     value's provenance is exactly "which relation, and which endpoint's quote" --
     reusing `RelationAssertion`'s own span-anchored evidence contract rather than
     inventing a second one, and nothing here globally propagates a value across the
     encounter on its own.
+
+    A section-scoped entry is created only after source reconciliation by
+    `composition.reconcile_section_context`; it keeps the original source span, the
+    source fact id, and a stable section-context id, and is never available for open
+    clinical-vocabulary axes.
 
     `parent_fact_id` and `source_relation_id` are set at extraction time (a CANDIDATE
     relation the model also emitted), but only PROVISIONALLY -- `scope_validated`

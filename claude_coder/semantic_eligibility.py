@@ -355,9 +355,12 @@ def _service_role_control(facts: list[ClinicalFact], candidates: list,
         # block, so a fact whose role simply failed to classify let
         # operative-classified candidates reach the clinical tie-breaker
         # untouched -- reproduced directly on the designated operative note.
+        # Missing role evidence is absence, not a graph contradiction.  A noisy
+        # multi-role recall pool must reach candidate-specific descriptor
+        # verification rather than manufacturing a whole-line hold.  Positive
+        # conflicting/mixed fact evidence remains blocking.
         blocks = (base_status in (RoleControlStatus.FACT_ROLE_CONFLICT,
-                                  RoleControlStatus.MIXED_KIND_INTENT,
-                                  RoleControlStatus.FACT_ROLE_MISSING)
+                                  RoleControlStatus.MIXED_KIND_INTENT)
                  and len(distinct_roles) > 1)
         return {(c.code, c.system): RoleControlDecision(
                     base_status, roles, classified[(c.code, c.system)], False, blocks,

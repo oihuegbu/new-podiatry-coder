@@ -2379,6 +2379,67 @@ class ProposeVerifyTest(unittest.TestCase):
         self.assertEqual(line.method, ResolutionMethod.VERIFIED)
         self.assertEqual(line.chosen.code, "A2")     # re-selected past the rejected A1
 
+    def test_overqualified_first_pick_reselects_to_supported_alternative(self):
+        """A missing-element verdict eliminates only the overqualified candidate.
+        A different authoritative candidate that both evaluators support must still
+        be evaluated and may release; the first candidate must not terminate the
+        entire service line as a provider query."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        from claude_coder.resolution import resolve
+        narrow = "act alpha with additional documented requirement"
+        supported = "act alpha"
+        src = MockSource(
+            records={("NARROW", "cpt"): {"long_description": narrow, "active": True},
+                     ("SUPPORTED", "cpt"): {"long_description": supported,
+                                              "active": True}},
+            retrieval={("*", "cpt"): [CandidateCode("NARROW", "cpt", narrow, 0.9),
+                                       CandidateCode("SUPPORTED", "cpt", supported, 0.8)]})
+        primary = _sv.judge(entails=lambda d: "act alpha" in d.lower(),
+                            prefer=lambda d: "additional" in d.lower(), reason="alpha")
+        corroborator = _sv.judge(
+            entails=lambda d: "additional" not in d.lower(),
+            missing_element=True, reason="the additional requirement is not documented")
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="act alpha",
+                            evidence=[EvidenceSpan("act alpha performed")], confidence=0.95)
+
+        line = resolve(_request(fact), src,
+                       llm=_from(primary, "provider-a"),
+                       corroborate=_from(corroborator, "provider-b"))
+
+        self.assertEqual(line.method, ResolutionMethod.VERIFIED, line.rationale)
+        self.assertEqual(line.chosen.code, "SUPPORTED")
+
+    def test_reselection_evaluates_the_entire_bounded_shortlist(self):
+        """A supported lower-ranked candidate must not be hidden behind a fixed
+        number of rejected candidates.  Every candidate in the already-bounded
+        shortlist is evaluated at most once."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        from claude_coder.resolution import resolve
+        descriptors = [f"act alpha variant {n}" for n in range(4)]
+        records = {(f"C{n}", "cpt"): {"long_description": desc, "active": True}
+                   for n, desc in enumerate(descriptors)}
+        retrieval = {("*", "cpt"): [
+            CandidateCode(f"C{n}", "cpt", desc, 1.0 - n / 10)
+            for n, desc in enumerate(descriptors)]}
+        src = MockSource(records=records, retrieval=retrieval)
+        primary = _sv.judge(entails=lambda d: True, reason="plausible candidate")
+        corroborator = _sv.judge(
+            entails=lambda d: "variant 3" in d.lower(),
+            missing_element=True, reason="earlier variant is overqualified")
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="act alpha",
+                            evidence=[EvidenceSpan("act alpha performed")], confidence=0.95)
+
+        line = resolve(_request(fact), src,
+                       llm=_from(primary, "provider-a"),
+                       corroborate=_from(corroborator, "provider-b"))
+
+        self.assertEqual(line.method, ResolutionMethod.VERIFIED, line.rationale)
+        self.assertEqual(line.chosen.code, "C3")
+
 
 class ProposedCandidateServiceRoleTest(unittest.TestCase):
     """issue #6 F9-R11-H-D: `_service_role_control`'s `blocks_line` backstop
@@ -2537,15 +2598,17 @@ class UnclassifiedFactRoleServiceConflictTest(unittest.TestCase):
         return ClinicalFact(kind=FactKind.PROCEDURE, description="anesthesia care performed",
                             evidence=[span], confidence=0.95)
 
-    def test_an_unclassified_fact_role_with_multi_role_candidates_aborts_before_verification(self):
+    def test_an_unclassified_fact_role_with_multi_role_candidates_reaches_verification(self):
         from claude_coder.resolution import resolve
         src = self._src()
         llm = _sv.judge(entails=lambda d: True, reason="entailed")
         line = resolve(_request(self._fact_with_no_service_role()), src,
                        llm=_from(llm, "provider-a"))
-        self.assertIsNone(line.chosen, line.rationale)
-        self.assertEqual(line.documentation_gap, "classification_data_gap:service_role_conflict",
-                         line.rationale)
+        self.assertIsNotNone(line.candidate_eligibility)
+        self.assertTrue(all(not r["role_control"]["blocks_line"]
+                            for r in line.candidate_eligibility))
+        self.assertNotEqual(line.documentation_gap,
+                            "classification_data_gap:service_role_conflict")
 
     def test_an_unclassified_fact_role_with_only_one_classified_role_still_releases(self):
         """The control must not become OVER-eager: a fact with no

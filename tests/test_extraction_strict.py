@@ -97,6 +97,52 @@ def test_a_persistently_malformed_draw_still_raises_after_bounded_retries():
     assert len(llm.call_count) == 3        # bounded -- never retried a 4th time
 
 
+def test_pipeline_mode_retries_a_paraphrased_span_and_keeps_every_service():
+    """Exact-evidence recovery is encounter- and terminology-agnostic: one bad
+    quote on one of several services regenerates the complete extraction, and the
+    recovered result retains an independently anchored line for every service."""
+    note = "First service performed. Second service performed."
+    first_draw = {"facts": [
+        _fact(fact_id="F1", description="first service",
+              evidence=["A paraphrase that is absent from the note"]),
+        _fact(fact_id="F2", description="second service",
+              evidence=["Second service performed."]),
+    ]}
+    second_draw = {"facts": [
+        _fact(fact_id="F1", description="first service",
+              evidence=["First service performed."]),
+        _fact(fact_id="F2", description="second service",
+              evidence=["Second service performed."]),
+    ]}
+    llm = _sequenced_llm(first_draw, second_draw)
+
+    result = extract_note(note, llm, require_anchored_evidence=True)
+
+    assert len(llm.call_count) == 2
+    assert [fact.fact_id for fact in result.facts] == ["F1", "F2"]
+    assert all(any(span.anchored for span in fact.evidence) for fact in result.facts)
+
+
+def test_persistent_unanchored_fact_is_fact_local_after_bounded_retries():
+    """A model that repeatedly paraphrases one fact must not erase an independently
+    valid sibling service or turn a fact-local defect into encounter-wide failure."""
+    note = "First service performed. Second service performed."
+    draw = {"facts": [
+        _fact(fact_id="F1", description="first service",
+              evidence=["A paraphrase that is absent from the note"]),
+        _fact(fact_id="F2", description="second service",
+              evidence=["Second service performed."]),
+    ]}
+    llm = _sequenced_llm(draw, draw, draw)
+
+    result = extract_note(note, llm, require_anchored_evidence=True)
+
+    assert len(llm.call_count) == 3
+    by_id = {fact.fact_id: fact for fact in result.facts}
+    assert not any(span.anchored for span in by_id["F1"].evidence)
+    assert any(span.anchored for span in by_id["F2"].evidence)
+
+
 # ------------------------------------------------- F9-R13-C release-gate root cause 1
 # issue #6, Codex's independent re-review: a schema-VALID response whose "attributes"
 # and "attribute_evidence" do not actually agree with each other used to reach
