@@ -880,6 +880,11 @@ class CandidateLine(_Strict):
     #: can distinguish this class of hold from an ordinary tie/gap by field
     #: rather than by parsing the reason string.
     attribute_evidence_gap: dict | None = None
+    #: Content-addressed deterministic candidate universe and the canonical
+    #: per-service evidence packet that every evaluator/selector used.  These
+    #: are audit records, not additional candidate authority.
+    candidate_set: dict | None = None
+    evidence_packet: dict | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -2513,6 +2518,10 @@ def bundle_from_coding_result(
             attribute_evidence_gap=(dict(getattr(line, "attribute_evidence_gap", None))
                                     if getattr(line, "attribute_evidence_gap", None)
                                     else None),
+            candidate_set=(dict((getattr(line, "tie_record", None) or {}).get(
+                "candidate_set") or {}) or None),
+            evidence_packet=(dict((getattr(line, "tie_record", None) or {}).get(
+                "evidence_packet") or {}) or None),
         ))
 
     # issue #6, Codex's independent re-review (F9-R13-A): a second-reading

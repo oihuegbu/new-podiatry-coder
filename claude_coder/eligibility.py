@@ -180,6 +180,16 @@ class RetrievalRequest:
     # multi-member intent (the common case) or when a caller does not supply one --
     # callers that omit it get exactly today's single-fact behavior, never an error.
     intent_facts: tuple[ClinicalFact, ...] = ()
+    # The broader, structurally composed service context (PART_OF-connected
+    # facts) is deliberately separate from ``intent_facts``.  ``intent_facts``
+    # is the narrow same-event set used by role/kind eligibility; feeding a
+    # supply, imaging event, or anesthesia component into that decision can
+    # manufacture a role conflict.  ``service_context_facts`` is evidence-only:
+    # resolution uses it to build one stable packet containing the related
+    # performed acts and attributes that may establish a candidate requirement.
+    # It can never admit a candidate or change the target event's role.
+    service_context_facts: tuple[ClinicalFact, ...] = ()
+    service_context_id: str = ""
 
     def __post_init__(self) -> None:
         if self.intent.state is not EligibilityState.ELIGIBLE_FOR_RETRIEVAL:
@@ -201,6 +211,10 @@ class RetrievalRequest:
         if fact_snapshot_digest(self.fact) != self.intent.fact_digest:
             raise ValueError(
                 "retrieval fact mutated since eligibility (snapshot digest mismatch)")
+        if self.service_context_facts:
+            ids = {f.fact_id for f in self.service_context_facts if f.fact_id}
+            if self.fact.fact_id not in ids:
+                raise ValueError("service evidence context does not contain retrieval fact")
 
 
 def _intent_id(encounter_id: str, fact_id: str, action: str) -> str:

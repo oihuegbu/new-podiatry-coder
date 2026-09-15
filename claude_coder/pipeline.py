@@ -807,6 +807,17 @@ def code_encounter(
                          if eid in _facts_by_id)
         for eid in _cli.clinical_event_ids:
             _intent_facts_by_event[eid] = _members
+    # A second, deliberately broader map is evidence context only.  PART_OF-
+    # connected events can document different steps of one composed service in
+    # different sentences.  Resolution receives these facts for its canonical
+    # evidence packet, while semantic eligibility continues to use only the
+    # narrow same-event map above; the two scopes must never be conflated.
+    _service_context_by_event: dict[str, tuple[str, tuple]] = {}
+    for _service in _service_intents:
+        _members = tuple(_facts_by_id[eid] for eid in _service.component_event_ids
+                         if eid in _facts_by_id)
+        for eid in _service.component_event_ids:
+            _service_context_by_event[eid] = (_service.intent_id, _members)
 
     lines = []
     for fact in facts:
@@ -921,6 +932,8 @@ def code_encounter(
             # isolation. Empty tuple (falls back to the fact alone) when this
             # fact belongs to no multi-member intent -- the common case.
             _intent_facts = _intent_facts_by_event.get(fact.fact_id, ())
+            _service_context_id, _service_context_facts = _service_context_by_event.get(
+                fact.fact_id, ("", (fact,)))
             # issue #6, Codex's independent re-review (F9-R14-A): captured in a named
             # variable so the SAME coverage corpus can back the post-arbitration/
             # refinement re-application of the attribute-evidence-gap guard below --
@@ -958,10 +971,16 @@ def code_encounter(
             try:
                 if fact.kind is FactKind.EM:
                     line = em.resolve_em(
-                        RetrievalRequest(_it, fact, intent_facts=_intent_facts), source)
+                        RetrievalRequest(
+                            _it, fact, intent_facts=_intent_facts,
+                            service_context_facts=_service_context_facts,
+                            service_context_id=_service_context_id), source)
                 else:
                     line = resolution.resolve(
-                        RetrievalRequest(_it, fact, intent_facts=_intent_facts), source,
+                        RetrievalRequest(
+                            _it, fact, intent_facts=_intent_facts,
+                            service_context_facts=_service_context_facts,
+                            service_context_id=_service_context_id), source,
                         llm=verify_llm, corroborate=corroborate_llm,
                         dos=date_of_service, reconciliation=source_reconciliation,
                         # issue #6 F9-R6 Phase 3, `CoverageCorpus`-typed since the

@@ -40,6 +40,8 @@ candidate pool and forbids it from verifying a code.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field, replace as _dc_replace
 from enum import Enum
@@ -970,6 +972,9 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
     if not isinstance(request, RetrievalRequest):
         raise TypeError("code retrieval requires an eligible RetrievalRequest")
     fact = request.fact
+    from . import verify as _verify
+    evidence_packet = _verify.build_service_evidence_packet(
+        fact, request.service_context_facts, request.service_context_id)
     # issue #6 item 5/F8-R2: semantic eligibility reads what the whole documented
     # EVENT states -- every fact the canonical `ClaimLineIntent` this fact belongs
     # to also names (duplicate mentions of the SAME documented event), not just
@@ -1033,7 +1038,8 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
         if _pv_kind and (always_verify or any(_needs_verification(fact, c) for c in cands)):
             seeds.extend(_dc_replace(c, requires_verification=True) for c in cands)
             return None
-        trusted = [_dc_replace(c, requires_verification=False) for c in cands]
+        trusted = _bind_evaluation_descriptors(
+            [_dc_replace(c, requires_verification=False) for c in cands], source)
         line = _decide(fact, trusted, authority=authority, source=source,
                        reconciliation=reconciliation)
         if not line.resolved:
@@ -1047,6 +1053,12 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
         from . import semantic_eligibility as _semelig
         line.candidate_eligibility = _semelig.eligibility_report(
             elig_facts, trusted, source, dos, reconciliation)
+        line.tie_record = {
+            **(line.tie_record or {}),
+            "candidate_set": _candidate_set_snapshot(
+                trusted, (fact.description,), request.service_context_id),
+            "evidence_packet": evidence_packet.as_record(),
+        }
         return line
 
     # AUTHORITATIVE FIRST: for a diagnosis, resolve through the ICD-10-CM
@@ -1304,7 +1316,7 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
             prior = best.get(candidate.code)
             best[candidate.code] = (candidate if prior is None
                                     else _merge_candidate(prior, candidate))
-    pool = sorted(best.values(), key=lambda c: c.score, reverse=True)
+    pool = sorted(best.values(), key=lambda c: (-c.score, c.system, c.code))
 
     # ---- Semantic eligibility-before-retrieval (issue #6 items 4/5, F8-R2) -------
     # Narrows EVERY candidate path -- the broad RECALL pool AND the authoritative
@@ -1410,7 +1422,10 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
         # trusted twice; it is simply given everything to report on.
         line = _propose_then_verify(fact, source, _all_candidates, llm, corroborate,
                                     dos=dos, reconciliation=reconciliation,
-                                    coverage=coverage, elig_facts=elig_facts)
+                                    coverage=coverage, elig_facts=elig_facts,
+                                    evidence_packet=evidence_packet,
+                                    candidate_queries=tuple(queries),
+                                    service_context_id=request.service_context_id)
         # #1 grounding: a DIAGNOSIS that verified only to a residual/catch-all category
         # with no distinctive descriptor overlap is an ungrounded guess (entailment
         # against a catch-all is near-tautological) -- escalate, never bill it verified.
@@ -1893,6 +1908,48 @@ def _bind_evaluation_descriptors(candidates: list[CandidateCode],
     return bound
 
 
+def _candidate_set_snapshot(candidates: list[CandidateCode], queries: tuple[str, ...],
+                            service_context_id: str = "") -> dict:
+    """Content-address the exact deterministic candidate universe evaluated.
+
+    Candidate generation may use fuzzy/vector recall, governed terminology,
+    authoritative indices, and UMLS, but never a model-authored code number.
+    Given the same normalized query set and source snapshots, this record is
+    stable and independently reproducible.  The ordered list is the actual
+    shortlist order shown to both evaluators; descriptor hashes and source
+    identities bind what every later stage is allowed to read.
+    """
+    normalized_queries = tuple(sorted(dict.fromkeys(
+        " ".join(str(q).casefold().split()) for q in queries if str(q).strip())))
+    records = []
+    for ordinal, candidate in enumerate(candidates):
+        authority = dict(candidate.authority or {})
+        sources = {str(candidate.source)} if candidate.source else set()
+        sources.update(str(s) for s in authority.get("sources", ()) if s)
+        records.append({
+            "ordinal": ordinal,
+            "code": candidate.code,
+            "system": candidate.system,
+            "descriptor_sha256": hashlib.sha256(
+                candidate.descriptor.encode("utf-8")).hexdigest(),
+            "authority_snapshot": dict(
+                authority.get("evaluation_descriptor_snapshot") or {}),
+            "source_lineage": sorted(sources),
+            "requires_verification": bool(candidate.requires_verification),
+        })
+    payload = {
+        "schema_version": 1,
+        "generator_version": "deterministic-authority-recall-v1",
+        "service_context_id": service_context_id,
+        "normalized_queries": list(normalized_queries),
+        "candidates": records,
+    }
+    payload["candidate_set_sha256"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                   default=str).encode()).hexdigest()
+    return payload
+
+
 def _active_only(cands: list[CandidateCode], source: CodeSource,
                  dos: str | None) -> list[CandidateCode]:
     """Fix3: drop candidates DEFINITIVELY inactive on the DOS before they can occupy
@@ -1972,7 +2029,8 @@ def _tie_escalation(fact: ClinicalFact, candidates: list[CandidateCode],
 
 def _requirement_grounded_status(fact: ClinicalFact, cand: CandidateCode,
                                  requirements: tuple, judgements: list,
-                                 reconciliation, coverage
+                                 reconciliation, coverage,
+                                 evidence_packet=None,
                                  ) -> tuple[bool, str] | None:
     """Whether `cand`'s OWN compiled MUST_SUPPORT/EXCLUSION requirements
     ground a validated elimination -- UNCONDITIONALLY, never gated behind
@@ -2008,7 +2066,8 @@ def _requirement_grounded_status(fact: ClinicalFact, cand: CandidateCode,
     by_axis: dict[str, list] = {}
     for r in cand_reqs:
         by_axis.setdefault(r.axis, []).append(r)
-    evidence_by_span_id = _verify.evidence_text_by_span_id(fact) if by_axis else {}
+    evidence_by_span_id = (_verify.evidence_text_by_span_id(fact, evidence_packet)
+                           if by_axis else {})
     for axis, axis_reqs in by_axis.items():
         # issue #6, Codex's independent re-review (F9-R19-A): an EXCLUSION-role
         # axis group grounds on the OPPOSITE judgement status from every other
@@ -2289,6 +2348,7 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode],
                                       fact: "ClinicalFact | None" = None,
                                       requirements: tuple = (),
                                       admissions: dict[str, "CandidateAdmission"] | None = None,
+                                      evidence_packet=None,
                                       ) -> tuple[list[CandidateCode], dict[str, str],
                                                 dict[str, str]] | None:
     """The candidate-level SEMANTIC entailment record (issue #6, Codex's
@@ -2426,18 +2486,14 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode],
         if fact is not None:
             from .verify import _agreed_citable_spans
             return bool(_agreed_citable_spans(
-                d.evidence_span_ids, fact, cand, reconciliation, d.status))
+                d.evidence_span_ids, fact, cand, reconciliation, d.status,
+                evidence_packet))
         return _disposition_spans_validated(d, settled, permitted)
 
     remaining: list[CandidateCode] = []
     eliminated: dict[str, str] = {}
     system_unresolved: dict[str, str] = {}
     for cand in shortlist:
-        admission = (admissions or {}).get(cand.code)
-        recall_only = bool(
-            admission is not None
-            and admission.standing is CandidateStanding.UNGROUNDED
-        )
         # issue #6, Codex's independent re-review (F9-R16-B): `chosen` is NO
         # LONGER special-cased here. The prior version skipped validating
         # `chosen`'s own disposition entirely, so a judgement whose LEGACY
@@ -2455,12 +2511,6 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode],
         # and never lets a DIFFERENT surviving candidate release in its place.
         d0, d1 = j0[cand.code], j1[cand.code]
         if not (_identity_matches(cand, d0) and _identity_matches(cand, d1)):
-            if recall_only:
-                eliminated[cand.code] = (
-                    "recall-only candidate did not earn evidence standing: its "
-                    "evaluator disposition was not bound to the current authoritative "
-                    "descriptor")
-                continue
             system_unresolved[cand.code] = (
                 f"a disposition for {cand.code} did not reproduce this candidate's "
                 f"own current official descriptor identity")
@@ -2515,7 +2565,7 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode],
                 r for r in requirements if r.axis != "qualified_child")
             grounded = (_requirement_grounded_status(
                             fact, cand, _contract_requirements, judgements,
-                            reconciliation, coverage)
+                            reconciliation, coverage, evidence_packet)
                        if fact is not None else None)
             if grounded is not None:
                 eliminated[cand.code] = grounded[1]
@@ -2529,17 +2579,7 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode],
                      f"both evaluators judged {cand.code} not_documented, but this "
                      f"could not be validated against a complete, independently-read "
                      f"whole-document search")
-            if recall_only:
-                eliminated[cand.code] = (
-                    "recall-only candidate did not earn evidence standing: " + reason)
-            else:
-                system_unresolved[cand.code] = reason
-            continue
-        if recall_only:
-            eliminated[cand.code] = (
-                "recall-only candidate did not earn evidence standing: independent "
-                f"evaluators did not agree it was supported ({d0.status!r} vs "
-                f"{d1.status!r})")
+            system_unresolved[cand.code] = reason
             continue
         system_unresolved[cand.code] = (
             f"independent evaluators disagreed on {cand.code}'s disposition "
@@ -2929,6 +2969,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                        coverage: "_requirement.CoverageCorpus | None" = None,
                        source: Any = None,
                        admissions: dict[str, CandidateAdmission] | None = None,
+                       evidence_packet=None,
                        ) -> ResolvedLine:
     """Release ONLY when exactly one shortlisted candidate is still entailed; otherwise
     hand the survivors to the tie policy the deterministic path already uses.
@@ -2980,7 +3021,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
     _disposition_verdict = _candidate_disposition_uniqueness(
         remaining, chosen, judgements, reconciliation, coverage,
         fact=fact, requirements=_elimination_requirements,
-        admissions=admissions)
+        admissions=admissions, evidence_packet=evidence_packet)
     _system_unresolved: dict[str, str] = {}
     if _disposition_verdict is not None:
         remaining, _further_eliminated, _system_unresolved = _disposition_verdict
@@ -3169,11 +3210,14 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
                          dos: str | None = None,
                          reconciliation=None,
                          coverage: "_requirement.CoverageCorpus | None" = None,
-                         elig_facts: list[ClinicalFact] | None = None
+                         elig_facts: list[ClinicalFact] | None = None,
+                         evidence_packet=None,
+                         candidate_queries: tuple[str, ...] = (),
+                         service_context_id: str = "",
                          ) -> ResolvedLine:
-    """Recall as candidate GENERATOR, authoritative descriptor + entailment as TRUTH.
-    Widen the pool with validated LLM proposals, select the candidate whose OFFICIAL
-    descriptor the documentation entails, then (when a corroborator is supplied)
+    """Deterministic recall as GENERATOR, descriptor + entailment as TRUTH.
+    Evaluate the source-derived, reproducible candidate pool against each OFFICIAL
+    descriptor, then (when a corroborator is supplied)
     require an INDEPENDENT second model to agree before accepting. Escalate if the
     selection finds nothing OR the second model disagrees. Nothing bills on recall
     alone, and nothing bills on a single model's say-so.
@@ -3185,18 +3229,12 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     path uses -- narrowed against the original page, else ONE targeted provider query.
     (Codex F8-R1: two models agreeing on one candidate never eliminated the rest.)
 
-    issue #6 F9-R11-H-D, fifth re-review: model-PROPOSED candidates are role-
-    controlled over the FULL candidate universe (the already-eligible retrieval
-    `pool` plus every validated proposal) BEFORE any shortlist is built or any
-    verification call runs -- not checked against `line.chosen` after selection
-    (the fourth re-review's own defect: an incompatible proposal that lost a
-    verifier TIE against a compatible retrieved candidate never reached
-    `line.chosen` at all, so a post-selection check could not see it, and the
-    tie escalation swallowed the compatible candidate along with it). A
-    role-incompatible proposal is excluded here, before it can ever contest a
-    tie; a genuine multi-role ambiguity across the combined universe aborts
-    with the typed `classification_data_gap` hold immediately, before any
-    verifier call is spent.
+    Model-authored code proposals are intentionally absent from the decisive
+    universe.  Even when registry-valid, they varied between otherwise identical
+    runs and could crowd out or resurrect candidates.  Recall comes only from the
+    versioned authoritative indices/descriptors, governed term sources, UMLS, and
+    the configured retrieval snapshot.  The LLM judges the fixed set; it does not
+    write it.
 
     `pool` here MUST be the caller's UNFILTERED retrieval/index universe
     (sixth re-review: passing the caller's own already-eligibility-filtered
@@ -3212,21 +3250,10 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     chosen, excluded, or neither -- so the audit trail (and the ClaimBundle
     that projects it) shows every candidate this fact's resolution actually
     considered, with its exact reason."""
-    from . import verify as _verify
     from . import semantic_eligibility as _semelig
-    proposed_evals = [(c, *_evaluate_reason(fact, c, source, reconciliation))
-                      for c in _verify.propose_codes(fact, source, llm)]
-    proposals_raw = [c for c, m, _r in proposed_evals
-                     if m is not None and not m.interval_unsupported]
-    proposals_unsupported = [c for c, m, _r in proposed_evals
-                             if m is not None and m.interval_unsupported]
-    # Registry-valid proposals `_evaluate` eliminated OUTRIGHT (laterality
-    # contradiction, or a documented measurement outside the descriptor's
-    # bounded interval) -- issue #6 F9-R11-H-D, seventh re-review: these
-    # never reached `full_universe` at all before, so the audit trail could
-    # not say a proposal was even considered, let alone why it was excluded.
-    proposals_deterministically_excluded = [(c, r) for c, m, r in proposed_evals
-                                            if m is None]
+    proposals_raw: list[CandidateCode] = []
+    proposals_unsupported: list[CandidateCode] = []
+    proposals_deterministically_excluded: list[tuple[CandidateCode, str]] = []
 
     # Candidate admission is per clinical event.  Sibling procedures/supplies
     # in the same composed intent remain available to downstream relationship
@@ -3323,7 +3350,9 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     pool = [c for c in pool if (c.code, c.system) in eligible_ids]
     line = _propose_then_verify_core(
         fact, source, pool, proposals, proposals_unsupported, llm, corroborate,
-        dos=dos, reconciliation=reconciliation, coverage=coverage)
+        dos=dos, reconciliation=reconciliation, coverage=coverage,
+        evidence_packet=evidence_packet, candidate_queries=candidate_queries,
+        service_context_id=service_context_id)
     line.candidate_eligibility = candidate_eligibility
     return line
 
@@ -3334,7 +3363,10 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                               proposals_unsupported: list[CandidateCode],
                               llm, corroborate=None, dos: str | None = None,
                               reconciliation=None,
-                              coverage: "_requirement.CoverageCorpus | None" = None
+                              coverage: "_requirement.CoverageCorpus | None" = None,
+                              evidence_packet=None,
+                              candidate_queries: tuple[str, ...] = (),
+                              service_context_id: str = "",
                               ) -> ResolvedLine:
     """The shortlist-build + verification loop, over an ALREADY role-
     eligibility-filtered `pool`/`proposals` (issue #6 F9-R11-H-D, fifth
@@ -3375,15 +3407,15 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
     umls_seeds = [c for c in retrieved_all if "umls_recall" in _candidate_sources(c)]
     retrieved = [c for c in retrieved_all if "umls_recall" not in _candidate_sources(c)]
     umls_cap = min(len(umls_seeds), _MIN_UMLS_SLOTS)
-    # Fix4: reserve a floor of shortlist slots for authoritative RETRIEVAL so LLM
-    # memory proposals cannot crowd it out. Keep up to (VERIFY_K - floor) proposals
-    # first, then the reserved UMLS lane, then retrieved, then any leftover
-    # proposals and UMLS seeds fill remaining room.
-    prop_cap = max(0, VERIFY_K - _MIN_RETRIEVED_SLOTS - umls_cap)
+    # All candidates are deterministic source outputs.  UMLS gets a small reserved
+    # recall lane because its score is not commensurate with vector similarity;
+    # the remainder follows deterministic retrieval rank with code identity as the
+    # stable final ordering key.
     order: list[CandidateCode] = []
     seen: set[str] = set()
-    for c in (proposals[:prop_cap] + umls_seeds[:umls_cap] + retrieved
-             + proposals[prop_cap:] + umls_seeds[umls_cap:]):
+    retrieved = sorted(retrieved, key=lambda c: (-c.score, c.system, c.code))
+    umls_seeds = sorted(umls_seeds, key=lambda c: (c.system, c.code))
+    for c in (umls_seeds[:umls_cap] + retrieved + umls_seeds[umls_cap:]):
         if c.code not in seen:
             seen.add(c.code)
             order.append(c)
@@ -3398,6 +3430,8 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
     # this SAME bound field from here on, so what a model is shown and what its
     # answer is validated against can never diverge again.
     shortlist = _bind_evaluation_descriptors(shortlist, source)
+    candidate_set = _candidate_set_snapshot(
+        shortlist, candidate_queries, service_context_id)
     # issue #6 F9-R6: compiled ONCE against the whole shortlist and passed
     # identically to every verifier call below (both models judge the SAME
     # requirement_ids -- structural, not coincidental) and into uniqueness
@@ -3463,11 +3497,46 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                         and set(admissions[c.code].contradicted_axes) & _categorical_axes)]
 
     def _with_admissions(line: ResolvedLine) -> ResolvedLine:
-        if line.tie_record is None:
-            return line
         return _dc_replace(line, tie_record={
-            **line.tie_record,
-            "candidate_admissions": {code: a.as_record() for code, a in admissions.items()}})
+            **(line.tie_record or {}),
+            "candidate_admissions": {code: a.as_record() for code, a in admissions.items()},
+            "candidate_set": candidate_set,
+            "evidence_packet": (evidence_packet.as_record()
+                                if evidence_packet is not None else None),
+        })
+
+    # When the source-derived structured contract settles the full universe,
+    # there is no semantic question left for an LLM.  Release deterministically
+    # only if exactly one candidate has governed identity evidence, every one of
+    # its MUST_SUPPORT axes is satisfied, and every rival is positively
+    # contradicted.  Ungrounded or unresolved rivals continue to the independent
+    # semantic evaluators; retrieval score never closes this path.
+    structured_winners = [
+        c for c in shortlist
+        if admissions[c.code].standing is CandidateStanding.SUPPORTED
+        and not admissions[c.code].unresolved_axes
+    ]
+    if (len(structured_winners) == 1
+            and all(c.code == structured_winners[0].code
+                    or admissions[c.code].standing is CandidateStanding.CONTRADICTED
+                    for c in shortlist)):
+        winner = structured_winners[0]
+        record = {
+            "stage": "deterministic_structured_requirements",
+            "shortlist": [c.code for c in shortlist],
+            "selected": winner.code,
+            "eliminated": {
+                c.code: admissions[c.code].reason for c in shortlist
+                if c.code != winner.code},
+        }
+        return _with_admissions(ResolvedLine(
+            fact=fact, chosen=winner,
+            alternatives=[c for c in shortlist if c.code != winner.code][:4],
+            method=ResolutionMethod.DETERMINISTIC,
+            rationale=("one authoritative candidate uniquely satisfied every "
+                       "structured, evidence-backed requirement; every rival was "
+                       "positively contradicted"),
+            tie_record=record))
 
     if not verifiable:
         contradicted_admissions = {code: a.reason for code, a in admissions.items()
@@ -3514,7 +3583,8 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
         if not cands:
             break
         primary = _verify.select_entailed(fact, cands, source, llm, requirements,
-                                          reconciliation=reconciliation, coverage=coverage)
+                                          reconciliation=reconciliation, coverage=coverage,
+                                          evidence_packet=evidence_packet)
         chosen, why = primary.chosen, primary.reason
         if chosen is None:
             # A complete per-candidate answer is useful even when the evaluator
@@ -3525,7 +3595,8 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
             if corroborate is not None:
                 second = _verify.corroborate(
                     fact, cands, source, corroborate, requirements,
-                    reconciliation=reconciliation, coverage=coverage)
+                    reconciliation=reconciliation, coverage=coverage,
+                    evidence_packet=evidence_packet)
                 note = ("independent disposition reconciliation"
                         if _independently_corroborated(corroboration)
                         else "a second disposition was obtained, but not from an "
@@ -3555,7 +3626,8 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                     {**constraint_eliminated, **tried},
                     f"{why}; {note}" if why else note,
                     corroboration, reconciliation, requirements,
-                    coverage, source, admissions=admissions))
+                    coverage, source, admissions=admissions,
+                    evidence_packet=evidence_packet))
             # Tie policy step 5: one evaluator supplied no unique selection and
             # there is no independent disposition matrix, so name the missing
             # discriminating fact rather than guessing.
@@ -3591,7 +3663,8 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
             # one entailed?" cannot notice that another candidate is entailed too, which is
             # precisely how a non-unique code used to auto-release (Codex F8-R1).
             second = _verify.corroborate(fact, cands, source, corroborate, requirements,
-                                         reconciliation=reconciliation, coverage=coverage)
+                                         reconciliation=reconciliation, coverage=coverage,
+                                         evidence_packet=evidence_packet)
             if not second.entails(chosen.code):
                 why2 = (second.elimination_of(chosen.code) or second.reason
                         or "the independent second judgement does not find this "
@@ -3616,7 +3689,8 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                 fact, chosen, verifiable, judgements,
                 {**constraint_eliminated, **tried}, why,
                 corroboration, reconciliation, requirements,
-                coverage, source, admissions=admissions))
+                coverage, source, admissions=admissions,
+                evidence_packet=evidence_packet))
         # A missing element disqualifies THIS candidate; it does not prove every
         # other authoritative candidate is an under-code.  Continue through the
         # remaining pool exactly as for any other named elimination.  If nothing

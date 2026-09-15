@@ -42,6 +42,127 @@ from .requirement import DescriptorRequirement, RequirementJudgement, Requiremen
 
 LLMFn = Callable[[str, str], str]
 
+
+@dataclass(frozen=True)
+class ServiceEvidencePacket:
+    """One immutable evidence view for one target service.
+
+    The target fact remains the event being coded.  ``context_facts`` are
+    structurally linked, performed components whose evidence may establish a
+    descriptor requirement (for example, a repair step can be documented in a
+    different sentence from the preparation step).  Context is evidence only:
+    it never changes candidate generation, role classification, units, or the
+    target event identity.
+
+    ``packet_sha256`` binds the ordered fact identities, normalized attributes,
+    and exact span identities/text hashes.  Both independent evaluators, response
+    validation, deterministic requirement validation, and the audit record use
+    this same object, eliminating per-call evidence-fragment drift.
+    """
+
+    schema_version: int
+    service_context_id: str
+    target_fact_id: str
+    context_fact_ids: tuple[str, ...]
+    spans: tuple
+    target_span_ids: tuple[str, ...]
+    fact_records: tuple[dict, ...]
+    packet_sha256: str
+
+    def as_record(self) -> dict:
+        return {
+            "schema_version": self.schema_version,
+            "service_context_id": self.service_context_id,
+            "target_fact_id": self.target_fact_id,
+            "context_fact_ids": list(self.context_fact_ids),
+            "span_ids": [str(getattr(s, "span_id", "") or "") for s in self.spans],
+            "target_span_ids": list(self.target_span_ids),
+            "facts": [dict(r) for r in self.fact_records],
+            "packet_sha256": self.packet_sha256,
+        }
+
+
+def build_service_evidence_packet(
+        fact: ClinicalFact,
+        context_facts: tuple[ClinicalFact, ...] | list[ClinicalFact] = (),
+        service_context_id: str = "") -> ServiceEvidencePacket:
+    """Build the canonical, deterministic evidence packet for ``fact``.
+
+    Only performed/codeable context facts are included.  That excludes history
+    and planned/negated events while remaining agnostic to specialty, procedure,
+    terminology, and code system.  Ordering and deduplication are entirely by
+    graph/fact/span identity, never model preference.
+    """
+    members: dict[str, ClinicalFact] = {}
+    for member in [fact, *(context_facts or ())]:
+        if member is not fact and not member.billable:
+            continue
+        key = str(member.fact_id or "")
+        if not key:
+            continue
+        members.setdefault(key, member)
+    members.setdefault(str(fact.fact_id or ""), fact)
+    ordered_facts = [members[k] for k in sorted(members)]
+
+    target_spans = _citable_evidence(fact)
+    target_ids = tuple(dict.fromkeys(
+        str(getattr(span, "span_id", "") or "") for span in target_spans
+        if str(getattr(span, "span_id", "") or "")))
+    span_by_identity = {}
+    for member in ordered_facts:
+        for span in _citable_evidence(member):
+            sid = str(getattr(span, "span_id", "") or "")
+            fallback = (
+                str(getattr(span, "page", "") or ""),
+                str(getattr(span, "start", "") or ""),
+                str(getattr(span, "end", "") or ""),
+                hashlib.sha256(str(getattr(span, "text", "") or "").encode()).hexdigest(),
+            )
+            span_by_identity.setdefault(("id", sid) if sid else ("pos", *fallback), span)
+    spans = tuple(sorted(
+        span_by_identity.values(),
+        key=lambda s: (
+            0 if str(getattr(s, "span_id", "") or "") in set(target_ids) else 1,
+            getattr(s, "page", None) if isinstance(getattr(s, "page", None), int) else 10**9,
+            getattr(s, "start", None) if isinstance(getattr(s, "start", None), int) else 10**18,
+            str(getattr(s, "span_id", "") or ""),
+        )))
+    records = tuple({
+        "fact_id": member.fact_id,
+        "kind": member.kind.value,
+        "description": member.description,
+        "attributes": dict(sorted((member.attributes or {}).items())),
+        "span_ids": [str(getattr(s, "span_id", "") or "")
+                     for s in _citable_evidence(member)],
+    } for member in ordered_facts)
+    identity = {
+        "schema_version": 1,
+        "service_context_id": service_context_id,
+        "target_fact_id": fact.fact_id,
+        "context_fact_ids": [m.fact_id for m in ordered_facts],
+        "facts": records,
+        "spans": [{
+            "span_id": str(getattr(s, "span_id", "") or ""),
+            "text_sha256": str(getattr(s, "text_sha256", "") or hashlib.sha256(
+                str(getattr(s, "text", "") or "").encode()).hexdigest()),
+            "page": getattr(s, "page", None),
+            "start": getattr(s, "start", None),
+            "end": getattr(s, "end", None),
+        } for s in spans],
+    }
+    packet_sha256 = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()
+    return ServiceEvidencePacket(
+        schema_version=1,
+        service_context_id=service_context_id,
+        target_fact_id=fact.fact_id,
+        context_fact_ids=tuple(m.fact_id for m in ordered_facts),
+        spans=spans,
+        target_span_ids=target_ids,
+        fact_records=records,
+        packet_sha256=packet_sha256,
+    )
+
 # The providers the two default judgement calls are PINNED to. They are named once, here,
 # and both the call itself and its declared identity below read them — so the identity can
 # never drift away from the provider actually contacted (which is what a downstream
@@ -525,7 +646,8 @@ def _requirement_options(requirements: tuple[DescriptorRequirement, ...],
     return "\n".join(lines)
 
 
-def _citable_evidence(fact: ClinicalFact) -> list:
+def _citable_evidence(fact: ClinicalFact,
+                      evidence_packet: ServiceEvidencePacket | None = None) -> list:
     """Every span citable as evidence for this fact -- its own `fact.evidence`
     plus `fact.attribute_evidence`'s spans passing the SAME usability filter
     `graph_consensus._attribute_span_support` already applies (a `"local"`
@@ -545,6 +667,10 @@ def _citable_evidence(fact: ClinicalFact) -> list:
     cited", the same "two parallel definitions of proof" pitfall this
     codebase already avoids elsewhere.
     """
+    if evidence_packet is not None:
+        if evidence_packet.target_fact_id != fact.fact_id:
+            raise ValueError("evidence packet target does not match verification fact")
+        return list(evidence_packet.spans)
     spans = list(fact.evidence)
     seen = {str(getattr(s, "span_id", "") or "") for s in spans}
     seen.discard("")
@@ -560,28 +686,37 @@ def _citable_evidence(fact: ClinicalFact) -> list:
     return spans
 
 
-def _evidence_options(fact: ClinicalFact) -> tuple[str, dict[str, str]]:
+def _evidence_options(
+        fact: ClinicalFact,
+        evidence_packet: ServiceEvidencePacket | None = None,
+        ) -> tuple[str, dict[str, str]]:
     """Evidence rendered with a stable bracketed id per quote, and the id->real
     span_id map used to validate a model's cited ids afterward. An unanchored span
     (no span_id yet) still renders -- so the model can still read it -- but is never
     a valid citation target (its id maps to "")."""
     lines = []
     id_to_span: dict[str, str] = {}
-    for i, s in enumerate(_citable_evidence(fact)):
+    target_ids = set(evidence_packet.target_span_ids) if evidence_packet else set()
+    for i, s in enumerate(_citable_evidence(fact, evidence_packet)):
         tag = f"e{i + 1}"
-        lines.append(f"[{tag}] {s.text}")
-        id_to_span[tag] = str(getattr(s, "span_id", "") or "")
+        sid = str(getattr(s, "span_id", "") or "")
+        scope = "target" if not evidence_packet or sid in target_ids else "service-context"
+        lines.append(f"[{tag}] (scope={scope}) {s.text}")
+        id_to_span[tag] = sid
     return " | ".join(lines), id_to_span
 
 
-def evidence_text_by_span_id(fact: ClinicalFact) -> dict[str, str]:
+def evidence_text_by_span_id(
+        fact: ClinicalFact,
+        evidence_packet: ServiceEvidencePacket | None = None) -> dict[str, str]:
     """span_id -> its own text, for EXACTLY the spans a requirement verifier
     could have cited (`_citable_evidence`) -- used by `requirement.
     validated_requirement` to confirm a SUPPORTED citation's own content
     actually supports what it claims, never a whole-document search standing
     in for a specific citation (issue #6 F9-R6-R2, second re-review)."""
     return {str(getattr(s, "span_id", "") or ""): s.text
-           for s in _citable_evidence(fact) if getattr(s, "span_id", "")}
+            for s in _citable_evidence(fact, evidence_packet)
+            if getattr(s, "span_id", "")}
 
 
 @dataclass(frozen=True)
@@ -779,7 +914,8 @@ def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
                       requirements: tuple[DescriptorRequirement, ...] = (),
                       *, force_disposition: bool = False,
                       reconciliation=None,
-                      coverage: "object | None" = None
+                      coverage: "object | None" = None,
+                      evidence_packet: ServiceEvidencePacket | None = None,
                       ) -> tuple[str, dict[str, str]]:
     """(prompt, id_to_span) -- the id_to_span map is needed by the caller to
     validate a model's cited requirement evidence ids afterward.
@@ -831,7 +967,7 @@ def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
     # candidates, or a forced singleton per F9-R18-A above), not only when
     # descriptor requirements were compiled.
     if requirements or len(candidates) >= 2 or force_disposition:
-        ev, id_to_span = _evidence_options(fact)
+        ev, id_to_span = _evidence_options(fact, evidence_packet)
     else:
         ev, id_to_span = " | ".join(s.text for s in fact.evidence), {}
     req_block = _requirement_options(requirements, candidates)
@@ -840,11 +976,21 @@ def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
     observations = _unresolved_observations(fact)
     complete_note = (coverage.text if coverage is not None
                      and getattr(coverage, "complete", False) else "")
+    context_records = ([] if evidence_packet is None else [
+        record for record in evidence_packet.fact_records
+        if record.get("fact_id") != fact.fact_id])
+    packet_identity = evidence_packet.packet_sha256 if evidence_packet else ""
+    evidence_section = (
+        f"CANONICAL SERVICE EVIDENCE PACKET: {packet_identity}\n"
+        f"RELATED PERFORMED SERVICE CONTEXT (evidence only; never a separate "
+        f"candidate identity): {json.dumps(context_records, sort_keys=True)}\n"
+        f"TARGET/CONTEXT EVIDENCE: {ev}"
+        if evidence_packet is not None else f"TARGET-EVENT EVIDENCE: {ev}")
     prompt = (f"DOCUMENTED FACT: {fact.description}\n"
              f"AUTHORIZED ATTRIBUTES: {json.dumps(attrs, sort_keys=True)}\n"
              f"UNRESOLVED NON-AUTHORIZING OBSERVATIONS: "
              f"{json.dumps(observations, sort_keys=True)}\n"
-             f"TARGET-EVENT EVIDENCE: {ev}\n\n"
+             f"{evidence_section}\n\n"
              f"COMPLETE NOTE: {complete_note or '(not supplied)'}\n\n"
              f"CANDIDATE OFFICIAL DESCRIPTORS:\n{opts}"
              f"{req_section}\n\n"
@@ -858,7 +1004,8 @@ def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
 # ---- citation-contract validation and bounded repair (F9-R22-A / F9-R23 Gate A) --------
 def _span_relates_to_candidate(span_text: str, fact: ClinicalFact,
                                candidate: CandidateCode,
-                               disposition_status: str = "entailed") -> bool:
+                               disposition_status: str = "entailed",
+                               *, context_span: bool = False) -> bool:
     """Whether `span_text` has any genuine CONTENT relationship to what a
     disposition citing it claims to support (issue #6, Codex's independent
     re-review, F9-R23 clarification, "Gate A"): anchoring/reconciliation
@@ -894,7 +1041,12 @@ def _span_relates_to_candidate(span_text: str, fact: ClinicalFact,
         return False
     cand_terms = _tiebreak._descriptor_tokens(candidate.descriptor)
     fact_terms = _tiebreak._descriptor_tokens(str(getattr(fact, "description", "") or ""))
-    shared = span_terms & (cand_terms | fact_terms)
+    # A target span may establish either the extracted event or a descriptor
+    # element.  A related-service context span must connect BOTH: otherwise a
+    # sibling procedure's perfectly valid evidence could support its own code
+    # while being misused to authorize the target event's candidate.
+    shared = (span_terms & cand_terms & fact_terms if context_span
+              else span_terms & (cand_terms | fact_terms))
     if not shared:
         return False
     # Token relatedness is a recall/scope check only. Every term offered as
@@ -926,7 +1078,9 @@ def _span_relates_to_candidate(span_text: str, fact: ClinicalFact,
 
 def _agreed_citable_spans(span_ids: tuple[str, ...], fact: ClinicalFact,
                           candidate: CandidateCode, reconciliation,
-                          disposition_status: str = "entailed") -> tuple[str, ...]:
+                          disposition_status: str = "entailed",
+                          evidence_packet: ServiceEvidencePacket | None = None,
+                          ) -> tuple[str, ...]:
     """Which of `span_ids` clear the FULL citation bar for a disposition on
     `candidate`: genuine target-event evidence for `fact` (a member of
     `_citable_evidence(fact)`), reconciled AGREED -- never VACUOUS, since
@@ -941,7 +1095,8 @@ def _agreed_citable_spans(span_ids: tuple[str, ...], fact: ClinicalFact,
     if not span_ids or fact is None or candidate is None or reconciliation is None:
         return ()
     from app.contracts.source_evidence import ReconciliationStatus
-    citable = {str(getattr(s, "span_id", "") or ""): s for s in _citable_evidence(fact)}
+    citable = {str(getattr(s, "span_id", "") or ""): s
+               for s in _citable_evidence(fact, evidence_packet)}
     citable.pop("", None)
     settled = reconciliation.by_span_id()
     out: list[str] = []
@@ -953,14 +1108,18 @@ def _agreed_citable_spans(span_ids: tuple[str, ...], fact: ClinicalFact,
         if rec is None or rec.status != ReconciliationStatus.AGREED:
             continue
         if not _span_relates_to_candidate(
-                span.text, fact, candidate, disposition_status):
+                span.text, fact, candidate, disposition_status,
+                context_span=bool(evidence_packet is not None
+                                  and sid not in set(evidence_packet.target_span_ids))):
             continue
         out.append(sid)
     return tuple(out)
 
 
 def validate_judgement_contract(judgement: "Judgement", candidates: list[CandidateCode],
-                                fact: ClinicalFact, reconciliation) -> dict[str, str]:
+                                fact: ClinicalFact, reconciliation,
+                                evidence_packet: ServiceEvidencePacket | None = None,
+                                ) -> dict[str, str]:
     """candidate_code -> defect reason, for every candidate this shortlist's
     `judgement` fails to answer within the citation contract (issue #6,
     Codex's independent re-review, F9-R22-A): no disposition entry at all,
@@ -982,7 +1141,8 @@ def validate_judgement_contract(judgement: "Judgement", candidates: list[Candida
                                       f"missing_fact")
             continue
         if not _agreed_citable_spans(
-                d.evidence_span_ids, fact, cand, reconciliation, d.status):
+                d.evidence_span_ids, fact, cand, reconciliation, d.status,
+                evidence_packet):
             defects[cand.code] = (f"{cand.code}: {d.status} disposition cites no "
                                   f"target-event span reconciled AGREED and genuinely "
                                   f"related to this candidate")
@@ -1012,7 +1172,9 @@ def _validate_and_repair(raw_ans: dict, judgement: "Judgement",
                          candidates: list[CandidateCode], fact: ClinicalFact,
                          reconciliation, requirements: tuple[DescriptorRequirement, ...],
                          id_to_span: dict[str, str], evaluator_origin: dict,
-                         llm: LLMFn, system: str) -> "Judgement":
+                         llm: LLMFn, system: str,
+                         evidence_packet: ServiceEvidencePacket | None = None,
+                         ) -> "Judgement":
     """One bounded same-evaluator repair call (issue #6, Codex's independent
     re-review, F9-R22-A) when the first answer's candidate dispositions fail
     the citation contract -- never a second vote, and never a whole-
@@ -1039,7 +1201,8 @@ def _validate_and_repair(raw_ans: dict, judgement: "Judgement",
     call could fix without it."""
     if reconciliation is None or not candidates:
         return judgement
-    defects = validate_judgement_contract(judgement, candidates, fact, reconciliation)
+    defects = validate_judgement_contract(
+        judgement, candidates, fact, reconciliation, evidence_packet)
     if not defects:
         return judgement
     try:
@@ -1070,7 +1233,9 @@ def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
                     source: CodeSource, llm: LLMFn,
                     requirements: tuple[DescriptorRequirement, ...] = (),
                     *, force_disposition: bool = False,
-                    reconciliation=None, coverage=None) -> Judgement:
+                    reconciliation=None, coverage=None,
+                    evidence_packet: ServiceEvidencePacket | None = None,
+                    ) -> Judgement:
     """ONE call over the whole shortlist: which candidates' OFFICIAL descriptors the
     documentation entails, which single one this model would code, and the named reason
     every other candidate is out. Judged on the authoritative descriptor text — the
@@ -1099,19 +1264,23 @@ def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
                if len(candidates) >= 2 or force_disposition else ""))
     prompt, id_to_span = _shortlist_prompt(
         fact, candidates, source, requirements, force_disposition=force_disposition,
-        reconciliation=reconciliation, coverage=coverage)
+        reconciliation=reconciliation, coverage=coverage,
+        evidence_packet=evidence_packet)
     raw = _json(llm(system, prompt))
     evaluator_origin = {"provider": VERIFY_PROVIDER}
     judgement = _judgement(raw, candidates, requirements, id_to_span, evaluator_origin)
     return _validate_and_repair(raw, judgement, candidates, fact, reconciliation,
-                                requirements, id_to_span, evaluator_origin, llm, system)
+                                requirements, id_to_span, evaluator_origin, llm, system,
+                                evidence_packet)
 
 
 def corroborate(fact: ClinicalFact, candidates: list[CandidateCode],
                 source: CodeSource, llm: LLMFn,
                 requirements: tuple[DescriptorRequirement, ...] = (),
                 *, force_disposition: bool = False,
-                reconciliation=None, coverage=None) -> Judgement:
+                reconciliation=None, coverage=None,
+                evidence_packet: ServiceEvidencePacket | None = None,
+                ) -> Judgement:
     """The INDEPENDENT second judgement, over the SAME shortlist and the SAME contract.
 
     It is deliberately NOT told which candidate the first model picked: a corroborator that
@@ -1128,9 +1297,11 @@ def corroborate(fact: ClinicalFact, candidates: list[CandidateCode],
                if len(candidates) >= 2 or force_disposition else ""))
     prompt, id_to_span = _shortlist_prompt(
         fact, candidates, source, requirements, force_disposition=force_disposition,
-        reconciliation=reconciliation, coverage=coverage)
+        reconciliation=reconciliation, coverage=coverage,
+        evidence_packet=evidence_packet)
     raw = _json(llm(system, prompt))
     evaluator_origin = {"provider": CORROBORATE_PROVIDER}
     judgement = _judgement(raw, candidates, requirements, id_to_span, evaluator_origin)
     return _validate_and_repair(raw, judgement, candidates, fact, reconciliation,
-                                requirements, id_to_span, evaluator_origin, llm, system)
+                                requirements, id_to_span, evaluator_origin, llm, system,
+                                evidence_packet)
