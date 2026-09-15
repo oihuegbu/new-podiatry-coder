@@ -99,7 +99,13 @@ def _selection_snapshot_signature(record: dict, released_code: str = ""):
                  else "unresolved" if code in unresolved
                  else "unaccounted")
         states.append((system, code, state))
-    return candidate_hash, evidence_hash, tuple(states)
+    # A semantic verdict is comparable only within the SAME sealed execution
+    # contract.  The candidate/evidence hashes prove the clinical inputs; the
+    # contract proves the source tree, authoritative snapshot and runtime
+    # model/control configuration that interpreted them.  Legacy tests/callers
+    # have no contract and remain comparable only to one another.
+    contract_hash = str(record.get("execution_contract_sha256") or "legacy_unbound")
+    return contract_hash, candidate_hash, evidence_hash, tuple(states)
 
 
 def _apply_cross_run_selection_guard(
@@ -117,7 +123,7 @@ def _apply_cross_run_selection_guard(
         record, line.chosen.code if line.chosen is not None else "")
     if current is None:
         return line
-    candidate_hash, evidence_hash, current_states = current
+    contract_hash, candidate_hash, evidence_hash, current_states = current
     prior_states = None
     # Records are returned in append order. Compare with the most recent exact
     # snapshot only: a changed outcome triggers one automated retry/hold, while a
@@ -127,8 +133,9 @@ def _apply_cross_run_selection_guard(
     for prior in reversed(prior_records):
         signature = _selection_snapshot_signature(
             prior, str(prior.get("code") or "") if prior.get("released") else "")
-        if signature is not None and signature[:2] == (candidate_hash, evidence_hash):
-            prior_states = signature[2]
+        if (signature is not None
+                and signature[:3] == (contract_hash, candidate_hash, evidence_hash)):
+            prior_states = signature[3]
             break
     differences = []
     if prior_states is not None and len(prior_states) == len(current_states):
@@ -339,6 +346,28 @@ def _fingerprint_schema_ok(fp) -> bool:
     return True
 
 
+def _valid_run_contract(value) -> bool:
+    """Validate the non-clinical execution identity received from `run.py`.
+
+    A run contract never supplies evidence or a code.  It says only which
+    deterministic process generated those things, so an unsealed contract must
+    be visible as system work rather than being written into a certificate as
+    if it were a reproducible identity.
+    """
+    if not isinstance(value, dict) or value.get("schema") != "coding_execution_contract/1":
+        return False
+    supplied = str(value.get("contract_sha256") or "")
+    if not supplied:
+        return False
+    body = dict(value)
+    body.pop("contract_sha256", None)
+    try:
+        from app.contracts.claim_bundle import prefixed_digest
+        return supplied == prefixed_digest(body)
+    except Exception:
+        return False
+
+
 def code_encounter(
     encounter_id: str,
     note_text: str,
@@ -354,6 +383,7 @@ def code_encounter(
     audit_repository=None,
     document_version: str | None = None,
     model_profiles: dict | None = None,
+    run_contract: dict | None = None,
     source_evidence=None,
     source_reader=None,
     service_date_binding: dict | None = None,
@@ -436,8 +466,20 @@ def code_encounter(
         if getattr(_config, "GRAPH_CONSENSUS", True):
             extract_llm_b = extraction.default_second_extract_llm
             enforce_second_reading_independence = True
-    profiles = model_profiles or _model_profile_identity(
-        extract_llm, verify_llm, corroborate_llm, extract_llm_b)
+    profiles = dict(model_profiles or _model_profile_identity(
+        extract_llm, verify_llm, corroborate_llm, extract_llm_b))
+    # `run.py` supplies a content-addressed execution contract for production
+    # attempts.  It is observational identity, not clinical evidence: it binds
+    # the completed ClaimBundle to the exact source/context/authority/model
+    # profile that produced it.  The entrypoint still creates a fresh attempt
+    # on every invocation; this record makes any cross-run model variance
+    # distinguishable from source/configuration drift.
+    if run_contract is not None:
+        if not _valid_run_contract(run_contract):
+            return _system_hold_result(encounter_id, date_of_service,
+                                       "run_contract_integrity",
+                                       ValueError("run contract is missing or malformed"), source)
+        profiles["execution_contract"] = dict(run_contract)
 
     from .models import FactKind
     # Enforced evidence/service graph. Any extraction, anchoring, graph-integrity,
@@ -1148,6 +1190,16 @@ def code_encounter(
                 and not went_through_pv and not line.documentation_gap
                 and not line.tie_record):
             line = arbitration.arbitrate(line, arbitrate_llm)
+        # The fresh attempt still runs every stage.  This sealed identity simply
+        # tells the cross-run guard whether two model judgements occurred under
+        # the same source/configuration process; it never reuses a prior result.
+        if line.tie_record:
+            execution_contract = profiles.get("execution_contract") or {}
+            line.tie_record = {
+                **line.tie_record,
+                "execution_contract_sha256": str(
+                    execution_contract.get("contract_sha256") or "legacy_unbound"),
+            }
         line = _apply_cross_run_selection_guard(line, prior_code_selection_records)
         # AUDIT: a tie that several candidates survived is a claim-affecting decision
         # in its own right -- which axes distinguished them, what the ORIGINAL DOCUMENT

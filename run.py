@@ -142,6 +142,7 @@ tools above when those are run by hand. They are annotated as such in
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -152,7 +153,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from app.contracts.claim_bundle import (
     SCHEMA_ID, SCHEMA_VERSION, AuthorityBinding, SourceDocument,
-    bundle_from_coding_result, failure_bundle,
+    bundle_from_coding_result, failure_bundle, prefixed_digest,
 )
 from app.contracts.encounter_context import build_provider
 from app.core.config import AGGREGATE_RESULTS, NOTES_DIR, OUTPUT_DIR
@@ -186,6 +187,128 @@ RESULTS_SCHEMA = f"{SCHEMA_ID}/{SCHEMA_VERSION}"
 #: Retired-flag exit code: distinct from argparse's own 2 so a driver can tell
 #: "you asked for something this entrypoint no longer does" from "bad usage".
 EXIT_RETIRED_FLAG = 3
+
+
+# A completed claim is an immutable decision over a particular document, context,
+# authority snapshot and decision implementation.  Re-running the same contract
+# through probabilistic readers can only introduce variance; it cannot make the
+# already-bound evidence or candidate universe more current.  This contract is
+# therefore an auditable member of `AuthorityBinding`'s existing model-profile
+# record.  It deliberately contains no credential, note text, patient data, or
+# model response.
+_RUN_CONTRACT_SCHEMA = "coding_execution_contract/1"
+_DECISION_SOURCE_TREES = ("app", "claude_coder")
+_DECISION_SOURCE_FILES = ("run.py", "process-notes.sh", "docker-compose.yml")
+
+
+def _sha256_file(path: Path) -> str:
+    """Content digest for one runtime source/configuration file."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as fh:
+        for block in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(block)
+    return "sha256:" + digest.hexdigest()
+
+
+def decision_source_tree_digest(root: Path | None = None) -> str:
+    """Content-address the executable decision path, not a checkout label.
+
+    A git SHA is useful only when deployment automation actually supplies it.
+    The run-contract boundary must remain correct even when it is absent, so it hashes
+    the Python sources actually available to the running process plus its tracked
+    invocation/deployment configuration.  A source change therefore cannot be
+    mistaken for an unchanged deterministic process merely because an image
+    label was omitted.
+    """
+    root = Path(root or Path(__file__).resolve().parent)
+    records: list[dict[str, str]] = []
+    for tree in _DECISION_SOURCE_TREES:
+        directory = root / tree
+        if not directory.is_dir():
+            raise RuntimeError(f"required decision source tree is unavailable: {tree}")
+        for path in sorted(directory.rglob("*.py")):
+            records.append({"path": path.relative_to(root).as_posix(),
+                            "sha256": _sha256_file(path)})
+    for name in _DECISION_SOURCE_FILES:
+        path = root / name
+        if not path.is_file():
+            raise RuntimeError(f"required decision source file is unavailable: {name}")
+        records.append({"path": name, "sha256": _sha256_file(path)})
+    return prefixed_digest(records)
+
+
+def _input_identity(value: str | None) -> str:
+    """Digest a context source by bytes when local, otherwise by declared spec."""
+    text = str(value or "").strip()
+    if not text:
+        return "absent"
+    path = Path(text)
+    if path.is_file():
+        return _sha256_file(path)
+    return prefixed_digest({"declared_adapter_spec": text})
+
+
+def _seal_run_contract(contract: dict) -> dict:
+    body = dict(contract)
+    body.pop("contract_sha256", None)
+    return {**body, "contract_sha256": prefixed_digest(body)}
+
+
+def run_contract(source, billing_context: dict | None,
+                 encounter_context_input: str | None) -> dict:
+    """The deterministic execution profile shared by every note in one run.
+
+    A changed source snapshot, model/control configuration, billing roster,
+    encounter-context source, or executable decision tree produces a new key.
+    Those are legitimate reasons for a new run to have a different process
+    identity.  With all of them unchanged, fresh attempts carry the same sealed
+    identity, making any model variance visible as variance under one process
+    rather than a silent source/configuration drift.
+    """
+    from app.core import config
+
+    fingerprint = source.data_fingerprint()
+    source_digest = str(fingerprint.get("fingerprint_sha256") or "")
+    if not source_digest:
+        raise RuntimeError("authoritative data has no content-addressed fingerprint")
+    return _seal_run_contract({
+        "schema": _RUN_CONTRACT_SCHEMA,
+        "authoritative_data_fingerprint": source_digest,
+        "decision_source_tree_sha256": decision_source_tree_digest(),
+        "billing_context_sha256": prefixed_digest(billing_context or {}),
+        "encounter_context_input_sha256": _input_identity(encounter_context_input),
+        "models": {
+            "primary_provider": config.LLM_PROVIDER,
+            "openai_model": config.OPENAI_MODEL,
+            "claude_model": config.CLAUDE_MODEL,
+            "claude_effort": config.CLAUDE_EFFORT,
+            "claude_verify_model": config.CLAUDE_VERIFY_MODEL,
+            "claude_verify_effort": config.CLAUDE_VERIFY_EFFORT,
+        },
+        "controls": {
+            "structured_outputs": bool(config.STRUCTURED_OUTPUTS),
+            "graph_consensus": bool(config.GRAPH_CONSENSUS),
+            "anthropic_use_batch": bool(config.ANTHROPIC_USE_BATCH),
+            "anthropic_batch_max_wait_s": float(config.ANTHROPIC_BATCH_MAX_WAIT_S),
+        },
+    })
+
+
+def note_run_contract(base_contract: dict, document_version: str) -> dict:
+    """Bind the shared execution profile to one immutable source document."""
+    if not document_version:
+        raise ValueError("a repeatable coding run needs a source-document digest")
+    return _seal_run_contract({
+        **{k: v for k, v in base_contract.items() if k != "contract_sha256"},
+        "document_version": str(document_version),
+    })
+
+
+def _valid_run_contract(value) -> bool:
+    if not isinstance(value, dict) or value.get("schema") != _RUN_CONTRACT_SCHEMA:
+        return False
+    supplied = str(value.get("contract_sha256") or "")
+    return bool(supplied) and supplied == _seal_run_contract(value).get("contract_sha256")
 
 
 # ----------------------------------------------------------------- note inputs
@@ -309,7 +432,7 @@ def load_billing_context(path: str | None) -> dict | None:
 
 
 # ---------------------------------------------------------------- note outputs
-def authority_binding(result, source) -> AuthorityBinding:
+def authority_binding(result, source, *, execution_contract: dict | None = None) -> AuthorityBinding:
     """Which authoritative data and index the coder actually queried.
 
     Read from the CERTIFICATE first, deliberately: `source_identity.data` is the
@@ -337,6 +460,21 @@ def authority_binding(result, source) -> AuthorityBinding:
     database = next((s for s in (manifest.get("sources") or [])
                      if isinstance(s, dict)
                      and s.get("source_id") == "compliance_database"), {})
+    profiles = dict(identity.get("models") or {})
+    if execution_contract is not None:
+        if not _valid_run_contract(execution_contract):
+            raise ValueError("cannot bind an unsealed deterministic run contract")
+        recorded = profiles.get("execution_contract")
+        if recorded is not None and recorded != execution_contract:
+            raise ValueError("pipeline and entrypoint recorded different run contracts")
+        # A held result may legitimately have no release certificate.  Bind the
+        # contract here too, so every completed ClaimBundle -- not only an
+        # AUTO_READY one -- can prove which deterministic process produced it.
+        profiles["execution_contract"] = dict(execution_contract)
+        expected_data = str(execution_contract.get("authoritative_data_fingerprint") or "")
+        actual_data = str(fingerprint.get("fingerprint_sha256") or "")
+        if expected_data != actual_data:
+            raise ValueError("run contract and ClaimBundle bind different authoritative snapshots")
     return AuthorityBinding(
         data_fingerprint=str(fingerprint.get("fingerprint_sha256") or ""),
         source_manifest_fingerprint=str(manifest.get("manifest_sha256") or ""),
@@ -345,7 +483,7 @@ def authority_binding(result, source) -> AuthorityBinding:
         index_checksum=str(fingerprint.get("codes_checksum") or ""),
         code_counts={k: int(v) for k, v in
                      (fingerprint.get("counts") or {}).items()},
-        model_profiles=identity.get("models") or {},
+        model_profiles=profiles,
         # issue #6 item 9: read from the environment, but NOT runtime introspection
         # -- these values were fixed at `docker build` time by the Dockerfile's own
         # ARGs (see `Dockerfile`), so reading the env var here reads a BAKED-IN
@@ -357,7 +495,8 @@ def authority_binding(result, source) -> AuthorityBinding:
     )
 
 
-def build_bundle(result, *, pdf_path: Path, note: dict, context, source) -> dict:
+def build_bundle(result, *, pdf_path: Path, note: dict, context, source,
+                 execution_contract: dict | None = None) -> dict:
     """The per-note artifact: one canonical `ClaimBundle`, serialized.
 
     Everything a downstream consumer needs travels here — ordered diagnoses,
@@ -378,7 +517,8 @@ def build_bundle(result, *, pdf_path: Path, note: dict, context, source) -> dict
             page_count=note["page_count"],
         ),
         context=context,
-        authority=authority_binding(result, source),
+        authority=authority_binding(result, source,
+                                    execution_contract=execution_contract),
         # The explainability surface, verbatim, so the JSON artifact is readable
         # without re-running anything.
         audit_trail=render(result),
@@ -545,8 +685,8 @@ def reject_retired_flags(args) -> int | None:
     """Retired-flag handling, stated out loud rather than silently ignored.
 
     `--no-cache` was a switch on `app.pipeline`'s result cache. `claude_coder`
-    has no result cache — every encounter is coded fresh — so the flag is a
-    no-op that still means what the caller wanted. It warns and continues.
+    has no result cache — every encounter is coded as a new auditable attempt —
+    so the flag is a no-op that still means what the caller wanted.
 
     `--consistency`/`--consistency-workers` asked for N independent runs whose
     disagreements drive the retired growth loop. Honouring the flag by running
@@ -556,7 +696,7 @@ def reject_retired_flags(args) -> int | None:
     if args.no_cache:
         logger.warning(
             "--no-cache is a no-op: the result cache belonged to the retired "
-            "app.pipeline; claude_coder codes every encounter fresh already.")
+            "app.pipeline; claude_coder codes every encounter as a new attempt.")
     if args.consistency > 1 or args.consistency_workers > 1:
         logger.error(
             f"--consistency={args.consistency} "
@@ -777,6 +917,19 @@ def main(argv: list[str] | None = None) -> int:
     # not the output of a COMPLETED current attempt.
     ledger = AttemptLedger(OUTPUT_DIR)
 
+    # Construct once from the exact authoritative source and runtime policy the
+    # batch will use.  Per-note document identity is added below.  It does not
+    # suppress a new attempt: every invocation re-runs the pipeline.  Its job is
+    # to make an unchanged run identifiable, so cross-run variance cannot be
+    # mistaken for a source/data/configuration change.
+    try:
+        batch_contract = run_contract(source, billing_context, args.encounter_context)
+    except Exception as exc:
+        batch_contract = None
+        logger.warning("deterministic run-contract recording is unavailable for this batch "
+                       "(%s: %s); every note will be evaluated as a new attempt",
+                       type(exc).__name__, exc)
+
     payloads = []
     failures = 0
     #: Notes that never got an attempt open, so they have no payload in
@@ -789,8 +942,19 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("=" * 70)
         logger.info(f"PROCESSING: {pdf_path.name}")
         logger.info("=" * 70)
+        document_version = document_version_of(pdf_path)
+        contract = None
+        if batch_contract is not None and document_version:
+            try:
+                contract = note_run_contract(batch_contract, document_version)
+            except Exception as exc:
+                logger.warning("  deterministic run-contract recording disabled for %s (%s: %s)",
+                               pdf_path.name, type(exc).__name__, exc)
+        if contract is not None:
+            logger.info("  sealed deterministic run contract recorded; opening a new "
+                        "auditable attempt")
         try:
-            attempt = ledger.begin(pdf_path.stem, document_version_of(pdf_path))
+            attempt = ledger.begin(pdf_path.stem, document_version)
         except AttemptLedgerError as exc:
             # The supersession itself could not be recorded. `begin` has already
             # made the previous result unservable, so nothing stale survives; this
@@ -851,9 +1015,11 @@ def main(argv: list[str] | None = None) -> int:
                 source_evidence=note["source_evidence"],
                 source_reader=note["source_reader"],
                 service_date_binding=binding.model_dump(mode="json"),
+                run_contract=contract,
             )
             payload = build_bundle(result, pdf_path=pdf_path, note=note,
-                                   context=context, source=source)
+                                   context=context, source=source,
+                                   execution_contract=contract)
             release = payload["release"]
             # `holds` is the CONSUMER-side re-derivation the contract stamps into
             # the artifact, not the producer's own flag: an empty holds list is
