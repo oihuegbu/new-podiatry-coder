@@ -2118,7 +2118,8 @@ def _disposition_spans_validated(d, settled, permitted) -> bool:
               for sid in d.evidence_span_ids)
 
 
-def _candidate_disposition_uniqueness(shortlist: list[CandidateCode], chosen: CandidateCode,
+def _candidate_disposition_uniqueness(shortlist: list[CandidateCode],
+                                      chosen: CandidateCode | None,
                                       judgements: list, reconciliation, coverage,
                                       fact: "ClinicalFact | None" = None,
                                       requirements: tuple = (),
@@ -2730,7 +2731,7 @@ def _system_unresolved_line(fact: ClinicalFact, shortlist: list[CandidateCode],
                   f"never a provider question or a coder's judgement call"))
 
 
-def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
+def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                        shortlist: list[CandidateCode], judgements: list,
                        eliminated_earlier: dict[str, str], why: str,
                        corroboration: str, reconciliation,
@@ -2764,9 +2765,21 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
     # still carries them for audit completeness and for the one path that IS
     # meant to read them.
     _elimination_requirements = tuple(r for r in requirements if r.axis not in _SEMANTIC_AXES)
-    remaining, eliminated = _uniqueness_view(fact, shortlist, chosen, judgements,
-                                             eliminated_earlier, reconciliation,
-                                             _elimination_requirements, coverage)
+    # A verifier is allowed to return a complete disposition matrix without
+    # nominating a code.  That is not a failed verification: it is a safer
+    # representation of "classify every candidate, then let the deterministic
+    # settlement layer decide."  The old early-return path discarded that
+    # matrix and never called the independent evaluator, leaving every
+    # multi-procedure fact whose first evaluator declined to choose in a
+    # permanent tie.  With no proposal there is no candidate to special-case in
+    # the legacy elimination view, so start from the whole shortlist and let the
+    # independently validated disposition matrix account for every member.
+    if chosen is None:
+        remaining, eliminated = list(shortlist), {}
+    else:
+        remaining, eliminated = _uniqueness_view(
+            fact, shortlist, chosen, judgements, eliminated_earlier,
+            reconciliation, _elimination_requirements, coverage)
     # issue #6, Codex's independent re-review (F9-R15-B): tried in ADDITION to
     # (never instead of) the axis/requirement-based elimination just above --
     # narrows `remaining` further only when both independent evaluators'
@@ -2790,7 +2803,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
     record = {
         "stage": "code_selection_uniqueness",
         "shortlist": [c.code for c in shortlist],
-        "selected": chosen.code,
+        "selected": chosen.code if chosen is not None else "",
         "still_entailed": [c.code for c in remaining],
         "eliminated": dict(sorted(eliminated.items())),
         "judgements": [j.as_record() for j in judgements],
@@ -2833,6 +2846,13 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
         return _system_unresolved_line(fact, shortlist, _system_unresolved,
                                        eliminated, record)
 
+    if not remaining:
+        return ResolvedLine(
+            fact=fact, chosen=None, alternatives=shortlist[:5],
+            method=ResolutionMethod.ABSTAINED, tie_record=record,
+            rationale=("both independent evaluators accounted for every candidate, "
+                       "and no candidate remained supported by the documentation"))
+
     # The initial `chosen` value is a proposal, not an authority.  Ordinarily
     # the unique survivor is the proposal itself.  If the complete structured
     # disposition pass instead eliminates that proposal and leaves a different
@@ -2841,13 +2861,45 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
     # evaluators already validated the survivor's current descriptor and every
     # rival has been accounted for; holding merely because the first proposal
     # was wrong would invert propose-then-verify into propose-as-truth.
+    #
+    # issue #6, Codex's independent re-review (F9-R24-B, second re-review;
+    # reverted after regression testing): a version of this branch once
+    # required `CandidateStanding.SUPPORTED` on the ordinary "the proposal
+    # survives, nothing contests it" shape too, matching the reselection
+    # branch three lines down. That is WRONG for this branch specifically:
+    # `candidate_admission`'s positive-identity bar (a compiled requirement,
+    # a direct authoritative term, or a governed crosswalk mapping) is
+    # calibrated for DISCRIMINATING BETWEEN RIVALS, not for gating an
+    # uncontested single retrieval both evaluators independently entail
+    # against a real, content-relevant citation (Gate A). Enforcing it here
+    # too reproduced, concretely (25 failing tests), the exact regression
+    # independently discovered and reverted earlier in this file's own
+    # history: a blanket post-hoc standing veto re-litigates a release Gate
+    # A + independent dual-evaluator entailment already validated, using a
+    # cruder, unrelated proxy. The reselection branch below is different in
+    # kind -- it is CHOOSING a candidate the original proposal did not name,
+    # which is exactly the rival-discrimination case `CandidateStanding`
+    # exists for -- so its own standing check stays as Codex wrote it.
     if len(remaining) == 1:
         survivor = remaining[0]
-        if survivor.code == chosen.code:
+        if chosen is None and _disposition_verdict is not None:
+            matrix_record = {
+                **record,
+                "selected": survivor.code,
+                "selected_from_complete_disposition_matrix": True,
+            }
+            note = ("the first evaluator made no proposal; two independent, "
+                    "descriptor-bound disposition matrices left exactly one "
+                    "source-cited candidate")
+            return _entailed_line(
+                fact, survivor, shortlist, f"{why}; {note}" if why else note,
+                corroboration, uniqueness=matrix_record)
+        if chosen is not None and survivor.code == chosen.code:
             return _entailed_line(fact, survivor, shortlist, why, corroboration,
                                   uniqueness=record)
         survivor_admission = (admissions or {}).get(survivor.code)
-        if (_disposition_verdict is not None
+        if (chosen is not None
+                and _disposition_verdict is not None
                 and survivor_admission is not None
                 and survivor_admission.standing is CandidateStanding.SUPPORTED):
             reselection_record = {
@@ -2872,7 +2924,8 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
     semantic_winner = _select_by_semantic_axes(fact, remaining, requirements,
                                                reconciliation, source)
     if (semantic_winner is not None
-            and all(j.entails(semantic_winner.code) for j in judgements)
+            and (_disposition_verdict is not None
+                 or all(j.entails(semantic_winner.code) for j in judgements))
             and _evaluate(fact, semantic_winner, reconciliation=reconciliation) is not None
             and not _interval_unsupported(fact, parse_descriptor(semantic_winner.descriptor))):
         note = (f"{len(remaining)} candidates remained entailed; {semantic_winner.code}'s "
@@ -2886,7 +2939,9 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode,
     # DOCUMENT decides, exactly as it does for a deterministic tie.
     tie = _tiebreak.narrow(fact, remaining, reconciliation, _elimination_requirements)
     winner = tie.winner
-    if (winner is not None and all(j.entails(winner.code) for j in judgements)
+    if (winner is not None
+            and (_disposition_verdict is not None
+                 or all(j.entails(winner.code) for j in judgements))
             and _evaluate(fact, winner, reconciliation=reconciliation) is not None
             and not _interval_unsupported(fact, parse_descriptor(winner.descriptor))):
         note = (f"{len(remaining)} candidates remained entailed, and the tie was narrowed "
@@ -2968,7 +3023,11 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     proposals_deterministically_excluded = [(c, r) for c, m, r in proposed_evals
                                             if m is None]
 
-    facts_for_role_check = elig_facts if elig_facts is not None else [fact]
+    # Candidate admission is per clinical event.  Sibling procedures/supplies
+    # in the same composed intent remain available to downstream relationship
+    # and claim-edit logic, but must not change this event's candidate kind or
+    # role before its own authoritative descriptors are verified.
+    facts_for_role_check = [fact]
     pool_ids = {(c.code, c.system) for c in pool}
     extra: list[CandidateCode] = []
     seen_extra: set[tuple[str, str]] = set()
@@ -3162,11 +3221,19 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
     # remaining candidate release on an axis that was STILL genuinely
     # unresolved for it too, because a single-candidate shortlist no
     # longer forced that axis to be discovered and checked. Standing is
-    # instead enforced the SAME way `verify._agreed_citable_spans`/Gate A
-    # already enforces disposition-level evidence: on the WINNING
-    # candidate, after the fact -- see `_propose_then_verify_core`'s
-    # thin wrapper below, which converts a release onto an UNGROUNDED
-    # `chosen` into a system-hold rather than ever returning it.
+    # instead enforced only on the RESELECTION branch of
+    # `_settle_uniqueness` (issue #6, F9-R24-B second re-review, then
+    # reverted for the ORDINARY branch after regression testing): choosing
+    # a different candidate than the original proposal requires that
+    # survivor to have `CandidateStanding.SUPPORTED`, converting a
+    # reselection onto an UNGROUNDED survivor into a system-hold via
+    # `_system_unresolved_line`. The ordinary "the proposal survives,
+    # nothing contests it" shape deliberately does NOT add this check --
+    # see the comment at that branch for why a blanket veto there
+    # reproduces the exact regression this pre-verification pool filter's
+    # own comment already warns about. There is no separate wrapper
+    # function; the one real check lives inline in `_settle_uniqueness`
+    # itself, on the reselection branch only.
     admissions = {c.code: candidate_admission(fact, c, requirements, source,
                                               reconciliation, coverage, dos)
                  for c in shortlist}
@@ -3239,9 +3306,28 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                                           reconciliation=reconciliation, coverage=coverage)
         chosen, why = primary.chosen, primary.reason
         if chosen is None:
-            # Tie policy step 5: nothing was entailed, so the useful output is WHICH
-            # documented fact would settle it -- a targeted provider query naming the
-            # candidates' own discriminating axes, never a generic coder queue.
+            # A complete per-candidate answer is useful even when the evaluator
+            # deliberately declines to nominate a billing code.  Obtain the
+            # independent matrix over the exact same shortlist and let the shared
+            # deterministic settlement function select only a unique, source-cited
+            # survivor.  Without a second evaluator we retain the existing tie path.
+            if corroborate is not None:
+                second = _verify.corroborate(
+                    fact, cands, source, corroborate, requirements,
+                    reconciliation=reconciliation, coverage=coverage)
+                note = ("independent disposition reconciliation"
+                        if _independently_corroborated(corroboration)
+                        else "a second disposition was obtained, but not from an "
+                             "independent origin")
+                return _with_admissions(_settle_uniqueness(
+                    fact, None, cands, [primary, second],
+                    {**constraint_eliminated, **tried},
+                    f"{why}; {note}" if why else note,
+                    corroboration, reconciliation, requirements,
+                    coverage, source, admissions=admissions))
+            # Tie policy step 5: one evaluator supplied no unique selection and
+            # there is no independent disposition matrix, so name the missing
+            # discriminating fact rather than guessing.
             return _with_admissions(_tie_escalation(
                 fact, verifiable, reconciliation,
                 "no candidate's authoritative descriptor is fully entailed by the "

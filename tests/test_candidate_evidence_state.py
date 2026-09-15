@@ -348,6 +348,110 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
                           "a Gate-A citation failure is a system evidence gap, never a "
                           "provider-answerable question")
 
+    def test_a_sole_uncontested_survivor_releases_even_with_ungrounded_standing(self):
+        """issue #6, Codex's independent re-review (F9-R24-B, second
+        re-review -- REVERTED after regression testing found it wrong): a
+        version of `_settle_uniqueness` once required
+        `CandidateStanding.SUPPORTED` on this ordinary "the proposal is
+        the only candidate and nothing contests it" shape too, matching
+        the reselection branch below. That broke 25 pre-existing tests
+        representing ordinary, legitimate single-candidate releases,
+        because `candidate_admission`'s positive-identity bar (a compiled
+        requirement, a direct authoritative term, or a governed crosswalk
+        mapping) is calibrated for DISCRIMINATING BETWEEN RIVALS, not for
+        gating an uncontested single retrieval both evaluators
+        independently entail against a real, content-relevant citation
+        (Gate A). This is the same regression independently discovered
+        and reverted earlier in `_propose_then_verify_core`'s own history
+        (a post-verification veto re-litigating an already-Gate-A-
+        validated release). This test pins the CORRECT behavior: a sole
+        survivor with UNGROUNDED admission standing still releases when
+        Gate A and both evaluators independently support it, because
+        nothing here ever contested its identity."""
+        chosen = _cand("CAND_CHOSEN", "assembly service, clean")
+        fact = _fact("assembly service, clean, performed today")
+        span = EvidenceSpan(text="assembly service, clean, performed today",
+                            anchored=True, span_id="s1")
+        fact.evidence = [span]
+        recon = self._reconciliation({"s1": "AGREED"})
+        j0 = _verify.Judgement(
+            chosen=chosen, entailed=("CAND_CHOSEN",), declared=True,
+            candidate_dispositions=(_disp(chosen, "entailed", evidence_span_ids=("s1",)),))
+        j1 = _verify.Judgement(
+            chosen=chosen, entailed=("CAND_CHOSEN",), declared=True,
+            candidate_dispositions=(_disp(chosen, "entailed", evidence_span_ids=("s1",)),))
+        admissions = {
+            chosen.code: resolution.CandidateAdmission(
+                (chosen.code, chosen.system), resolution.CandidateStanding.UNGROUNDED,
+                (), (), (), ("s1",),
+                {"code": chosen.code, "descriptor": chosen.descriptor},
+                (chosen.source,), "synthetic recall-only candidate, no positive identity signal"),
+        }
+        line = resolution._settle_uniqueness(
+            fact, chosen, [chosen], [j0, j1], {}, "entailed", "", recon,
+            admissions=admissions)
+        self.assertEqual(line.chosen.code if line.chosen else None, "CAND_CHOSEN",
+                         "an uncontested sole survivor must still release on Gate A + "
+                         "dual-evaluator entailment alone -- admission standing is for "
+                         "discriminating between rivals, not for re-gating an uncontested "
+                         "single retrieval")
+
+    def test_complete_independent_matrices_can_select_without_a_model_proposal(self):
+        """Selection belongs to deterministic reconciliation, not to whichever
+        evaluator happened to nominate a code.  Two complete descriptor-bound
+        matrices may leave one unique survivor even when ``chosen`` is absent."""
+        supported = _cand("CAND_SUPPORTED", "assembly service, supported form")
+        excluded = _cand("CAND_EXCLUDED", "assembly service, different form")
+        fact = _fact("assembly service, supported form, performed")
+        fact.evidence = [
+            EvidenceSpan(text="assembly service, supported form, performed",
+                         anchored=True, span_id="s1"),
+            EvidenceSpan(text="different form was not performed",
+                         anchored=True, span_id="s2"),
+        ]
+        recon = self._reconciliation({"s1": "AGREED", "s2": "AGREED"})
+        judgements = [
+            _verify.Judgement(
+                chosen=None, entailed=(), declared=True,
+                candidate_dispositions=(
+                    _disp(supported, "entailed", evidence_span_ids=("s1",)),
+                    _disp(excluded, "contradicted", evidence_span_ids=("s2",))))
+            for _ in range(2)
+        ]
+
+        line = resolution._settle_uniqueness(
+            fact, None, [supported, excluded], judgements, {},
+            "no proposal", "distinct_origin", recon)
+
+        self.assertEqual(line.chosen.code if line.chosen else None,
+                         "CAND_SUPPORTED")
+        self.assertTrue(line.tie_record["selected_from_complete_disposition_matrix"])
+        self.assertIn("CAND_EXCLUDED", line.tie_record["eliminated"])
+
+    def test_no_proposal_with_two_supported_survivors_remains_a_tie(self):
+        first = _cand("CAND_FIRST", "assembly service, first form")
+        second = _cand("CAND_SECOND", "assembly service, second form")
+        fact = _fact("assembly service performed")
+        fact.evidence = [EvidenceSpan(text="assembly service performed",
+                                      anchored=True, span_id="s1")]
+        recon = self._reconciliation({"s1": "AGREED"})
+        judgements = [
+            _verify.Judgement(
+                chosen=None, entailed=(), declared=True,
+                candidate_dispositions=(
+                    _disp(first, "entailed", evidence_span_ids=("s1",)),
+                    _disp(second, "entailed", evidence_span_ids=("s1",))))
+            for _ in range(2)
+        ]
+
+        line = resolution._settle_uniqueness(
+            fact, None, [first, second], judgements, {},
+            "no proposal", "distinct_origin", recon)
+
+        self.assertIsNone(line.chosen)
+        self.assertEqual(sorted(c.code for c in line.alternatives),
+                         ["CAND_FIRST", "CAND_SECOND"])
+
     def test_ungrounded_recall_rival_cannot_block_a_supported_candidate(self):
         """Standing is load-bearing: a recall-only rival that evaluators do
         not independently support is audited out and cannot create a tie,
