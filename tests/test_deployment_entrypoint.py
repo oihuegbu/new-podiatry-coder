@@ -102,6 +102,7 @@ def test_runtime_helper_binds_checkpoint_identity_and_database_as_one_store():
     assert 'provenance-${PROVENANCE_STORE_ID}.db' in helper
     assert "PROVENANCE_STORE_ID=${PROVENANCE_STORE_ID:-}" in compose
     assert "PROVENANCE_DB=${PROVENANCE_DB:-output/provenance.db}" in compose
+    assert "ANTHROPIC_USE_BATCH=${ANTHROPIC_USE_BATCH:-1}" in compose
 
 
 def test_runtime_helper_has_a_persistent_non_ec2_identity_fallback():

@@ -52,6 +52,10 @@ services:
       # database from being reused by a different deployment's database.
       - PROVENANCE_STORE_ID=${PROVENANCE_STORE_ID:-}
       - PROVENANCE_DB=${PROVENANCE_DB:-output/provenance.db}
+      # Host-scoped override for the real-note acceptance run. Production retains
+      # batch mode by default; `ANTHROPIC_USE_BATCH=0 ./process-notes.sh ...` reaches
+      # the container instead of being shadowed by env_file.
+      - ANTHROPIC_USE_BATCH=${ANTHROPIC_USE_BATCH:-1}
       # issue #6, Codex's independent re-review, root cause 1: the default run
       # must always resolve encounter/billing context, never rely on
       # note-extracted metadata alone -- and that default must live in TRACKED
