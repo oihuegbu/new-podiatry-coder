@@ -2287,12 +2287,13 @@ class ProposeVerifyTest(unittest.TestCase):
         self.assertEqual({c.code for c in line.alternatives},
                          {"CODEALPHA", "CODEBETA"})
 
-    def test_proposal_widens_recall_but_does_not_select_from_untyped_terms(self):
+    def test_model_code_proposal_cannot_change_deterministic_candidate_set(self):
         from claude_coder.data_access import MockSource
         from claude_coder.models import ResolutionMethod
         from claude_coder.resolution import resolve
-        # retrieval only surfaces the WRONG code; the model proposes the right one,
-        # which is validated against the registry and then verified.
+        # Retrieval surfaces one code and the model emits another code number.
+        # Candidate identity is source-derived now: the model response cannot add
+        # a registry record to the decisive universe.
         src = MockSource(
             records={("CODEALPHA", "cpt"): {"long_description": self.ALPHA, "active": True},
                      ("CODEBETA", "cpt"): {"long_description": self.BETA, "active": True}},
@@ -2302,8 +2303,9 @@ class ProposeVerifyTest(unittest.TestCase):
                        corroborate=_from(self._corroborator(confirm=True), "provider-b"))
         self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
         self.assertIsNone(line.chosen)
-        self.assertEqual({c.code for c in line.alternatives},
-                         {"CODEALPHA", "CODEBETA"})
+        self.assertEqual({c.code for c in line.alternatives}, {"CODEBETA"})
+        self.assertNotIn("CODEALPHA", {
+            row["code"] for row in (line.candidate_eligibility or [])})
 
     def test_escalates_when_nothing_entailed(self):
         from claude_coder.models import ResolutionMethod
@@ -2524,21 +2526,16 @@ class ProposedCandidateServiceRoleTest(unittest.TestCase):
         self.assertIsNotNone(line.chosen, line.rationale)
         self.assertEqual(line.chosen.code, "OP", line.rationale)
 
-    def test_every_validated_proposal_is_audited_in_candidate_eligibility(self):
-        """Codex's required regression #1: a validated proposal appears in
-        `candidate_eligibility` -- selected, excluded, or neither -- so the
-        ClaimBundle can audit the role decision made about it, not just
-        about whatever retrieval happened to surface."""
+    def test_model_code_proposal_never_enters_candidate_eligibility(self):
+        """The model judges a fixed source-derived universe; it cannot write it."""
         from claude_coder.resolution import resolve
         src = self._src(op_eligible_at_retrieval=True)
         llm = _sv.judge(entails=lambda d: "operative" in d.lower(),
                         propose=["ANES"], reason="proposed")
         line = resolve(_request(self._fact()), src, llm=_from(llm, "provider-a"))
         report = {r["code"]: r for r in (line.candidate_eligibility or [])}
-        self.assertIn("ANES", report, line.candidate_eligibility)
         self.assertIn("OP", report, line.candidate_eligibility)
-        self.assertFalse(report["ANES"]["eligible"])
-        self.assertTrue(report["ANES"].get("reason"), report["ANES"])
+        self.assertNotIn("ANES", report, line.candidate_eligibility)
         self.assertTrue(report["OP"]["eligible"])
 
     def test_a_first_pass_excluded_retrieval_candidate_remains_audited(self):
@@ -2929,7 +2926,7 @@ class ProposedCandidateDeterministicExclusionTest(unittest.TestCase):
     (a reason-carrying sibling of `_evaluate`, which stays unchanged for its
     other five callers) closes this. Synthetic codes throughout."""
 
-    def test_a_laterality_contradictory_proposal_remains_audited(self):
+    def test_a_laterality_contradictory_model_code_is_not_a_candidate(self):
         from claude_coder.data_access import MockSource
         from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,
                                          FactKind, RelationState)
@@ -2957,14 +2954,11 @@ class ProposedCandidateDeterministicExclusionTest(unittest.TestCase):
                         propose=["LEFT"], reason="proposed")
         line = resolve(_request(fact), src, llm=_from(llm, "provider-a"))
         report = {r["code"]: r for r in (line.candidate_eligibility or [])}
-        self.assertIn("LEFT", report, line.candidate_eligibility)
-        self.assertFalse(report["LEFT"]["eligible"])
-        self.assertIn("laterality", report["LEFT"].get("reason", "").lower(),
-                      report["LEFT"])
+        self.assertNotIn("LEFT", report, line.candidate_eligibility)
         self.assertIsNotNone(line.chosen, line.rationale)
         self.assertEqual(line.chosen.code, "RIGHT", line.rationale)
 
-    def test_an_out_of_range_proposal_remains_audited(self):
+    def test_an_out_of_range_model_code_is_not_a_candidate(self):
         from claude_coder.data_access import MockSource
         from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
         from claude_coder.resolution import resolve
@@ -2985,10 +2979,7 @@ class ProposedCandidateDeterministicExclusionTest(unittest.TestCase):
         llm = _sv.judge(entails=lambda d: True, propose=["SMALL"], reason="proposed")
         line = resolve(_request(fact), src, llm=_from(llm, "provider-a"))
         report = {r["code"]: r for r in (line.candidate_eligibility or [])}
-        self.assertIn("SMALL", report, line.candidate_eligibility)
-        self.assertFalse(report["SMALL"]["eligible"])
-        self.assertIn("measurement", report["SMALL"].get("reason", "").lower(),
-                      report["SMALL"])
+        self.assertNotIn("SMALL", report, line.candidate_eligibility)
         self.assertIsNotNone(line.chosen, line.rationale)
         self.assertEqual(line.chosen.code, "UNBOUNDED", line.rationale)
 
@@ -3043,7 +3034,7 @@ class ProposedAndRetrievedSameCodeExclusionTest(unittest.TestCase):
         self.assertIsNotNone(line.chosen, line.rationale)
         self.assertEqual(line.chosen.code, "RIGHT", line.rationale)
 
-    def test_an_out_of_range_code_present_in_both_retrieval_and_proposal_is_excluded(self):
+    def test_an_out_of_range_retrieval_candidate_is_not_promoted_by_model_proposal(self):
         from claude_coder.data_access import MockSource
         from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
         from claude_coder.resolution import resolve
@@ -3066,9 +3057,13 @@ class ProposedAndRetrievedSameCodeExclusionTest(unittest.TestCase):
         line = resolve(_request(fact), src, llm=_from(llm, "provider-a"))
         report = {r["code"]: r for r in (line.candidate_eligibility or [])}
         self.assertIn("SMALL", report, line.candidate_eligibility)
-        self.assertFalse(report["SMALL"]["eligible"], report["SMALL"])
-        self.assertIsNotNone(report["SMALL"].get("reason"), report["SMALL"])
-        self.assertIn("measurement", report["SMALL"]["reason"].lower(), report["SMALL"])
+        # Candidate eligibility is role/kind compatibility; the later
+        # descriptor-interval contract performs the measurement exclusion.
+        self.assertTrue(report["SMALL"]["eligible"], report["SMALL"])
+        snapshot = (line.tie_record or {}).get("candidate_set") or {}
+        self.assertEqual(
+            [row["code"] for row in snapshot.get("candidates", [])],
+            ["UNBOUNDED", "SMALL"])
         self.assertIsNotNone(line.chosen, line.rationale)
         self.assertEqual(line.chosen.code, "UNBOUNDED", line.rationale)
 

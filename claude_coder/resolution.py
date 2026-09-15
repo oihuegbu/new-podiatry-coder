@@ -1888,6 +1888,9 @@ def _bind_evaluation_descriptors(candidates: list[CandidateCode],
     """
     bound: list[CandidateCode] = []
     for cand in candidates:
+        if (cand.authority or {}).get("evaluation_descriptor_snapshot"):
+            bound.append(cand)
+            continue
         try:
             tiers = source.descriptions(cand.code, cand.system) or []
         except Exception:
@@ -1909,7 +1912,9 @@ def _bind_evaluation_descriptors(candidates: list[CandidateCode],
 
 
 def _candidate_set_snapshot(candidates: list[CandidateCode], queries: tuple[str, ...],
-                            service_context_id: str = "") -> dict:
+                            service_context_id: str = "",
+                            evaluation_candidates: list[CandidateCode] | None = None,
+                            ) -> dict:
     """Content-address the exact deterministic candidate universe evaluated.
 
     Candidate generation may use fuzzy/vector recall, governed terminology,
@@ -1943,6 +1948,9 @@ def _candidate_set_snapshot(candidates: list[CandidateCode], queries: tuple[str,
         "service_context_id": service_context_id,
         "normalized_queries": list(normalized_queries),
         "candidates": records,
+        "evaluation_shortlist": [
+            [c.system, c.code] for c in
+            (evaluation_candidates if evaluation_candidates is not None else candidates)],
     }
     payload["candidate_set_sha256"] = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"),
@@ -2494,6 +2502,9 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode],
     eliminated: dict[str, str] = {}
     system_unresolved: dict[str, str] = {}
     for cand in shortlist:
+        admission = (admissions or {}).get(cand.code)
+        recall_only = bool(admission is not None
+                           and admission.standing is CandidateStanding.UNGROUNDED)
         # issue #6, Codex's independent re-review (F9-R16-B): `chosen` is NO
         # LONGER special-cased here. The prior version skipped validating
         # `chosen`'s own disposition entirely, so a judgement whose LEGACY
@@ -2511,9 +2522,13 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode],
         # and never lets a DIFFERENT surviving candidate release in its place.
         d0, d1 = j0[cand.code], j1[cand.code]
         if not (_identity_matches(cand, d0) and _identity_matches(cand, d1)):
-            system_unresolved[cand.code] = (
-                f"a disposition for {cand.code} did not reproduce this candidate's "
-                f"own current official descriptor identity")
+            reason = (f"a disposition for {cand.code} did not reproduce this candidate's "
+                      f"own current official descriptor identity")
+            if recall_only:
+                eliminated[cand.code] = (
+                    "recall-only candidate never earned evidence standing: " + reason)
+            else:
+                system_unresolved[cand.code] = reason
             continue
         # issue #6, Codex's independent re-review (F9-R23 root finding 2):
         # each evaluator's raw status is normalized to its OWN validated
@@ -2579,7 +2594,22 @@ def _candidate_disposition_uniqueness(shortlist: list[CandidateCode],
                      f"both evaluators judged {cand.code} not_documented, but this "
                      f"could not be validated against a complete, independently-read "
                      f"whole-document search")
-            system_unresolved[cand.code] = reason
+            if recall_only:
+                eliminated[cand.code] = (
+                    "recall-only candidate never earned evidence standing: " + reason)
+            else:
+                system_unresolved[cand.code] = reason
+            continue
+        # A disagreement only becomes a disposable recall miss when NEITHER
+        # evaluator supplied valid, source-cited support.  Once either side has
+        # established support, disagreement is an adjudication signal and the
+        # candidate remains visible as system-unresolved; it is never erased by
+        # the other evaluator's vote.
+        if recall_only and "supported" not in {d0_class, d1_class}:
+            eliminated[cand.code] = (
+                "recall-only candidate never earned evidence standing: independent "
+                f"evaluators did not agree it was supported ({d0.status!r} vs "
+                f"{d1.status!r})")
             continue
         system_unresolved[cand.code] = (
             f"independent evaluators disagreed on {cand.code}'s disposition "
@@ -3268,7 +3298,7 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
         if key not in pool_ids and key not in seen_extra:
             seen_extra.add(key)
             extra.append(c)
-    full_universe = list(pool) + extra
+    full_universe = _bind_evaluation_descriptors(list(pool) + extra, source)
     candidate_eligibility = _semelig.eligibility_report(
         facts_for_role_check, full_universe, source, dos, reconciliation)
     # Merge the deterministically-excluded proposals into the SAME report.
@@ -3378,6 +3408,10 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
     # confirmation below (and it must be computed even when `corroborate` is None, since
     # "no second opinion" is itself one of the non-independent origins).
     corroboration = _verify.corroboration_origin(llm, corroborate)
+    # Bind before ranking or interval evaluation.  Retrieval descriptors are
+    # recall text; every semantic/structured decision must consume the same
+    # authoritative snapshot later shown to the evaluators and recorded in audit.
+    pool = _bind_evaluation_descriptors(pool, source)
     retrieved_matches = _ranked(fact, pool, source, reconciliation)
     unsupported = [m.candidate for m in retrieved_matches
                    if m is not None and m.interval_unsupported] + proposals_unsupported
@@ -3431,7 +3465,8 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
     # answer is validated against can never diverge again.
     shortlist = _bind_evaluation_descriptors(shortlist, source)
     candidate_set = _candidate_set_snapshot(
-        shortlist, candidate_queries, service_context_id)
+        pool, candidate_queries, service_context_id,
+        evaluation_candidates=shortlist)
     # issue #6 F9-R6: compiled ONCE against the whole shortlist and passed
     # identically to every verifier call below (both models judge the SAME
     # requirement_ids -- structural, not coincidental) and into uniqueness
