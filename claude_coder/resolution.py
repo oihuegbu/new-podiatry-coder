@@ -1133,6 +1133,32 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
                         # exclusion protects every verification-required
                         # source uniformly, not just redirects.
                         seeds.append(c)
+        # A whole extracted diagnosis phrase can contain an authoritative ICD
+        # Alphabetic-Index term plus laterality, anatomy, or other documented
+        # detail.  ``index_codes`` correctly refuses to call that a whole-term
+        # lookup, but losing the contained Index term altogether makes the vector
+        # retriever the only source of recall.  Add every source-bounded Index
+        # phrase match to the SAME fixed candidate universe as the SNOMED map
+        # below.  These are explicitly verification-required -- unlike a unique
+        # direct whole-term Index entry, a contained phrase is never a selection
+        # authority and cannot auto-close a line.
+        recall_fn = getattr(source, "index_code_matches", None)
+        index_matches = (dict(recall_fn(fact.description, fact.system) or {})
+                         if callable(recall_fn) else {})
+        seen_seed_codes = {c.code for c in seeds}
+        for mapped_code, match in sorted(index_matches.items()):
+            pool = _authoritative_pool(
+                mapped_code, source,
+                candidate_source="icd10cm-index-recall",
+                authority={
+                    "source": "ICD-10-CM Alphabetic Index phrase recall",
+                    "term_to_code_match": dict(match or {}),
+                },
+            )
+            for candidate in pool:
+                if candidate.code not in seen_seed_codes:
+                    seen_seed_codes.add(candidate.code)
+                    seeds.append(_dc_replace(candidate, requires_verification=True))
         # SECOND authoritative layer: the SNOMED CT -> ICD-10-CM crosswalk (the long-
         # tail eponyms/synonyms the ICD Index lacks — e.g. an eponymous condition).
         # A single crosswalk hit is a strong CANDIDATE, not a verdict: the concept's
