@@ -811,6 +811,28 @@ class TerminologyDistinctiveTokenRecallTest(unittest.TestCase):
         })
         self.assertEqual(idx.recall_candidates("detailed tiny tendon degeneration"), set())
 
+    def test_incidental_rare_query_word_cannot_hide_contained_source_phrase(self):
+        """An unrelated rare word must not become the sole lookup anchor.
+
+        This guards the source-bucket optimisation rather than a clinical term:
+        the complete multi-token governed phrase remains mandatory, and only the
+        query contains the extra word.
+        """
+        from claude_coder.terminology import TerminologyIndex
+        idx = TerminologyIndex({
+            "synthetic-alpha": ["alpha degeneration"],
+            "synthetic-beta": ["incidental qualifier"],
+            "synthetic-gamma": ["alpha intervention"],
+        })
+        matches = idx.recall_matches("incidental alpha tendon degeneration")
+        # The existing distinctive-token fallback may independently propose the
+        # synthetic-beta code.  This regression is only about preserving the
+        # complete contained source phrase rather than suppressing that separate,
+        # already-audited recall route.
+        self.assertIn("SYN.THETIC-ALPHA", matches)
+        self.assertEqual(matches["SYN.THETIC-ALPHA"]["method"],
+                         "contained_source_phrase")
+
     def test_rare_unambiguous_source_token_widens_recall_only(self):
         from claude_coder.terminology import TerminologyIndex
         idx = TerminologyIndex({
