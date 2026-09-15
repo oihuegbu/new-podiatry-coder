@@ -49,6 +49,7 @@ No real medical code appears anywhere in this file; the fixture note is syntheti
 """
 import ast
 import json
+import os
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -76,11 +77,70 @@ def test_the_compose_command_is_this_entrypoint():
 
 def test_first_boot_and_the_note_watcher_invoke_the_same_entrypoint():
     user_data = (REPO_ROOT / "terraform" / "templates" / "user_data.sh.tftpl").read_text()
-    assert "python run.py --setup-only" in user_data, (
-        "first-boot dependency loading no longer goes through run.py --setup-only")
-    assert "python run.py" in user_data.split("process-notes.sh")[-1] or \
-           "run.py \"$@\"" in user_data, (
+    helper = (REPO_ROOT / "process-notes.sh").read_text()
+    assert "./process-notes.sh --setup-only" in user_data, (
+        "first-boot dependency loading bypasses the installation-bound runtime helper")
+    assert 'python run.py "$@"' in helper, (
         "the process-notes helper (which the note-watcher service calls) no longer runs run.py")
+    assert "cat > /opt/app/process-notes.sh" not in user_data, (
+        "user_data replaces the versioned helper with a drifting embedded copy")
+
+
+def test_runtime_helper_binds_checkpoint_identity_and_database_as_one_store():
+    """The external checkpoint namespace and durable DB must advance together.
+
+    A generic `provenance.db` checkpoint identity made replacement EC2 hosts collide:
+    the new host's short local journal was compared to the old host's later S3 head and
+    every otherwise-codeable note became SYSTEM_RETRY.  The supported entrypoint now
+    derives one installation identity and uses it in both names.
+    """
+    helper = (REPO_ROOT / "process-notes.sh").read_text()
+    compose = (REPO_ROOT / "docker-compose.yml").read_text()
+    assert "latest/meta-data/instance-id" in helper
+    assert 'identity_prefix="ec2-${instance_id}"' in helper
+    assert "installation_uuid" in helper
+    assert 'provenance-${PROVENANCE_STORE_ID}.db' in helper
+    assert "PROVENANCE_STORE_ID=${PROVENANCE_STORE_ID:-}" in compose
+    assert "PROVENANCE_DB=${PROVENANCE_DB:-output/provenance.db}" in compose
+
+
+def test_runtime_helper_has_a_persistent_non_ec2_identity_fallback():
+    helper = (REPO_ROOT / "process-notes.sh").read_text()
+    assert "output/.provenance-store-id" in helper
+    assert "flock 9" in helper
+    assert "/proc/sys/kernel/random/uuid" in helper
+
+
+def test_runtime_helper_reuses_one_installation_identity_and_pairs_its_db(tmp_path):
+    """Execute the supported wrapper with fake host tools; this checks behavior, not prose."""
+    root = tmp_path / "deployment"
+    root.mkdir()
+    helper = root / "process-notes.sh"
+    helper.write_text((REPO_ROOT / "process-notes.sh").read_text())
+    helper.chmod(0o755)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "capture"
+    (fake_bin / "curl").write_text(
+        "#!/usr/bin/env bash\n"
+        "case \"$*\" in *api/token*) printf token;; *) printf i-deadbeef;; esac\n")
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n%s\\n%s\\n' \"$PROVENANCE_STORE_ID\" \"$PROVENANCE_DB\" \"$*\""
+        " > \"$CAPTURE\"\n")
+    (fake_bin / "curl").chmod(0o755)
+    (fake_bin / "docker").chmod(0o755)
+    env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}", CAPTURE=str(capture))
+
+    subprocess.run([str(helper), "--note", "synthetic.pdf"], env=env, check=True)
+    first = capture.read_text().splitlines()
+    subprocess.run([str(helper), "--note", "synthetic.pdf"], env=env, check=True)
+    second = capture.read_text().splitlines()
+
+    assert first == second
+    assert first[0].startswith("ec2-i-deadbeef-")
+    assert first[1] == f"/app/output/provenance-{first[0]}.db"
+    assert first[2] == "compose run --rm app python run.py --note synthetic.pdf"
 
 
 def test_the_entrypoint_imports_the_claude_coder_pipeline_and_not_the_retired_one():
