@@ -51,6 +51,13 @@ def _dot(code: str) -> str:
 
 _MIN_DISTINCTIVE_TOKEN_LENGTH = 5
 _MAX_DISTINCTIVE_SOURCE_TERMS = 3
+# A governed source phrase may occur inside a clinician's more detailed phrase
+# ("qualifier source-term extra-detail") without being a fuzzy match.  This is
+# deliberately stricter than token overlap: every source token has to be present
+# verbatim, and a one-token source phrase is never enough to seed recall.  The
+# production consumer is the SNOMED-to-ICD mapping, whose output is still only a
+# verification-required candidate, never a coding decision.
+_MIN_CONTAINED_SOURCE_TOKENS = 2
 
 
 class TerminologyIndex:
@@ -97,6 +104,11 @@ class TerminologyIndex:
         self._token_codes: dict[str, set[str]] = {}
         self._token_terms: dict[str, set[str]] = {}
         self._terms_by_code: dict[str, set[str]] = {}
+        # Exact multi-token source phrases, indexed by each source token.  Recall
+        # chooses the smallest query-token bucket before checking token-set
+        # containment, so longer terminology tables do not turn a diagnosis lookup
+        # into a full-table scan.
+        self._contained_by_token: dict[str, list[tuple[str, frozenset[str], str]]] = {}
         self._index_terms(terms_by_code)
         # A separate, direct-only index (issue #6 F9-R12-A, reopened) --
         # recursing with no cross-reference argument terminates immediately
@@ -119,10 +131,14 @@ class TerminologyIndex:
                 self._despaced.setdefault(n.replace(" ", ""), set()).add(dotted)
                 toks = frozenset(_sing(t) for t in n.split() if len(t) > 2)
                 if toks:
+                    for token in toks:
+                        self._token_codes.setdefault(token, set()).add(dotted)
+                        self._token_terms.setdefault(token, set()).add(n)
                     self._byset.setdefault(toks, set()).add(dotted)
-                for token in toks:
-                    self._token_codes.setdefault(token, set()).add(dotted)
-                    self._token_terms.setdefault(token, set()).add(n)
+                    if len(toks) >= _MIN_CONTAINED_SOURCE_TOKENS:
+                        entry = (dotted, toks, n)
+                        for token in toks:
+                            self._contained_by_token.setdefault(token, []).append(entry)
 
     def _whole_match(self, description: str) -> tuple[set[str], str, object]:
         """(codes, method, comparison key) for the established whole-term match."""
@@ -185,6 +201,30 @@ class TerminologyIndex:
             return matches
 
         matches: dict[str, dict] = {}
+        query_tokens = {_sing(t) for t in normalized.split() if len(t) > 2}
+
+        # Exact contained governed phrase recall.  Clinical extraction often
+        # preserves additional documented qualifiers around a terminology term;
+        # requiring whole-string equality in that situation turns a real source
+        # mapping into a needless recall gap.  This comparison remains entirely
+        # lexical and source-bounded: it neither edits/stems medical vocabulary nor
+        # treats a near string as equivalent.  A matching term must contribute at
+        # least two of its own normalized tokens, all of which appear verbatim in
+        # the query.  As with every other result from this method, callers use it
+        # to propose candidates for independent descriptor/evidence verification.
+        contained: dict[str, list[str]] = {}
+        buckets = [self._contained_by_token.get(token, ()) for token in query_tokens]
+        anchor = min((bucket for bucket in buckets if bucket), key=len, default=())
+        for code, source_tokens, source_term in anchor:
+            if source_tokens <= query_tokens:
+                contained.setdefault(code, []).append(source_term)
+        for code, source_terms in contained.items():
+            matches[code] = {
+                "method": "contained_source_phrase",
+                "normalized_query": normalized,
+                "source_terms": sorted(set(source_terms)),
+            }
+
         tokens = {_sing(t) for t in normalized.split()
                   if len(t) >= _MIN_DISTINCTIVE_TOKEN_LENGTH}
         for token in sorted(tokens):
@@ -194,15 +234,22 @@ class TerminologyIndex:
                     or len(terms) > _MAX_DISTINCTIVE_SOURCE_TERMS):
                 continue
             code = next(iter(codes))
-            record = matches.setdefault(code, {
-                "method": "distinctive_source_token",
-                "normalized_query": normalized,
-                "matched_tokens": [],
-                "source_terms": [],
-            })
-            record["matched_tokens"].append(token)
-            record["source_terms"] = sorted(
-                set(record["source_terms"]) | set(terms))
+            # A contained multi-token phrase is stronger than a one-token
+            # distinctiveness fallback.  Preserve it as the primary method while
+            # recording any additional rare-token lineage, rather than letting a
+            # weaker match overwrite the audit explanation.
+            record = matches.get(code)
+            if record is None:
+                record = {
+                    "method": "distinctive_source_token",
+                    "normalized_query": normalized,
+                    "matched_tokens": [],
+                    "source_terms": [],
+                }
+                matches[code] = record
+            if record["method"] == "distinctive_source_token":
+                record["matched_tokens"].append(token)
+            record["source_terms"] = sorted(set(record["source_terms"]) | set(terms))
         return matches
 
     def recall_candidates(self, description: str) -> set[str]:

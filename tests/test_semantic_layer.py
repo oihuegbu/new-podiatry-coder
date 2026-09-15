@@ -785,6 +785,32 @@ class ExactDirectCodeTermSignalTest(unittest.TestCase):
 
 
 class TerminologyDistinctiveTokenRecallTest(unittest.TestCase):
+    def test_multi_token_governed_phrase_inside_detailed_clinical_text_widens_recall(self):
+        """A source phrase embedded in a longer clinical phrase is exact token
+        containment, not fuzzy matching.  It is recall-only: downstream
+        descriptor/evidence validation must still decide whether the proposed
+        candidate applies."""
+        from claude_coder.terminology import TerminologyIndex
+        idx = TerminologyIndex({
+            "synthetic-alpha": ["alpha degeneration"],
+            "synthetic-beta": ["alpha intervention"],
+        })
+        self.assertEqual(idx.candidates("Detailed alpha tendon degeneration"), set())
+        match = idx.recall_matches("Detailed alpha tendon degeneration")[
+            "SYN.THETIC-ALPHA"]
+        self.assertEqual(match["method"], "contained_source_phrase")
+        self.assertEqual(match["source_terms"], ["alpha degeneration"])
+
+    def test_single_token_or_partial_source_phrase_never_uses_containment_recall(self):
+        """Containment must not collapse into unsafe keyword matching."""
+        from claude_coder.terminology import TerminologyIndex
+        idx = TerminologyIndex({
+            "synthetic-alpha": ["Tiny"],
+            "synthetic-beta": ["Beta degeneration"],
+            "synthetic-gamma": ["Gamma degeneration"],
+        })
+        self.assertEqual(idx.recall_candidates("detailed tiny tendon degeneration"), set())
+
     def test_rare_unambiguous_source_token_widens_recall_only(self):
         from claude_coder.terminology import TerminologyIndex
         idx = TerminologyIndex({
