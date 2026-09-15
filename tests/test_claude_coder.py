@@ -1226,6 +1226,95 @@ class TerminologyIndexTest(unittest.TestCase):
         line = resolve(_request(fact), src, llm=_from(llm, "provider-a"))
         self.assertEqual(line.chosen.code, "C22.2", line.rationale)
 
+    def test_governed_diagnosis_sources_are_unioned_before_direct_index_closure(self):
+        """A direct Index hit cannot hide a different governed-map candidate.
+
+        Codes and descriptors are synthetic.  This covers only the generic
+        invariant: collect every governed source candidate before allowing a
+        deterministic selection.
+        """
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod)
+        from claude_coder.resolution import resolve
+        src = MockSource(
+            records={
+                ("C11.1", "icd10"): {"long_description": "synthetic direct condition",
+                                       "active": True},
+                ("C22.2", "icd10"): {"long_description": "synthetic governed condition",
+                                       "active": True},
+            },
+            index={"synthetic documented condition": {"C11.1"}},
+            snomed={"synthetic documented condition": {"C22.2"}},
+        )
+        fact = ClinicalFact(
+            kind=FactKind.DIAGNOSIS, description="synthetic documented condition",
+            evidence=[EvidenceSpan("synthetic documented condition")], confidence=0.95,
+        )
+        line = resolve(_request(fact), src)
+        self.assertNotEqual(line.method, ResolutionMethod.DETERMINISTIC)
+        observed = {(record["code"], record["system"])
+                    for record in (line.candidate_eligibility or [])}
+        self.assertEqual(observed, {("C11.1", "icd10"), ("C22.2", "icd10")})
+
+    def test_multi_map_governed_diagnosis_source_keeps_every_candidate(self):
+        """Source-map cardinality must not silently remove diagnosis recall."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder.resolution import resolve
+        src = MockSource(
+            records={
+                ("C11.1", "icd10"): {"long_description": "synthetic first condition",
+                                       "active": True},
+                ("C22.2", "icd10"): {"long_description": "synthetic second condition",
+                                       "active": True},
+            },
+            index={},
+            snomed={"synthetic documented condition": {"C11.1", "C22.2"}},
+        )
+        fact = ClinicalFact(
+            kind=FactKind.DIAGNOSIS, description="synthetic documented condition",
+            evidence=[EvidenceSpan("synthetic documented condition")], confidence=0.95,
+        )
+        line = resolve(_request(fact), src)
+        observed = {(record["code"], record["system"])
+                    for record in (line.candidate_eligibility or [])}
+        self.assertEqual(observed, {("C11.1", "icd10"), ("C22.2", "icd10")})
+
+    def test_same_fact_and_source_snapshot_produce_the_same_candidate_universe(self):
+        """Candidate generation is repeatable before any model decision.
+
+        This deliberately compares the complete code-level eligibility record,
+        not merely the winner.  A later refactor may not change a previously
+        verified universe by stopping after a different source or control-flow
+        branch for the same fact and authoritative snapshot.
+        """
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder.resolution import resolve
+        src = MockSource(
+            records={
+                ("C11.1", "icd10"): {"long_description": "synthetic direct condition",
+                                       "active": True},
+                ("C22.2", "icd10"): {"long_description": "synthetic governed condition",
+                                       "active": True},
+            },
+            index={"synthetic documented condition": {"C11.1"}},
+            snomed={"synthetic documented condition": {"C22.2"}},
+        )
+        fact = ClinicalFact(
+            kind=FactKind.DIAGNOSIS, description="synthetic documented condition",
+            evidence=[EvidenceSpan("synthetic documented condition")], confidence=0.95,
+        )
+
+        def universe():
+            line = resolve(_request(fact), src)
+            return [(record["code"], record["system"], record["eligible"],
+                     record.get("reason"))
+                    for record in (line.candidate_eligibility or [])]
+
+        self.assertEqual(universe(), universe())
+
     def test_category_expands_to_leaf_by_laterality(self):
         from claude_coder.data_access import MockSource
         from claude_coder.models import (AttributeEvidence, ClinicalFact, EvidenceSpan,

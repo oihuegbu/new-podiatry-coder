@@ -1083,6 +1083,14 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
     # provenance-clean wherever the Index carries the term. The embedding is only
     # reached when the Index has no entry for the phrasing.
     if fact.kind is FactKind.DIAGNOSIS:
+        # Candidate generation is a union operation. A direct Alphabetic-Index
+        # hit is often the strongest source signal, but it must not terminate
+        # generation before other governed diagnosis sources can contribute a
+        # materially different current-code candidate. Otherwise an exact index
+        # term can hide a source-mapped synonym/eponym and send only the first
+        # code to verification. The existing direct deterministic path remains
+        # available below when no competing governed candidate exists.
+        direct_index_pool: list[CandidateCode] = []
         idx = source.index_codes(fact.description, fact.system)
         # issue #6 F9-R12-A, REOPENED: `idx` mixes direct Index entries with
         # cross-reference (see/seeAlso) redirect aliases -- a redirect is
@@ -1098,11 +1106,7 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
         # by documented evidence. This makes the deterministic Index path
         # safe against parse noise.
         if len(idx) == 1 and next(iter(idx)) in idx_direct:
-            pool = _authoritative_pool(next(iter(idx)), source)
-            if pool:
-                r = _take(pool, "ICD-10-CM Alphabetic Index")
-                if r is not None:
-                    return r
+            direct_index_pool = _authoritative_pool(next(iter(idx)), source)
         elif idx:
             # issue #6 F9-R12-A: a multi-code Index hit (a cross-reference
             # redirect spanning a laterality/site family -- e.g. "paronychia"
@@ -1142,8 +1146,12 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
             # residual descriptor because it carries no match/source identity.
             snomed_matches = {code: {} for code in
                               source.snomed_codes(fact.description, fact.system)}
-        if len(snomed_matches) == 1:
-            mapped_code, match = next(iter(snomed_matches.items()))
+        # A governed map can legitimately return several current-code stems.
+        # They are all source-derived candidates, never a source-authorized
+        # choice. Dropping the entire map unless its cardinality happened to be
+        # one hid genuine alternatives from descriptor/evidence verification.
+        seen_seed_codes = {c.code for c in seeds}
+        for mapped_code, match in sorted(snomed_matches.items()):
             pool = _authoritative_pool(
                 mapped_code, source,
                 candidate_source="snomed-crosswalk",
@@ -1152,10 +1160,33 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
                     "term_to_code_match": dict(match or {}),
                 },
             )
-            if pool:
-                r = _take(pool, "SNOMED CT -> ICD-10-CM map", always_verify=True)
+            for candidate in pool:
+                if candidate.code not in seen_seed_codes:
+                    seen_seed_codes.add(candidate.code)
+                    # A crosswalk proposes recall only, so every mapped leaf
+                    # requires the same descriptor/evidence verification as
+                    # broad retrieval.
+                    seeds.append(_dc_replace(candidate, requires_verification=True))
+
+        if direct_index_pool:
+            direct_codes = {c.code for c in direct_index_pool}
+            competing_authoritative = any(c.code not in direct_codes for c in seeds)
+            if not competing_authoritative:
+                # Preserve the established fast path when the direct, current
+                # Index mapping is the sole governed candidate (or every source
+                # independently names the same leaf).
+                r = _take(direct_index_pool, "ICD-10-CM Alphabetic Index")
                 if r is not None:
                     return r
+            else:
+                # A direct hit remains high-quality recall, but cannot decide
+                # against another governed code source by control-flow order.
+                # It joins the fixed verification universe with the same
+                # verification requirement as its competitor.
+                for candidate in direct_index_pool:
+                    if candidate.code not in seen_seed_codes:
+                        seen_seed_codes.add(candidate.code)
+                        seeds.append(_dc_replace(candidate, requires_verification=True))
 
     # AUTHORITATIVE FIRST (procedure axis, mechanic 5): resolve a procedure/supply/
     # imaging phrase through the CPT/HCPCS descriptor index before any embedding —
