@@ -974,7 +974,8 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
     fact = request.fact
     from . import verify as _verify
     evidence_packet = _verify.build_service_evidence_packet(
-        fact, request.service_context_facts, request.service_context_id)
+        fact, request.service_context_facts, request.service_context_id,
+        reconciliation=reconciliation)
     # issue #6 item 5/F8-R2: semantic eligibility reads what the whole documented
     # EVENT states -- every fact the canonical `ClaimLineIntent` this fact belongs
     # to also names (duplicate mentions of the SAME documented event), not just
@@ -1040,7 +1041,24 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
             return None
         trusted = _bind_evaluation_descriptors(
             [_dc_replace(c, requires_verification=False) for c in cands], source)
-        line = _decide(fact, trusted, authority=authority, source=source,
+        # Exact term/index identity does not override the target event's typed
+        # kind or service role.  Apply the same eligibility control here that the
+        # broad recall path applies below; otherwise an exact phrase hit could
+        # deterministically release a surgery-classified code for an imaging or
+        # supply fact and merely *record* the contradiction in its audit report.
+        from . import semantic_eligibility as _semelig
+        eligibility = _semelig.eligibility_report(
+            [fact], trusted, source, dos, reconciliation)
+        eligible_ids = {(r["code"], r["system"]) for r in eligibility
+                        if r.get("eligible")}
+        eligible_trusted = [c for c in trusted
+                            if (c.code, c.system) in eligible_ids]
+        if not eligible_trusted:
+            # Keep the rejected source hit in the later fixed universe so its
+            # exact exclusion is visible; it still cannot reach verification.
+            seeds.extend(trusted)
+            return None
+        line = _decide(fact, eligible_trusted, authority=authority, source=source,
                        reconciliation=reconciliation)
         if not line.resolved:
             return None
@@ -1050,9 +1068,7 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
         # it) but must still carry an eligibility AUDIT record, exactly like
         # every other candidate path, so a reader of `candidate_eligibility`
         # never sees an unexplained None for a line that resolved this way.
-        from . import semantic_eligibility as _semelig
-        line.candidate_eligibility = _semelig.eligibility_report(
-            elig_facts, trusted, source, dos, reconciliation)
+        line.candidate_eligibility = eligibility
         line.tie_record = {
             **(line.tie_record or {}),
             "candidate_set": _candidate_set_snapshot(

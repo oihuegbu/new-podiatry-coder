@@ -1,16 +1,12 @@
-"""Propose-then-verify — recall as a candidate GENERATOR, authoritative data as TRUTH.
+"""Verify a deterministic candidate universe against authoritative descriptors.
 
-This is the license-clean substitute for the AMA CPT Alphabetic Index: it needs no
-new data, only the authoritative descriptors already loaded. Two bounded LLM steps,
-neither of which is ever trusted to emit a billable code from memory:
+Candidate generation is outside this module's judgement path: the resolver builds a
+fixed, versioned universe from authoritative indices/descriptors, governed terminology,
+UMLS and configured retrieval.  A model never contributes a code number to that decisive
+universe.  The bounded LLM steps in this module only judge whether a generated candidate
+is supported:
 
-  PROPOSE  — the model names candidate code NUMBERS it thinks fit the documented
-             procedure. Every proposal is then VALIDATED against the authoritative
-             registry: a code that does not exist is dropped, and the descriptor is
-             read from the record (never from the model). So the model only widens
-             the candidate pool; it cannot invent a code or author a descriptor.
-
-  VERIFY   — the model judges, for EVERY candidate on the shortlist, whether that
+  VERIFY   — a model judges, for EVERY candidate on the shortlist, whether that
              candidate's AUTHORITATIVE descriptor is ENTAILED by the documented facts,
              by GENERAL principles (any specialty / code set): every distinguishing
              element the descriptor states — the specific act/service, the
@@ -85,7 +81,7 @@ class ServiceEvidencePacket:
 def build_service_evidence_packet(
         fact: ClinicalFact,
         context_facts: tuple[ClinicalFact, ...] | list[ClinicalFact] = (),
-        service_context_id: str = "") -> ServiceEvidencePacket:
+        service_context_id: str = "", *, reconciliation=None) -> ServiceEvidencePacket:
     """Build the canonical, deterministic evidence packet for ``fact``.
 
     Only performed/codeable context facts are included.  That excludes history
@@ -127,11 +123,15 @@ def build_service_evidence_packet(
             getattr(s, "start", None) if isinstance(getattr(s, "start", None), int) else 10**18,
             str(getattr(s, "span_id", "") or ""),
         )))
+    # Only claim-authorized attributes enter a packet used for selection.  Raw
+    # extraction observations remain available on the fact/audit objects, but putting
+    # them here would present an unresolved or unanchored value to both evaluators as if
+    # it were established merely because the surrounding service was related.
     records = tuple({
         "fact_id": member.fact_id,
         "kind": member.kind.value,
         "description": member.description,
-        "attributes": dict(sorted((member.attributes or {}).items())),
+        "attributes": _authorized_attributes(member, reconciliation),
         "span_ids": [str(getattr(s, "span_id", "") or "")
                      for s in _citable_evidence(member)],
     } for member in ordered_facts)
@@ -966,7 +966,11 @@ def _shortlist_prompt(fact: ClinicalFact, candidates: list[CandidateCode],
     # are needed whenever the candidate-disposition contract applies (2+
     # candidates, or a forced singleton per F9-R18-A above), not only when
     # descriptor requirements were compiled.
-    if requirements or len(candidates) >= 2 or force_disposition:
+    # A supplied packet is the one evidence contract for *every* shortlist shape,
+    # including an ordinary singleton.  Falling back to ``fact.evidence`` for that
+    # shape made the two evaluators see a different packet than the audit record and
+    # silently dropped relevant component spans.
+    if evidence_packet is not None or requirements or len(candidates) >= 2 or force_disposition:
         ev, id_to_span = _evidence_options(fact, evidence_packet)
     else:
         ev, id_to_span = " | ".join(s.text for s in fact.evidence), {}
