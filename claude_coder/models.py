@@ -444,6 +444,15 @@ DEPENDENCY_SUBMISSION_HOLD_MARKER = "; submission held: material dependency"
 #: the writer (`resolution.py`) and reader (`pipeline.py`) can never drift.
 SYSTEM_UNRESOLVED_MARKER = "SYSTEM_UNRESOLVED:"
 
+#: Marker for a performed, evidence-backed event whose generated candidate
+#: universe was completely and validly rejected.  This is a candidate-generation
+#: failure unless an authoritative reporting rule separately proves that the event
+#: is integral/non-reportable; it is never a provider documentation question and
+#: never proof that the documented event did not occur.  The pipeline converts it
+#: to a retryable, fact-scoped system gate while the ClaimBundle keeps the rejected
+#: candidates visible as ``NO_SUPPORTED_CANDIDATE``.
+CANDIDATE_RECALL_GAP_MARKER = "CANDIDATE_RECALL_GAP:"
+
 
 @dataclass
 class ResolvedLine:
@@ -460,6 +469,11 @@ class ResolvedLine:
     # set when the line escalated because the best-matching code needs an element
     # the documentation does not state — carries the specific gap for a provider query.
     documentation_gap: str | None = None
+    # True only when the documented event is established but candidate
+    # generation produced no descriptor that survived independent validation.
+    # This is distinct from a provider-answerable documentation gap and from an
+    # authoritative rule proving the event non-reportable.
+    candidate_recall_gap: bool = False
     # The TIE POLICY's record (directive section 4) when several candidates survived
     # elimination: which axes actually distinguished them, what the ORIGINAL DOCUMENT
     # was proven to say about each, which axes it left unsettled, and the question that

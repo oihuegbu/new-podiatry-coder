@@ -545,6 +545,19 @@ class ServiceRoleExclusion(unittest.TestCase):
             "2026-01-01")
         self.assertEqual({c.code for c in result}, {"OP", "ANES"})
 
+    def test_single_imaging_fact_is_not_a_mixed_kind_intent(self):
+        """A single non-procedure fact has exactly one kind. Procedure-role
+        classification is inapplicable; noisy operative/anesthesia candidates
+        must not manufacture a whole-line mixed-intent hold."""
+        fact = ClinicalFact(FactKind.IMAGING, "an imaging service", fact_id="IMG1")
+        report = semelig.eligibility_report(
+            [fact], [_candidate("OP"), _candidate("ANES")], self._source(),
+            "2026-01-01")
+        self.assertTrue(report)
+        self.assertEqual({r["role_control"]["status"] for r in report},
+                         {"not_applicable"})
+        self.assertFalse(any(r["role_control"]["blocks_line"] for r in report))
+
     def test_eligibility_report_reflects_the_service_role_exclusion(self):
         fact = _service_role_fact("operative")
         candidates = [_candidate("OP"), _candidate("ANES")]
@@ -626,6 +639,8 @@ class ServiceRoleExclusion(unittest.TestCase):
             ([_service_role_fact("operative"),
              ClinicalFact(FactKind.DIAGNOSIS, "a condition", fact_id="D1")],
              "mixed_kind_intent"),
+            ([ClinicalFact(FactKind.IMAGING, "an imaging service", fact_id="IMG1")],
+             "not_applicable"),
         ]
         for facts, expected_status in cases:
             report = {r["code"]: r for r in semelig.eligibility_report(
@@ -634,7 +649,18 @@ class ServiceRoleExclusion(unittest.TestCase):
             self.assertIsNotNone(rc, f"role_control silently absent for {expected_status}")
             self.assertEqual(rc["status"], expected_status)
             self.assertTrue(rc["authority_source_id"] or expected_status.startswith(
-                ("fact_role", "mixed_kind")), rc)
+                ("fact_role", "mixed_kind", "not_applicable")), rc)
+
+    def test_nonprocedure_role_control_does_not_call_an_inapplicable_authority(self):
+        class BrokenProcedureClassifier:
+            def semantic_class(self, code, system, *, dos=None):
+                raise AssertionError("procedure-role classifier must not be called")
+
+        fact = ClinicalFact(FactKind.IMAGING, "an imaging service", fact_id="IMG1")
+        report = semelig._service_role_control(
+            [fact], [_candidate("OP")], BrokenProcedureClassifier(), dos="2026-01-01")
+        self.assertEqual(report[("OP", "cpt")].status.value, "not_applicable")
+        self.assertFalse(report[("OP", "cpt")].blocks_line)
 
     def test_role_control_reports_an_unclassifiable_candidate_explicitly(self):
         fact = _service_role_fact("operative")

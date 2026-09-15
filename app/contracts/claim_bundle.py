@@ -2212,6 +2212,7 @@ def _line_snapshot(line) -> dict[str, Any]:
         "rationale": getattr(line, "rationale", ""),
         "excluded_reason": getattr(line, "excluded_reason", None),
         "documentation_gap": getattr(line, "documentation_gap", None),
+        "candidate_recall_gap": bool(getattr(line, "candidate_recall_gap", False)),
         # issue #6, Codex's independent re-review (F9-R14-A): the typed disposition
         # `resolution._apply_attribute_evidence_gap_guard` stamps when a selected
         # code was withdrawn because this fact's own attribute_evidence_gaps was
@@ -2486,6 +2487,11 @@ def bundle_from_coding_result(
                                  or str(tie_record.get("provider_question") or ""))
             if documentation_gap:
                 status = LineStatus.CANDIDATES_NEEDING_FACT
+            elif bool(getattr(line, "candidate_recall_gap", False)):
+                # The rejected alternatives remain visible, but none is a
+                # supported candidate.  Alternatives existing is not evidence
+                # that one remains viable.
+                status = LineStatus.NO_SUPPORTED_CANDIDATE
             elif alternatives:
                 status = LineStatus.CANDIDATES_UNRESOLVED
             else:

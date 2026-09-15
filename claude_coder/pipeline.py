@@ -23,8 +23,9 @@ from . import requirement as _requirement
 from .arbitration import LLMFn
 from .autonomy import decide, dependency_hold_text
 from .data_access import AuthoritativeSource, CodeSource
-from .models import (ClaimSubmissionStatus, CodingResult, DEPENDENCY_SUBMISSION_HOLD_MARKER,
-                     ResolutionMethod, ResolvedLine, SYSTEM_UNRESOLVED_MARKER,
+from .models import (ClaimSubmissionStatus, CodingResult,
+                     DEPENDENCY_SUBMISSION_HOLD_MARKER, ResolutionMethod, ResolvedLine,
+                     SYSTEM_UNRESOLVED_MARKER,
                      UnresolvedRecoveredLine)
 
 
@@ -1189,6 +1190,12 @@ def code_encounter(
                 f"candidate_evidence_unresolved:{fact.fact_id}",
                 Outcome.UNKNOWN, line.rationale,
                 "propose-then-verify candidate disposition (issue #6 F9-R19-A)",
+                retryable=True, affected_fact_ids=(fact.fact_id,)))
+        if bool(getattr(line, "candidate_recall_gap", False)):
+            pre_retrieval_gates.append(GateResult(
+                f"candidate_recall_gap:{fact.fact_id}",
+                Outcome.UNKNOWN, line.rationale,
+                "candidate generation and authoritative descriptor verification",
                 retryable=True, affected_fact_ids=(fact.fact_id,)))
         lines.append(line)
 

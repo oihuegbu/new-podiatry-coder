@@ -1742,6 +1742,20 @@ class PerLineStatusClassification(unittest.TestCase):
         self.assertEqual({c.code for c in unresolved.candidates}, {"ALT3"})
         self.assertIn("corroborator disagreed", unresolved.blocking_reason)
 
+    def test_rejected_alternatives_are_no_supported_candidate_not_a_final_exclusion_guess(self):
+        """Rejected candidates remain auditable, but a typed recall gap means
+        none remains supported. Candidate presence alone must not relabel it as
+        an unresolved tie."""
+        from app.contracts.claim_bundle import LineStatus
+        result = self._result()
+        line = next(ln for ln in result.lines if ln.fact.fact_id == "F5")
+        line.candidate_recall_gap = True
+        bundle = self._bundle(result)
+        unresolved = next(cl for cl in bundle.candidate_lines
+                          if cl.clinical_event_id == "F5")
+        self.assertEqual(unresolved.status, LineStatus.NO_SUPPORTED_CANDIDATE)
+        self.assertEqual({c.code for c in unresolved.candidates}, {"ALT3"})
+
     def test_an_uncertainty_on_one_line_never_blocks_an_unrelated_recommended_line(self):
         """issue #6 F9-R8-A, Codex's independent re-review of 5ab4a13: this test
         used to force `bundle.release` to `AUTO_READY` via `model_copy`,

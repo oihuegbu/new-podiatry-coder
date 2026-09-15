@@ -2896,6 +2896,31 @@ def _system_unresolved_line(fact: ClinicalFact, shortlist: list[CandidateCode],
                   f"never a provider question or a coder's judgement call"))
 
 
+def _candidate_recall_gap_line(fact: ClinicalFact,
+                               candidates: list[CandidateCode],
+                               detail: str,
+                               record: dict | None = None) -> ResolvedLine:
+    """A performed event was established, but candidate generation supplied no
+    descriptor that survived independent verification.
+
+    Rejecting every generated candidate does not prove that the event is
+    non-reportable.  Only an authoritative reporting control may make that
+    determination.  Until then this is a retryable, line-scoped system recall
+    gap: preserve the rejected candidates and the complete decision record,
+    never ask the provider to repair a candidate-generation failure, and never
+    suppress independently defensible sibling lines.
+    """
+    from .models import CANDIDATE_RECALL_GAP_MARKER
+    return ResolvedLine(
+        fact=fact, chosen=None, alternatives=list(candidates)[:5],
+        method=ResolutionMethod.ABSTAINED, documentation_gap=None,
+        candidate_recall_gap=True,
+        tie_record={**(record or {}), "candidate_recall_gap": True},
+        rationale=(f"{CANDIDATE_RECALL_GAP_MARKER} {detail} -- the documented "
+                   "event remains established; regenerate candidates or prove "
+                   "non-reportability from an authoritative reporting control"))
+
+
 def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                        shortlist: list[CandidateCode], judgements: list,
                        eliminated_earlier: dict[str, str], why: str,
@@ -3012,11 +3037,26 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                                        eliminated, record)
 
     if not remaining:
-        return ResolvedLine(
-            fact=fact, chosen=None, alternatives=shortlist[:5],
-            method=ResolutionMethod.ABSTAINED, tie_record=record,
-            rationale=("both independent evaluators accounted for every candidate, "
-                       "and no candidate remained supported by the documentation"))
+        # A complete rejection is normally a candidate-generation gap, but
+        # preserve the one legitimate exception: the authoritative candidate
+        # contracts may expose a genuinely typed, provider-answerable axis that
+        # is absent from the record.  Ask only that question.  Raw descriptor
+        # words and one-sided qualifier values cannot reach this branch because
+        # tiebreak permits only complete, genuinely discriminating axes.
+        tie = _tiebreak.narrow(
+            fact, shortlist, reconciliation,
+            requirements=_elimination_requirements)
+        if tie.provider_question:
+            return _tie_escalation(
+                fact, shortlist, reconciliation,
+                "every generated candidate was rejected, and the authoritative "
+                "candidate contracts identify one documentable distinguishing fact",
+                tie=tie, record=record, requirements=_elimination_requirements)
+        return _candidate_recall_gap_line(
+            fact, shortlist,
+            "both independent evaluators accounted for every generated candidate, "
+            "and no candidate remained supported by the documentation",
+            record)
 
     # The initial `chosen` value is a proposal, not an authority.  Ordinarily
     # the unique survivor is the proposal itself.  If the complete structured
@@ -3438,12 +3478,12 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
         # Every candidate was positively, validly disqualified -- nothing
         # is left standing to ask a provider or a coder about either; this
         # documented event has no defensible candidate in this pool.
-        return ResolvedLine(
-            fact=fact, chosen=None, alternatives=shortlist[:5],
-            method=ResolutionMethod.ABSTAINED, tie_record=record,
-            rationale=(f"no candidate in this pool has positive standing -- every "
-                      f"candidate was positively disqualified: "
-                      f"{'; '.join(f'{c} ({r})' for c, r in sorted(contradicted_admissions.items()))}"))
+        return _candidate_recall_gap_line(
+            fact, shortlist,
+            "no generated candidate has positive standing; every candidate was "
+            "positively disqualified: "
+            f"{'; '.join(f'{c} ({r})' for c, r in sorted(contradicted_admissions.items()))}",
+            record)
     # issue #6, Codex's independent re-review (F9-R18-A, reopened P1): clinical-
     # attribute axis-conflict enforcement is no longer branch-local here -- a
     # check confined to this one propose-then-verify path could never see the

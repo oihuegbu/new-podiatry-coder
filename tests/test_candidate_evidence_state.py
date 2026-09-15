@@ -267,6 +267,29 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
     def _reconciliation(self, statuses):
         return _reconciliation(statuses)
 
+    def test_all_validly_rejected_candidates_become_a_typed_recall_gap(self):
+        """A complete rejection proves that none of the generated candidates
+        fits. It does not prove the performed event is non-reportable and must
+        not become a provider question or generic coder tie."""
+        from claude_coder.models import CANDIDATE_RECALL_GAP_MARKER
+        first = _cand("CAND_FIRST", "assembly service, variant one")
+        second = _cand("CAND_SECOND", "assembly service, variant two")
+        fact = _fact("assembly service performed today")
+        dispositions = (
+            _disp(first, "not_documented", missing_fact="variant one documented"),
+            _disp(second, "not_documented", missing_fact="variant two documented"),
+        )
+        judges = [_judgement(dispositions), _judgement(dispositions)]
+        line = resolution._settle_uniqueness(
+            fact, first, [first, second], judges, {}, "no supported candidate", "",
+            reconciliation=None, coverage=_coverage("assembly service performed today"))
+        self.assertIsNone(line.chosen)
+        self.assertTrue(line.candidate_recall_gap)
+        self.assertIsNone(line.documentation_gap)
+        self.assertIn(CANDIDATE_RECALL_GAP_MARKER, line.rationale)
+        self.assertEqual({c.code for c in line.alternatives},
+                         {"CAND_FIRST", "CAND_SECOND"})
+
     def test_an_unvalidated_entailed_disposition_is_system_unresolved_never_released(self):
         """Codex's independent exact-SHA reproduction: two bare "entailed"
         claims, neither citing a reconciled span, must never release as

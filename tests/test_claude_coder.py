@@ -2628,6 +2628,44 @@ class UnclassifiedFactRoleServiceConflictTest(unittest.TestCase):
         self.assertEqual(line.chosen.code, "OP")
 
 
+class SingletonNonProcedureRoleControlTest(unittest.TestCase):
+    """The procedure-role backstop is inapplicable to a single non-procedure
+    event. This drives the complete resolution entry point so the former live
+    ``classification_data_gap:service_role_conflict`` failure cannot recur
+    through a caller-boundary mismatch."""
+
+    def test_single_imaging_event_never_gets_a_mixed_kind_service_role_hold(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CandidateCode, ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder.resolution import resolve
+        records = {
+            ("CAND_OPERATION", "cpt"): {
+                "long_description": "operative service", "active": True},
+            ("CAND_ANESTHESIA", "cpt"): {
+                "long_description": "anesthesia service", "active": True},
+        }
+        source = MockSource(
+            records=records,
+            retrieval={("*", "cpt"): [
+                CandidateCode("CAND_OPERATION", "cpt", "operative service", 0.9),
+                CandidateCode("CAND_ANESTHESIA", "cpt", "anesthesia service", 0.8),
+            ]},
+            semantic_class={"CAND_OPERATION": "surgical_procedure",
+                            "CAND_ANESTHESIA": "anesthesia"})
+        fact = ClinicalFact(
+            FactKind.IMAGING, "imaging service performed", fact_id="IMG1",
+            evidence=[EvidenceSpan("imaging service performed", anchored=True,
+                                   span_id="s1")], confidence=0.95)
+        line = resolve(_request(fact), source)
+        self.assertNotEqual(line.documentation_gap,
+                            "classification_data_gap:service_role_conflict")
+        self.assertTrue(line.candidate_eligibility)
+        self.assertEqual({r["role_control"]["status"]
+                          for r in line.candidate_eligibility}, {"not_applicable"})
+        self.assertFalse(any(r["role_control"]["blocks_line"]
+                             for r in line.candidate_eligibility))
+
+
 class NonSeparatelyBillableCandidatePreFilterTest(unittest.TestCase):
     """issue #6, Codex's independent re-review (F9-R19-A consolidated
     live-run remediation, Finding 3): `AuthoritativeSource.

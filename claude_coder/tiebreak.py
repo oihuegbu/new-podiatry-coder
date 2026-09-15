@@ -559,9 +559,16 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
 
     if qualified:
         full = {c.code: qualified.get(c.code, ()) for c in candidates}
-        probes.append(AxisProbe(
-            AXIS_QUALIFIED_CHILD, full,
-            provable=True, selectable=True, queryable=True))
+        # A child qualifier can distinguish the tied candidates only when
+        # EVERY candidate states a child value and at least two values differ.
+        # Silence is not the opposite of a qualifier.  The old probe included
+        # unrelated/silent candidates and could turn one candidate's residual
+        # suffix into a provider question even though the other candidate had
+        # no competing value on this axis.
+        if all(full.values()) and len(set(full.values())) > 1:
+            probes.append(AxisProbe(
+                AXIS_QUALIFIED_CHILD, full,
+                provable=True, selectable=True, queryable=True))
         # issue #6, Codex's independent re-review (F9-R21-B): the shared
         # stem is recorded as AUDIT CONTEXT only -- `provable=False,
         # selectable=False, queryable=False` -- never a literal-absence
@@ -620,8 +627,11 @@ def _axes_from_requirements(requirements: tuple, codes: set[str],
     probes: list[AxisProbe] = []
     for axis, terms_by_code in sorted(by_axis.items()):
         full = {code: tuple(sorted(terms_by_code.get(code, ()))) for code in codes}
-        if len(set(full.values())) < 2:
-            continue        # every candidate silent or identical -- nothing to discriminate
+        if not all(full.values()) or len(set(full.values())) < 2:
+            # A missing value is absence, not an opposing value.  Selection or
+            # a provider question is valid only when the authority states a
+            # genuinely differing value for every candidate still in the tie.
+            continue
         selectable, queryable = flags[axis]
         probes.append(AxisProbe(axis, full, provable=True,
                                 selectable=selectable, queryable=queryable))

@@ -257,7 +257,8 @@ class RoleControlStatus(str, Enum):
                                                         #: could not be determined
     FACT_ROLE_MISSING = "fact_role_missing"       #: did not run; no fact documented a role
     FACT_ROLE_CONFLICT = "fact_role_conflict"     #: did not run; facts disagree on role
-    MIXED_KIND_INTENT = "mixed_kind_intent"       #: did not run; not every fact is a PROCEDURE
+    MIXED_KIND_INTENT = "mixed_kind_intent"       #: did not run; more than one fact kind
+    NOT_APPLICABLE = "not_applicable"             #: did not run; one non-PROCEDURE kind
 
 
 @dataclass(frozen=True)
@@ -327,9 +328,18 @@ def _service_role_control(facts: list[ClinicalFact], candidates: list,
     # documented procedure role from the audit trail exactly when a reviewer
     # most needs to see it.
     roles = tuple(sorted(_authorized_roles(facts, reconciliation)))
-    mixed_kind = {f.kind for f in facts} != {FactKind.PROCEDURE}
-    if mixed_kind:
+    kinds = {f.kind for f in facts}
+    # Operative-vs-anesthesia is a sub-classification of PROCEDURE facts.  A
+    # singleton IMAGING/SUPPLY/DRUG/DIAGNOSIS fact is not a "mixed-kind intent";
+    # the previous ``kinds != {PROCEDURE}`` test mislabeled every such singleton
+    # and could block it merely because noisy recall contained both operative-
+    # and anesthesia-classified candidates.  Mixed means more than one fact kind,
+    # literally.  A single non-procedure kind is handled by the independent
+    # candidate-kind control below and this procedure-role control is inapplicable.
+    if len(kinds) > 1:
         base_status = RoleControlStatus.MIXED_KIND_INTENT
+    elif kinds != {FactKind.PROCEDURE}:
+        base_status = RoleControlStatus.NOT_APPLICABLE
     elif not roles:
         base_status = RoleControlStatus.FACT_ROLE_MISSING
     elif len(roles) > 1:
@@ -338,6 +348,15 @@ def _service_role_control(facts: list[ClinicalFact], candidates: list,
         base_status = RoleControlStatus.FACT_ROLE_MISSING
     else:
         base_status = None                    # the control actually runs, below
+
+    if base_status is RoleControlStatus.NOT_APPLICABLE:
+        # Do not call the procedure-role authority for a fact kind this control
+        # does not govern.  An unavailable procedure classifier must not turn an
+        # otherwise valid imaging/supply/drug line into a system failure.
+        return {(c.code, c.system): RoleControlDecision(
+                    base_status, roles, None, False, False,
+                    authority_source_id="", authority_version=None)
+                for c in candidates}
 
     if base_status is not None:
         classified = {(c.code, c.system): _candidate_procedure_role(c, source, dos=dos)

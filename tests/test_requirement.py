@@ -1173,6 +1173,47 @@ class QualifiedChildRequirementTest(unittest.TestCase):
                if r.axis == "qualified_child"]
         self.assertEqual(reqs, [])
 
+    def test_a_child_value_on_only_one_remaining_candidate_is_not_a_tie_axis(self):
+        """One candidate's qualifier plus another candidate's silence is not a
+        differential and must not generate a provider question."""
+        from claude_coder import tiebreak
+        qualified = _cand("CAND_QUALIFIED", "assembly service; residual variant")
+        sibling = _cand("CAND_SIBLING", "assembly service; specific variant")
+        silent = _cand("CAND_SILENT", "different service without a child clause")
+        compiled = req.compile_requirements([qualified, sibling, silent])
+        axes = tiebreak._axes_from_requirements(
+            compiled, {"CAND_QUALIFIED", "CAND_SILENT"}, frozenset())
+        self.assertFalse(any(a.axis == "qualified_child" for a in axes))
+
+    def test_qualified_child_probe_requires_values_for_every_tied_candidate(self):
+        """The direct descriptor-derived path obeys the same no-silence rule
+        as the compiled-requirement path."""
+        from claude_coder import tiebreak
+        qualified = _cand("CAND_QUALIFIED", "assembly service; branch alpha")
+        sibling = _cand("CAND_SIBLING", "assembly service; branch beta")
+        silent = _cand("CAND_SILENT", "unrelated service")
+        axes = tiebreak.discriminating_axes([qualified, sibling, silent])
+        self.assertFalse(any(a.axis == "qualified_child" for a in axes))
+
+    def test_one_sided_child_requirement_never_becomes_a_provider_question(self):
+        from claude_coder import tiebreak
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from app.contracts.source_evidence import (
+            ReconciliationStatus, SourceReconciliation, SpanReconciliation)
+        qualified = _cand("CAND_QUALIFIED", "assembly service; residual variant")
+        sibling = _cand("CAND_SIBLING", "assembly service; specific variant")
+        silent = _cand("CAND_SILENT", "different service without a child clause")
+        compiled = req.compile_requirements([qualified, sibling, silent])
+        span = EvidenceSpan("service performed today", anchored=True, span_id="s1")
+        fact = ClinicalFact(FactKind.PROCEDURE, "service performed", fact_id="F1",
+                            evidence=[span], confidence=0.9)
+        reconciliation = SourceReconciliation(spans=(SpanReconciliation(
+            span_id="s1", status=ReconciliationStatus.AGREED),))
+        outcome = tiebreak.narrow(
+            fact, [qualified, silent], reconciliation, requirements=compiled)
+        self.assertEqual(outcome.provider_question, "")
+        self.assertNotIn("qualified_child", outcome.unsettled)
+
     def test_qualified_child_axis_is_selectable_like_laterality(self):
         """`tiebreak.discriminating_axes` marks this axis `selectable`,
         exactly like laterality -- so `narrow`'s EXISTING literal-presence
