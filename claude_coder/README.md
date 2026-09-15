@@ -62,7 +62,7 @@ note ─► 1. EXTRACT    Clinical Language Understanding. The LLM emits evidenc
         │             concept — eliminating contradictions and ranking specificity.
         │             What the deterministic path can't ground goes to →
         ▼
-        2b. VERIFY    Propose-then-verify (license-clean CPT-Index substitute):
+        2b. VERIFY    Fixed-candidate generate-then-verify path:
         │             the LLM PROPOSES candidate code numbers (validated against
         │             the registry — it can't invent one), a code is accepted only
         │             when its AUTHORITATIVE DESCRIPTOR is ENTAILED by the facts,
@@ -153,7 +153,7 @@ grounded in authoritative data; nothing bills on vector rank or model memory.**
 | **Authoritative index** | ICD-10-CM Alphabetic Index (`index_codes`) → SNOMED→ICD map (`snomed_codes`) for diagnoses; CMS Table of Drugs (`drug_index_codes`) → AMA CPT Index (`cpt_index_codes`) → learned index (`learned_index_codes`) → CPT/HCPCS descriptor index (`procedure_index_codes`) for procedures/supplies/drugs | A single, unambiguous authoritative term→code hit. Taken deterministically. |
 | **Structured decision** | `_decide` / `_evaluate`: eliminate candidates that *contradict* documented attributes (wrong laterality, measurement outside the descriptor's interval, inactive on the DOS); select **only** a candidate that uniquely satisfies a documented axis. | The index has no clean hit; a retrieval pool exists. |
 | **Tie policy** | `tiebreak.narrow`: several candidates survive, so re-inspect **only their discriminating axes** against the **original document**; release the one the page uniquely entails, else raise **one targeted provider query**. | Two or more survivors, none uniquely satisfying a documented axis. |
-| **Propose-then-verify** | `verify.propose_codes` (LLM proposes, registry validates) → `verify.select_entailed` (descriptor entailment) → `verify.corroborate` (independent second model). Bounded re-selection on a wrong-concept rejection; a `missing_element` rejection becomes a provider query. | Procedures/imaging, and diagnoses that reach the embedding fallback. The license-clean substitute for the AMA CPT Index. |
+| **Generate-then-verify** | Fixed candidates come from authoritative indices/descriptors, governed terminology, UMLS, and the versioned retrieval snapshot; no model-authored code enters the decisive universe. `verify.select_entailed` and independent `verify.corroborate` judge one descriptor-bound candidate set against one content-addressed service-evidence packet. Structured requirements settle deterministically when complete; disagreement or exact-input run variance retains the candidate as a line-local system hold. | Procedures/imaging, and diagnoses that reach the retrieval fallback. A reproducible candidate-and-verification path when an authoritative Alphabetic Index term is unavailable. |
 | **Arbitration** | `arbitration.arbitrate`: a single bounded LLM pick over the *retrieved* candidate descriptors — it can never recall or invent a code, and `autonomy` never auto-releases its result. | Residual ambiguity for kinds that did **not** go through propose-then-verify **and** that neither a failed deterministic constraint nor the tie policy has already answered. |
 
 Retrieval is the repo's hybrid dense(bge)+sparse(BM25) RRF store, reused **as

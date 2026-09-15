@@ -411,12 +411,11 @@ def code_encounter(
         return _system_hold_result(encounter_id, date_of_service,
                                    "authoritative_data_integrity", exc, source)
 
-    # Propose-then-verify is enabled in real mode (no stubbed LLMs). It grounds every
-    # procedure code in an authoritative descriptor the documentation entails — the
-    # license-clean substitute for the CPT Index. In real mode it is also corroborated
-    # by an INDEPENDENT second model, so a procedure bills only when two independent
-    # judgements agree. Tests pass stub LLMs and leave these None -> deterministic
-    # path unchanged, no corroboration.
+    # Descriptor verification is enabled in real mode (no stubbed LLMs). Candidate
+    # numbers already came from the deterministic source/retrieval universe; the models
+    # only judge whether each bound authoritative descriptor is entailed. In real mode
+    # an INDEPENDENT second model corroborates that judgement. Tests pass stub LLMs and
+    # leave these None -> deterministic path unchanged, no corroboration.
     if verify_llm is None and arbitrate_llm is None:
         from .verify import default_corroborate_llm, default_verify_llm
         verify_llm = default_verify_llm

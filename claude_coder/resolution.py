@@ -1402,14 +1402,15 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
         seen_codes = {c.code for c in seeds}
         pool = list(seeds) + [c for c in pool if c.code not in seen_codes]
 
-    # PROPOSE-THEN-VERIFY (when an LLM is available): widen the pool with
-    # authoritative-validated LLM proposals, then accept the first candidate whose
-    # OFFICIAL descriptor the documentation entails; escalate otherwise. Applies to
+    # GENERATE-THEN-VERIFY (when an LLM is available): evaluate the fixed, source-
+    # generated pool against each candidate's bound OFFICIAL descriptor; the model does
+    # not add codes. Accept only a uniquely supported candidate; escalate otherwise. Applies to
     # procedures/imaging AND to DIAGNOSES that reached the embedding fallback — an
     # ICD Index / SNOMED hit already returned deterministically above, so this only
     # verifies the UNGROUNDED embedding picks (the ones that were confidently wrong,
     # e.g. a code asserting a qualifier the documentation does not support). Runs even on
-    # an empty recall pool, since a validated proposal can rescue a missed concept.
+    # an empty recall pool only to produce an explicit candidate-recall gap; a model is
+    # never asked to invent a replacement code.
     # F8-R2: which reasons semantic eligibility excluded candidates for, over the
     # FULL candidate universe -- used below both to phrase an empty-pool abstain
     # honestly and to route it. A measurement gap is answerable by the provider
