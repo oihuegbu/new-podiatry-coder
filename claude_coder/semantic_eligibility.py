@@ -433,7 +433,8 @@ def _service_role_exclusions(facts: list[ClinicalFact], candidates: list,
 #: project") -- reuses the classes `_service_role_control` already trusts
 #: rather than inventing a new taxonomy or a guessed descriptor-phrase list.
 _NON_PROCEDURE_INCOMPATIBLE_CLASSES = frozenset(
-    {"performance_measure_tracking", "evaluation_management", "anesthesia"})
+    {"performance_measure_tracking", "evaluation_management", "anesthesia",
+     "surgical_procedure"})
 
 
 def _candidate_kind_control(facts: list[ClinicalFact], candidates: list,

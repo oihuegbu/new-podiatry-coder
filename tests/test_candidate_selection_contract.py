@@ -58,6 +58,35 @@ def test_context_citation_must_connect_target_and_candidate_not_only_a_sibling()
         ("s3",), target, candidate, reconciliation, "entailed", packet) == ()
 
 
+def test_singleton_verifier_uses_the_same_canonical_packet_as_audit():
+    target = _fact("F1", "assembly repair", "assembly repair performed", "s1")
+    component = _fact("F2", "assembly preparation", "surface prepared", "s2")
+    packet = verify.build_service_evidence_packet(
+        target, (target, component), "service-A")
+    candidate = CandidateCode(
+        code="CODE_A", system="cpt", descriptor="assembly repair",
+        source="retrieval")
+
+    prompt, citation_map = verify._shortlist_prompt(
+        target, [candidate], MockSource(), evidence_packet=packet)
+
+    assert packet.packet_sha256 in prompt
+    assert "surface prepared" in prompt
+    assert set(citation_map.values()) == {"s1", "s2"}
+
+
+def test_packet_does_not_promote_unreconciled_raw_context_attributes():
+    target = _fact("F1", "assembly repair", "assembly repair performed", "s1")
+    component = _fact("F2", "assembly preparation", "surface prepared", "s2")
+    component.attributes["technique"] = "observed-only"
+
+    packet = verify.build_service_evidence_packet(
+        target, (target, component), "service-A", reconciliation=_reconciliation("s1", "s2"))
+
+    component_record = next(r for r in packet.fact_records if r["fact_id"] == "F2")
+    assert component_record["attributes"] == {}
+
+
 def test_resolver_candidate_universe_never_calls_model_code_proposal():
     fact = _fact("F1", "assembly repair", "assembly repair performed", "s1")
     candidate = CandidateCode(
@@ -128,4 +157,3 @@ def test_model_disagreement_preserves_recall_candidate_as_system_unresolved():
     assert remaining == []
     assert eliminated == {}
     assert "CODE_A" in unresolved
-

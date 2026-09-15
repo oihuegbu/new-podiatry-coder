@@ -2747,6 +2747,55 @@ class CandidateKindControlTest(unittest.TestCase):
         self.assertIsNotNone(line.chosen, line.rationale)
         self.assertEqual(line.chosen.code, "SUPPLY", line.rationale)
 
+    def test_a_surgical_candidate_is_excluded_from_an_imaging_facts_pool(self):
+        """Related procedure context may support a descriptor element, but it must
+        never change the target event's typed kind.  A surgery-classified candidate
+        therefore cannot be selected for an imaging event merely because its text
+        mentions the operation being imaged."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder import semantic_eligibility as semelig
+        src = MockSource(semantic_class={"OPERATION": "surgical_procedure"})
+        fact = ClinicalFact(
+            kind=FactKind.IMAGING,
+            description="imaging used to confirm completion of the operation",
+            evidence=[EvidenceSpan(
+                "imaging confirmed completion of the operation", anchored=True,
+                span_id="s1")], confidence=0.95, fact_id="IMG1")
+        candidates = [CandidateCode(
+            "OPERATION", "cpt", "operative removal service", 0.9, "retrieval")]
+
+        excluded = semelig._candidate_kind_control([fact], candidates, src, None)
+
+        self.assertIn(("OPERATION", "cpt"), excluded)
+        self.assertIn("surgical_procedure", excluded[("OPERATION", "cpt")])
+
+    def test_exact_descriptor_hit_cannot_bypass_kind_control(self):
+        """The authoritative-index shortcut and broad recall must enforce one
+        target-kind boundary; an exact hit is a candidate lead, not permission to
+        change an imaging event into an operation."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder.resolution import resolve
+        source = MockSource(
+            records={("OPERATION", "cpt"): {
+                "long_description": "operative removal service", "active": True}},
+            proc_index={"imaging used to confirm operation": {"OPERATION"}},
+            semantic_class={"OPERATION": "surgical_procedure"})
+        fact = ClinicalFact(
+            kind=FactKind.IMAGING,
+            description="imaging used to confirm operation", fact_id="IMG1",
+            evidence=[EvidenceSpan(
+                "imaging used to confirm operation", anchored=True, span_id="s1")],
+            confidence=0.95)
+
+        line = resolve(_request(fact), source)
+
+        self.assertIsNone(line.chosen)
+        report = {r["code"]: r for r in line.candidate_eligibility}
+        self.assertFalse(report["OPERATION"]["eligible"])
+        self.assertIn("surgical_procedure", report["OPERATION"]["reason"])
+
     def test_a_procedure_facts_pool_is_untouched_by_the_kind_control(self):
         """`_service_role_control` (operative vs. anesthesia) already owns a
         procedure fact's own role distinction -- this supplementary control
