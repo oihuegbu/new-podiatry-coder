@@ -1154,7 +1154,8 @@ def validate_judgement_contract(judgement: "Judgement", candidates: list[Candida
 
 
 def _repair_prompt(original_ans: dict, id_to_span: dict[str, str],
-                   candidates: list[CandidateCode], defects: dict[str, str]) -> str:
+                   candidates: list[CandidateCode], defects: dict[str, str],
+                   evaluation_prompt: str) -> str:
     """A BOUNDED same-evaluator repair turn (issue #6, Codex's independent
     re-review, F9-R22-A) -- correction of a structurally invalid response,
     never a second vote. Repeats the fixed candidate hashes and the allowed
@@ -1167,6 +1168,10 @@ def _repair_prompt(original_ans: dict, id_to_span: dict[str, str],
         + "\n".join(f"- {reason}" for reason in defects.values())
         + f"\n\nFIXED CANDIDATE DESCRIPTOR HASHES (copy exactly, do not alter):\n{hashes}\n\n"
         f"ALLOWED EVIDENCE TAGS: {tags}\n\n"
+        "IMMUTABLE EVALUATION MATERIAL (use these exact facts, evidence tags, "
+        "descriptors, and requirements when repairing the cited disposition; do not "
+        "infer evidence from the tag names):\n"
+        f"{evaluation_prompt}\n\n"
         f"YOUR ORIGINAL ANSWER:\n{json.dumps(original_ans)}\n\n"
         "Return a corrected, complete JSON answer fixing ONLY the defects named above -- "
         "do not change any option's disposition that was not flagged.")
@@ -1177,6 +1182,7 @@ def _validate_and_repair(raw_ans: dict, judgement: "Judgement",
                          reconciliation, requirements: tuple[DescriptorRequirement, ...],
                          id_to_span: dict[str, str], evaluator_origin: dict,
                          llm: LLMFn, system: str,
+                         evaluation_prompt: str,
                          evidence_packet: ServiceEvidencePacket | None = None,
                          ) -> "Judgement":
     """One bounded same-evaluator repair call (issue #6, Codex's independent
@@ -1184,6 +1190,14 @@ def _validate_and_repair(raw_ans: dict, judgement: "Judgement",
     the citation contract -- never a second vote, and never a whole-
     encounter retry: only the SAME evaluator, correcting its OWN
     structurally invalid response.
+
+    The repair receives the exact immutable evaluation prompt that produced
+    the defective answer.  Earlier it received only opaque evidence-tag names,
+    so an evaluator that had cited the wrong tag had no source text or official
+    descriptor with which to select a valid replacement; a second answer could
+    only guess.  Replaying the fixed prompt is not a new judgement or a new
+    candidate universe: it is the same evaluator correcting its citation against
+    the same evidence packet, descriptors, attributes, and requirements.
 
     A candidate the repair still cannot validate keeps whichever real
     disposition entry it has (the repaired one if the model gave one, else
@@ -1211,7 +1225,8 @@ def _validate_and_repair(raw_ans: dict, judgement: "Judgement",
         return judgement
     try:
         repaired_raw = _json(
-            llm(system, _repair_prompt(raw_ans, id_to_span, candidates, defects)))
+            llm(system, _repair_prompt(raw_ans, id_to_span, candidates, defects,
+                                       evaluation_prompt)))
         repaired = _judgement(repaired_raw, candidates, requirements, id_to_span,
                               evaluator_origin)
     except Exception:
@@ -1275,7 +1290,7 @@ def select_entailed(fact: ClinicalFact, candidates: list[CandidateCode],
     judgement = _judgement(raw, candidates, requirements, id_to_span, evaluator_origin)
     return _validate_and_repair(raw, judgement, candidates, fact, reconciliation,
                                 requirements, id_to_span, evaluator_origin, llm, system,
-                                evidence_packet)
+                                prompt, evidence_packet)
 
 
 def corroborate(fact: ClinicalFact, candidates: list[CandidateCode],
@@ -1308,4 +1323,4 @@ def corroborate(fact: ClinicalFact, candidates: list[CandidateCode],
     judgement = _judgement(raw, candidates, requirements, id_to_span, evaluator_origin)
     return _validate_and_repair(raw, judgement, candidates, fact, reconciliation,
                                 requirements, id_to_span, evaluator_origin, llm, system,
-                                evidence_packet)
+                                prompt, evidence_packet)
