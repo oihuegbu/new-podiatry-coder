@@ -3360,21 +3360,9 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
         if blocked:
             record["eligible"] = False
             record["reason"] = "not separately reportable per authoritative data"
-    # issue #6, Codex's independent re-review (F9-R21-C): a candidate whose
-    # OWN authoritative classification is categorically the WRONG KIND of
-    # service for a non-procedure fact (a quality-measure/E&M/anesthesia-
-    # status code surviving for a documented SUPPLY/IMAGING/DRUG/DIAGNOSIS
-    # event) must not compete in that fact's shortlist at all -- reproduced
-    # live: a suture-anchor supply fact's pool retained unrelated quality-
-    # measure/imaging/other candidates as "entailed" with nothing checking
-    # whether they were even the right KIND of code.
-    for (code, system), reason in _semelig._candidate_kind_control(
-            facts_for_role_check, full_universe, source, dos).items():
-        for record in candidate_eligibility:
-            if (record["code"], record["system"]) == (code, system) and record["eligible"]:
-                record["eligible"] = False
-                record["reason"] = reason
-                break
+    # Candidate-kind filtering is part of semantic_eligibility's one shared
+    # report/filter contract.  Do not re-derive it here: exact-index, broad-recall,
+    # LLM and no-LLM callers must all consume the same decision record.
     eligible_ids = {(r["code"], r["system"]) for r in candidate_eligibility
                     if r["eligible"]}
 

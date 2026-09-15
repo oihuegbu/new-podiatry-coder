@@ -790,6 +790,8 @@ def eligible_partition(facts: list[ClinicalFact], candidates: list, source,
     role_excluded = _service_role_exclusions(facts, pool, source, reconciliation,
                                              dos=date_of_service)
     pool = [c for c in pool if (c.code, c.system) not in role_excluded]
+    kind_excluded = _candidate_kind_control(facts, pool, source, date_of_service)
+    pool = [c for c in pool if (c.code, c.system) not in kind_excluded]
     excluded = _anatomy_dominance_exclusions(facts, pool, source, reconciliation)
     return [c for c in pool if (c.code, c.system) not in excluded]
 
@@ -808,6 +810,10 @@ def eligibility_report(facts: list[ClinicalFact], candidates: list, source,
                                          dos=date_of_service)
     surviving = [c for c in pool
                 if not role_control[(c.code, c.system)].excluded]
+    kind_excluded = _candidate_kind_control(
+        facts, surviving, source, date_of_service)
+    surviving = [c for c in surviving
+                 if (c.code, c.system) not in kind_excluded]
     dominance = _anatomy_dominance_exclusions(facts, surviving, source, reconciliation)
     report = []
     for c in candidates:
@@ -818,6 +824,8 @@ def eligibility_report(facts: list[ClinicalFact], candidates: list, source,
             reason = (f"candidate's authoritative classification is "
                      f"{role_decision.candidate_role!r}, incompatible with the "
                      f"fact's documented service_role {role_decision.fact_roles[0]!r}")
+        if reason is None:
+            reason = kind_excluded.get(key)
         if reason is None:
             reason = dominance.get(key)
         report.append({
