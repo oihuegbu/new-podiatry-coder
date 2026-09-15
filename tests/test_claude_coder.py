@@ -3699,9 +3699,55 @@ class LateralityUpgradeTest(unittest.TestCase):
                                                   value="right"),)}, confidence=0.98)
         llm = _sv.judge(entails=lambda d: True, reason="entailed")
         line = resolve(_request(fact), src, llm=_from(llm, "provider-a"))
-        self.assertEqual(line.chosen.code, "DX9")           # retrieval gives unspecified
+        # Specificity relatives now enter the original verification pool, so
+        # the supported leaf is selected before the legacy post-pass.
+        self.assertEqual(line.chosen.code, "DX1")
         line = upgrade_diagnosis_laterality(line, src)
-        self.assertEqual(line.chosen.code, "DX1")           # upgraded to the right sibling
+        self.assertEqual(line.chosen.code, "DX1")           # idempotent
+
+    def test_unspecified_retrieval_leaf_expands_before_initial_verification(self):
+        """The unspecified leaf must not be the verifier's only option when
+        anchored laterality and an authoritative, descriptor-compatible sibling
+        exist.  The sibling is still selected only by independent descriptor
+        entailment; family expansion itself never approves a code."""
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (AttributeEvidence, CandidateCode,
+                                         ClinicalFact, EvidenceSpan, FactKind,
+                                         RelationState, ResolutionMethod)
+        from claude_coder.resolution import resolve
+        recs = {
+            ("DX9", "icd10"): {
+                "long_description": "some condition, unspecified site", "active": True},
+            ("DX1", "icd10"): {
+                "long_description": "some condition, right site", "active": True},
+            ("DX2", "icd10"): {
+                "long_description": "some condition, left site", "active": True},
+        }
+        src = MockSource(records=recs, retrieval={
+            ("*", "icd10"): [CandidateCode(
+                "DX9", "icd10", "retrieval alias", 1.0)]})
+        span = EvidenceSpan("some condition, right side", anchored=True, span_id="s1")
+        fact = ClinicalFact(
+            kind=FactKind.DIAGNOSIS, description="some condition",
+            attributes={"laterality": "right"}, evidence=[span],
+            attribute_evidence={"laterality": (
+                AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                  value="right"),)}, confidence=0.98)
+        primary = _sv.judge(entails=lambda descriptor: "right" in descriptor.lower(),
+                            reason="documented specificity")
+        corroborator = _sv.judge(
+            entails=lambda descriptor: "right" in descriptor.lower(),
+            reason="independently documented specificity")
+
+        line = resolve(
+            _request(fact), src,
+            llm=_from(primary, "provider-a"),
+            corroborate=_from(corroborator, "provider-b"))
+
+        self.assertEqual(line.method, ResolutionMethod.VERIFIED, line.rationale)
+        self.assertEqual(line.chosen.code, "DX1", line.rationale)
+        self.assertNotEqual(line.chosen.code, "DX9")
+        self.assertEqual(line.chosen.descriptor, "some condition, right site")
 
     def test_no_upgrade_without_documented_side(self):
         from claude_coder.data_access import MockSource

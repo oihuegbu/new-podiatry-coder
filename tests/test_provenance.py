@@ -276,8 +276,9 @@ class _AmbiguousRelatedConceptSource(_UniqueRelatedConceptSource):
 
 
 def _structured_relation_case(*, second_service=False, second_diagnosis=False,
-                              procedure_detail=False, reconcile=True):
-    note = ("PREOPERATIVE ASSESSMENT\n"
+                              procedure_detail=False, reconcile=True,
+                              diagnosis_heading="PREOPERATIVE ASSESSMENT"):
+    note = (f"{diagnosis_heading}\n"
             "Condition alpha."
             + (" Condition delta." if second_diagnosis else "")
             + "\n"
@@ -356,10 +357,41 @@ def test_relation_contract_does_not_guess_when_neither_orientation_matches():
     assert unchanged.reconciliation_status not in prov.GROUNDED_RECONCILIATION_STATUSES
 
 
-def test_structured_fields_never_invent_a_reason_for_edge():
+def test_structured_fields_compile_a_unique_source_proved_pair_without_model_edge():
+    """Relation emission by an extractor is not a safety control.  When the
+    structured record itself supplies reconciled endpoints and a unique governed-
+    axis match, the deterministic compiler must recover that relationship."""
     note, facts, _relation = _structured_relation_case()
-    assert prov.complete_reason_for_relations(
-        facts, [], note, source=_UniqueRelatedConceptSource()) == []
+    completed = prov.complete_reason_for_relations(
+        facts, [], note, source=_UniqueRelatedConceptSource())
+    assert len(completed) == 1
+    assert completed[0].subject_event_id == "E_REASON"
+    assert completed[0].object_event_id == "E_SERVICE"
+    assert completed[0].reconciliation_status == prov.SOURCE_STRUCTURED_PRIMARY
+
+
+def test_structured_fields_do_not_compile_without_the_governed_source():
+    note, facts, _relation = _structured_relation_case()
+    assert prov.complete_reason_for_relations(facts, [], note, source=None) == []
+
+
+def test_structured_fields_compile_one_unique_diagnosis_for_multiple_services():
+    note, facts, _relation = _structured_relation_case(second_service=True)
+    completed = prov.complete_reason_for_relations(
+        facts, [], note, source=_UniqueRelatedConceptSource())
+    assert {(edge.subject_event_id, edge.object_event_id) for edge in completed} == {
+        ("E_REASON", "E_SERVICE"), ("E_REASON", "E_SERVICE_2")}
+    assert all(edge.reconciliation_status == prov.SOURCE_STRUCTURED_PRIMARY
+               for edge in completed)
+
+
+def test_structured_indications_heading_can_ground_a_unique_pair():
+    note, facts, _relation = _structured_relation_case(
+        diagnosis_heading="INDICATIONS")
+    completed = prov.complete_reason_for_relations(
+        facts, [], note, source=_UniqueRelatedConceptSource())
+    assert len(completed) == 1
+    assert completed[0].reconciliation_status == prov.SOURCE_STRUCTURED_PRIMARY
 
 
 def test_structured_fields_require_source_reconciled_endpoints():

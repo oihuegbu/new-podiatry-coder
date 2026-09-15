@@ -736,14 +736,15 @@ def _structured_reason_for_proof(rel: RelationAssertion, facts: list, note_text:
                                  source: Any, compiled: dict) -> list[str] | None:
     """Return endpoint spans proving one structured diagnosis-to-service edge.
 
-    This is deliberately narrower than relation completion.  It may UPGRADE only an
-    edge an extractor already proposed; it never manufactures every possible pair.
     The source record must independently confirm both endpoint quotations, put them
     in the two configured structured fields, and make the proposed diagnosis the
     uniquely best governed-axis match for this service among the structured
-    diagnoses.  A diagnosis may legitimately support more than one service; an
-    equal competing diagnosis, missing data, an ungoverned synonym, an ambiguous
-    concept match, or a source exception leaves the edge unchanged.
+    diagnoses.  The edge may have come from extraction or from the deterministic
+    candidate-pair compiler in ``complete_reason_for_relations``; either way this
+    proof, not the edge's origin, is what grounds it.  A diagnosis may legitimately
+    support more than one service; an equal competing diagnosis, missing data, an
+    ungoverned synonym, an ambiguous concept match, or a source exception leaves
+    the edge ungrounded.
     """
     if source is None or rel.predicate is not RelationPredicate.REASON_FOR \
             or rel.state is not RelationState.ASSERTED:
@@ -856,26 +857,23 @@ def complete_reason_for_relations(facts: list, relations: list[RelationAssertion
     proved which diagnosis justified it, even though the note states it
     directly -- the extractor just never emitted the relation.
 
-    Before that completion pass, an EXISTING asserted pair may also be grounded
-    by the reviewed structured-record route: independently reconciled endpoint
-    quotations under explicit diagnosis/service-summary headings, exactly one
-    billable summary service, and source-backed compatibility on every configured
-    axis.  That route upgrades a proposed edge only; it never generates a pair.
+    Before that completion pass, an asserted pair may also be grounded by the
+    reviewed structured-record route: independently reconciled endpoint quotations
+    under explicit diagnosis/indication and service headings plus source-backed
+    compatibility on every configured axis.
 
     For every (diagnosis, billable non-diagnosis fact) pair not already
     asserted in the required `REASON_FOR` direction, a
-    PROVISIONAL edge citing every one of both facts' own evidence spans is
-    built and run through the SAME `reconcile_relations`/`_directional_proof`
-    grammar every asserted edge is held to -- never a separate, less-proven
-    path. Only a provisional edge that reconciles `SOURCE_DIRECTIONAL` (the
-    document's own linking phrase, in the right orientation, between the two
-    facts' own disjoint verified mentions) is kept; `SOURCE_COLOCATED` (mere
-    co-occurrence) and `UNRECONCILED` completions are discarded outright --
-    this must never infer a linkage from repetition, model confidence, or a
-    bare fact-kind/code pairing, only from what the source text itself
-    states.  An extractor-emitted reverse edge does not suppress completion:
-    direction is part of relation identity, and only the source-grounded
-    diagnosis-to-service orientation can satisfy medical necessity.
+    PROVISIONAL edge citing every one of both facts' own evidence spans is built.
+    It is kept only when one of the SAME two source-grounding proofs succeeds:
+    `SOURCE_DIRECTIONAL` (a directional linking phrase between disjoint endpoint
+    spans) or `SOURCE_STRUCTURED_PRIMARY` (verified structured fields plus a unique
+    governed-axis match for that service).  `SOURCE_COLOCATED` and `UNRECONCILED`
+    candidates are discarded outright.  Enumerating candidates is not asserting
+    them: no candidate reaches the graph unless the source proof closes, so an
+    extractor omission cannot suppress a relationship that the record itself can
+    deterministically establish.  An extractor-emitted reverse edge likewise does
+    not suppress completion because direction is part of relation identity.
     """
     grammar = load_relation_grammar()
     compiled = _grammar_patterns(grammar)
@@ -918,7 +916,23 @@ def complete_reason_for_relations(facts: list, relations: list[RelationAssertion
     if not provisional:
         return upgraded
     reconciled = reconcile_relations(provisional, facts, note_text, readings=readings)
-    grounded = [r for r in reconciled if r.reconciliation_status in GROUNDED_RECONCILIATION_STATUSES]
+    grounded: list[RelationAssertion] = []
+    for relation in reconciled:
+        if relation.reconciliation_status in GROUNDED_RECONCILIATION_STATUSES:
+            grounded.append(relation)
+            continue
+        proof = _structured_reason_for_proof(
+            relation, facts, note_text, source, compiled)
+        if not proof:
+            continue
+        grounded.append(replace(
+            relation,
+            evidence_span_ids=list(dict.fromkeys(
+                list(relation.evidence_span_ids or []) + list(proof))),
+            reconciliation_status=SOURCE_STRUCTURED_PRIMARY,
+            reconciliation_evidence=list(proof),
+            extraction_source="source_structured_relation_completion",
+        ))
     return merge_relations(upgraded + grounded)
 
 

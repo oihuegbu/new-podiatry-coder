@@ -129,6 +129,10 @@ class DependencyHoldTest(unittest.TestCase):
                              "the resolved code must survive -- never cleared")
         self.assertEqual(service.chosen.code, "SERVICE_A")
         self.assertEqual(service.claim_submission_status, ClaimSubmissionStatus.HELD)
+        self.assertEqual(result.dependency_hold_reasons["P1"][0]["basis"],
+                         "grounded_reason_for")
+        self.assertEqual(result.dependency_hold_reasons["P1"][0]["source_fact_id"],
+                         "D1")
         self.assertIn(service, result.submission_held_lines)
         self.assertNotIn(service, result.billable_lines)
         # Zero submission-ready lines, and release is blocked.
@@ -150,6 +154,24 @@ class DependencyHoldTest(unittest.TestCase):
 
         item = next(r for r in result.routing if r["subject"] == "service P1")
         self.assertEqual(item["destination"], Destination.REVIEW.value)
+
+    def test_a_gate_scoped_hold_names_the_exact_material_control(self):
+        service = _resolved_line("P1", "SERVICE_A")
+        gate = GateResult(
+            "medical_necessity", Outcome.UNKNOWN,
+            "no grounded diagnosis-to-service support", "synthetic authority",
+            affected_fact_ids=("P1",))
+        result = _result([service], gates=[gate])
+
+        autonomy.decide(result)
+
+        self.assertEqual(service.claim_submission_status, ClaimSubmissionStatus.HELD)
+        self.assertEqual(result.dependency_hold_reasons["P1"][0]["basis"],
+                         "gate_scope")
+        self.assertEqual(result.dependency_hold_reasons["P1"][0]["gate"],
+                         "medical_necessity")
+        self.assertIn("no grounded diagnosis-to-service support", service.rationale)
+        self.assertNotIn("clinical episode", service.rationale)
 
     def test_an_unrelated_resolved_line_is_untouched(self):
         """Only genuinely entangled facts are held -- an independent,
@@ -200,6 +222,7 @@ class SameEpisodeProximityNeverHoldsTest(unittest.TestCase):
 
         self.assertEqual(procedure.claim_submission_status, ClaimSubmissionStatus.READY)
         self.assertIn(procedure, result.billable_lines)
+        self.assertNotIn("P1", result.dependency_hold_reasons)
 
     def test_a_negated_unreconciled_reason_for_does_not_hold_the_resolved_line(self):
         """issue #6, Codex's independent re-review (F9-R22-B): a relation
@@ -259,26 +282,26 @@ class SameEpisodeProximityNeverHoldsTest(unittest.TestCase):
         self.assertEqual(primary.claim_submission_status, ClaimSubmissionStatus.READY)
         self.assertIn(primary, result.billable_lines)
 
-    def test_a_second_unresolved_indication_still_holds_the_service(self):
-        """issue #6 F9-R9-A, Codex's earlier independent re-review of
-        6ff2761: propagation is UNCONDITIONAL, with no "does the other side
-        have independent support" carve-out -- a service documented with
-        TWO REASON_FOR indications, one resolved and one not, must stay
-        held. Materiality is graph-entanglement-based, not diagnosis-kind-
-        based: a second, still-open indication must never silently drop
-        out of the claim's open items just because a DIFFERENT indication
-        already, independently satisfies necessity."""
+    def test_an_additional_unresolved_indication_does_not_hold_an_already_supported_service(self):
+        """An open additional diagnosis stays visible on its own line but is
+        not material to a service whose exact necessity binding already closed
+        on another grounded diagnosis."""
         weak_diagnosis = _unresolved_line("D1", kind=FactKind.DIAGNOSIS)
         strong_diagnosis = _resolved_line("D2", "DX_B", kind=FactKind.DIAGNOSIS)
         service = _resolved_line("P1", "SERVICE_A")
         relations = [_reason_for("D1", "P1"), _reason_for("D2", "P1")]
         result = _result([weak_diagnosis, strong_diagnosis, service], relations=relations)
+        result.necessity_support = [{
+            "procedure_event_id": "P1",
+            "supports": [{"diagnosis_event_id": "D2"}],
+        }]
 
         autonomy.decide(result)
 
-        self.assertEqual(service.claim_submission_status, ClaimSubmissionStatus.HELD)
-        self.assertNotIn(service, result.billable_lines)
-        self.assertIn(service, result.submission_held_lines)
+        self.assertEqual(service.claim_submission_status, ClaimSubmissionStatus.READY)
+        self.assertIn(service, result.billable_lines)
+        self.assertNotIn(service, result.submission_held_lines)
+        self.assertNotIn("P1", result.dependency_hold_reasons)
 
 
 class DependencyHoldBundleTest(unittest.TestCase):

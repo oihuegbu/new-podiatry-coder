@@ -421,15 +421,15 @@ class ClaimSubmissionStatus(str, Enum):
     HELD = "held"
 
 
-#: Marker appended to `ResolvedLine.rationale` (issue #6, Codex's independent
-#: re-review, F9-R20-A clarification) whenever `autonomy.decide`/`pipeline.
-#: _apply_dependency_exclusions` holds a line for graph entanglement with an
-#: unresolved/gate-held fact, rather than an unresolved administrative fact
+#: Marker appended to `ResolvedLine.rationale` whenever `autonomy.decide`/
+#: `pipeline._apply_dependency_exclusions` holds a line for a typed, material
+#: claim dependency on an unresolved/gate-held fact, rather than an unresolved
+#: administrative fact
 #: (e.g. actor ownership). One shared constant so both writers (`autonomy.py`,
 #: `pipeline.py`) and the one reader that distinguishes the two HELD shapes
 #: for routing (`autonomy.decide`'s own `submission_held_lines` loop) can
 #: never drift apart into two different literal strings.
-DEPENDENCY_SUBMISSION_HOLD_MARKER = "; submission held: entangled with"
+DEPENDENCY_SUBMISSION_HOLD_MARKER = "; submission held: material dependency"
 
 #: Marker prefixed onto `ResolvedLine.rationale` (issue #6, Codex's
 #: independent re-review, F9-R19-A Finding 1) whenever `resolution.
@@ -606,6 +606,12 @@ class CodingResult:
     # re-derive -- never by matching `excluded_reason`'s free text, which
     # cannot distinguish a dependency exclusion from a claim-set-mechanic one.
     dependency_excluded_fact_ids: frozenset = field(default_factory=frozenset)
+    # Exact, machine-readable causes for the IDs above, keyed by affected fact
+    # id.  Each item names the source fact/gate and the typed material basis
+    # (`claim_line_intent`, grounded `reason_for`, or direct `gate_scope`).
+    # Clinical-episode membership is deliberately not a basis.  This makes a
+    # held line auditable without reverse-engineering a generic prose message.
+    dependency_hold_reasons: dict[str, list[dict]] = field(default_factory=dict)
     bypassed_ncci: list = field(default_factory=list)   # code pairs cleared by a modifier
     # NCCI PTP component codes DEMOTED during reconciliation (bundled into a payable
     # comprehensive code). Recorded as (component, payable) so the NCCI gate can report

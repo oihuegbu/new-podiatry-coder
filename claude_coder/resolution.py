@@ -1289,6 +1289,21 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
             best[c.code] = c
         else:
             best[c.code] = _merge_candidate(prior, c)
+    # A recall hit may be the billable ``unspecified`` leaf even though the
+    # record contains an independently grounded side.  Waiting until
+    # ``refine_diagnosis_specificity`` is too late: both verifiers can correctly
+    # reject that broad leaf before a line exists for the post-selection
+    # refinement to inspect.  Offer authoritative, descriptor-validated family
+    # relatives to the ORIGINAL verification round instead.  This widens recall
+    # only; every added code remains verification-required and must survive the
+    # same semantic, DOS, descriptor-entailment, corroboration, and claim gates.
+    if fact.kind is FactKind.DIAGNOSIS:
+        base_candidates = list(seeds) + list(best.values())
+        for candidate in _diagnosis_specificity_candidates(
+                fact, base_candidates, source, reconciliation):
+            prior = best.get(candidate.code)
+            best[candidate.code] = (candidate if prior is None
+                                    else _merge_candidate(prior, candidate))
     pool = sorted(best.values(), key=lambda c: c.score, reverse=True)
 
     # ---- Semantic eligibility-before-retrieval (issue #6 items 4/5, F8-R2) -------
@@ -1713,6 +1728,103 @@ def _authoritative_pool(code: str, source: CodeSource, *,
     return [_candidate_from_code(c, source, candidate_source=candidate_source,
                                  authority=authority)
             for c in source.leaf_codes(code, "icd10")]
+
+
+def _diagnosis_specificity_candidates(
+        fact: ClinicalFact, candidates: list[CandidateCode], source: CodeSource,
+        reconciliation=None) -> list[CandidateCode]:
+    """Return authoritative, evidence-compatible ICD specificity relatives.
+
+    Retrieval commonly returns an already-billable ``unspecified`` leaf.  A
+    category-expansion API quite correctly returns that leaf itself, so its
+    side-specific siblings never reach the verifier and the verifier has no
+    defensible candidate to choose.  This helper derives a bounded family from
+    the candidate's own authoritative code/descriptor, never from a medical-code
+    list:
+
+    * the fact's side must be claim-authorized by anchored evidence;
+    * the base descriptor must itself declare that it is unspecified;
+    * relatives come only from authoritative ICD leaves under the base code's
+      immediate stem and category;
+    * a relative must name the documented side, preserve the descriptor concept
+      (exact descriptor family or distinctive-token overlap), and contradict no
+      documented axis;
+    * returned relatives are candidates for normal verification, never approvals.
+
+    The category fallback covers code sets whose specific leaves are not encoded
+    by replacing the final character.  Its descriptor checks prevent unrelated
+    children in the same category from entering the bounded result.
+    """
+    if fact.kind is not FactKind.DIAGNOSIS:
+        return []
+    laterality = _fact_laterality(fact, reconciliation)
+    if laterality not in ("right", "left"):
+        return []
+
+    def _tokens(value: str) -> set[str]:
+        return {token for token in re.split(r"[^a-z]+", value.lower())
+                if len(token) > 3 and token not in _GENERIC_TOKENS}
+
+    existing = {(candidate.code.replace(".", "").upper(), candidate.system)
+                for candidate in candidates}
+    discovered: dict[tuple[str, str], tuple[bool, int, CandidateCode]] = {}
+    for base in candidates:
+        if base.system != "icd10":
+            continue
+        # Candidate copies can carry a shortened retrieval/UMLS label.  Family
+        # construction must use the same authoritative descriptor source later
+        # bound for verification, never whichever label happened to win recall.
+        base_descriptions = source.descriptions(base.code, "icd10") or []
+        descriptor = str(base_descriptions[0] if base_descriptions else "")
+        if not descriptor:
+            continue
+        lowered = descriptor.lower()
+        if "unspecified" not in lowered or laterality in lowered:
+            continue
+        undotted = base.code.replace(".", "").upper()
+        if len(undotted) < 2:
+            continue
+        roots = list(dict.fromkeys((undotted[:-1], undotted[:3])))
+        family = _strip_laterality(descriptor)
+        concept = _tokens(family)
+        for root in roots:
+            for code in source.leaf_codes(root, "icd10"):
+                normalized = str(code).replace(".", "").upper()
+                key = (normalized, "icd10")
+                if key in existing or normalized == undotted:
+                    continue
+                descriptions = source.descriptions(normalized, "icd10") or []
+                relative_descriptor = str(descriptions[0] if descriptions else "")
+                relative_lower = relative_descriptor.lower()
+                if (not relative_descriptor or laterality not in relative_lower
+                        or "unspecified" in _strip_laterality(relative_lower)):
+                    continue
+                relative_family = _strip_laterality(relative_descriptor)
+                relative_tokens = _tokens(relative_family)
+                exact_family = relative_family == family
+                overlap = len(concept & relative_tokens)
+                if not exact_family and (not concept or overlap < 2):
+                    continue
+                candidate = CandidateCode(
+                    code=str(code), system="icd10", descriptor=relative_descriptor,
+                    score=float(base.score), source="icd10-specificity-family",
+                    authority={
+                        "source": "ICD-10-CM authoritative specificity family",
+                        "base_candidate": base.code,
+                        "base_source": base.source,
+                    },
+                    requires_verification=True,
+                )
+                if _evaluate(fact, candidate, source, reconciliation) is None:
+                    continue
+                rank = (exact_family, overlap)
+                prior = discovered.get(key)
+                if prior is None or rank > prior[:2]:
+                    discovered[key] = (exact_family, overlap, candidate)
+
+    ordered = sorted(discovered.values(), key=lambda item: (item[0], item[1]),
+                     reverse=True)
+    return [item[2] for item in ordered[:6]]
 
 
 VERIFY_K = 8           # shortlist size sent to the entailment-selection call

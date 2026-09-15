@@ -42,15 +42,11 @@ from .models import (
 #:
 #: `REASON_FOR` propagates ONLY in its documented direction -- diagnosis/
 #: indication TO the service whose necessity depends on it, never
-#: automatically in reverse: an unresolved diagnosis can leave its service
-#: unjustified, but an unresolved OR excluded service does not, by itself,
-#: retroactively invalidate a diagnosis that is otherwise a real, resolved
-#: selection. Propagation is unconditional otherwise -- never suppressed
-#: just because some OTHER fact also relates to the same endpoint (issue #6
-#: F9-R9-A: "materiality is graph-entanglement-based, not diagnosis-kind-
-#: based" -- a second, still-unresolved documented indication for a
-#: procedure must stay a visible open item even when a different indication
-#: already independently satisfies that procedure's necessity).
+#: automatically in reverse. It is material only while that exact service
+#: lacks a positive diagnosis binding from the medical-necessity gate. Once
+#: the gate has positively established a supporting diagnosis, an additional
+#: unresolved indication stays visible as its own open line but cannot erase
+#: or hold the independently defensible service.
 #:
 #: `PART_OF` is deliberately NOT treated as its own claim-impact edge here,
 #: even when grounded: a generic standalone `PART_OF` assertion is not proof
@@ -104,6 +100,14 @@ def _necessity_authoritatively_met(result: CodingResult, source) -> bool:
         if not any(s.get("policy_qualifying") for s in (binding.get("supports") or [])):
             return False                 # linked, but not by a policy-qualifying diagnosis
     return True
+
+
+def dependency_hold_text(reasons: list[dict] | None) -> str:
+    """Stable human rendering of typed material dependency causes."""
+    summaries = [str(reason.get("summary") or "").strip()
+                 for reason in (reasons or []) if isinstance(reason, dict)]
+    summaries = list(dict.fromkeys(summary for summary in summaries if summary))
+    return "; ".join(summaries) or "a typed claim dependency did not clear"
 
 # Which destination wins when several apply: a hard stop first, then an operational
 # retry, then genuine coding judgement, then a provider question, then a do-not-bill
@@ -269,32 +273,104 @@ def decide(result: CodingResult,
     # directional `REASON_FOR` edge (`_grounded_asserted`) -- see that
     # constant's docstring above for why `PART_OF` is not its own
     # propagation path even when grounded.
-    def _entangled(fact_id: str) -> set[str]:
+    necessity_bound = {
+        str(binding.get("procedure_event_id")): binding
+        for binding in (result.necessity_support or [])
+        if binding.get("procedure_event_id")
+    }
+
+    def _necessity_is_already_supported(service_id: str) -> bool:
+        """Whether the necessity gate positively bound this exact service.
+
+        An additional unresolved diagnosis cannot change a service's existing
+        medical-necessity disposition once the gate has already accepted another
+        grounded support for that same service (and policy qualification where
+        applicable).  The unresolved diagnosis remains visible on its own line;
+        it simply does not destructively hold an independently justified service.
+        """
+        binding = necessity_bound.get(str(service_id))
+        return bool(binding and binding.get("supports"))
+
+    def _material_impacts(fact_id: str) -> dict[str, list[dict]]:
         if fact_id is None:
-            return set()
-        impacted: set[str] = set()
+            return {}
+        impacted: dict[str, list[dict]] = {}
+
+        def add(target: str, reason: dict) -> None:
+            if not target or target == fact_id:
+                return
+            impacted.setdefault(target, []).append(reason)
+
         for intent in (getattr(result, "claim_line_intents", None) or ()):
             ids = set(getattr(intent, "clinical_event_ids", None) or ())
             if fact_id in ids:
-                impacted |= (ids - {fact_id})
+                for target in ids - {fact_id}:
+                    add(target, {
+                        "basis": "claim_line_intent",
+                        "source_fact_id": fact_id,
+                        "intent_id": str(getattr(intent, "intent_id", "") or ""),
+                        "summary": (
+                            f"unresolved fact {fact_id} is part of the same "
+                            f"code-determining claim-line intent as {target}"),
+                    })
         for rel in (getattr(result, "relations", None) or ()):
             if rel.predicate is not RelationPredicate.REASON_FOR:
                 continue
             if not _grounded_asserted(rel):
                 continue
             if rel.subject_event_id == fact_id:
-                impacted.add(rel.object_event_id)
+                # A second open indication does not invalidate a service whose
+                # exact medical-necessity binding is already positively closed.
+                # It remains an unresolved diagnosis line, but is not material to
+                # the supported service's submission correctness.
+                if _necessity_is_already_supported(rel.object_event_id):
+                    continue
+                add(rel.object_event_id, {
+                    "basis": "grounded_reason_for",
+                    "source_fact_id": fact_id,
+                    "relation_id": str(getattr(rel, "relation_id", "") or ""),
+                    "summary": (
+                        f"unresolved diagnosis fact {fact_id} is a grounded "
+                        f"medical-necessity dependency of service "
+                        f"{rel.object_event_id}"),
+                })
         return impacted
 
+    def _entangled(fact_id: str) -> set[str]:
+        return set(_material_impacts(fact_id))
+
     blocked_fact_ids: set[str] = set()
+    blocked_reasons: dict[str, list[dict]] = {}
+
+    def _block(target: str, reason: dict) -> None:
+        if not target:
+            return
+        blocked_fact_ids.add(target)
+        bucket = blocked_reasons.setdefault(target, [])
+        identity = (reason.get("basis"), reason.get("source_fact_id"),
+                    reason.get("relation_id"), reason.get("intent_id"),
+                    reason.get("gate"))
+        if not any((item.get("basis"), item.get("source_fact_id"),
+                    item.get("relation_id"), item.get("intent_id"),
+                    item.get("gate")) == identity for item in bucket):
+            bucket.append(reason)
+
     for ln in result.lines:
         if ln.fact.billable and not ln.resolved and not ln.excluded_reason:
-            blocked_fact_ids |= _entangled(ln.fact.fact_id)
+            for target, reasons in _material_impacts(ln.fact.fact_id).items():
+                for reason in reasons:
+                    _block(target, reason)
     for g in result.gates:
         if g.outcome in (Outcome.UNKNOWN, Outcome.BLOCKED, Outcome.ERROR) and g.affected_fact_ids:
             for fid in g.affected_fact_ids:
-                blocked_fact_ids.add(fid)
-                blocked_fact_ids |= _entangled(fid)
+                _block(fid, {
+                    "basis": "gate_scope",
+                    "gate": g.name,
+                    "summary": f"{g.name} did not clear for fact {fid}: {g.detail}",
+                })
+                for target, reasons in _material_impacts(fid).items():
+                    for reason in reasons:
+                        _block(target, reason)
 
     # issue #6 F9-R11-A/B: the one real, typed signal a caller (`pipeline.
     # _reconcile_claim_after_pruning`) needs to tell a DEPENDENCY exclusion
@@ -302,6 +378,7 @@ def decide(result: CodingResult,
     # else `excluded_reason` might name) -- set fresh every call, never
     # accumulated here; the caller is the one with a reason to accumulate.
     result.dependency_excluded_fact_ids = frozenset(blocked_fact_ids)
+    result.dependency_hold_reasons = blocked_reasons
 
     # A currently-resolved, billable line entangled with an unresolved or
     # gate-held fact cannot be CERTIFIED FOR SUBMISSION independently of it --
@@ -327,9 +404,8 @@ def decide(result: CodingResult,
                     and ln.fact.fact_id in blocked_fact_ids):
                 ln.claim_submission_status = ClaimSubmissionStatus.HELD
                 ln.rationale = (
-                    f"{ln.rationale}{DEPENDENCY_SUBMISSION_HOLD_MARKER} an unresolved or "
-                    f"gate-held fact sharing this line's clinical episode or necessity "
-                    f"linkage, which could change this line's own billing correctness")
+                    f"{ln.rationale}{DEPENDENCY_SUBMISSION_HOLD_MARKER}: "
+                    f"{dependency_hold_text(blocked_reasons.get(ln.fact.fact_id))}")
 
     # Computed AFTER the exclusion stamping above, not before: whether an
     # unresolved fact's own `blocking` flag (section 3) should fire depends on

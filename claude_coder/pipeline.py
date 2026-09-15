@@ -21,7 +21,7 @@ from . import arbitration, certificate, em, extraction, gates, ontology, resolut
 from . import graph_consensus as _gc
 from . import requirement as _requirement
 from .arbitration import LLMFn
-from .autonomy import decide
+from .autonomy import decide, dependency_hold_text
 from .data_access import AuthoritativeSource, CodeSource
 from .models import (ClaimSubmissionStatus, CodingResult, DEPENDENCY_SUBMISSION_HOLD_MARKER,
                      ResolutionMethod, ResolvedLine, SYSTEM_UNRESOLVED_MARKER,
@@ -2334,7 +2334,9 @@ def _restore_pre_claim_set_state(result: CodingResult, baseline: dict) -> None:
     result.ncci_suppressed = []
 
 
-def _apply_dependency_exclusions(result: CodingResult, dependency_excluded_ids: set) -> None:
+def _apply_dependency_exclusions(
+        result: CodingResult, dependency_excluded_ids: set,
+        dependency_hold_reasons: dict[str, list[dict]] | None = None) -> None:
     """Re-stamp the fact_ids a PRIOR round's `decide()` call already
     identified as dependency-excluded (issue #6 F9-R11-A/B) -- BEFORE this
     round's claim-set mechanics run, so they see the dependency-pruned
@@ -2364,9 +2366,8 @@ def _apply_dependency_exclusions(result: CodingResult, dependency_excluded_ids: 
                 and ln.fact.fact_id in dependency_excluded_ids):
             ln.claim_submission_status = ClaimSubmissionStatus.HELD
             ln.rationale = (
-                f"{ln.rationale}{DEPENDENCY_SUBMISSION_HOLD_MARKER} an unresolved or "
-                f"gate-held fact sharing this line's clinical episode or necessity "
-                f"linkage, which could change this line's own billing correctness")
+                f"{ln.rationale}{DEPENDENCY_SUBMISSION_HOLD_MARKER}: "
+                f"{dependency_hold_text((dependency_hold_reasons or {}).get(ln.fact.fact_id))}")
 
 
 def _reconcile_claim_after_pruning(
@@ -2428,10 +2429,12 @@ def _reconcile_claim_after_pruning(
     if baseline is None:
         baseline = _snapshot_pre_claim_set_state(result)
     dependency_excluded_ids: set = set()
+    dependency_hold_reasons: dict[str, list[dict]] = {}
     max_rounds = len(result.lines) + 2
     for _ in range(max_rounds):
         _restore_pre_claim_set_state(result, baseline)
-        _apply_dependency_exclusions(result, dependency_excluded_ids)
+        _apply_dependency_exclusions(
+            result, dependency_excluded_ids, dependency_hold_reasons)
         modifier_engine.assign_claim(result, source, source_reconciliation)
         apply_ncci_bundling(result, source)
         apply_integral_bundling(result, source)
@@ -2441,7 +2444,17 @@ def _reconcile_claim_after_pruning(
             reconciliation=source_reconciliation)
         decide(result, source=source)
         new_ids = set(result.dependency_excluded_fact_ids)
+        for fact_id, reasons in (result.dependency_hold_reasons or {}).items():
+            bucket = dependency_hold_reasons.setdefault(fact_id, [])
+            for reason in reasons:
+                if reason not in bucket:
+                    bucket.append(reason)
         if new_ids <= dependency_excluded_ids:
+            # `decide` reports only causes visible in THIS iteration.  Lines
+            # deliberately held before the gates rerun no longer participate in
+            # those gates, so preserve the exact causes accumulated when each hold
+            # was first established rather than replacing them with an empty map.
+            result.dependency_hold_reasons = dependency_hold_reasons
             return
         dependency_excluded_ids |= new_ids
     # Mathematically unreachable given the monotonic-growth invariant above

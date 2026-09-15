@@ -1,8 +1,8 @@
 {
   "control_id": "relation_directional_evidence",
-  "version": "relation-evidence-grammar-v5",
+  "version": "relation-evidence-grammar-v6",
   "control_mode": "ENFORCED_FAIL_CLOSED",
-  "description": "When may the source document be said to STATE a directional relation between two clinical events? Two events quoted near each other are merely co-located and do not prove a relationship. The primary route requires the endpoints' verified verbatim mentions to sit on either side of a configured linking phrase in one clause. A second, narrowly governed structured-record route applies only to an existing extractor-proposed reason-for edge: both endpoint quotations must be independently reconciled, occupy explicitly labelled diagnosis and procedure fields, and the proposed diagnosis must be the uniquely best governed-axis match for that service among the structured diagnoses. This grammar contains no medical code, code family, clinical term, or specialty-specific procedure.",
+  "description": "When may the source document be said to STATE a directional relation between two clinical events? Two events quoted near each other are merely co-located and do not prove a relationship. The primary route requires the endpoints' verified verbatim mentions to sit on either side of a configured linking phrase in one clause. A second, narrowly governed structured-record route compiles diagnosis-to-service candidates independently of model relation emission: both endpoint quotations must be independently reconciled, occupy explicitly labelled diagnosis/indication and procedure fields, and the diagnosis must be the uniquely best governed-axis match for that service among the structured diagnoses. Candidate enumeration never creates a relation unless this source proof closes. This grammar contains no medical code, code family, clinical term, or specialty-specific procedure.",
   "authority": [
     "CMS Program Integrity Manual (Pub. 100-08) Chapter 3, Section 3.3.2.1.1 -- the medical record itself must support the medical necessity of the service billed",
     "ICD-10-CM Official Guidelines for Coding and Reporting, Section IV -- report the diagnosis the record documents as the reason for the encounter/service; a linkage the record does not state may not be inferred",
@@ -17,10 +17,11 @@
     "as well as", "in addition to"
   ],
   "structured_reason_for": {
-    "description": "A surgical record may state diagnoses and performed services in separate, explicitly labelled fields. This route proves only an extractor-proposed diagnosis-to-service pair whose endpoint quotations were independently reconciled to the original document, whose diagnosis is in a pre/post-operative diagnosis or assessment section, whose service is in a labelled procedure section, and whose diagnosis is the uniquely best governed-axis match for that service among structured diagnoses. It never infers a pair from co-location, encounter membership, model agreement, or an unlabelled narrative section.",
+    "description": "A surgical record may state diagnoses/indications and performed services in separate, explicitly labelled fields. This route proves only a diagnosis-to-service candidate whose endpoint quotations were independently reconciled to the original document, whose diagnosis is in a diagnosis, assessment, or indications section, whose service is in a labelled procedure section, and whose diagnosis is the uniquely best governed-axis match for that service among structured diagnoses. It never infers a pair from co-location, encounter membership, model agreement, or an unlabelled narrative section.",
     "diagnosis_header_patterns": [
       "(?:pre|post)[ -]?operative (?:assessment|diagnos(?:is|es))",
-      "(?:primary )?diagnos(?:is|es)"
+      "(?:primary )?diagnos(?:is|es)",
+      "indications?"
     ],
     "service_header_patterns": [
       "(?:procedure|operation)(?:s)?(?: performed| in detail| description)?"
@@ -49,5 +50,5 @@
       ]
     }
   },
-  "notes": "min_independent_assertions affects only the audit/confidence corroboration axis and never release. Agreement between extraction runs is not a statement about the record. Cue phrases, clause boundaries, heading patterns, and compatibility axes are reviewed configuration. A predicate with no entry cannot be reconciled directionally. The structured route never invents a relation: it can only ground an asserted reason-for edge after deterministic source and compatibility checks. Missing reconciliation, missing axes, ambiguous terminology, multiple summary services, or unmatched headings leave the edge unreconciled."
+  "notes": "min_independent_assertions affects only the audit/confidence corroboration axis and never release. Agreement between extraction runs is not a statement about the record. Cue phrases, clause boundaries, heading patterns, and compatibility axes are reviewed configuration. A predicate with no entry cannot be reconciled directionally. The structured route compiles candidate pairs but grounds only a uniquely compatible diagnosis-to-service relation after deterministic source and compatibility checks. Missing reconciliation, missing axes, ambiguous terminology, an equal-scoring diagnosis, or unmatched headings leave the edge unreconciled."
 }

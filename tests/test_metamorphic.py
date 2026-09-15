@@ -124,16 +124,9 @@ def test_materiality_from_authoritative_coverage():
     """Materiality of an unresolved diagnosis follows the necessity gate's OWN RESOLVED
     BINDING — the claim-line diagnosis that actually justified each service — not a second,
     parallel re-derivation from coverage membership (Codex F6-R3, adjacent instance):
-      (a) a procedure governed by NO policy (necessity unconfirmable), documenting a
-          SECOND, unresolved indication for that SAME procedure alongside the
-          resolved one that already satisfies it -> the unresolved dx BLOCKS — this
-          is the exostectomy/Haglund case (28118 is ungoverned), where an unresolved
-          documented indication for the procedure must never silently drop out of
-          the claim's open items just because a DIFFERENT indication already
-          sufficed (issue #6 F9-R9-A, Codex's independent re-review of 6ff2761:
-          materiality is graph-entanglement-based, not diagnosis-kind-based, so this
-          case's fixture must actually DOCUMENT the dependency it exercises rather
-          than relying on every diagnosis blocking by default);
+      (a) a procedure governed by NO policy whose necessity gate positively bound a
+          grounded diagnosis -> an additional unresolved indication remains visible
+          on its own line but is non-material to the already-justified service;
       (b) a governed procedure whose necessity the gate RESOLVED (encounter linkage AND a
           policy-qualifying diagnosis) -> an unresolved EXTRA dx, with NO relationship to
           anything on the claim, is non-material -> AUTO_READY;
@@ -190,11 +183,11 @@ def test_materiality_from_authoritative_coverage():
         decide(r, source=source)
         return r.verdict
     # (a): dx(None) ("Dx") is a SECOND documented REASON_FOR indication for the
-    # SAME ungoverned procedure UU01, alongside the already-resolved DQ01 --
-    # entangled with a still-billable procedure, so it stays blocking even
-    # though UU01's necessity is independently satisfied by DQ01 alone.
+    # SAME ungoverned procedure. The real necessity gate has already bound the
+    # released diagnosis to that service, so the extra open diagnosis stays
+    # visible but does not destructively hold the supported procedure.
     assert run([proc("UU01"), dx("DQ01"), dx(None)], [_link("DDQ01"), _link("Dx")]) \
-        is Verdict.REVIEW_REQUIRED                                               # (a)
+        is Verdict.AUTO_READY                                                    # (a)
     assert run([proc("GG01"), dx("DQ01"), dx(None)], [_link("DDQ01")]) \
         is Verdict.AUTO_READY                                                    # (b)
     assert run([proc("GG01"), dx("ZZ99"), dx(None)], [_link("DZZ99")]) \
