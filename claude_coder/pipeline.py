@@ -53,6 +53,115 @@ _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SECOND_READING_RUN_ID = "second-reading"
 
 
+def _prior_code_selection_records(repository, encounter_id: str) -> list[dict]:
+    """Return prior durable code-selection records when the repository supports reads.
+
+    Lightweight/test sinks need not implement ``records``. A readable durable
+    repository supplies historical comparisons; absence of that optional read
+    capability simply means no cross-run claim is made. A real read failure is not
+    swallowed: unavailable durable state reaches the existing system-hold boundary.
+    """
+    reader = getattr(repository, "records", None)
+    if not callable(reader):
+        return []
+    return [dict(row.get("record") or {}) for row in reader(encounter_id)
+            if row.get("kind") == "code_tie_resolution"
+            and isinstance(row.get("record"), dict)]
+
+
+def _selection_snapshot_signature(record: dict, released_code: str = ""):
+    """Comparable outcome for one exact candidate/evidence snapshot.
+
+    Legacy/incomplete records and non-semantic deterministic decisions return
+    ``None``. Candidate generation and structured deterministic closure are stable by
+    construction; this guard is specifically for semantic-evaluator variance.
+    """
+    if record.get("stage") != "code_selection_uniqueness":
+        return None
+    candidate_set = record.get("candidate_set") or {}
+    evidence_packet = record.get("evidence_packet") or {}
+    candidate_hash = str(candidate_set.get("candidate_set_sha256") or "")
+    evidence_hash = str(evidence_packet.get("packet_sha256") or "")
+    candidates = candidate_set.get("candidates") or []
+    if not candidate_hash or not evidence_hash or not candidates:
+        return None
+    still = set(record.get("still_entailed") or [])
+    eliminated = set((record.get("eliminated") or {}).keys())
+    unresolved = set((record.get("system_unresolved") or {}).keys())
+    states = []
+    for candidate in candidates:
+        code = str(candidate.get("code") or "")
+        system = str(candidate.get("system") or "")
+        if not code or not system:
+            return None
+        state = ("supported" if code in still or code == released_code
+                 else "eliminated" if code in eliminated
+                 else "unresolved" if code in unresolved
+                 else "unaccounted")
+        states.append((system, code, state))
+    return candidate_hash, evidence_hash, tuple(states)
+
+
+def _apply_cross_run_selection_guard(
+        line: ResolvedLine, prior_records: list[dict]) -> ResolvedLine:
+    """Turn exact-input, run-to-run semantic variance into a line-local system hold.
+
+    A prior model outcome never authorizes a code and never overrides the current
+    authority snapshot. It only prevents a model-dependent candidate that changed
+    disposition on identical candidate/evidence fingerprints from disappearing or
+    being released as stable. The candidate remains visible for automated retry;
+    unrelated lines are unaffected.
+    """
+    record = line.tie_record or {}
+    current = _selection_snapshot_signature(
+        record, line.chosen.code if line.chosen is not None else "")
+    if current is None:
+        return line
+    candidate_hash, evidence_hash, current_states = current
+    prior_states = None
+    # Records are returned in append order. Compare with the most recent exact
+    # snapshot only: a changed outcome triggers one automated retry/hold, while a
+    # subsequent repeat of the new outcome establishes stability. Comparing with
+    # every historical outcome would poison the snapshot forever after one old
+    # disagreement and provide no possible automated adjudication path.
+    for prior in reversed(prior_records):
+        signature = _selection_snapshot_signature(
+            prior, str(prior.get("code") or "") if prior.get("released") else "")
+        if signature is not None and signature[:2] == (candidate_hash, evidence_hash):
+            prior_states = signature[2]
+            break
+    differences = []
+    if prior_states is not None and len(prior_states) == len(current_states):
+        for old, new in zip(prior_states, current_states):
+            if old[:2] == new[:2] and old[2] != new[2]:
+                differences.append((*old[:2], old[2], new[2]))
+    differences = sorted(set(differences))
+    if not differences:
+        return line
+
+    if line.chosen is not None:
+        chosen = line.chosen
+        if all((c.code, c.system) != (chosen.code, chosen.system)
+               for c in line.alternatives):
+            line.alternatives = [chosen, *line.alternatives]
+        line.chosen = None
+    line.method = ResolutionMethod.ABSTAINED
+    line.documentation_gap = None
+    line.candidate_recall_gap = False
+    line.tie_record = {
+        **record,
+        "cross_run_variance": [{
+            "system": system, "code": code,
+            "prior_state": prior_state, "current_state": current_state,
+        } for system, code, prior_state, current_state in differences],
+    }
+    line.rationale = (
+        f"{SYSTEM_UNRESOLVED_MARKER} semantic candidate disposition changed across "
+        "runs despite identical candidate-set and evidence-packet fingerprints; "
+        "candidate retained for automated adjudication, never erased or released as stable")
+    return line
+
+
 def _fingerprint_certifiable(fp) -> bool:
     """A release may be certified only against a fingerprint that actually IDENTIFIES the
     authoritative data — not merely asserts that some data was there.
@@ -370,6 +479,8 @@ def code_encounter(
         if audit_repository is None:
             from app.core.config import PROVENANCE_DB
             audit_repository = _prov.SqliteAuditRepository(PROVENANCE_DB, strict=True)
+        prior_code_selection_records = _prior_code_selection_records(
+            audit_repository, encounter_id)
         audit_hashes = [audit_repository.append(
             encounter_id, "evidence_anchoring", _prov.anchoring_report(facts))]
         # ---- Second independent reading, compared on GRAPH AXES ---------------------
@@ -1037,6 +1148,7 @@ def code_encounter(
                 and not went_through_pv and not line.documentation_gap
                 and not line.tie_record):
             line = arbitration.arbitrate(line, arbitrate_llm)
+        line = _apply_cross_run_selection_guard(line, prior_code_selection_records)
         # AUDIT: a tie that several candidates survived is a claim-affecting decision
         # in its own right -- which axes distinguished them, what the ORIGINAL DOCUMENT
         # was proven to say about each, and whether the page settled it or the provider
