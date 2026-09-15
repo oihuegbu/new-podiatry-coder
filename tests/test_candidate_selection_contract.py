@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from app.contracts.source_evidence import (ReconciliationStatus, SourceReconciliation,
                                             SpanReconciliation)
-from claude_coder import resolution, verify
+from claude_coder import pipeline, resolution, verify
 from claude_coder.data_access import MockSource
 from claude_coder.models import (CandidateCode, ClinicalFact, Disposition, EvidenceSpan,
                                  FactKind, ResolutionMethod, ResolvedLine)
@@ -157,3 +157,66 @@ def test_model_disagreement_preserves_recall_candidate_as_system_unresolved():
     assert remaining == []
     assert eliminated == {}
     assert "CODE_A" in unresolved
+
+
+def test_cross_run_variance_retains_candidate_and_holds_only_its_line():
+    fact = _fact("F1", "assembly repair", "assembly repair performed", "s1")
+    candidate = CandidateCode(
+        code="CODE_A", system="cpt", descriptor="assembly repair", source="retrieval")
+    snapshot = resolution._candidate_set_snapshot(
+        [candidate], (fact.description,), "service-A")
+    packet = verify.build_service_evidence_packet(fact, service_context_id="service-A")
+    current_record = {
+        "stage": "code_selection_uniqueness",
+        "candidate_set": snapshot,
+        "evidence_packet": packet.as_record(),
+        "still_entailed": ["CODE_A"],
+        "eliminated": {},
+    }
+    prior_record = {
+        **current_record,
+        "still_entailed": [],
+        "eliminated": {"CODE_A": "prior independently validated rejection"},
+        "released": False,
+        "code": "",
+    }
+    line = ResolvedLine(
+        fact=fact, chosen=candidate, alternatives=[],
+        method=ResolutionMethod.VERIFIED, tie_record=current_record)
+
+    guarded = pipeline._apply_cross_run_selection_guard(line, [prior_record])
+
+    assert guarded.chosen is None
+    assert [c.code for c in guarded.alternatives] == ["CODE_A"]
+    assert "SYSTEM_UNRESOLVED" in guarded.rationale
+    assert guarded.tie_record["cross_run_variance"] == [{
+        "system": "cpt", "code": "CODE_A",
+        "prior_state": "eliminated", "current_state": "supported"}]
+
+
+def test_cross_run_guard_uses_latest_exact_snapshot_so_retry_can_converge():
+    fact = _fact("F1", "assembly repair", "assembly repair performed", "s1")
+    candidate = CandidateCode(
+        code="CODE_A", system="cpt", descriptor="assembly repair", source="retrieval")
+    snapshot = resolution._candidate_set_snapshot(
+        [candidate], (fact.description,), "service-A")
+    packet = verify.build_service_evidence_packet(fact, service_context_id="service-A")
+    current_record = {
+        "stage": "code_selection_uniqueness", "candidate_set": snapshot,
+        "evidence_packet": packet.as_record(), "still_entailed": ["CODE_A"],
+        "eliminated": {},
+    }
+    old_conflict = {
+        **current_record, "still_entailed": [],
+        "eliminated": {"CODE_A": "old rejection"}, "released": False, "code": ""}
+    latest_repeat = {
+        **current_record, "released": False, "code": ""}
+    line = ResolvedLine(
+        fact=fact, chosen=candidate, method=ResolutionMethod.VERIFIED,
+        tie_record=current_record)
+
+    guarded = pipeline._apply_cross_run_selection_guard(
+        line, [old_conflict, latest_repeat])
+
+    assert guarded.chosen is candidate
+    assert "cross_run_variance" not in guarded.tie_record
