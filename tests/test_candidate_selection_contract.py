@@ -220,3 +220,29 @@ def test_cross_run_guard_uses_latest_exact_snapshot_so_retry_can_converge():
 
     assert guarded.chosen is candidate
     assert "cross_run_variance" not in guarded.tie_record
+
+
+def test_cross_run_guard_does_not_compare_different_execution_contracts():
+    """A source/model/config change is a new process, not model variance."""
+    fact = _fact("F1", "assembly repair", "assembly repair performed", "s1")
+    candidate = CandidateCode(
+        code="CODE_A", system="cpt", descriptor="assembly repair", source="retrieval")
+    snapshot = resolution._candidate_set_snapshot(
+        [candidate], (fact.description,), "service-A")
+    packet = verify.build_service_evidence_packet(fact, service_context_id="service-A")
+    current_record = {
+        "stage": "code_selection_uniqueness", "candidate_set": snapshot,
+        "evidence_packet": packet.as_record(), "still_entailed": ["CODE_A"],
+        "eliminated": {}, "execution_contract_sha256": "contract-current"}
+    prior_record = {
+        **current_record, "still_entailed": [],
+        "eliminated": {"CODE_A": "prior rejection"}, "released": False,
+        "code": "", "execution_contract_sha256": "contract-prior"}
+    line = ResolvedLine(
+        fact=fact, chosen=candidate, method=ResolutionMethod.VERIFIED,
+        tie_record=current_record)
+
+    guarded = pipeline._apply_cross_run_selection_guard(line, [prior_record])
+
+    assert guarded.chosen is candidate
+    assert "cross_run_variance" not in guarded.tie_record
