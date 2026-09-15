@@ -213,9 +213,21 @@ class TerminologyIndex:
         # the query.  As with every other result from this method, callers use it
         # to propose candidates for independent descriptor/evidence verification.
         contained: dict[str, list[str]] = {}
-        buckets = [self._contained_by_token.get(token, ()) for token in query_tokens]
-        anchor = min((bucket for bucket in buckets if bucket), key=len, default=())
-        for code, source_tokens, source_term in anchor:
+        # A contained source phrase can be anchored by *any* one of its tokens.
+        # Choosing only the globally smallest query-token bucket looks efficient,
+        # but is incorrect: an incidental, rare qualifier in the note can select a
+        # bucket unrelated to the actual contained source phrase and silently lose
+        # its candidate.  Union the bounded token buckets, then de-duplicate the
+        # exact source entries before testing full containment.  This remains a
+        # source-bounded lookup (not a table scan or fuzzy match), while making
+        # every exact contained phrase discoverable regardless of extra wording.
+        entries, seen_entries = [], set()
+        for token in sorted(query_tokens):
+            for entry in self._contained_by_token.get(token, ()):
+                if entry not in seen_entries:
+                    seen_entries.add(entry)
+                    entries.append(entry)
+        for code, source_tokens, source_term in entries:
             if source_tokens <= query_tokens:
                 contained.setdefault(code, []).append(source_term)
         for code, source_terms in contained.items():
