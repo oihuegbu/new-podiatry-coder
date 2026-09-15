@@ -194,6 +194,8 @@ class CodeSource(Protocol):
 
     def index_codes_direct(self, description: str, system: str) -> set[str]: ...
 
+    def index_code_matches(self, description: str, system: str) -> dict[str, dict]: ...
+
     def snomed_codes(self, description: str, system: str) -> set[str]: ...
 
     def snomed_code_matches(self, description: str, system: str) -> dict[str, dict]: ...
@@ -277,6 +279,7 @@ class AuthoritativeSource:
         self._compliance_store = None
         self._pfs_bound = False
         self._idx = None
+        self._idx_identity = None
         self._snomed = None
         self._snomed_identity = None
         self._concept_relation_index = None
@@ -1226,9 +1229,11 @@ class AuthoritativeSource:
             try:
                 from .terminology import TerminologyIndex
                 self._idx, identity = TerminologyIndex.load_snapshot()
+                self._idx_identity = dict(identity)
                 self._bound_sources.bind(identity)
             except Exception:
                 self._idx = False
+                self._idx_identity = None
         return self._idx
 
     def index_codes(self, description: str, system: str) -> set[str]:
@@ -1255,6 +1260,41 @@ class AuthoritativeSource:
         if not idx:
             return set()
         return {c for c in idx.direct_candidates(description) if self.leaf_codes(c, "icd10")}
+
+    def index_code_matches(self, description: str, system: str) -> dict[str, dict]:
+        """Versioned ICD-10-CM Index phrase matches for candidate recall.
+
+        ``index_codes`` deliberately answers only a whole-term lookup: it is the
+        authority-qualified fast path for a clean, direct Index entry.  Clinical
+        facts frequently contain a governed Index phrase plus additional documented
+        detail, though.  Treating the whole extracted phrase as the only lookup key
+        discards that real Index evidence and leaves vector retrieval as the sole
+        candidate source.  This method exposes ``TerminologyIndex.recall_matches``
+        as *recall only*: every match is source-bounded, token-exact, recorded with
+        the parsed Index snapshot, and still must clear descriptor/evidence
+        verification, selection, and all claim controls.
+
+        It intentionally does not distinguish direct entries from cross-references
+        for selection.  Unlike ``index_codes_direct``, these matches can never take
+        the deterministic shortcut; they are candidates only.  Cross-reference
+        terms are therefore useful navigation without becoming proof that a code is
+        billable.
+        """
+        if system != "icd10":
+            return {}
+        idx = self._terminology_index()
+        if not idx:
+            return {}
+        out: dict[str, dict] = {}
+        for stem, match in idx.recall_matches(description).items():
+            if not self.leaf_codes(stem, "icd10"):
+                continue
+            out[str(stem)] = {
+                **dict(match),
+                "mapped_code": str(stem),
+                "source_identity": dict(self._idx_identity or {}),
+            }
+        return out
 
     def leaf_codes(self, stem: str, system: str) -> set[str]:
         """The billable code(s) at/under a code stem: the code itself if it is a
@@ -2032,6 +2072,7 @@ class MockSource:
                  status: dict[str, str] | None = None,
                  index: dict[str, set] | None = None,
                  index_direct: dict[str, set] | None = None,
+                 index_recall: dict[str, dict[str, dict]] | None = None,
                  snomed: dict[str, set] | None = None,
                  proc_index: dict[str, set] | None = None,
                  cpt_index: dict[str, set] | None = None,
@@ -2069,6 +2110,7 @@ class MockSource:
         # configured hit is trusted as direct, preserving prior deterministic
         # behavior unchanged for every test that never mentions redirects.
         self._index_direct = self._index if index_direct is None else index_direct
+        self._index_recall = index_recall or {}
         self._snomed_map = snomed or {}
         self._proc_index = proc_index or {}
         self._cpt_index = cpt_index or {}
@@ -2134,6 +2176,12 @@ class MockSource:
 
     def index_codes_direct(self, description, system):
         return set(self._index_direct.get(description, set())) if system == "icd10" else set()
+
+    def index_code_matches(self, description, system):
+        if system != "icd10":
+            return {}
+        return {str(code): dict(match or {}) for code, match in
+                (self._index_recall.get(description, {}) or {}).items()}
 
     def snomed_codes(self, description, system):
         return set(self._snomed_map.get(description, set())) if system == "icd10" else set()

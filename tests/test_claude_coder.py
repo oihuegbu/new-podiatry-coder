@@ -1179,6 +1179,55 @@ class TerminologyIndexTest(unittest.TestCase):
         self.assertEqual(line.chosen.code, "C11.1")
         self.assertIn("Alphabetic Index", line.rationale)
 
+    def test_contained_index_phrase_is_verified_candidate_not_a_lost_retrieval_gap(self):
+        """A longer documented diagnosis can contain a versioned Index phrase.
+
+        Whole-term Index lookup correctly does not treat this as an exact direct
+        entry, but candidate generation must preserve the governed phrase as a
+        verification-required candidate.  The test is entirely synthetic: its
+        invariant is source recall -> fixed candidate universe -> descriptor
+        verification, never a clinical term or a medical code.
+        """
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind, ResolutionMethod
+        from claude_coder.resolution import resolve
+        source_phrase = "synthetic condition alpha"
+        documented = "detailed synthetic condition alpha with extra context"
+        src = MockSource(
+            records={
+                ("C33.3", "icd10"): {
+                    "long_description": "synthetic condition alpha", "active": True,
+                },
+            },
+            index_recall={
+                documented: {
+                    "C33.3": {
+                        "method": "contained_source_phrase",
+                        "normalized_query": documented,
+                        "source_terms": [source_phrase],
+                        "mapped_code": "C33.3",
+                        "source_identity": {"source_id": "synthetic-index"},
+                    },
+                },
+            },
+        )
+        fact = ClinicalFact(
+            kind=FactKind.DIAGNOSIS, description=documented,
+            evidence=[EvidenceSpan(documented)], confidence=0.95,
+        )
+        # No verifier: a contained phrase is real recall, but never the direct
+        # Index shortcut that could bill without descriptor verification.
+        held = resolve(_request(fact), src)
+        self.assertIsNone(held.chosen, held.rationale)
+        self.assertNotEqual(held.method, ResolutionMethod.DETERMINISTIC, held.rationale)
+        self.assertIn("C33.3", {c.code for c in (held.alternatives or [])})
+
+        verifier = _sv.judge(entails=lambda _: True, reason="entailed")
+        released = resolve(_request(fact), src, llm=_from(verifier, "provider-a"))
+        self.assertEqual(released.chosen.code, "C33.3", released.rationale)
+        self.assertNotEqual(released.method, ResolutionMethod.DETERMINISTIC,
+                            released.rationale)
+
     def test_snomed_layer_contributes_a_candidate_but_never_closes_without_verification(self):
         """issue #6 F9-R12-E (Codex): a SNOMED CT -> ICD-10-CM crosswalk hit
         maps a concept to a best-fit DEFAULT code that can be less specific
