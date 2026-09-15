@@ -2,10 +2,12 @@
 code-search candidate BEFORE any code retrieval, producing a code-free ClaimLineIntent.
 
 This is the plane that fixes `billable == performed`: a performed event is not
-automatically a claim line. Each billable fact runs a sequence of TRI-STATE gates
-(PASS / BLOCK / UNRESOLVED — never a silent default-to-eligible), and only an event that
-clears them becomes an ELIGIBLE intent. Integral / not-performed / supporting events stay
-in the record as NON_CLAIM_EVIDENCE; material ambiguity becomes AUTO_HOLD.
+automatically a submitted claim line. Each billable fact runs a sequence of TRI-STATE
+gates (PASS / BLOCK / UNRESOLVED — never a silent default-to-eligible). A documented
+composition relationship is context for candidate retrieval and later authoritative
+bundling; it is not, by itself, evidence that a performed service is non-reportable.
+Not-performed/supporting events stay in the record as NON_CLAIM_EVIDENCE; material
+ambiguity becomes AUTO_HOLD.
 
 The pipeline treats ClaimLineIntent as a hard capability boundary: only an eligible
 intent can construct a RetrievalRequest. Agnostic — reads fact kinds, dispositions,
@@ -293,46 +295,48 @@ def _relations_for(fact: ClinicalFact, relations: list) -> list:
                 and r.object_event_id == fact.fact_id)]
 
 
-def _connects(r, left: str, right: str) -> bool:
-    return {r.subject_event_id, r.object_event_id} == {left, right}
+def _gate_composition_context(fact: ClinicalFact, relations: list) -> EligibilityDecision:
+    """Record composition without deciding reportability before code retrieval.
 
-
-def _gate_part_of_demotion(fact: ClinicalFact, relations: list) -> EligibilityDecision:
-    """Demote a component ONLY when integrality is EXPLICITLY asserted (PART_OF, state
-    ASSERTED) and NOT contradicted by a documented distinctness (SEPARATE_FROM asserted).
-    A weak/UNCERTAIN relationship never demotes -- it defers to the conflict gate."""
+    ``PART_OF`` says how documented clinical events relate.  It does not say whether the
+    authoritative code set treats the component as inherent, separately reportable, or
+    reportable only under a claim-edit condition.  That decision requires actual
+    candidates and belongs to the post-selection descriptor/NCCI/global controls.  This
+    gate therefore always clears while retaining the relationship state in its detail.
+    """
     rels = _relations_for(fact, relations)
-    part_of = [r for r in rels if r.predicate is RelationPredicate.PART_OF
-               and r.state is RelationState.ASSERTED]
+    part_of = [r for r in rels if r.predicate is RelationPredicate.PART_OF]
     if not part_of:
-        return EligibilityDecision("part_of_demotion", Outcome.PASS,
-                                   "no explicit integral-component relationship",
+        return EligibilityDecision("composition_context", Outcome.PASS,
+                                   "no documented component relationship",
                                    "documented relationship")
-    distinct = [r for p in part_of for r in relations
-                if r.predicate is RelationPredicate.SEPARATE_FROM
-                and r.state is RelationState.ASSERTED
-                and _connects(r, p.subject_event_id, p.object_event_id)]
-    if distinct:
-        return EligibilityDecision("part_of_demotion", Outcome.PASS,
-                                   "explicit PART_OF but documented distinctness present",
-                                   "documented relationship")
-    return EligibilityDecision("part_of_demotion", Outcome.BLOCKED,
-                               "explicitly documented integral component of another event",
-                               "documented relationship")
+    states = ", ".join(sorted({r.state.value for r in part_of}))
+    return EligibilityDecision(
+        "composition_context", Outcome.PASS,
+        f"PART_OF relationship preserved for post-selection controls (state={states}); "
+        "reportability not inferred before candidate retrieval",
+        "documented relationship + authoritative post-selection controls")
 
 
-def _gate_conflict(fact: ClinicalFact, relations: list) -> EligibilityDecision:
-    """A material relationship the passes could not agree on (UNCERTAIN) about whether
-    this event is integral or distinct is a HOLD, not a guess."""
-    material = {RelationPredicate.PART_OF, RelationPredicate.SEPARATE_FROM}
+def _gate_relationship_context(fact: ClinicalFact, relations: list) -> EligibilityDecision:
+    """Preserve composition uncertainty without pre-judging reportability.
+
+    Composition/distinctness uncertainty may affect bundling or occurrence counting, but
+    its materiality cannot be known until candidates exist.  Preserve it for the existing
+    post-selection occurrence and claim-edit controls rather than suppressing retrieval.
+    """
     uncertain = [r for r in _relations_for(fact, relations)
-                 if r.predicate in material and r.state is RelationState.UNCERTAIN]
+                 if r.predicate in {RelationPredicate.PART_OF,
+                                    RelationPredicate.SEPARATE_FROM}
+                 and r.state is RelationState.UNCERTAIN]
     if uncertain:
         preds = ", ".join(sorted({r.predicate.value for r in uncertain}))
-        return EligibilityDecision("conflict", Outcome.UNKNOWN,
-                                   f"unresolved relationship(s): {preds}",
-                                   "relationship reconciliation")
-    return EligibilityDecision("conflict", Outcome.PASS, "no unresolved material relationship",
+        return EligibilityDecision(
+            "relationship_context", Outcome.PASS,
+            f"unresolved relationship(s) preserved for post-selection comparison: {preds}",
+            "relationship reconciliation + authoritative post-selection controls")
+    return EligibilityDecision("relationship_context", Outcome.PASS,
+                               "no unresolved composition/distinctness relationship",
                                "relationship reconciliation")
 
 
@@ -378,7 +382,7 @@ def _classify(decisions: list[EligibilityDecision]) -> EligibilityState:
     documented, different actor than the billing entity) still AUTO_HOLDs exactly
     as before via the BLOCKED check above; only the "simply not yet resolved" case
     now reaches ELIGIBLE_FOR_RETRIEVAL. Every OTHER gate's UNKNOWN
-    (`conflict`/`documentation_minimum`/`axis_consensus`) is untouched, so this
+    (`documentation_minimum`/`axis_consensus`) is untouched, so this
     cannot silently defeat a legitimate hold from any of them -- if actor_ownership
     AND one of those is UNKNOWN on the same event, the event still AUTO_HOLDs on
     the other gate's UNKNOWN. `evaluate()` separately stamps the resulting intent's
@@ -389,14 +393,12 @@ def _classify(decisions: list[EligibilityDecision]) -> EligibilityState:
     # NON_CLAIM: the event is definitively not an independent service line
     if by.get("occurrence") is Outcome.BLOCKED:
         return EligibilityState.NON_CLAIM_EVIDENCE
-    if by.get("part_of_demotion") is Outcome.BLOCKED:
-        return EligibilityState.NON_CLAIM_EVIDENCE
     # AUTO_HOLD: material ambiguity or a defensibility/ownership block
     if any(o is Outcome.BLOCKED for g, o in by.items()
            if g in ("evidence_required", "actor_ownership")):
         return EligibilityState.AUTO_HOLD
     if any(o is Outcome.UNKNOWN for g, o in by.items()
-           if g in ("conflict", "documentation_minimum", "axis_consensus")):
+           if g in ("documentation_minimum", "axis_consensus")):
         return EligibilityState.AUTO_HOLD
     return EligibilityState.ELIGIBLE_FOR_RETRIEVAL
 
@@ -502,8 +504,9 @@ def merge_duplicate_intents(intents: list["ClaimLineIntent"],
                             separate_pairs: set | None = None,
                             source=None) -> list["ClaimLineIntent"]:
     """same_episode_merge, PAIR-AWARE (Codex F5-R1): duplicate mentions (same key/episode/
-    state) merge into ONE intent EXCEPT across a cannot-link -- an explicit SEPARATE_FROM
-    (by event id) or a KNOWN-KNOWN attribute conflict. Cannot-links PROPAGATE one hop over
+    state) merge into ONE intent EXCEPT across a cannot-link -- a documented relation
+    establishing or questioning that the records are different events, or a KNOWN-KNOWN
+    attribute conflict. Cannot-links PROPAGATE one hop over
     coreference (a duplicate of an event inherits that event's separations), so an ambiguous
     duplicate adjacent to a SEPARATE_FROM is kept separate rather than merged into the wrong
     service. Known-plus-missing reconciles. No merged cluster contains both endpoints of a
@@ -668,8 +671,9 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
         elif f.kind in _SERVICE_KINDS:
             decisions = [_gate_evidence_required(f), _gate_occurrence(f),
                          _gate_actor_ownership(f, relations, _facts_by_id),
-                         _gate_part_of_demotion(f, relations),
-                         _gate_conflict(f, relations), _gate_documentation_minimum(f),
+                         _gate_composition_context(f, relations),
+                         _gate_relationship_context(f, relations),
+                         _gate_documentation_minimum(f),
                          _gate_axis_consensus(f)]
             state = _classify(decisions)
             component = ClaimComponent.SERVICE
@@ -695,11 +699,21 @@ def evaluate(facts: list[ClinicalFact], relations: list | None, encounter_id: st
             service_episode_id=_ep_map.get(f.fact_id),
             distinctness_facts=_distinctness_facts(f, relations),
             fact_digest=fact_snapshot_digest(f)))
-    _separate_pairs = {frozenset((r.subject_event_id, r.object_event_id))
-                       for r in relations
-                       if r.predicate is RelationPredicate.SEPARATE_FROM
-                       and r.state is RelationState.ASSERTED}
-    return merge_duplicate_intents(intents, _separate_pairs, source)
+    # A PART_OF edge necessarily names a component and a parent as separate graph
+    # events, even when their wording happens to normalize to the same action.  Do not
+    # collapse either before both cross retrieval.  An UNCERTAIN PART_OF/SEPARATE_FROM
+    # likewise cannot authorize an early merge; its materiality is assessed after
+    # candidate selection, when occurrence reconciliation can see whether both facts
+    # resolved to the same code.
+    _cannot_merge_pairs = {
+        frozenset((r.subject_event_id, r.object_event_id))
+        for r in relations
+        if (r.predicate is RelationPredicate.PART_OF
+            and r.state in (RelationState.ASSERTED, RelationState.UNCERTAIN))
+        or (r.predicate is RelationPredicate.SEPARATE_FROM
+            and r.state in (RelationState.ASSERTED, RelationState.UNCERTAIN))
+    }
+    return merge_duplicate_intents(intents, _cannot_merge_pairs, source)
 
 
 #: Decisions RECORDED for the audit trail that never determine the eligibility state.
@@ -730,7 +744,6 @@ OWNER_CODER = "CODER"                     # irreducible coding/clinical judgemen
 _HOLD_OWNERS: dict[tuple[str, Outcome], str] = {
     # The event is not an independent claim line at all.
     ("occurrence", Outcome.BLOCKED): OWNER_NON_CLAIM,
-    ("part_of_demotion", Outcome.BLOCKED): OWNER_NON_CLAIM,
     # Nothing downstream can be verified against a fact with no anchored evidence, or
     # one billed by an entity the record says did not perform it.
     ("evidence_required", Outcome.BLOCKED): OWNER_INTEGRITY,
@@ -746,7 +759,6 @@ _HOLD_OWNERS: dict[tuple[str, Outcome], str] = {
     # page could not settle it. The answer exists only in the provider's head, so it
     # becomes one precise question -- the directive names model disagreement
     # explicitly as something that must NOT reach a coder.
-    ("conflict", Outcome.UNKNOWN): OWNER_PROVIDER_QUERY,
     ("axis_consensus", Outcome.UNKNOWN): OWNER_PROVIDER_QUERY,
     ("coreference_assignment", Outcome.UNKNOWN): OWNER_PROVIDER_QUERY,
     ("coreference", Outcome.UNKNOWN): OWNER_PROVIDER_QUERY,
@@ -791,10 +803,9 @@ def shadow_diff(facts: list[ClinicalFact], intents: list[ClaimLineIntent]) -> di
     allowed to gate retrieval (Phase 1c). Purely observational.
 
       agree_eligible        both would send it to retrieval
-      would_hold            engine holds it (unanchored evidence / contrary ownership /
-                            unresolved relationship) that today bills
-      would_suppress        engine marks it non-claim (not performed / explicitly integral)
+      would_hold            engine holds it (unanchored evidence / contrary ownership)
                             that today bills
+      would_suppress        engine marks it non-claim (not performed) that today bills
       eligible_not_billable engine would retrieve a fact today skips (should be empty)
     """
     billable_ids = {f.fact_id for f in facts if f.billable}

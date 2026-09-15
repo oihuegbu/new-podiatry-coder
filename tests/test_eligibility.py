@@ -1,9 +1,9 @@
 """Phase-1 eligibility engine: tri-state gates + code-free ClaimLineIntent.
 
-The core safety property — a performed event is NOT automatically a claim line:
-an explicitly integral component is demoted to NON_CLAIM_EVIDENCE BEFORE retrieval, a
-non-performed event never becomes a line, and material ambiguity holds. Agnostic —
-synthetic facts/relations, no medical code."""
+The core safety property — a performed event is evaluated before it can become a
+submitted claim line: composition remains context until authoritative post-selection
+controls decide reportability, a non-performed event never becomes a line, and material
+event-identity ambiguity holds. Agnostic — synthetic facts/relations, no medical code."""
 from claude_coder import eligibility as el
 from claude_coder.eligibility import EligibilityState, ClaimComponent
 from claude_coder.models import (ClaimSubmissionStatus, ClinicalFact, FactKind,
@@ -52,23 +52,29 @@ def test_ownership_gate():
     assert el._gate_actor_ownership(organization).outcome is Outcome.PASS
 
 
-def test_part_of_demotion_requires_explicit_integrality():
+def test_part_of_is_context_and_never_pre_retrieval_demotion():
     f = _fact(fid="F1")
-    assert el._gate_part_of_demotion(f, []).outcome is Outcome.PASS                 # no relation
-    assert el._gate_part_of_demotion(f, [_partof()]).outcome is Outcome.BLOCKED      # explicit
-    # weak/uncertain PART_OF does NOT demote (defers to the conflict gate)
-    assert el._gate_part_of_demotion(f, [_partof(state=RelationState.UNCERTAIN)]).outcome \
-        is Outcome.PASS
-    # documented distinctness overrides the demotion
+    assert el._gate_composition_context(f, []).outcome is Outcome.PASS
+    asserted = el._gate_composition_context(f, [_partof()])
+    assert asserted.outcome is Outcome.PASS
+    assert "post-selection" in asserted.detail
+    uncertain = el._gate_composition_context(
+        f, [_partof(state=RelationState.UNCERTAIN)])
+    assert uncertain.outcome is Outcome.PASS
+    # Documented distinctness remains graph context too; neither relation is a
+    # substitute for authoritative code/reportability evaluation.
     sep = RelationAssertion("F1", RelationPredicate.SEPARATE_FROM, "F2",
                             state=RelationState.ASSERTED)
-    assert el._gate_part_of_demotion(f, [_partof(), sep]).outcome is Outcome.PASS
+    assert el._gate_composition_context(f, [_partof(), sep]).outcome is Outcome.PASS
 
 
-def test_conflict_gate_holds_on_uncertain_material_relation():
+def test_uncertain_composition_relation_is_deferred_until_after_retrieval():
     f = _fact(fid="F1")
-    assert el._gate_conflict(f, [_partof(state=RelationState.UNCERTAIN)]).outcome is Outcome.UNKNOWN
-    assert el._gate_conflict(f, [_partof()]).outcome is Outcome.PASS
+    decision = el._gate_relationship_context(
+        f, [_partof(state=RelationState.UNCERTAIN)])
+    assert decision.outcome is Outcome.PASS
+    assert "post-selection" in decision.detail
+    assert el._gate_relationship_context(f, [_partof()]).outcome is Outcome.PASS
 
 
 # ------------------------------------------------------------------ classification
@@ -85,11 +91,10 @@ def test_clean_service_is_eligible():
     assert not hasattr(i, "code") and "code" not in i.attributes
 
 
-def test_explicit_integral_component_demoted_before_retrieval():
-    """The billable==performed fix: an event documented as part of another is NON_CLAIM,
-    so retrieval never searches a code for it."""
+def test_explicit_component_reaches_retrieval_before_reportability_decision():
+    """PART_OF alone cannot prove that a performed service is non-reportable."""
     i = _one([_fact(fid="F1")], relations=[_partof("F1", "F2")])
-    assert i.state is EligibilityState.NON_CLAIM_EVIDENCE
+    assert i.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL
 
 
 def test_non_performed_event_is_non_claim():
@@ -100,9 +105,9 @@ def test_unanchored_evidence_holds():
     assert _one([_fact(anchored=False)]).state is EligibilityState.AUTO_HOLD
 
 
-def test_uncertain_relationship_holds():
+def test_uncertain_composition_relationship_still_reaches_retrieval():
     i = _one([_fact(fid="F1")], relations=[_partof("F1", "F2", RelationState.UNCERTAIN)])
-    assert i.state is EligibilityState.AUTO_HOLD
+    assert i.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL
 
 
 def test_contrary_ownership_holds():
@@ -173,6 +178,15 @@ def test_identical_service_mentions_merge_to_one_intent():
     assert set(m.clinical_event_ids) == {"F1", "F2"}
 
 
+def test_part_of_events_are_not_collapsed_as_duplicate_mentions():
+    """A component and its parent each need candidate evaluation even when the
+    extraction wording happens to be identical."""
+    facts = [_fact(fid="F1"), _fact(fid="F2")]
+    intents = el.evaluate(facts, [_partof("F2", "F1")], "enc", "2026-08-01")
+    assert len(intents) == 2
+    assert all(i.state is EligibilityState.ELIGIBLE_FOR_RETRIEVAL for i in intents)
+
+
 def test_distinct_services_do_not_merge():
     a = _fact(fid="F1", attrs={"anatomy": "calcaneus", "laterality": "right"})
     b = _fact(fid="F2", attrs={"anatomy": "calcaneus", "laterality": "left"})   # diff laterality
@@ -210,11 +224,13 @@ def test_shadow_diff_flags_hold_on_unanchored_evidence():
     assert d["divergent"] is True and len(d["would_hold"]) == 1 and not d["would_suppress"]
 
 
-def test_shadow_diff_flags_suppress_on_explicit_integral():
+def test_shadow_diff_does_not_suppress_a_performed_component():
     facts = [_fact(fid="F1")]
-    rels = [_partof("F1", "F2")]                     # explicitly integral -> engine suppresses
+    rels = [_partof("F1", "F2")]
     d = el.shadow_diff(facts, el.evaluate(facts, rels, "enc", "2026-08-01"))
-    assert d["divergent"] is True and len(d["would_suppress"]) == 1
+    assert d["divergent"] is False
+    assert len(d["agree_eligible"]) == 1
+    assert not d["would_suppress"]
 
 
 # ---- Codex review F5: distinctness-aware dedup ----

@@ -59,6 +59,8 @@ from claude_coder.models import (
     FactKind,
     GateResult,
     Outcome,
+    RelationAssertion,
+    RelationPredicate,
     RelationState,
     ResolutionMethod,
     ResolvedLine,
@@ -339,16 +341,15 @@ def test_a_documentation_hold_in_the_same_gate_is_not_laundered_into_a_retry():
         "a hold caused by what the note documents must never be reported as retryable")
 
 
-def test_an_unsettled_relationship_is_a_provider_question_not_a_coder_queue():
-    """Two readings disagreed about whether an event is integral or distinct.
-
-    That is a code-changing fact the record does not state -- the same shape as the
-    `axis_consensus` hold the previous phase reclassified -- so it must become one
-    precise provider question. It reached a coder before this phase.
-    """
-    decision = elig.EligibilityDecision(
-        "conflict", Outcome.UNKNOWN, "unresolved relationship(s): part_of", "x")
-    assert elig.hold_owner(decision) == elig.OWNER_PROVIDER_QUERY
+def test_composition_uncertainty_is_not_a_pre_retrieval_question():
+    """Reportability cannot be inferred from a relationship before candidates exist."""
+    fact = _fact(FactKind.PROCEDURE, description="performed service", fact_id="s1")
+    relation = RelationAssertion(
+        subject_event_id="s1", predicate=RelationPredicate.PART_OF,
+        object_event_id="s2", state=RelationState.UNCERTAIN)
+    decision = elig._gate_relationship_context(fact, [relation])
+    assert decision.outcome is Outcome.PASS
+    assert "post-selection" in decision.detail
 
 
 def test_an_unassignable_duplicate_mention_is_a_provider_question():

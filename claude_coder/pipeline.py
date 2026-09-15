@@ -806,6 +806,9 @@ def code_encounter(
         # issue #6, Codex's independent re-review (F9-R18-A reopened P1): same
         # reset, same reason, for the axis-conflict guard's bounded page text.
         _line_page_text = None
+        # Like candidate-eligibility/advisory provenance below, this survives helpers
+        # that reconstruct a ResolvedLine after retrieval.
+        _retrieval_attempted = False
         _it = _elig_state.get(fact.fact_id)
         if _it is None:
             line = ResolvedLine(
@@ -958,6 +961,7 @@ def code_encounter(
                 return _system_hold_result(encounter_id, date_of_service,
                                            f"retrieval_execution:{fact.fact_id}", exc, source,
                                            lines=lines)
+            _retrieval_attempted = True
             # issue #6 item 8: captured here, before arbitration/refinement below MAY
             # reconstruct `line` (see the item 7 comment at the end of this loop for
             # why that matters) -- `em.resolve_em` does not run semantic eligibility
@@ -1154,6 +1158,7 @@ def code_encounter(
         # issue #6 item 3/F8-R2: same reason, same pattern.
         if _advisory_terminology is not None:
             line.advisory_terminology = _advisory_terminology
+        line.retrieval_attempted = _retrieval_attempted
         # issue #6, Codex's independent re-review (F9-R19-A Finding 1):
         # `resolution._system_unresolved_line` marks a line whose candidate
         # evidence could be neither confirmed nor eliminated -- a SYSTEM
@@ -1193,6 +1198,13 @@ def code_encounter(
         service_intents=service_intents,
         unresolved_recovered_lines=tuple(_unresolved_recovered_lines),
     )
+    # Mandatory service-completeness invariant: every performed service must cross the
+    # retrieval boundary once, unless it is a duplicate mention represented by the
+    # canonical member of the same ClaimLineIntent.  Composition relationships never
+    # satisfy this invariant -- they are context, not evidence of non-reportability.
+    # A future eligibility rule that accidentally suppresses a performed component is
+    # therefore detected before release instead of silently undercoding the encounter.
+    pre_retrieval_gates.append(_performed_service_accounting_gate(result, facts))
     # Mechanic 4 — collapse duplicate resolved codes into one line before anything
     # downstream reasons about the claim as a set.
     dedup_lines(result, source)
@@ -1854,6 +1866,66 @@ def _attach_recommendations(result: CodingResult) -> None:
         rec = by_id.get(item.get("fact_id")) or by_subject.get(item.get("subject"))
         if rec:
             item["recommendation"] = rec["recommendation"]
+
+
+def _performed_service_accounting_gate(result: CodingResult,
+                                       facts: list[ClinicalFact]) -> GateResult:
+    """Prove that every performed service was evaluated, without forcing it to bill.
+
+    Selection, NCCI/global bundling, and explicit exclusion remain downstream. This
+    invariant checks only the dangerous gap between extraction and candidate retrieval:
+    a composed child cannot disappear merely because it is related to a parent.
+    """
+    from .eligibility import EligibilityState
+    from .models import FactKind, GateResult, Outcome
+
+    service_kinds = {FactKind.PROCEDURE, FactKind.IMAGING, FactKind.SUPPLY,
+                     FactKind.DRUG, FactKind.EM}
+    intent_by_event = {
+        event_id: intent
+        for intent in (result.claim_line_intents or [])
+        for event_id in (intent.clinical_event_ids or [])
+    }
+    line_by_event = {line.fact.fact_id: line for line in (result.lines or [])
+                     if line.fact is not None and line.fact.fact_id}
+    failures: list[str] = []
+    accounted = 0
+    for fact in facts:
+        if fact is None or fact.kind not in service_kinds or not fact.billable:
+            continue
+        intent = intent_by_event.get(fact.fact_id)
+        if intent is None:
+            failures.append(fact.fact_id)
+            continue
+        if intent.state is not EligibilityState.ELIGIBLE_FOR_RETRIEVAL:
+            # A targeted evidence/identity hold is visible and actionable, but a
+            # performed event may never be silently declared NON_CLAIM before its
+            # reportability can be tested against code-set authority.
+            if intent.state is EligibilityState.NON_CLAIM_EVIDENCE:
+                failures.append(fact.fact_id)
+            else:
+                accounted += 1
+            continue
+        canonical_id = intent.clinical_event_ids[0] if intent.clinical_event_ids else ""
+        canonical = line_by_event.get(canonical_id)
+        if canonical is None or not canonical.retrieval_attempted:
+            failures.append(fact.fact_id)
+            continue
+        accounted += 1
+
+    if failures:
+        unique = tuple(dict.fromkeys(failures))
+        return GateResult(
+            "performed_service_accounting", Outcome.UNKNOWN,
+            f"performed service event(s) did not reach candidate retrieval: "
+            f"{', '.join(unique)}",
+            "extraction-to-retrieval completeness invariant", retryable=True,
+            affected_fact_ids=unique)
+    return GateResult(
+        "performed_service_accounting", Outcome.PASS,
+        f"all {accounted} performed service event(s) reached retrieval or were "
+        "represented by a retrieved canonical duplicate",
+        "extraction-to-retrieval completeness invariant")
 
 
 def _occurrence_context(result: CodingResult) -> tuple[dict, set]:
