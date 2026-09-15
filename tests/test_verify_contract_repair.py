@@ -213,6 +213,29 @@ class RepairLoopTest(unittest.TestCase):
         self.assertEqual(
             verify.validate_judgement_contract(j, [cand], fact, reconciliation), {})
 
+    def test_repair_replays_the_immutable_evaluation_material(self):
+        """A citation repair needs the actual tagged evidence and descriptor,
+        not merely opaque tag names.  Otherwise a model that selected a bad tag
+        has no information with which to select a valid one and the repair is
+        performative rather than corrective."""
+        cand = _cand("ALPHA")
+        fact = _fact()
+        reconciliation = _reconciliation({"s1": "AGREED"})
+        digest = verify._descriptor_sha256(cand)
+        defective = _answer(1, [_disposition(1, "entailed", digest, [])])
+        fixed = _answer(1, [_disposition(1, "entailed", digest, ["e1"])])
+        llm = ScriptedLLM([defective, fixed])
+
+        verify.select_entailed(fact, [cand], None, llm, force_disposition=True,
+                               reconciliation=reconciliation)
+
+        self.assertEqual(len(llm.calls), 2)
+        repair_prompt = llm.calls[1][1]
+        self.assertIn("IMMUTABLE EVALUATION MATERIAL", repair_prompt)
+        self.assertIn("TARGET-EVENT EVIDENCE: [e1] (scope=target) assembly performed",
+                      repair_prompt)
+        self.assertIn(cand.descriptor, repair_prompt)
+
     def test_a_valid_disposition_never_triggers_a_repair_call(self):
         cand = _cand("ALPHA")
         fact = _fact()
