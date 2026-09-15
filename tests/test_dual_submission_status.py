@@ -22,7 +22,8 @@ def _decision(gate, outcome):
 
 
 _ALL_PASS_SERVICE_GATES = ["evidence_required", "occurrence", "actor_ownership",
-                          "part_of_demotion", "conflict", "documentation_minimum",
+                          "composition_context", "relationship_context",
+                          "documentation_minimum",
                           "axis_consensus"]
 
 
@@ -39,10 +40,10 @@ class ClassifyActorOwnershipUnknown(unittest.TestCase):
         state = _classify(_decisions({"actor_ownership": Outcome.BLOCKED}))
         self.assertEqual(state, EligibilityState.AUTO_HOLD)
 
-    def test_ownership_unknown_plus_conflict_unknown_still_auto_holds(self):
+    def test_ownership_unknown_plus_relationship_context_does_not_auto_hold(self):
         state = _classify(_decisions({"actor_ownership": Outcome.UNKNOWN,
-                                      "conflict": Outcome.UNKNOWN}))
-        self.assertEqual(state, EligibilityState.AUTO_HOLD)
+                                      "relationship_context": Outcome.PASS}))
+        self.assertEqual(state, EligibilityState.ELIGIBLE_FOR_RETRIEVAL)
 
     def test_ownership_unknown_plus_documentation_minimum_unknown_still_auto_holds(self):
         state = _classify(_decisions({"actor_ownership": Outcome.UNKNOWN,

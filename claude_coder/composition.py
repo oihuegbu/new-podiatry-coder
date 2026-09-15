@@ -35,9 +35,10 @@ _HEADER_LINE = re.compile(r"^[ \t]*([A-Z][A-Z0-9 /&()\-]{1,60})[ \t]*:?[ \t]*$")
 #: reportable procedures documented under the same heading are still two separate
 #: services, and unioning them into one `ServiceIntent` would incorrectly narrow
 #: retrieval/eligibility to whichever service's vocabulary happens to dominate the
-#: pair. Only `PART_OF` -- an explicit, documented integrality assertion, the same
-#: predicate `eligibility._gate_part_of_demotion` already requires before treating
-#: one event as a component of another -- composes two events into one intent.
+#: pair. Only `PART_OF` -- an explicit, documented composition assertion -- groups
+#: events for downstream relationship controls. It does not itself decide that a
+#: performed component is non-reportable; reportability is decided only after each
+#: service has candidates, using authoritative descriptor and claim-edit data.
 _COMPOSING_PREDICATES = frozenset({RelationPredicate.PART_OF})
 
 
@@ -131,7 +132,7 @@ def compose(facts: list[ClinicalFact], note_text: str) -> list[RelationAssertion
 
 @dataclass
 class ServiceIntent:
-    """One connected group of clinical events under PART_OF/SAME_EPISODE_AS
+    """One connected group of clinical events under PART_OF
     reachability -- a read-time PROJECTION over the existing graph, never a new
     persisted object (issue #6 item 2's own design constraint). A fact linked to
     nothing is still a valid, one-member intent: absence of a relation is not absence

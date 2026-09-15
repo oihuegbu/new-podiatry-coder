@@ -496,6 +496,13 @@ class ResolvedLine:
     # CPT/HCPCS) or no unique advisory match was found -- a different, honest
     # thing from "found matches and used none of them."
     advisory_terminology: list[dict] | None = None
+    # True only when the canonical event actually crossed the eligibility capability
+    # boundary and a retrieval/resolution implementation returned for it.  This is a
+    # pipeline-integrity signal, not a confidence score: it lets the release gate prove
+    # that no performed service was silently classified away before authoritative code
+    # data was consulted. Duplicate mentions remain False because their canonical
+    # ClaimLineIntent member performs the one retrieval for that occurrence.
+    retrieval_attempted: bool = False
 
     @property
     def resolved(self) -> bool:
