@@ -107,7 +107,7 @@ def test_runtime_helper_binds_checkpoint_identity_and_database_as_one_store():
 
 def test_runtime_helper_has_a_persistent_non_ec2_identity_fallback():
     helper = (REPO_ROOT / "process-notes.sh").read_text()
-    assert "output/.provenance-store-id" in helper
+    assert ".runtime/provenance-store-id" in helper
     assert "flock 9" in helper
     assert "/proc/sys/kernel/random/uuid" in helper
 

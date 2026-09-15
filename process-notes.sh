@@ -29,8 +29,12 @@ resolve_ec2_instance_id() {
 }
 
 if [ -z "${PROVENANCE_STORE_ID:-}" ]; then
-  identity_file="$APP_ROOT/output/.provenance-store-id"
-  mkdir -p "$APP_ROOT/output"
+  # Keep host bootstrap state outside `output/`: containers create that bind-mounted
+  # directory's contents as root, so a non-root deployment operator cannot reliably
+  # create a lock there. `.runtime/` is host-owned and ignored; the database itself
+  # still lives in the persistent output mount.
+  identity_file="$APP_ROOT/.runtime/provenance-store-id"
+  mkdir -p "$APP_ROOT/.runtime"
   # Serialize first creation so two simultaneous runs cannot fork identities.  The
   # installation UUID is required even on EC2: two checked-out deployments can live
   # on one host and must not bind their different databases to the same S3 key.
