@@ -25,6 +25,20 @@ ever contains). "Defensible", for a code in this payload, is production's
 own vocabulary: `external_disposition == "BILLABLE_AND_DEFENSIBLE"`
 (`app.contracts.claim_bundle.ExternalDisposition`).
 
+`build_claim_bundle_payload(result)` binds a FULLY POPULATED, RESOLVED
+patient/subscriber/payer/rendering-provider/billing-entity/affiliation/
+coverage context (`fully_resolved_context()`) and a populated authority
+binding (`synthetic_authority_binding()`) by default -- synthetic
+identifiers, but a real, valid instance of the same contract object a
+genuine roster-backed deployment produces, not the empty `EncounterContext()`
+`problems()` correctly refuses to call releasable. A scenario whose own fix
+is the only thing that could still block release therefore reaches a TRUE,
+zero-`holds` AUTO_READY -- `payload["release"]["holds"] == []` -- exactly
+mirroring what a genuinely complete real claim looks like, not merely a
+producer-level verdict with a page of unrelated envelope holds still listed.
+A scenario that wants to isolate the resolution-layer verdict from the
+claim-envelope layer instead may pass `context=EncounterContext()` explicitly.
+
 To verify a NEW fix with this harness: build a `MockSource` shaped like the
 fix's real bug (real candidate descriptors reproduced with SYNTHETIC
 vocabulary, never a hardcoded real code/scenario), a minimal extraction
@@ -33,23 +47,20 @@ scripted `shortlist_verdict.judge(...)` callables (via `_declare`, never the
 same judge object declared twice -- see its own docstring); call
 `run_pipeline(...)`, then `build_claim_bundle_payload(result)`; assert on
 `defensible_codes(payload)` and/or `payload["release"]["producer_verdict"]`/
-`payload["candidate_lines"]` for a scenario whose correct outcome is a
-held/reviewed line rather than a release -- both are "defensible": a
+`holds`/`payload["candidate_lines"]` for a scenario whose correct outcome is
+a held/reviewed line rather than a release -- both are "defensible": a
 wrongly-released code and a wrongly-silent hold are the SAME category of
-defect this harness exists to catch. A MINIMAL synthetic scenario's
-`payload["release"]["holds"]` will still legitimately list every missing
-real-world claim field this harness never supplies (patient demographics,
-payer, coverage, authoritative-data fingerprints) -- that is expected and
-orthogonal to what a fix under test changes; `producer_verdict`/
-`external_disposition` are the fields that answer "did resolution pick (or
-correctly withhold) a defensible code," which is what this harness verifies.
+defect this harness exists to catch.
 """
 import json
 import unittest
 
-from app.contracts.claim_bundle import (AuthorityBinding, SourceDocument,
-                                        bundle_from_coding_result)
-from app.contracts.encounter_context import EncounterContext
+from app.contracts.claim_bundle import (
+    AffiliationBinding, AuthorityBinding, BillingEntityIdentity,
+    CONTEXT_SERVICE_DATE_SOURCE, ContextResolution, CoverageBinding,
+    EncounterContext, PatientIdentity, PayerIdentity, ProviderIdentity,
+    REQUIRED_ENCOUNTER_CONTEXT, ServiceDateBinding, SourceDocument,
+    SubscriberIdentity, AUTHORITATIVE_FIELD_SOURCE, bundle_from_coding_result)
 from claude_coder.data_access import MockSource
 from claude_coder.models import CandidateCode
 from claude_coder.pipeline import code_encounter
@@ -75,15 +86,76 @@ def run_pipeline(note_text, facts_json, source, *, verify_llm=None,
             "participants": [{"id": "actor-1", "type": "person", "roles": ["performer"]}]})
 
 
-def build_claim_bundle_payload(result) -> dict:
+def fully_resolved_context(dos: str = "2026-01-01") -> EncounterContext:
+    """A completely populated, RESOLVED `EncounterContext` -- every field
+    `REQUIRED_ENCOUNTER_CONTEXT` names, each declared `AUTHORITATIVE_FIELD_
+    SOURCE` (never note-derived), plus a reproducing fingerprint. Synthetic
+    identifiers throughout (this suite's own no-real-PII/no-real-code
+    convention), but a REAL, valid instance of the same contract object a
+    genuine roster-backed deployment produces -- not the empty
+    `EncounterContext()` default, which `problems()` correctly refuses to
+    call releasable (a claim cannot be built from note-extracted context
+    alone). Confirms a fix's scenario can reach a TRUE, zero-`holds`
+    AUTO_READY -- not merely a producer-level verdict -- when nothing else
+    about the claim blocks it."""
+    patient = PatientIdentity(patient_id="PAT-1", first_name="Alexis", last_name="Quintero",
+                              date_of_birth="1982-09-02", gender="F")
+    subscriber = SubscriberIdentity(member_id="MEM-1", group_number="GRP-1")
+    payer = PayerIdentity(name="Synthetic Payer", payer_id="PAYER-1")
+    provider = ProviderIdentity(npi="1888888888", first_name="Robin", last_name="Vasquez")
+    billing_entity = BillingEntityIdentity(entity_id="ENTITY-1",
+                                           name="Synthetic Practice PLLC",
+                                           npi="1999999998")
+    affiliation = AffiliationBinding(affiliation_id="AFF-1", provider_npi=provider.npi,
+                                     billing_entity_id=billing_entity.entity_id,
+                                     effective_start="2020-01-01")
+    coverage = CoverageBinding(coverage_id="COV-1", patient_id=patient.patient_id,
+                               payer_id=payer.payer_id, effective_start="2020-01-01")
+    service_date = ServiceDateBinding(date_of_service=dos, source=CONTEXT_SERVICE_DATE_SOURCE,
+                                      declared_date=dos)
+    field_sources = {path: AUTHORITATIVE_FIELD_SOURCE for path in REQUIRED_ENCOUNTER_CONTEXT}
+    context = EncounterContext(
+        resolution=ContextResolution.RESOLVED, provider_id="synthetic-test-roster",
+        context_version="v1", service_date=service_date,
+        patient=patient, subscriber=subscriber, payer=payer, rendering_provider=provider,
+        billing_entity=billing_entity, affiliation=affiliation, coverage=coverage,
+        place_of_service="11", jurisdiction="FL", field_sources=field_sources)
+    return context.model_copy(update={"fingerprint": context.compute_fingerprint()})
+
+
+def synthetic_authority_binding() -> AuthorityBinding:
+    """A populated `AuthorityBinding` -- synthetic-but-well-formed digests
+    standing in for the real compliance.db/source-manifest bytes a live
+    `AuthoritativeSource` binds (this harness's `MockSource` has no real
+    bytes to hash). Orthogonal to the patient/payer/billing context above:
+    this is what closes the remaining "no authoritative-data fingerprint"/
+    "no compiled-database snapshot" holds so a scenario can reach TRUE
+    zero-`holds` AUTO_READY end to end."""
+    return AuthorityBinding(
+        data_fingerprint="sha256:" + "a" * 64,
+        source_manifest_fingerprint="sha256:" + "b" * 64,
+        database_snapshot_digest="sha256:" + "c" * 64)
+
+
+def build_claim_bundle_payload(result, *, context=None, authority=None,
+                              source_document=None) -> dict:
     """The SAME canonical ClaimBundle JSON payload production writes to
     `output/results/*_results.json` -- `run.py`'s `build_bundle()` makes
-    this EXACT call (`bundle_from_coding_result(...).to_payload()`), just
-    with a real PDF's `SourceDocument`/resolved `EncounterContext` in place
-    of the minimal defaults a synthetic scenario has no need to supply."""
+    this EXACT call (`bundle_from_coding_result(...).to_payload()`).
+    Defaults to a fully populated, RESOLVED context/authority/source
+    document (see `fully_resolved_context`/`synthetic_authority_binding`
+    above) so a scenario proves it can reach a TRUE, zero-`holds`
+    AUTO_READY when its own fix's mechanism is the only thing that could
+    still block it -- pass `context=EncounterContext()` explicitly for a
+    scenario that wants to isolate the resolution-layer verdict from the
+    claim-envelope layer instead."""
     bundle = bundle_from_coding_result(
-        result, source_document=SourceDocument(), context=EncounterContext(),
-        authority=AuthorityBinding())
+        result,
+        source_document=source_document or SourceDocument(
+            document_version="sha256:" + "d" * 64,
+            extracted_text_sha256="sha256:" + "e" * 64, page_count=1),
+        context=context if context is not None else fully_resolved_context(),
+        authority=authority if authority is not None else synthetic_authority_binding())
     return bundle.to_payload()
 
 
@@ -207,6 +279,10 @@ class WholePipelineDefensibleCodes(unittest.TestCase):
 
         payload = build_claim_bundle_payload(result)
         self.assertEqual(payload["release"]["producer_verdict"], "AUTO_READY", payload)
+        self.assertEqual(payload["release"]["destination"], "AUTO_READY", payload)
+        self.assertEqual(payload["release"]["holds"], [],
+                         "a fully populated patient/payer/billing context and "
+                         "authority binding must reach a TRUE, zero-hold release")
         codes = defensible_codes(payload)
         self.assertEqual(codes, {"GROUNDED", "DX_ALPHA_RIGHT"}, payload)
         self.assertNotIn("CARDINALITY_ONLY", codes)
