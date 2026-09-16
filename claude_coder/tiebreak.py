@@ -75,6 +75,35 @@ AXIS_EXCLUSION_CLAUSE = "exclusion_clause"
 #: via the same `asserted_status`/`validated_requirement` machinery already
 #: proven safe for `laterality`/`inclusion_term`, never bag-of-words.
 AXIS_QUALIFIED_CHILD = "qualified_child"
+#: issue #6, independent root-cause investigation (real-data replay against the
+#: designated note, F1/28118 vs 28120): a candidate's own authoritative
+#: descriptor stating a positive indication via "(eg, ...)"/"(e.g., ...)"/
+#: "(for example, ...)" grammar names a clinical circumstance the record must
+#: document for THIS candidate to apply -- the SAME "required precondition"
+#: polarity as `AXIS_QUALIFIED_CHILD`'s differential (never inverted, unlike
+#: `AXIS_EXCLUSION_CLAUSE`: documenting the clause SUPPORTS the candidate, it
+#: never eliminates it). Before this axis existed, two independent evaluators
+#: disagreeing specifically about whether such a clause was documented had no
+#: governed axis to adjudicate through: `_tiebreak.narrow` had nothing to test
+#: (no winner, no provider question either -- `discriminating_axes` simply
+#: never surfaced the clause), so the disagreement fell to a permanent,
+#: unrescuable system hold on every retry, deterministically, since nothing
+#: about the compiled data changes between runs. A comprehensive scan of the
+#: real CPT/ICD-10-CM data (grammar-only detection, no hardcoded code/term)
+#: found this clause shape on 1,697 real descriptors, 1,645 of them (97%)
+#: previously ungoverned by any existing axis mechanism -- this was not an
+#: isolated case. `selectable`/`queryable` exactly like `AXIS_QUALIFIED_CHILD`:
+#: the whole clause is checked as one phrase via the same
+#: `asserted_status`/`validated_requirement` machinery already proven safe for
+#: `laterality`/`qualified_child`/`inclusion_term`, never bag-of-words -- and,
+#: critically, elimination requires BOTH independent evaluators to validate
+#: NOT_DOCUMENTED against a fully-searched corpus (`_requirement_grounded_
+#: status`'s existing `coverage.complete` gate), so a genuine paraphrase (e.g.
+#: "chronic osteitis" for "osteomyelitis") that either evaluator correctly
+#: recognizes as SUPPORTED never gets silently eliminated -- it just leaves
+#: this axis ungrounded, exactly like every other MUST_SUPPORT axis already
+#: does.
+AXIS_INDICATION_CLAUSE = "indication_clause"
 #: issue #6, Codex's independent re-review (F9-R19-A Finding 2): the shared
 #: pre-semicolon stem itself, as a REQUIRED precondition every member of a
 #: qualified-child family must clear before any of them may be considered
@@ -395,6 +424,36 @@ def _exclusion_clause(descriptor: str) -> str | None:
     return None
 
 
+#: The markers a CPT/HCPCS/ICD-10-CM descriptor uses to introduce a positive,
+#: illustrative INDICATION clause -- documentation grammar, not clinical
+#: vocabulary, exactly like `_EXCLUSION_MARKERS` above.
+_INDICATION_RE = re.compile(
+    r"\((?:eg|e\.g\.?|for example)[,.]?\s*([^()]+)\)", re.IGNORECASE)
+
+
+def _indication_clause(descriptor: str) -> str | None:
+    """The clause inside a "(eg, ...)"/"(e.g., ...)"/"(for example, ...)"
+    parenthetical, or None when `descriptor` states no such clause.
+
+    Matched directly against the WHOLE descriptor (never per-clause like
+    `_exclusion_clause`) because the marker itself is parenthesis-scoped, not
+    comma/semicolon-scoped -- a real CPT descriptor commonly nests an
+    "(eg, ...)" example clause inside a larger comma-separated phrase (e.g.
+    "Partial excision (...) bone (eg, osteomyelitis or bossing); talus or
+    calcaneus"), so splitting on commas first would sever the marker from its
+    own content, exactly the way it would for `_exclusion_clause` if that
+    marker were ever nested in parentheses too. Reproduces verbatim from the
+    descriptor by construction (a regex match on the real string), so a
+    caller compiling this into a `requirement.DescriptorRequirement` can
+    always find it again via `_find_clause`, the same guarantee
+    `_exclusion_clause` already gives."""
+    m = _INDICATION_RE.search(descriptor or "")
+    if not m:
+        return None
+    text = m.group(1).strip(" ,;.")
+    return text or None
+
+
 def _semicolon_prefix(descriptor: str) -> tuple[str, str] | None:
     """(normalized stem including the semicolon, the candidate's own remaining
     qualifying clause) for a descriptor stating CPT's family-indentation
@@ -524,16 +583,20 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
     # winner decision even after the real, governed axis had resolved it.
     excl = {c.code: _descriptor_alternatives(_exclusion_clause(c.descriptor) or "")
             for c in candidates}
+    indic = {c.code: _descriptor_alternatives(_indication_clause(c.descriptor) or "")
+             for c in candidates}
     qualified = _qualified_child_terms(candidates)
     viability = _family_viability_terms(candidates) if qualified else {}
 
     lat_words = {_sing(w) for terms in lat.values() for w in terms}
-    # The marker itself belongs to the exclusion grammar just as surely as
-    # the clause it introduces.  If left in the residual token bag it creates
-    # a permanently-unsettled audit-only axis even after the structured
-    # positive and exclusion clauses have resolved the candidate family.
-    governed_words = set(lat_words) | {_sing(word) for word in _EXCLUSION_MARKERS}
-    for terms in (*excl.values(), *qualified.values(), *viability.values()):
+    # The marker itself belongs to the exclusion/indication grammar just as
+    # surely as the clause it introduces.  If left in the residual token bag
+    # it creates a permanently-unsettled audit-only axis even after the
+    # structured positive/exclusion/indication clauses have resolved the
+    # candidate family.
+    governed_words = (set(lat_words) | {_sing(word) for word in _EXCLUSION_MARKERS}
+                      | {"eg", "example"})
+    for terms in (*excl.values(), *qualified.values(), *viability.values(), *indic.values()):
         governed_words |= {_sing(w) for phrase in terms
                            for w in re.split(r"[^a-z0-9]+", phrase.lower()) if w}
     toks = {c.code: _descriptor_tokens(c.descriptor) - governed_words for c in candidates}
@@ -556,6 +619,21 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
         probes.append(AxisProbe(
             AXIS_EXCLUSION_CLAUSE, excl,
             provable=True, selectable=False, queryable=False))
+
+    if any(indic.values()):
+        # issue #6, independent root-cause investigation: unlike
+        # `AXIS_EXCLUSION_CLAUSE`, this polarity is NOT inverted -- documenting
+        # one of a candidate's own indication alternatives SUPPORTS it, exactly
+        # like `AXIS_QUALIFIED_CHILD`'s differential, so it is NOT a member of
+        # `_GATE_ONLY_AXES`: it participates in `narrow()`'s ordinary
+        # literal-presence winner logic (`selectable=True`) and, when genuinely
+        # undocumented rather than merely absent from one candidate's own
+        # descriptor, is a real fact a provider could be asked to confirm
+        # (`queryable=True`) -- never a gate-only gap like an exclusion clause,
+        # which restates a condition the record already establishes elsewhere.
+        probes.append(AxisProbe(
+            AXIS_INDICATION_CLAUSE, indic,
+            provable=True, selectable=True, queryable=True))
 
     if qualified:
         full = {c.code: qualified.get(c.code, ()) for c in candidates}

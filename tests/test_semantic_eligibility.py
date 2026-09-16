@@ -435,6 +435,64 @@ class AnatomyPhraseDecomposition(unittest.TestCase):
         targets = semelig._candidate_anatomy_targets(feats)
         self.assertEqual(targets, ("structure gamma",), targets)
 
+    def test_a_trailing_cardinality_phrase_is_not_a_second_alternative_target(self):
+        """issue #6, independent root-cause investigation (real-data replay
+        against the designated note): CPT 24305 "Tendon lengthening, upper
+        arm or elbow, EACH TENDON" was wrongly treated as anatomically
+        compatible with a fact documenting "Achilles tendon" -- `_TARGET_
+        SPLIT` correctly separated "each tendon" from "upper arm"/"elbow" as
+        its own component, but that component states a BILLING-UNIT
+        cardinality ("each"/"per"/"single"/"pair"/"bilateral" --
+        `ontology._CARDINALITY`, the same closed vocabulary `parse_
+        descriptor` already uses), never a second anatomical site. Its
+        generic head noun ("tendon") ancestor-relates to nearly any specific
+        tendon concept, so left in, it silently poisons the dominance check
+        for every fact naming any tendon at all. "Action, structure alpha,
+        each structure alpha" must yield ONLY "structure alpha"."""
+        feats = semelig._ontology.parse_descriptor(
+            "Lengthening, structure alpha or structure beta, each structure")
+        targets = semelig._candidate_anatomy_targets(feats)
+        self.assertEqual(targets, ("structure alpha", "structure beta"), targets)
+
+    def test_a_cardinality_only_anatomy_phrase_grounds_nothing_not_even_itself(self):
+        """The semicolon-qualifier CPT grammar ("Action of structure alpha;
+        single structure") puts the real target BEFORE the split point and
+        leaves only the cardinality qualifier after it -- decomposing to
+        NOTHING is the honest, safe answer here (UNKNOWN, never a guessed
+        target), not a fallback to the raw cardinality phrase itself."""
+        feats = semelig._ontology.parse_descriptor(
+            "Lengthening of structure alpha; single structure")
+        targets = semelig._candidate_anatomy_targets(feats)
+        self.assertEqual(targets, (), targets)
+
+    def test_a_cardinality_led_target_cannot_ground_a_candidate_or_dominate_a_sibling(self):
+        """Claim-level reproduction of the real bug: a candidate whose ONLY
+        anatomy signal is a cardinality-led phrase ("each structure") must
+        never ground via its generic head noun's own governed ancestor
+        relation to the fact's documented structure -- and, symmetrically,
+        must not survive dominance exclusion once a genuinely grounded
+        sibling exists in the same pool."""
+        source = MockSource(
+            records={
+                ("GROUNDED", "cpt"): {
+                    "long_description": "Repair, structure alpha", "active": True},
+                ("CARDINALITY_ONLY", "cpt"): {
+                    "long_description":
+                        "Lengthening, other site, each structure", "active": True}},
+            # A governed relation exists between the cardinality-led phrase
+            # ITSELF (its generic head noun ancestor-relates to the fact's
+            # documented structure, exactly like "tendon" does to "Achilles
+            # tendon" in the real bug) and the fact's own documented
+            # structure -- if that phrase were wrongly kept as a real
+            # target, this would ground CARDINALITY_ONLY too.
+            concept_relation={("structure alpha", "structure alpha"): "same",
+                              ("structure alpha", "each structure"): "ancestor_descendant"})
+        fact = ClinicalFact(FactKind.PROCEDURE, "a procedure",
+                            attributes={"anatomy": "structure alpha"})
+        result = semelig.eligible_partition(
+            [fact], [_candidate("GROUNDED"), _candidate("CARDINALITY_ONLY")], source, None)
+        self.assertEqual([c.code for c in result], ["GROUNDED"])
+
     def test_qualifier_clause_cannot_ground_a_candidate_or_dominate_a_sibling(self):
         """Codex F9-R2-C, fourth pass, claim-level reproduction: even when a
         governed relation exists for the QUALIFIER phrase itself, it must never

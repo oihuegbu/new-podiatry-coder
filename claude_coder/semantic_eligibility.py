@@ -613,6 +613,25 @@ _WITH_OR_WITHOUT = re.compile(r"[,;]?\s*\bwith\s+or\s+without\b.*$", re.IGNORECA
 #: descriptor's target list is far more likely to use "or" for genuine alternatives
 #: and "and"/"&" for a single compound target ("skin and subcutaneous tissue").
 _TARGET_SPLIT = re.compile(r"\s*(?:,|;|/|\bor\b)\s*", re.IGNORECASE)
+#: issue #6, independent root-cause investigation (real-data replay against
+#: the designated note: CPT 24305 "Tendon lengthening, upper arm or elbow,
+#: EACH TENDON" wrongly grounded as anatomically compatible with a fact
+#: documenting "Achilles tendon" -- `_TARGET_SPLIT` correctly separates
+#: "each tendon" from "upper arm"/"elbow" as its own component, but that
+#: component is a BILLING-UNIT qualifier ("each"/"per"/"single"/"pair"/
+#: "bilateral" -- `ontology._CARDINALITY`, the SAME closed vocabulary
+#: `parse_descriptor` already uses to detect a descriptor's cardinality),
+#: never a second alternative anatomical site. Left in, its generic head
+#: noun ("tendon") ancestor-relates to almost any specific tendon concept
+#: (Achilles tendon IS a tendon), so `_anatomy_compatibility` reported
+#: SUPPORTED_HIERARCHICAL for a candidate whose ACTUAL named sites --
+#: "upper arm", "elbow" -- correctly related as UNRESOLVED. A target
+#: component whose own first word is a cardinality word states HOW MANY,
+#: never WHERE, so it is dropped here exactly like the "with or without"
+#: qualifier clause above -- never split into a false anatomical target.
+_CARDINALITY_LEADING_RE = re.compile(
+    r"^(?:" + "|".join(re.escape(w) for w in _ontology._CARDINALITY) + r")\b",
+    re.IGNORECASE)
 
 
 def _candidate_anatomy_targets(feats) -> tuple[str, ...]:
@@ -624,7 +643,9 @@ def _candidate_anatomy_targets(feats) -> tuple[str, ...]:
     that target was only ONE of several the descriptor names. A trailing "with or
     without ..." qualifier CLAUSE is truncated first -- dropped wholesale, never
     split into a false additional target -- because it qualifies the target(s)
-    already named, it does not name a new one."""
+    already named, it does not name a new one. A cardinality-led component
+    ("each tendon", "single tendon", "per session") is dropped the same way,
+    for the same reason: see `_CARDINALITY_LEADING_RE`'s own comment."""
     text = feats.anatomy_phrase
     if not text:
         return ()
@@ -633,7 +654,9 @@ def _candidate_anatomy_targets(feats) -> tuple[str, ...]:
         return ()
     parts = tuple(dict.fromkeys(
         p.strip() for p in _TARGET_SPLIT.split(truncated) if p.strip()))
-    return parts or (truncated,)
+    if not parts:
+        parts = (truncated,)
+    return tuple(p for p in parts if not _CARDINALITY_LEADING_RE.match(p))
 
 
 def _anatomy_compatibility(candidate, facts: list[ClinicalFact], source,

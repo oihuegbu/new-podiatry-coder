@@ -1172,6 +1172,144 @@ class ExclusionClauseRequirementTest(unittest.TestCase):
         self.assertFalse(grounded)
 
 
+class IndicationClauseRequirementTest(unittest.TestCase):
+    """issue #6, independent root-cause investigation (real-data replay
+    against the designated note, F1/CPT 28118 vs 28120): a candidate's own
+    descriptor stating a positive "(eg, ...)"/"(e.g., ...)"/"(for example,
+    ...)" indication clause compiles into a `RequirementRole.MUST_SUPPORT`
+    requirement -- the SAME "required precondition" polarity as
+    `AXIS_QUALIFIED_CHILD`'s differential (never inverted, unlike
+    `AXIS_EXCLUSION_CLAUSE`): genuinely documenting one of the clause's
+    alternatives SUPPORTS the candidate that carries it; genuinely NOT
+    documenting any of them, in a fully-searched record, is what may ground
+    an elimination. Synthetic descriptors throughout."""
+
+    WITH_INDICATION = _cand("CAND_IND", "assembly service (eg, variant condition)")
+    PLAIN = _cand("CAND_PLAIN", "assembly service performed")
+
+    def _coverage(self, text):
+        import hashlib
+        return req.CoverageCorpus(channel_id="test-channel", text=text,
+                                  text_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                                  covered_pages=(1,), page_image_sha256=("stub-hash",))
+
+    def _reconciliation(self, statuses):
+        from app.contracts.source_evidence import (ReconciliationStatus,
+                                                    SourceReconciliation,
+                                                    SpanReconciliation)
+        return SourceReconciliation(spans=tuple(
+            SpanReconciliation(span_id=sid, status=ReconciliationStatus[status])
+            for sid, status in statuses.items()))
+
+    def test_an_indication_clause_compiles_as_a_required_must_support_requirement(self):
+        reqs = [r for r in req.compile_requirements([self.WITH_INDICATION, self.PLAIN])
+               if r.axis == "indication_clause"]
+        self.assertEqual(len(reqs), 1)     # only CAND_IND states one
+        r = reqs[0]
+        self.assertEqual(r.candidate_code, "CAND_IND")
+        self.assertTrue(r.required)
+        self.assertEqual(r.role, req.RequirementRole.MUST_SUPPORT)
+        self.assertEqual(r.expected, ("variant condition",))
+        self.assertEqual(r.authority_source_text, self.WITH_INDICATION.descriptor)
+
+    def test_a_descriptor_stating_no_indication_compiles_nothing_for_that_candidate(self):
+        reqs = [r for r in req.compile_requirements([self.WITH_INDICATION, self.PLAIN])
+               if r.axis == "indication_clause"]
+        self.assertEqual([r for r in reqs if r.candidate_code == "CAND_PLAIN"], [])
+
+    def test_two_candidates_with_no_indication_clause_compile_nothing(self):
+        a = _cand("CAND_A", "assembly service performed")
+        b = _cand("CAND_B", "assembly service performed differently")
+        reqs = [r for r in req.compile_requirements([a, b]) if r.axis == "indication_clause"]
+        self.assertEqual(reqs, [])
+
+    def test_indication_clause_validates_supported_through_the_existing_plumbing(self):
+        """Wired through the SAME `validated_requirement` every other axis
+        uses -- proves this is not a parallel, unvetted mechanism."""
+        reqs = [r for r in req.compile_requirements([self.WITH_INDICATION, self.PLAIN])
+               if r.axis == "indication_clause"]
+        r = reqs[0]
+        judgement = req.RequirementJudgement(
+            requirement_id=r.requirement_id, status=req.RequirementStatus.SUPPORTED,
+            evidence_span_ids=("s1",))
+        span_text = "documentation confirms the variant condition was addressed"
+        self.assertTrue(req.validated_requirement(
+            r, judgement, evidence_by_span_id={"s1": span_text},
+            reconciliation=self._reconciliation({"s1": "AGREED"})))
+
+    def test_indication_clause_not_documented_validates_against_full_coverage(self):
+        reqs = [r for r in req.compile_requirements([self.WITH_INDICATION, self.PLAIN])
+               if r.axis == "indication_clause"]
+        r = reqs[0]
+        coverage = self._coverage("assembly service performed today, nothing else stated")
+        judgement = req.RequirementJudgement(
+            requirement_id=r.requirement_id, status=req.RequirementStatus.NOT_DOCUMENTED)
+        self.assertTrue(req.validated_requirement(r, judgement, coverage=coverage))
+
+    def _judgements(self, requirement_ids, statuses, evidence_span_ids=("s1",)):
+        rjs = tuple(req.RequirementJudgement(
+            requirement_id=rid, status=statuses,
+            evidence_span_ids=(evidence_span_ids if statuses == req.RequirementStatus.SUPPORTED
+                               else ()))
+            for rid in requirement_ids)
+        model_a = type("J", (), {"requirement_judgements": rjs})()
+        model_b = type("J", (), {"requirement_judgements": rjs})()
+        return [model_a, model_b]
+
+    def test_grounded_elimination_eliminates_on_an_undocumented_indication_clause(self):
+        """End-to-end through the REAL `resolution._grounded_elimination` --
+        the actual function `_uniqueness_view` calls, not merely
+        `validated_requirement` in isolation. Both models unanimously report
+        NOT_DOCUMENTED for CAND_IND's own indication requirement, over a
+        fully-covered corpus that never states it -- this is what may
+        eliminate it, the OPPOSITE polarity from `AXIS_EXCLUSION_CLAUSE`."""
+        from claude_coder import resolution
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+
+        span = EvidenceSpan(text="assembly service performed, nothing else stated",
+                            anchored=True, span_id="s1")
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="assembly service",
+                            evidence=[span], confidence=0.9, fact_id="F1")
+        reqs = req.compile_requirements([self.WITH_INDICATION, self.PLAIN])
+        ind_req = next(r for r in reqs if r.axis == "indication_clause")
+        coverage = self._coverage("assembly service performed, nothing else stated")
+        judgements = self._judgements((ind_req.requirement_id,),
+                                      req.RequirementStatus.NOT_DOCUMENTED)
+
+        grounded, detail = resolution._grounded_elimination(
+            fact, self.WITH_INDICATION, self.PLAIN, reconciliation=None,
+            requirements=reqs, judgements=judgements, coverage=coverage)
+        self.assertTrue(grounded, detail)
+        self.assertIn("NOT_DOCUMENTED", detail)
+
+    def test_grounded_elimination_never_eliminates_on_a_documented_indication_clause(self):
+        """The mirror case: the SAME indication requirement, but every
+        evaluator reports SUPPORTED for it (a real cited span backs it) --
+        the required precondition IS met, so nothing grounds an elimination
+        through this axis."""
+        from claude_coder import resolution
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        from app.contracts.source_evidence import (ReconciliationStatus,
+                                                    SourceReconciliation,
+                                                    SpanReconciliation)
+
+        span = EvidenceSpan(text="documentation confirms the variant condition was addressed",
+                            anchored=True, span_id="s1")
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="assembly service",
+                            evidence=[span], confidence=0.9, fact_id="F1")
+        reqs = req.compile_requirements([self.WITH_INDICATION, self.PLAIN])
+        ind_req = next(r for r in reqs if r.axis == "indication_clause")
+        reconciliation = SourceReconciliation(spans=(
+            SpanReconciliation(span_id="s1", status=ReconciliationStatus.AGREED),))
+        judgements = self._judgements((ind_req.requirement_id,),
+                                      req.RequirementStatus.SUPPORTED)
+
+        grounded, _detail = resolution._grounded_elimination(
+            fact, self.WITH_INDICATION, self.PLAIN, reconciliation, requirements=reqs,
+            judgements=judgements, coverage=None)
+        self.assertFalse(grounded)
+
+
 class QualifiedChildRequirementTest(unittest.TestCase):
     """issue #6, Codex's independent re-review (F9-R19-A): CPT's own family-
     indentation convention -- candidates sharing an identical stem up to a

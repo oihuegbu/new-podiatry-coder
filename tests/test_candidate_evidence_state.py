@@ -793,6 +793,53 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
         self.assertIsNone(line.documentation_gap)
         self.assertIn(SYSTEM_UNRESOLVED_MARKER, line.rationale)
 
+    def test_a_disputed_candidates_own_undocumented_indication_clause_becomes_a_provider_question(self):
+        """issue #6, independent root-cause investigation (real-data replay
+        against the designated note): before `tiebreak.AXIS_INDICATION_CLAUSE`
+        existed, two evaluators disagreeing specifically about a candidate
+        whose OWN descriptor states a positive "(eg, ...)" indication clause
+        had NO governed axis to adjudicate through -- `_tiebreak.narrow` had
+        nothing to test (no winner, and no provider question either, since
+        `discriminating_axes` never surfaced the clause at all), so the
+        disagreement fell to a permanent, unrescuable SYSTEM_UNRESOLVED hold
+        that reproduced identically on every retry. Reproduced live on the
+        real note (CPT 28118 vs 28120, "...eg, osteomyelitis or bossing...");
+        pinned here with synthetic vocabulary. Both evaluators agree on
+        CAND_ALPHA (states no indication clause); they disagree specifically
+        about CAND_BETA, whose own descriptor requires documenting "variant
+        condition" -- a fact the evidence never states either way. This must
+        now become a genuine, specific, answerable provider question naming
+        that exact fact, never a silent hold with no path to resolution."""
+        from claude_coder.models import SYSTEM_UNRESOLVED_MARKER
+        chosen = _cand("CAND_ALPHA", "assembly service, broad category")
+        rival = _cand("CAND_BETA",
+                      "assembly service, broad category (eg, variant condition)")
+        fact = _fact("assembly service performed today")
+        span = EvidenceSpan(text="assembly service performed today", anchored=True,
+                           span_id="s1")
+        fact.evidence = [span]
+        recon = self._reconciliation({"s1": "AGREED"})
+        primary = _verify.Judgement(
+            chosen=chosen, entailed=(chosen.code, rival.code), declared=True,
+            candidate_dispositions=(
+                _disp(chosen, "entailed", evidence_span_ids=("s1",)),
+                _disp(rival, "entailed", evidence_span_ids=("s1",))))
+        corroborator = _verify.Judgement(
+            chosen=chosen, entailed=(chosen.code,), declared=True,
+            candidate_dispositions=(
+                _disp(chosen, "entailed", evidence_span_ids=("s1",)),
+                _disp(rival, "different_concept", evidence_span_ids=("s1",))))
+
+        line = resolution._settle_uniqueness(
+            fact, chosen, [chosen, rival], [primary, corroborator], {},
+            "independent verification", "cross-vendor corroboration", recon)
+
+        self.assertIsNone(line.chosen)
+        self.assertNotIn(SYSTEM_UNRESOLVED_MARKER, line.rationale or "")
+        self.assertIsNotNone(line.documentation_gap)
+        self.assertIn("variant condition", line.documentation_gap)
+        self.assertIn("indication_clause", line.documentation_gap)
+
     def test_malformed_disagreement_remains_a_system_hold_not_a_provider_question(self):
         """The new resolver must not launder a citation failure into autonomy.
 
