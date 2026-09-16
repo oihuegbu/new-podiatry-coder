@@ -520,6 +520,113 @@ class AnatomyPhraseDecomposition(unittest.TestCase):
         self.assertEqual({c.code for c in result}, {"QUALIFIED", "UNGROUNDED"})
 
 
+def _diagnosis_fact_with_onset(value: bool | None,
+                               description="a diagnosis") -> ClinicalFact:
+    """A DIAGNOSIS fact with a claim-authorized "traumatic_onset" attribute,
+    exactly the shape `_fact_attribute_value`/`claim_authorized_value`
+    requires -- same construction `_service_role_fact` below uses. `value`
+    is a genuine Python `bool` (never a string): the real wire-schema
+    "booleans" array (`extraction.py`) parses to exactly this shape, and a
+    real `False` here is the precise case this investigation found
+    `claim_authorized_value` was silently unable to authorize at all before
+    its own fix. `attribute_evidence`'s own "value" is still the STRING
+    convention the wire schema documents ("true"/"false"), independent of
+    the native-bool `attributes` entry. `value=None` builds a fact that
+    never states one at all."""
+    if value is None:
+        return ClinicalFact(FactKind.DIAGNOSIS, description)
+    from claude_coder.models import AttributeEvidence, EvidenceSpan, RelationState
+    span = EvidenceSpan(f"documented as traumatic_onset={value}", anchored=True,
+                        span_id="s1")
+    return ClinicalFact(
+        FactKind.DIAGNOSIS, description, attributes={"traumatic_onset": value},
+        evidence=[span],
+        attribute_evidence={"traumatic_onset": (
+            AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                              value="true" if value else "false"),)})
+
+
+class TraumaticOnsetDominance(unittest.TestCase):
+    """issue #6, independent root-cause investigation (real-data replay
+    against the designated note): the real "Insertional Achilles tendon
+    degeneration" diagnosis kept losing a ranking tie to an acute-injury
+    ICD-10-CM strain code with no governed signal to settle it -- the
+    SNOMED-based concept-relation index is unsafe to reuse for this
+    (confirmed it wrongly returns "same" for "degeneration" vs "strain"
+    phrase pairs sharing an anatomical site), so a NEW extraction-time
+    attribute ("traumatic_onset", extraction.py) plus this new governed
+    dominance check (mirroring `AnatomyDominance`'s exact comparative,
+    never-absolute posture) closes the gap instead."""
+
+    def _source(self, semantic_class_map):
+        return MockSource(
+            records={
+                ("INJURY", "icd10"): {"description": "Strain of a structure",
+                                      "active": True},
+                ("DISEASE", "icd10"): {"description": "Tendinitis of a structure",
+                                       "active": True}},
+            semantic_class=semantic_class_map)
+
+    def test_non_traumatic_onset_excludes_an_injury_chapter_sibling(self):
+        source = self._source({"INJURY": "injury_poisoning"})
+        fact = _diagnosis_fact_with_onset(False)
+        result = semelig.eligible_partition(
+            [fact], [_candidate("INJURY", system="icd10"),
+                    _candidate("DISEASE", system="icd10")], source, None)
+        self.assertEqual([c.code for c in result], ["DISEASE"])
+
+    def test_undocumented_onset_excludes_nothing(self):
+        """Absence of the axis is a data gap, never evidence against either
+        candidate."""
+        source = self._source({"INJURY": "injury_poisoning"})
+        fact = _diagnosis_fact_with_onset(None)
+        result = semelig.eligible_partition(
+            [fact], [_candidate("INJURY", system="icd10"),
+                    _candidate("DISEASE", system="icd10")], source, None)
+        self.assertEqual({c.code for c in result}, {"INJURY", "DISEASE"})
+
+    def test_explicitly_traumatic_onset_excludes_nothing(self):
+        """The symmetric case is deliberately not implemented -- an injury-
+        chapter candidate is never PREFERRED by this mechanism, only ever
+        excluded when the record rules it out."""
+        source = self._source({"INJURY": "injury_poisoning"})
+        fact = _diagnosis_fact_with_onset(True)
+        result = semelig.eligible_partition(
+            [fact], [_candidate("INJURY", system="icd10"),
+                    _candidate("DISEASE", system="icd10")], source, None)
+        self.assertEqual({c.code for c in result}, {"INJURY", "DISEASE"})
+
+    def test_no_non_injury_alternative_excludes_nothing(self):
+        """Absence of grounding is not evidence against anyone -- when every
+        candidate in the pool is injury-chapter classified, none is excluded
+        on this basis alone."""
+        source = self._source({"INJURY": "injury_poisoning",
+                              "DISEASE": "injury_poisoning"})
+        fact = _diagnosis_fact_with_onset(False)
+        result = semelig.eligible_partition(
+            [fact], [_candidate("INJURY", system="icd10"),
+                    _candidate("DISEASE", system="icd10")], source, None)
+        self.assertEqual({c.code for c in result}, {"INJURY", "DISEASE"})
+
+    def test_single_candidate_pool_excludes_nothing(self):
+        source = self._source({"INJURY": "injury_poisoning"})
+        fact = _diagnosis_fact_with_onset(False)
+        result = semelig.eligible_partition(
+            [fact], [_candidate("INJURY", system="icd10")], source, None)
+        self.assertEqual([c.code for c in result], ["INJURY"])
+
+    def test_eligibility_report_names_the_same_reason(self):
+        source = self._source({"INJURY": "injury_poisoning"})
+        fact = _diagnosis_fact_with_onset(False)
+        report = semelig.eligibility_report(
+            [fact], [_candidate("INJURY", system="icd10"),
+                    _candidate("DISEASE", system="icd10")], source, None)
+        by_code = {r["code"]: r for r in report}
+        self.assertFalse(by_code["INJURY"]["eligible"], by_code)
+        self.assertIn("non-traumatic", by_code["INJURY"]["reason"])
+        self.assertTrue(by_code["DISEASE"]["eligible"], by_code)
+
+
 def _service_role_fact(role: str | None, description="a procedure") -> ClinicalFact:
     """A PROCEDURE fact with a claim-authorized "service_role" attribute, exactly
     the shape `_fact_attribute_value`/`claim_authorized_value` requires (scope-

@@ -782,8 +782,25 @@ def claim_authorized_value(fact, axis: str, reconciliation) -> str | None:
     independent cross-vendor verifier pair's verdict on an axis neither
     reading's own quotation settled (`adjudicate_axis`). Checked here, never by
     mutating an `AttributeEvidence` entry to look directly-asserted when it
-    is not -- the two proofs stay distinguishable in the record."""
-    value = str((getattr(fact, "attributes", None) or {}).get(axis) or "").strip()
+    is not -- the two proofs stay distinguishable in the record.
+
+    issue #6, independent root-cause investigation: a wire-schema BOOLEAN
+    attribute (extraction.py's "booleans" array -- new_patient,
+    separately_identifiable, traumatic_onset) parses to a genuine Python
+    `bool`, and `x or ""` treats `False` as falsy -- collapsing an
+    EXPLICITLY documented `False` into the SAME empty string this function
+    already, correctly, treats as "never stated at all". A boolean
+    attribute's `False` value could therefore never be claim-authorized;
+    only `True` ever reached the checks below. `raw_value is None` is the
+    genuine "never stated" test (a missing key duck-types the same way via
+    `dict.get`'s own `None` default); a real `False` is a real, checkable
+    value from here on, normalized exactly like `_norm` already normalizes
+    every boolean it compares against."""
+    raw_value = (getattr(fact, "attributes", None) or {}).get(axis)
+    if raw_value is None:
+        return None
+    value = ("true" if raw_value is True else "false" if raw_value is False
+             else str(raw_value).strip())
     if not value:
         return None
     adjudication = (getattr(fact, "axis_adjudications", None) or {}).get(axis)

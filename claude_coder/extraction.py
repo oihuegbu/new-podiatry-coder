@@ -60,6 +60,17 @@ For each fact return an object with:
         "total_time_minutes" if the note records visit time, and
         "separately_identifiable" (true only if the note documents E/M work
         significant and separate from any procedure done the same day).
+        For a "diagnosis" fact ONLY, when the note itself states which one:
+        "traumatic_onset" (true/false) — true when the note documents this
+        condition arose from a discrete injury/trauma mechanism (a fall, blow,
+        forceful twist, accident, or similar acute event); false when the note
+        instead documents a gradual, chronic, degenerative, overuse, or
+        non-traumatic process (e.g. "degeneration", "chronic", "did not
+        improve with conservative treatment", a congenital or infectious
+        origin). Omit entirely when the note states neither — never guess an
+        onset mechanism the note does not address, and never infer it from
+        the diagnosis's name alone when the note's own wording does not
+        settle it.
         Emit each attribute as ONE entry in exactly one of three arrays, chosen
         by the value's own natural type — never coerce a value into the wrong
         array to make it fit, and never emit the same axis name in more than

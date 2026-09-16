@@ -741,6 +741,73 @@ def _anatomy_dominance_exclusions(facts: list[ClinicalFact], candidates: list,
     return out
 
 
+def _injury_chapter_classification(candidate, source, date_of_service: str | None) -> str:
+    """This ONE candidate's own governed injury/disease classification --
+    `"injury"` when `source.semantic_class` resolves it to the
+    `injury_poisoning` code class (the CDC/NCHS ICD-10-CM chapter-19
+    boundary, S00-T88 -- see `AuthoritativeSource._icd_chapter_ranges`),
+    `"not_injury"` for anything else it DOES resolve to (including no match
+    at all, which is a genuine classification for a non-injury-chapter
+    code), `"unknown"` only when the classifier itself is unavailable or
+    raises -- never guessed either way from an unreachable source."""
+    classifier = getattr(source, "semantic_class", None)
+    if not callable(classifier):
+        return _UNKNOWN
+    try:
+        cls = classifier(candidate.code, candidate.system, dos=date_of_service)
+    except Exception:
+        return _UNKNOWN
+    return "injury" if cls == "injury_poisoning" else "not_injury"
+
+
+def _traumatic_onset_dominance_exclusions(facts: list[ClinicalFact], candidates: list,
+                                          source, date_of_service: str | None,
+                                          reconciliation=None) -> dict[tuple[str, str], str]:
+    """`{(code, system) -> reason}` for injury-chapter candidates the record's
+    OWN documented onset mechanism rules out (issue #6, independent root-
+    cause investigation: the real note's "Insertional Achilles tendon
+    degeneration" diagnosis kept losing a ranking tie to an acute-injury
+    Achilles-strain code with no governed signal to settle it).
+
+    `extraction.py`'s "traumatic_onset" attribute (boolean) is the record's
+    OWN, extraction-time answer to "does the note document this condition
+    as arising from a discrete injury/trauma event, or a gradual/chronic/
+    non-traumatic process" -- never re-derived here from free text (the
+    exact class of hardcoded-vocabulary proxy this codebase's own history
+    already rejected for several other axes). An injury-chapter candidate
+    (`_injury_chapter_classification` -- SAME governed CDC/NCHS chapter
+    boundary `semantic_class`'s `injury_poisoning` class already uses,
+    never re-derived) is excluded ONLY when:
+      - the fact's own CLAIM-AUTHORIZED `traumatic_onset` value is
+        explicitly "false" (the note itself states a non-traumatic onset,
+        never inferred from silence -- omitted/undocumented never excludes
+        anything, the same "absence of grounding is not evidence" posture
+        `_anatomy_dominance_exclusions` already holds), AND
+      - at least one OTHER candidate in the SAME pool is NOT classified to
+        the injury chapter, so this can only prefer an available, better-
+        fitting sibling, never empty a pool on this signal alone.
+    Symmetric case (an explicitly documented traumatic onset preferring an
+    injury-chapter code over a disease-chapter sibling) is deliberately not
+    implemented here: it is not the failure this investigation reproduced,
+    and every disease-chapter code remains independently eligible on every
+    other axis regardless, so nothing is lost by leaving it to the ordinary
+    disposition/entailment path. A pool of fewer than two candidates has
+    nothing to compare, so nothing is excluded."""
+    if len(candidates) < 2:
+        return {}
+    onset = _fact_attribute_value(facts, "traumatic_onset", reconciliation).strip().lower()
+    if onset != "false":
+        return {}
+    verdicts = {(c.code, c.system): _injury_chapter_classification(c, source, date_of_service)
+               for c in candidates}
+    if not any(v == "not_injury" for v in verdicts.values()):
+        return {}
+    return {key: ("the record documents this condition's onset as non-traumatic, and "
+                  "another candidate in the same pool is not classified to the "
+                  "injury/poisoning chapter")
+            for key, v in verdicts.items() if v == "injury"}
+
+
 def _ineligibility_reason(candidate, facts: list[ClinicalFact], source,
                           date_of_service: str | None) -> str | None:
     """None when eligible; otherwise the one compiled-record axis that positively
@@ -816,7 +883,10 @@ def eligible_partition(facts: list[ClinicalFact], candidates: list, source,
     kind_excluded = _candidate_kind_control(facts, pool, source, date_of_service)
     pool = [c for c in pool if (c.code, c.system) not in kind_excluded]
     excluded = _anatomy_dominance_exclusions(facts, pool, source, reconciliation)
-    return [c for c in pool if (c.code, c.system) not in excluded]
+    pool = [c for c in pool if (c.code, c.system) not in excluded]
+    onset_excluded = _traumatic_onset_dominance_exclusions(
+        facts, pool, source, date_of_service, reconciliation)
+    return [c for c in pool if (c.code, c.system) not in onset_excluded]
 
 
 def eligibility_report(facts: list[ClinicalFact], candidates: list, source,
@@ -824,10 +894,10 @@ def eligibility_report(facts: list[ClinicalFact], candidates: list, source,
     """A full per-candidate audit record over `candidates` -- which `eligible_partition`
     would keep or exclude, and why -- preserved for the audit trail EVEN on a
     held/blocked outcome (issue #6 item 8), never only for a released line. Computed
-    over the SAME `_ineligibility_reason` AND the same `_anatomy_dominance_exclusions`
-    (run over the identical eligible-survivor pool) `eligible_partition` itself reads,
-    so this record can never claim a different reason than the one that actually
-    decided it."""
+    over the SAME `_ineligibility_reason` AND the same `_anatomy_dominance_exclusions`/
+    `_traumatic_onset_dominance_exclusions` (run over the identical eligible-survivor
+    pool, in the identical order) `eligible_partition` itself reads, so this record
+    can never claim a different reason than the one that actually decided it."""
     pool = [c for c in candidates if eligible(c, facts, source, date_of_service)]
     role_control = _service_role_control(facts, pool, source, reconciliation,
                                          dos=date_of_service)
@@ -838,6 +908,9 @@ def eligibility_report(facts: list[ClinicalFact], candidates: list, source,
     surviving = [c for c in surviving
                  if (c.code, c.system) not in kind_excluded]
     dominance = _anatomy_dominance_exclusions(facts, surviving, source, reconciliation)
+    surviving = [c for c in surviving if (c.code, c.system) not in dominance]
+    onset_dominance = _traumatic_onset_dominance_exclusions(
+        facts, surviving, source, date_of_service, reconciliation)
     report = []
     for c in candidates:
         key = (c.code, c.system)
@@ -851,6 +924,8 @@ def eligibility_report(facts: list[ClinicalFact], candidates: list, source,
             reason = kind_excluded.get(key)
         if reason is None:
             reason = dominance.get(key)
+        if reason is None:
+            reason = onset_dominance.get(key)
         report.append({
             "code": c.code, "system": c.system, "eligible": reason is None,
             "reason": reason,

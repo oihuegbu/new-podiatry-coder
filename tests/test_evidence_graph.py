@@ -1613,6 +1613,54 @@ class AttributeEvidenceMutationIsBoundToEveryDigest(unittest.TestCase):
             "the graph binding must change when a mutation flips code selection")
 
 
+class ClaimAuthorizedValueBooleanFalse(unittest.TestCase):
+    """issue #6, independent root-cause investigation: found while wiring a
+    NEW boolean attribute (extraction.py's "traumatic_onset") through
+    `claim_authorized_value` for the first time. A wire-schema BOOLEAN
+    attribute (new_patient, separately_identifiable, traumatic_onset) parses
+    to a genuine Python `bool` -- and the function's own raw-value
+    extraction used `x or ""`, which treats `False` as falsy, collapsing an
+    EXPLICITLY documented `False` into the exact same empty string this
+    function already, correctly, treats as "never stated at all". Every
+    boolean attribute's `False` value was therefore silently UNAUTHORIZABLE
+    -- only `True` could ever reach the assertion/reconciliation checks
+    below, for every consumer of this one shared accessor, not merely the
+    caller that happened to notice."""
+
+    def _fact(self, *, raw_value, evidence_value):
+        from claude_coder.models import AttributeEvidence, RelationState
+        span = EvidenceSpan("documented explicitly", anchored=True, span_id="s1")
+        return ClinicalFact(
+            FactKind.DIAGNOSIS, "a condition", attributes={"a_flag": raw_value},
+            evidence=[span], fact_id="F1",
+            attribute_evidence={"a_flag": (
+                AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                  value=evidence_value),)})
+
+    def test_a_genuine_false_boolean_is_claim_authorized_not_treated_as_absent(self):
+        from claude_coder import graph_consensus as gc
+        fact = self._fact(raw_value=False, evidence_value="false")
+        self.assertEqual(gc.claim_authorized_value(fact, "a_flag", None), "false")
+
+    def test_a_genuine_true_boolean_is_still_claim_authorized(self):
+        from claude_coder import graph_consensus as gc
+        fact = self._fact(raw_value=True, evidence_value="true")
+        self.assertEqual(gc.claim_authorized_value(fact, "a_flag", None), "true")
+
+    def test_a_missing_axis_still_returns_none(self):
+        from claude_coder import graph_consensus as gc
+        fact = ClinicalFact(FactKind.DIAGNOSIS, "a condition", fact_id="F1")
+        self.assertIsNone(gc.claim_authorized_value(fact, "a_flag", None))
+
+    def test_a_false_boolean_still_needs_a_matching_asserted_entry(self):
+        """The bug was specifically about `False` collapsing to "absent" --
+        it must not ALSO become "trust the raw value with no evidence check",
+        which would be the opposite, equally unsafe mistake."""
+        from claude_coder import graph_consensus as gc
+        fact = self._fact(raw_value=False, evidence_value="true")  # mismatched
+        self.assertIsNone(gc.claim_authorized_value(fact, "a_flag", None))
+
+
 class PerLineStatusClassification(unittest.TestCase):
     """issue #6 F9-R7 item 4: every documented service/diagnosis survives into
     the bundle with one explicit status, never erased into an untyped audit
