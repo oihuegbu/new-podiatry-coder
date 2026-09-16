@@ -357,6 +357,45 @@ class SemanticAnatomyRequirementTest(unittest.TestCase):
                          "a concept every tied candidate shares says nothing about "
                          "which one the record means")
 
+    def test_a_candidates_own_alternative_sharing_the_tied_concept_compiles_no_requirement(self):
+        """issue #6, independent review: reproduces the exact real-note failure
+        mode found against CPT 28118/28119/28120 -- a candidate whose own
+        descriptor names TWO alternative anatomy targets ("structure alpha or
+        structure beta") where ONE of those alternatives (beta) is a concept
+        every OTHER tied candidate also accepts. `structure beta` alone is
+        correctly excluded as non-discriminating (the prior test above), but
+        the bug was promoting the candidate's OTHER own alternative
+        (`structure alpha`, unique to this one candidate) into a MUST_SUPPORT
+        requirement anyway -- demanding the record document `alpha`
+        specifically, when the candidate's own descriptor already treats
+        alpha/beta as interchangeable (an OR, not an AND) and `beta` alone,
+        which the tied set already shares, is fully sufficient. That
+        manufactured a requirement no candidate's own descriptor actually
+        imposes, producing an unresolvable split between independent
+        evaluators: one correctly reads the descriptor's real OR semantics as
+        satisfied by the documented `beta`; the other correctly finds the
+        wrongly-compiled `alpha`-only requirement unmet. Live symptom: CPT
+        28120 ("...talus or calcaneus") tied against 28118/28119 (calcaneus
+        only) over a documented calcaneus procedure -- `calcaneus` is shared
+        and correctly excluded, but `talus` (28120's OTHER own alternative)
+        was wrongly compiled into a forced requirement, and the designated
+        operative note held on exactly this pattern (F9-R23-round-N,
+        independent-anatomy-alternative regression)."""
+        either = _cand("CAND_EITHER", "assembly service, structure alpha or structure beta")
+        rival = _cand("CAND_RIVAL", "assembly service, structure beta")
+        source = MockSource(
+            records=self._records(either, rival),
+            concept_lookup={
+                "structure alpha": {"candidates": ["C_ALPHA"], "unique": True, "expansions": []},
+                "structure beta": {"candidates": ["C_BETA"], "unique": True, "expansions": []}})
+        reqs = [r for r in req.compile_requirements([either, rival], source=source)
+               if r.axis == "semantic_anatomy"]
+        self.assertEqual(
+            reqs, [],
+            "a candidate already satisfiable through an anatomy concept the whole "
+            "tied set shares must not ALSO be held to its own other alternative -- "
+            "its alternatives are an OR, not an AND")
+
     def test_an_ambiguous_match_never_compiles_a_requirement(self):
         """Fail-closed, the same discipline `_anatomy_compatibility` already
         applies: a term resolving to MORE than one concept id is not governed

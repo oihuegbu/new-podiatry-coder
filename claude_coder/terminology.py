@@ -17,6 +17,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from .ontology import _LATERALITY
+
 
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ",
@@ -58,6 +60,23 @@ _MAX_DISTINCTIVE_SOURCE_TERMS = 3
 # production consumer is the SNOMED-to-ICD mapping, whose output is still only a
 # verification-required candidate, never a coding decision.
 _MIN_CONTAINED_SOURCE_TOKENS = 2
+# issue #6, independent review: a laterality/orientation word ("right", "left",
+# "bilateral", "side") carries no clinical specificity on its own -- it appears as a
+# contained phrase in THOUSANDS of unrelated Alphabetic Index entries across every
+# body system and chapter, purely because most injury/condition entries state which
+# side they're on. Requiring only "at least two contained tokens" let a source term
+# built ENTIRELY from these words (e.g. "right side") satisfy that bar while
+# contributing zero real diagnostic meaning, seeding recall with an unbounded,
+# essentially random set of codes for ANY fact description that happens to end in a
+# side qualifier. Reproduced directly: "condition alpha of the right side" (a generic
+# synthetic fixture with no real diagnostic content) matched "right side" against a
+# real Alphabetic Index term and recalled pathologic-fracture, congenital-anomaly,
+# skull-fracture, and traumatic-brain-injury codes alike -- all sharing nothing with
+# the fact except the word "side". A contained match must contribute at least one
+# token beyond pure orientation/laterality wording. Not a code or clinical-term list --
+# generic English orientation words, the same class already excluded elsewhere in
+# this codebase's own distinctive-token conventions.
+_ORIENTATION_ONLY_TOKENS = set(_LATERALITY) | {"side"}
 
 
 class TerminologyIndex:
@@ -228,7 +247,7 @@ class TerminologyIndex:
                     seen_entries.add(entry)
                     entries.append(entry)
         for code, source_tokens, source_term in entries:
-            if source_tokens <= query_tokens:
+            if source_tokens <= query_tokens and (source_tokens - _ORIENTATION_ONLY_TOKENS):
                 contained.setdefault(code, []).append(source_term)
         for code, source_terms in contained.items():
             matches[code] = {
@@ -240,6 +259,12 @@ class TerminologyIndex:
         tokens = {_sing(t) for t in normalized.split()
                   if len(t) >= _MIN_DISTINCTIVE_TOKEN_LENGTH}
         for token in sorted(tokens):
+            # A pure orientation/laterality word is never "distinctive," no
+            # matter how few codes it happens to map to -- the same principle
+            # as the contained-phrase guard above, defense-in-depth for this
+            # separate fallback path.
+            if token in _ORIENTATION_ONLY_TOKENS:
+                continue
             codes = self._token_codes.get(token) or set()
             terms = self._token_terms.get(token) or set()
             if (len(codes) != 1 or not terms

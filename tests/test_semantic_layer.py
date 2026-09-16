@@ -860,6 +860,40 @@ class TerminologyDistinctiveTokenRecallTest(unittest.TestCase):
         self.assertEqual(idx.recall_candidates("shared pattern"), set())
         self.assertEqual(idx.recall_candidates("rare pattern"), set())
 
+    def test_a_source_phrase_built_entirely_of_orientation_words_never_widens_recall(self):
+        """issue #6, independent review: a source phrase whose ENTIRE contained
+        token set is orientation/laterality wording ("right side") carries no
+        real clinical specificity -- it is a phrase that legitimately appears
+        in thousands of unrelated Alphabetic Index entries across every body
+        system, purely because most injury/condition entries state which side
+        they're on. Reproduced directly against the real, licensed ICD-10-CM
+        Alphabetic Index data: a synthetic fact description ending in "right
+        side" recalled pathologic-fracture, congenital-anomaly, skull-fracture,
+        and traumatic-brain-injury codes alike, sharing nothing with the fact
+        except the word "side" -- an essentially unbounded, random-looking
+        candidate flood for ANY fact whose description happens to end in a side
+        qualifier. A contained match must contribute at least one token beyond
+        pure orientation/laterality wording."""
+        from claude_coder.terminology import TerminologyIndex
+        idx = TerminologyIndex({
+            "synthetic-alpha": ["right side"],
+            "synthetic-beta": ["alpha degeneration"],
+        })
+        # "right side" alone: two contained tokens, but both pure orientation --
+        # must not widen recall on its own, even against a query sharing NOTHING
+        # else with any indexed term.
+        self.assertEqual(idx.recall_candidates("condition unrelated to the right side"),
+                         set(),
+                         "an orientation-only source phrase must never seed recall, "
+                         "even though it technically satisfies the minimum "
+                         "contained-token count")
+        # A genuinely distinctive term alongside the SAME orientation wording
+        # must still widen recall normally -- this guards against an over-broad
+        # fix that also suppresses legitimate matches.
+        matches = idx.recall_matches("alpha degeneration, documented on the right side")
+        self.assertIn("SYN.THETIC-BETA", matches)
+        self.assertEqual(matches["SYN.THETIC-BETA"]["method"], "contained_source_phrase")
+
 
 class GovernedMappingIdentityTest(unittest.TestCase):
     def _candidate(self, *, mapped_code="SYNTH-A", source="snomed-crosswalk",
