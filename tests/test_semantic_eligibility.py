@@ -343,44 +343,10 @@ class AnatomyDominance(unittest.TestCase):
         if line.chosen is not None:
             self.assertEqual(line.chosen.code, "GROUNDED")
 
-    def test_cardinality_led_target_never_dominates_end_to_end_through_resolve(self):
-        """issue #6, independent root-cause investigation, whole-pipeline
-        verification (real note: CPT 24305 "Tendon lengthening, upper arm or
-        elbow, EACH TENDON" wrongly survived against a fact documenting
-        "Achilles tendon" -- the generic head noun in the cardinality-led
-        "each tendon" component ancestor-related to any specific tendon
-        concept). Through the REAL pipeline entry point: a candidate whose
-        ONLY anatomy signal is a cardinality-led phrase must never be the
-        one `resolve()` releases when a genuinely grounded sibling was
-        retrieved for the same fact."""
-        from claude_coder.resolution import resolve
-        from tests.test_measurement import _request
-
-        source = MockSource(
-            records={
-                ("GROUNDED", "cpt"): {
-                    "long_description": "Repair, structure alpha", "active": True},
-                ("CARDINALITY_ONLY", "cpt"): {
-                    "long_description":
-                        "Lengthening, other site, each structure", "active": True}},
-            # A governed relation exists for the cardinality-led phrase ITSELF
-            # (its generic head noun ancestor-relates to the fact's documented
-            # structure, exactly like "tendon" does to "Achilles tendon" in the
-            # real bug) -- without the fix, this is exactly what wrongly
-            # grounds CARDINALITY_ONLY.
-            concept_relation={("structure alpha", "structure alpha"): "same",
-                             ("structure alpha", "each structure"): "ancestor_descendant"},
-            retrieval={("*", "cpt"): [_candidate("GROUNDED"),
-                                     _candidate("CARDINALITY_ONLY")]})
-        fact = ClinicalFact(FactKind.PROCEDURE, "a procedure",
-                            attributes={"anatomy": "structure alpha"}, fact_id="fx")
-        line = resolve(_request(fact), source)
-        self.assertIsNotNone(line.candidate_eligibility)
-        report = {r["code"]: r for r in line.candidate_eligibility}
-        self.assertFalse(report["CARDINALITY_ONLY"]["eligible"], report)
-        self.assertTrue(report["GROUNDED"]["eligible"], report)
-        if line.chosen is not None:
-            self.assertEqual(line.chosen.code, "GROUNDED")
+    # Full whole-pipeline verification (through the real code_encounter()
+    # entrypoint, not just resolve()) for the cardinality-led anatomy target
+    # fix lives in tests/test_whole_pipeline_defensible_codes.py, the one
+    # shared, reusable harness any fix's scenario runs through.
 
 
 class AnatomyPhraseDecomposition(unittest.TestCase):
