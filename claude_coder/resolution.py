@@ -3514,8 +3514,15 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
         if c.code not in seen:
             seen.add(c.code)
             order.append(c)
-    # Fix3: drop DOS-inactive candidates before capping to the shortlist.
-    shortlist = _active_only(order, source, dos)[:VERIFY_K]
+    # Drop DOS-inactive candidates before verification.  ``order`` is the
+    # deterministic, versioned authoritative candidate universe for this one
+    # documented service.  A prior ``[:VERIFY_K]`` truncation let a rejected
+    # first page masquerade as a candidate-recall gap even when further
+    # source-derived candidates existed.  Similarity may order recall, but it
+    # may not decide that the unvisited remainder is absent.  Each candidate
+    # below is still subject to the same descriptor, evidence, corroboration,
+    # and claim controls; this only makes exhaustion mean actual exhaustion.
+    shortlist = _active_only(order, source, dos)
     if not shortlist and unsupported:
         return _bounded_interval_hold(fact, unsupported)
     # issue #6, Codex's independent re-review (F9-R17-A): bind ONE authoritative
