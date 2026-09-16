@@ -155,6 +155,61 @@ def test_candidate_recall_gap_advances_to_the_next_authoritative_page():
     assert paging["pages_evaluated"][0]["outcome"] == "candidate_recall_gap"
 
 
+def test_every_anchored_fact_span_reaches_deterministic_recall_sources():
+    """Recall may not depend on which supporting quotation is listed first.
+
+    The synthetic later span is the only one that an authoritative term source
+    would recognize.  Before the complete-evidence query fix, it never reached
+    either retrieval or the UMLS recall seam because resolution used
+    ``fact.evidence[:1]``.  This is deliberately vocabulary- and code-agnostic:
+    the assertion is about stable propagation of source-anchored event evidence,
+    not about a particular procedure or terminology entry.
+    """
+    from claude_coder.eligibility import (ClaimComponent, ClaimLineIntent,
+                                          EligibilityState, RetrievalRequest,
+                                          fact_snapshot_digest)
+
+    first = EvidenceSpan("initial synthetic mention", anchored=True,
+                         span_id="s1", start=0, end=25)
+    later = EvidenceSpan("distinctive synthetic source phrase", anchored=True,
+                         span_id="s2", start=26, end=59)
+    fact = ClinicalFact(
+        FactKind.PROCEDURE, "synthetic event", fact_id="F1",
+        disposition=Disposition.PERFORMED, confidence=0.99,
+        evidence=[first, later])
+
+    class CaptureSource(MockSource):
+        def __init__(self):
+            super().__init__()
+            self.retrieval_queries = []
+            self.umls_terms = []
+
+        def retrieve(self, description, system, top_k=20):
+            self.retrieval_queries.append((description, system))
+            return []
+
+        def umls_candidates(self, terms, system, date_of_service):
+            self.umls_terms = list(terms)
+            return []
+
+    intent = ClaimLineIntent(
+        intent_id="intent-F1", encounter_id="enc", component=ClaimComponent.SERVICE,
+        clinical_event_ids=["F1"], fact_kind=fact.kind.value,
+        clinical_action=fact.description, attributes=dict(fact.attributes),
+        date_of_service=None, billing_entity_id=None, source_span_ids=["s1", "s2"],
+        state=EligibilityState.ELIGIBLE_FOR_RETRIEVAL,
+        fact_digest=fact_snapshot_digest(fact))
+    source = CaptureSource()
+
+    resolution.resolve(RetrievalRequest(intent, fact), source)
+
+    assert "distinctive synthetic source phrase" in source.umls_terms
+    assert ("distinctive synthetic source phrase", "cpt") in source.retrieval_queries
+    assert source.umls_terms[:3] == [
+        "synthetic event", "initial synthetic mention",
+        "distinctive synthetic source phrase"]
+
+
 def test_candidate_set_snapshot_is_stable_and_binds_descriptor_identity():
     first = CandidateCode(
         code="CODE_B", system="cpt", descriptor="assembly removal", score=0.8,

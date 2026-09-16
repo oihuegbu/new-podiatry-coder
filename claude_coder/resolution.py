@@ -941,6 +941,74 @@ def _apply_attribute_axis_conflict_guard(
     return line
 
 
+def _candidate_queries_for_fact(fact: ClinicalFact) -> list[str]:
+    """Build the deterministic recall query set for one clinical event.
+
+    Candidate generation must see the same *complete, source-anchored event
+    evidence* that later descriptor verification sees.  Feeding only the first
+    quotation to retrieval made a correctly extracted event depend on which
+    supporting span happened to be ordered first; source terms present in a
+    second (or later) verified quotation could never reach the authoritative
+    descriptor, UMLS, or advisory recall channels.  That is a recall defect,
+    not a reason to relax selection.
+
+    This function therefore contributes the normalized event description plus
+    every anchored event quotation, in stable source order.  It deliberately
+    does **not** pull in a whole section, another event, or an unvalidated
+    inherited attribute: those are not evidence that this event occurred and
+    would reintroduce the cross-service contamination the eligibility boundary
+    prevents.  Attribute values already appear in the structured first query;
+    their separate quotations are evidence for validation, not a licence to
+    broaden this event's clinical identity.
+
+    The result is a bounded-by-document, source-derived recall set.  It is
+    still only recall: every resulting code follows the existing authoritative
+    descriptor, requirement, evidence, and claim-control gates unchanged.
+    A direct-library caller that has not run anchoring yet retains the legacy
+    quotation behavior as a compatibility fallback; production enters this
+    function only after anchoring, so that fallback cannot widen a released
+    encounter's evidence base.
+    """
+    attributes = fact.attributes or {}
+    query = fact.description + " " + " ".join(
+        str(attributes[axis]) for axis in sorted(attributes, key=lambda value: str(value))
+        if str(axis).lower() != "count")
+    source_spans = [
+        span for span in (fact.evidence or [])
+        if getattr(span, "anchored", False) and str(getattr(span, "text", "")).strip()
+    ]
+    # `resolve()` remains a reusable library entry point.  Callers that supply
+    # direct text rather than a source document cannot satisfy an anchoring
+    # contract they were never given, so preserve their existing recall input;
+    # no selected line can treat this fallback as source reconciliation.
+    spans = source_spans or [
+        span for span in (fact.evidence or []) if str(getattr(span, "text", "")).strip()
+    ]
+    ordered_spans = sorted(
+        spans,
+        key=lambda span: (
+            str(getattr(span, "reading_channel_id", "") or ""),
+            (getattr(span, "start", None)
+             if isinstance(getattr(span, "start", None), int) else 10**18),
+            (getattr(span, "end", None)
+             if isinstance(getattr(span, "end", None), int) else 10**18),
+            str(getattr(span, "span_id", "") or ""),
+            str(getattr(span, "text", "")),
+        ))
+    candidates = [query] + [str(span.text) for span in ordered_spans]
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in candidates:
+        text = str(value).strip()
+        if not text:
+            continue
+        identity = " ".join(text.casefold().split())
+        if identity not in seen:
+            seen.add(identity)
+            out.append(text)
+    return out
+
+
 def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
                   llm=None, corroborate=None, dos: str | None = None,
                   reconciliation=None,
@@ -1300,9 +1368,7 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
     # (which often carries the eponym / clinician term the descriptor lacks),
     # then union the pools keeping each code's best relevance. Fallback for
     # phrasings the authoritative Index does not carry.
-    query = fact.description + " " + " ".join(
-        str(v) for k, v in fact.attributes.items() if str(k).lower() != "count")
-    queries = [query.strip()] + [s.text for s in fact.evidence[:1]]
+    queries = _candidate_queries_for_fact(fact)
     # GOVERNED ALTERNATE WORDING (issue #6 F7-R3-C4): the two independent readings may
     # have worded a code-changing axis differently (e.g. anatomy) and been recognized
     # as the SAME concept rather than a disagreement -- `governed_terms` is that
@@ -1312,11 +1378,13 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
     # though the encounter no longer holds on the axis. One extra query per confirmed
     # alternate, substituted for that one axis, gives it a real chance to be found --
     # a verified expansion must IMPROVE recall, not merely remove a hold.
-    for axis, alternates in (fact.governed_terms or {}).items():
-        for alt in alternates:
+    for axis in sorted(fact.governed_terms or {}, key=lambda value: str(value)):
+        alternates = (fact.governed_terms or {}).get(axis) or ()
+        for alt in sorted(alternates, key=lambda value: " ".join(str(value).casefold().split())):
             attrs = dict(fact.attributes, **{axis: alt})
             alt_query = fact.description + " " + " ".join(
-                str(v) for k, v in attrs.items() if str(k).lower() != "count")
+                str(attrs[key]) for key in sorted(attrs, key=lambda value: str(value))
+                if str(key).lower() != "count")
             if alt_query.strip():
                 queries.append(alt_query.strip())
     # ADVISORY PROCEDURE-SYNONYM RECALL (issue #6 item 3/F8-R2): widens the query
@@ -1328,6 +1396,18 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
         for alt in entry["expansions"]:
             if alt.strip():
                 queries.append(alt.strip())
+    # One normalized query identity per source lookup.  The base fact evidence,
+    # a governed alternate, and an advisory expansion can legitimately render
+    # the same words; repeatedly querying it would make audit/order depend on
+    # incidental extraction duplication without adding any source recall.
+    _seen_query_identities: set[str] = set()
+    _deduplicated_queries: list[str] = []
+    for text in queries:
+        identity = " ".join(str(text).casefold().split())
+        if identity and identity not in _seen_query_identities:
+            _seen_query_identities.add(identity)
+            _deduplicated_queries.append(text)
+    queries = _deduplicated_queries
     best: dict[str, CandidateCode] = {}
     for q in queries:
         if not q.strip():
