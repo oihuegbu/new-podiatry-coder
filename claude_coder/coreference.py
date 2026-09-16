@@ -138,6 +138,19 @@ def action_form(text: Any) -> frozenset[str]:
     return frozenset(out)
 
 
+def _negation_markers_present(text: Any) -> frozenset[str]:
+    """Which of `tiebreak._NEGATION`'s markers appear in `text` -- the SAME
+    governed negation-grammar list `tiebreak.asserted_status` already trusts
+    for negation-scope detection, reused here rather than a second, invented
+    one. Checked on the RAW string (never the filtered/stemmed `action_form`
+    set, which already drops "without" as non-distinctive documentation
+    filler and so could never surface a negation difference on its own)."""
+    from . import tiebreak as _tiebreak
+    lowered = " " + re.sub(r"\s+", " ", str(text or "").lower()) + " "
+    return frozenset(marker for marker in _tiebreak._NEGATION
+                     if f" {marker} " in lowered)
+
+
 def action_identity(left: Any, right: Any) -> str:
     """SAME_EVENT when two action phrases are the same action, else UNDETERMINED.
 
@@ -145,9 +158,39 @@ def action_identity(left: Any, right: Any) -> str:
     common may be two services or one service described two ways, and this test cannot
     tell -- so it never claims to. Distinctness comes from the record's own axes, or
     from the authoritative data once both mentions have resolved.
-    """
+
+    issue #6, independent root-cause investigation (real-data replay against
+    the designated note): exact SET equality alone missed the module's own
+    named defect for a genuine ELABORATION -- one reading's "Monitored
+    anesthesia care" and another's "Monitored anesthesia care with regional
+    ankle block" describe the identical event, the second simply adds a
+    detail the first is silent on. Every one of the shorter phrase's own
+    distinctive tokens surviving, unchanged, inside the longer phrase (a
+    genuine SUBSET relation, checked both directions since either reading
+    may be the more detailed one) is the same signal `_WITH_OR_WITHOUT`/
+    cardinality-phrase handling elsewhere in this codebase already trusts:
+    additional wording that never CONTRADICTS the shorter form is
+    elaboration, not a different documented action -- a genuinely distinct
+    action would use at least one different root word, not merely add to an
+    unmodified copy of the other's own words.
+
+    Every match this function can return -- the PRE-EXISTING exact-equality
+    path included -- is gated on `_negation_markers_present` agreeing
+    between both sides. Discovered live while adding the subset path above:
+    `_MIN_STEM` (4, to prevent over-stemming) silently drops "no"/"not"
+    (2-3 characters) from `action_form`'s own distinctive-token set, so
+    "wound debridement" and "wound debridement was NOT performed" already
+    reached IDENTICAL token sets through the ORIGINAL exact-equality check
+    alone, before this change ever added a subset path -- a negation
+    reversing the entire event was silently invisible to word-set
+    comparison. `tiebreak._NEGATION` (the SAME grammar list negation-scope
+    detection already trusts) is checked on the RAW string, independent of
+    `action_form`'s length/filler filtering, so it catches exactly the
+    markers stemming was silently erasing."""
     a, b = action_form(left), action_form(right)
-    if a and b and a == b:
+    if not (a and b) or _negation_markers_present(left) != _negation_markers_present(right):
+        return UNDETERMINED
+    if a == b or a <= b or b <= a:
         return SAME_EVENT
     return UNDETERMINED
 

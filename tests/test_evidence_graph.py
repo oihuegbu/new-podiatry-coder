@@ -5219,6 +5219,85 @@ class GovernedActionIdentity(unittest.TestCase):
         self.assertEqual(verdict, cr.DISTINCT_EVENT, reason)
 
 
+class ActionIdentitySubsetElaboration(unittest.TestCase):
+    """issue #6, independent root-cause investigation (real-data replay
+    against the designated note): `action_identity`'s exact-stemmed-set
+    equality alone missed this module's own named defect (see its file
+    docstring: "the same event written twice in different words stayed two
+    intents") for a genuine ELABORATION -- one reading's "Monitored
+    anesthesia care" and another's "Monitored anesthesia care with regional
+    ankle block" describe the identical event, the second simply adds a
+    detail the first is silent on. Reproduced live: this exact pair stayed
+    UNDETERMINED and the anesthesia line held as `AMBIGUOUS_COLOCATED`
+    (`event_union.admit`) on the real note, with no `source`/SNOMED
+    concept graph available to rescue it either. A genuine SUBSET relation
+    between the two phrases' own distinctive tokens (checked both
+    directions) now confirms SAME_EVENT with no source needed -- and is
+    gated, on BOTH the pre-existing exact-match path and the new subset
+    path, on `tiebreak._NEGATION` markers agreeing between the two sides,
+    closing a PRE-EXISTING gap discovered while building this: `_MIN_STEM`
+    (4, to prevent over-stemming) silently drops "no"/"not" (2-3
+    characters) from the stemmed token set, so "wound debridement" and
+    "wound debridement was NOT performed" already reached identical token
+    sets through the untouched exact-equality path alone."""
+
+    def test_an_elaborated_phrase_confirms_the_same_event_no_source_needed(self):
+        from claude_coder import coreference as cr
+        verdict = cr.action_identity(
+            "Monitored anesthesia care",
+            "Monitored anesthesia care with regional ankle block")
+        self.assertEqual(verdict, cr.SAME_EVENT)
+
+    def test_the_subset_relation_works_regardless_of_which_side_is_longer(self):
+        from claude_coder import coreference as cr
+        self.assertEqual(
+            cr.action_identity(
+                "excision structure alpha with adjunct structure beta",
+                "excision structure alpha"),
+            cr.SAME_EVENT)
+
+    def test_two_genuinely_different_actions_stay_undetermined(self):
+        """Neither side's distinctive tokens are a subset of the other's --
+        this must never be mistaken for elaboration."""
+        from claude_coder import coreference as cr
+        self.assertEqual(
+            cr.action_identity(
+                "excision of structure alpha",
+                "repair of structure beta"),
+            cr.UNDETERMINED)
+
+    def test_a_negated_elaboration_never_merges_via_the_subset_path(self):
+        from claude_coder import coreference as cr
+        self.assertEqual(
+            cr.action_identity(
+                "structure alpha procedure",
+                "structure alpha procedure was not performed"),
+            cr.UNDETERMINED)
+
+    def test_a_negation_difference_is_never_missed_through_the_pre_existing_exact_path(self):
+        """Reproduces the PRE-EXISTING gap this investigation found: without the
+        negation guard, "no"/"not" (below `_MIN_STEM`) vanish from the stemmed
+        token SET entirely, so these two opposite statements would already
+        reach identical sets through the untouched exact-equality branch."""
+        from claude_coder import coreference as cr
+        self.assertEqual(
+            cr.action_identity("structure alpha present", "no structure alpha present"),
+            cr.UNDETERMINED)
+
+    def test_event_verdict_confirms_the_real_anesthesia_elaboration_end_to_end(self):
+        """End-to-end through `event_verdict`, exactly the real note's shape:
+        the second reading is silent on laterality where the primary states
+        it -- silence on one side is not a stated conflict."""
+        from claude_coder import coreference as cr
+        verdict, reason = cr.event_verdict(
+            left_kind="procedure", right_kind="procedure",
+            left_action="Monitored anesthesia care",
+            right_action="Monitored anesthesia care with regional ankle block",
+            left_attributes={"anatomy": "ankle"},
+            right_attributes={"anatomy": "ankle", "laterality": "right"})
+        self.assertEqual(verdict, cr.SAME_EVENT, reason)
+
+
 class GovernedAlignmentTier(unittest.TestCase):
     """Issue #6 F9-R4: `graph_consensus.align()`'s new governed tier, which takes
     priority over the pre-existing lexical Jaccard tier but never replaces its
