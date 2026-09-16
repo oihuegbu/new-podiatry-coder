@@ -109,6 +109,52 @@ def test_resolver_candidate_universe_never_calls_model_code_proposal():
     assert core.call_args.args[3] == []
 
 
+def test_candidate_recall_gap_advances_to_the_next_authoritative_page():
+    """A rejected bounded page is not candidate-universe exhaustion.
+
+    The test stubs only the page executor: the public wrapper still performs
+    its ordinary candidate-admission work, then must carry the exact page
+    metadata emitted by the core into the next call and retain both pages in
+    the final audit.  Synthetic identifiers keep this about pagination rather
+    than a particular medical-code family.
+    """
+    fact = _fact("F1", "assembly repair", "assembly repair performed", "s1")
+    candidates = [CandidateCode(
+        code=f"SYNTH_{n:02d}", system="cpt",
+        descriptor=f"synthetic assembly service {n}", score=1.0 - n / 100,
+        source="retrieval") for n in range(9)]
+    source = MockSource(records={
+        (candidate.code, candidate.system): {
+            "long_description": candidate.descriptor, "active": True}
+        for candidate in candidates})
+    first_page = ResolvedLine(
+        fact=fact, chosen=None, alternatives=candidates[:8],
+        method=ResolutionMethod.ABSTAINED, candidate_recall_gap=True,
+        tie_record={"candidate_recall_gap": True, "candidate_page": {
+            "offset": 0, "page_size": 8, "universe_size": 9,
+            "candidate_codes": [c.code for c in candidates[:8]],
+        }})
+    resolved = ResolvedLine(
+        fact=fact, chosen=candidates[8], alternatives=[],
+        method=ResolutionMethod.VERIFIED,
+        tie_record={"candidate_page": {
+            "offset": 8, "page_size": 1, "universe_size": 9,
+            "candidate_codes": [candidates[8].code],
+        }})
+
+    with patch.object(resolution, "_propose_then_verify_core",
+                      side_effect=(first_page, resolved)) as core:
+        line = resolution._propose_then_verify(
+            fact, source, candidates, lambda *_: "{}")
+
+    assert [call.kwargs["page_offset"] for call in core.call_args_list] == [0, 8]
+    assert line.chosen is candidates[8]
+    paging = line.tie_record["verification_paging"]
+    assert paging["authoritative_universe_size"] == 9
+    assert [page["offset"] for page in paging["pages_evaluated"]] == [0, 8]
+    assert paging["pages_evaluated"][0]["outcome"] == "candidate_recall_gap"
+
+
 def test_candidate_set_snapshot_is_stable_and_binds_descriptor_identity():
     first = CandidateCode(
         code="CODE_B", system="cpt", descriptor="assembly removal", score=0.8,

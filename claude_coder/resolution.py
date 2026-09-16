@@ -3073,6 +3073,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                        source: Any = None,
                        admissions: dict[str, CandidateAdmission] | None = None,
                        evidence_packet=None,
+                       defer_page_local_exhaustion: bool = False,
                        ) -> ResolvedLine:
     """Release ONLY when exactly one shortlisted candidate is still entailed; otherwise
     hand the survivors to the tie policy the deterministic path already uses.
@@ -3081,7 +3082,10 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
     targeted provider query" algorithm as `_decide`, over the same `tiebreak` module. The
     only thing that differs is who did the eliminating: there it is the descriptor
     features, here it is two models' named eliminations. Nothing about "the first model
-    picked this one" is allowed to stand in for uniqueness.
+    picked this one" is allowed to stand in for uniqueness.  When a bounded verifier page
+    is not the last authoritative page, complete page-local rejection returns a typed recall
+    gap instead of manufacturing a provider question before lower-ranked source candidates
+    have been evaluated.
     """
     # issue #6, Codex's independent re-review (F9-R13-C): `semantic_action`/
     # `semantic_qualifier` requirements are `role=MUST_SUPPORT` like any other
@@ -3190,7 +3194,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
         tie = _tiebreak.narrow(
             fact, shortlist, reconciliation,
             requirements=_elimination_requirements)
-        if tie.provider_question:
+        if tie.provider_question and not defer_page_local_exhaustion:
             return _tie_escalation(
                 fact, shortlist, reconciliation,
                 "every generated candidate was rejected, and the authoritative "
@@ -3198,8 +3202,11 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                 tie=tie, record=record, requirements=_elimination_requirements)
         return _candidate_recall_gap_line(
             fact, shortlist,
-            "both independent evaluators accounted for every generated candidate, "
-            "and no candidate remained supported by the documentation",
+            ("both independent evaluators accounted for every candidate on this "
+             "authoritative page, and no candidate remained supported by the "
+             "documentation" if defer_page_local_exhaustion else
+             "both independent evaluators accounted for every generated candidate, "
+             "and no candidate remained supported by the documentation"),
             record)
 
     # The initial `chosen` value is a proposal, not an authority.  Ordinarily
@@ -3439,11 +3446,48 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
 
     proposals = [c for c in proposals_raw if (c.code, c.system) in eligible_ids]
     pool = [c for c in pool if (c.code, c.system) in eligible_ids]
-    line = _propose_then_verify_core(
-        fact, source, pool, proposals, proposals_unsupported, llm, corroborate,
-        dos=dos, reconciliation=reconciliation, coverage=coverage,
-        evidence_packet=evidence_packet, candidate_queries=candidate_queries,
-        service_context_id=service_context_id)
+    # A candidate-recall gap is honest only after every deterministically ordered
+    # authoritative page has been evaluated.  Keep verifier requests bounded while
+    # advancing through the same source-derived universe; never let the first
+    # rejected page stand in for exhaustion.
+    page_offset = 0
+    evaluated_pages: list[dict[str, Any]] = []
+    while True:
+        line = _propose_then_verify_core(
+            fact, source, pool, proposals, proposals_unsupported, llm, corroborate,
+            dos=dos, reconciliation=reconciliation, coverage=coverage,
+            evidence_packet=evidence_packet, candidate_queries=candidate_queries,
+            service_context_id=service_context_id, page_offset=page_offset)
+        page = (line.tie_record or {}).get("candidate_page", {})
+        page_size = int(page.get("page_size", 0))
+        universe_size = int(page.get("universe_size", 0))
+        evaluated_pages.append({
+            "offset": page_offset,
+            "page_size": page_size,
+            "candidate_codes": list(page.get("candidate_codes", ())),
+            "outcome": ("candidate_recall_gap" if line.candidate_recall_gap
+                        else line.method.value),
+        })
+        # Advance only after a page was completely rejected as a recall gap.
+        # A selected code, a real documentation question, or any system/evidence
+        # hold is a conclusion about the current deterministic page, never a
+        # pretext to keep making unrelated verifier calls.  `universe_size` and
+        # `page_size` are calculated by the core from the same active, de-duplicated
+        # authoritative ordering it evaluated; `len(pool)` is not equivalent
+        # because it can include inactive or duplicate candidates.
+        if (not line.candidate_recall_gap
+                or page_size <= 0
+                or page_offset + page_size >= universe_size):
+            break
+        page_offset += page_size
+    line = _dc_replace(line, tie_record={
+        **(line.tie_record or {}),
+        "verification_paging": {
+            "page_limit": VERIFY_K,
+            "authoritative_universe_size": universe_size,
+            "pages_evaluated": evaluated_pages,
+        },
+    })
     line.candidate_eligibility = candidate_eligibility
     return line
 
@@ -3458,6 +3502,7 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                               evidence_packet=None,
                               candidate_queries: tuple[str, ...] = (),
                               service_context_id: str = "",
+                              page_offset: int = 0,
                               ) -> ResolvedLine:
     """The shortlist-build + verification loop, over an ALREADY role-
     eligibility-filtered `pool`/`proposals` (issue #6 F9-R11-H-D, fifth
@@ -3514,17 +3559,23 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
         if c.code not in seen:
             seen.add(c.code)
             order.append(c)
-    # Drop DOS-inactive candidates before verification.  ``order`` is the
-    # deterministic, versioned authoritative candidate universe for this one
-    # documented service.  A prior ``[:VERIFY_K]`` truncation let a rejected
-    # first page masquerade as a candidate-recall gap even when further
-    # source-derived candidates existed.  Similarity may order recall, but it
-    # may not decide that the unvisited remainder is absent.  Each candidate
-    # below is still subject to the same descriptor, evidence, corroboration,
-    # and claim controls; this only makes exhaustion mean actual exhaustion.
-    shortlist = _active_only(order, source, dos)
+    # One bounded page from the deterministic, versioned authoritative universe.
+    # The caller advances after a fully rejected page, so no unvisited candidate
+    # can be mistaken for absent while a verifier prompt remains bounded.
+    active_order = _active_only(order, source, dos)
+    shortlist = active_order[page_offset:page_offset + VERIFY_K]
+    candidate_page = {
+        "offset": page_offset,
+        "page_size": len(shortlist),
+        "universe_size": len(active_order),
+        "candidate_codes": [c.code for c in shortlist],
+    }
+    has_more_authoritative_candidates = (
+        page_offset + len(shortlist) < len(active_order))
     if not shortlist and unsupported:
-        return _bounded_interval_hold(fact, unsupported)
+        line = _bounded_interval_hold(fact, unsupported)
+        return _dc_replace(line, tie_record={
+            **(line.tie_record or {}), "candidate_page": candidate_page})
     # issue #6, Codex's independent re-review (F9-R17-A): bind ONE authoritative
     # descriptor per candidate now, before anything downstream reads
     # `candidate.descriptor` -- requirement compilation, both verifier prompts,
@@ -3606,6 +3657,7 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
             "candidate_set": candidate_set,
             "evidence_packet": (evidence_packet.as_record()
                                 if evidence_packet is not None else None),
+            "candidate_page": candidate_page,
         })
 
     # When the source-derived structured contract settles the full universe,
@@ -3650,12 +3702,12 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
         # Every candidate was positively, validly disqualified -- nothing
         # is left standing to ask a provider or a coder about either; this
         # documented event has no defensible candidate in this pool.
-        return _candidate_recall_gap_line(
+        return _with_admissions(_candidate_recall_gap_line(
             fact, shortlist,
             "no generated candidate has positive standing; every candidate was "
             "positively disqualified: "
             f"{'; '.join(f'{c} ({r})' for c, r in sorted(contradicted_admissions.items()))}",
-            record)
+            record))
     # issue #6, Codex's independent re-review (F9-R18-A, reopened P1): clinical-
     # attribute axis-conflict enforcement is no longer branch-local here -- a
     # check confined to this one propose-then-verify path could never see the
@@ -3716,6 +3768,13 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                                 and not second.entails(c.code) for c in cands)):
                     details = list(dict.fromkeys(missing_tried.values()))
                     question = "; ".join(details)
+                    if has_more_authoritative_candidates:
+                        return _with_admissions(_candidate_recall_gap_line(
+                            fact, shortlist,
+                            "every candidate on this authoritative page was rejected; "
+                            "later source candidates remain to be evaluated before a "
+                            "provider question can be concluded",
+                            {"page_missing_requirements": details}))
                     return _with_admissions(ResolvedLine(
                         fact=fact, chosen=None, alternatives=verifiable[:5],
                         method=ResolutionMethod.ABSTAINED,
@@ -3730,7 +3789,8 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                     f"{why}; {note}" if why else note,
                     corroboration, reconciliation, requirements,
                     coverage, source, admissions=admissions,
-                    evidence_packet=evidence_packet))
+                    evidence_packet=evidence_packet,
+                    defer_page_local_exhaustion=has_more_authoritative_candidates))
             # Tie policy step 5: one evaluator supplied no unique selection and
             # there is no independent disposition matrix, so name the missing
             # discriminating fact rather than guessing.
@@ -3740,24 +3800,24 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                 "documentation (verified)", requirements=requirements))
         chosen_match = _evaluate(fact, chosen, source, reconciliation)
         if chosen_match is None:
-            return ResolvedLine(
+            return _with_admissions(ResolvedLine(
                 fact=fact, chosen=None, alternatives=shortlist,
                 method=ResolutionMethod.ABSTAINED,
-                rationale="verifier selected a candidate that contradicts documented axes")
+                rationale="verifier selected a candidate that contradicts documented axes"))
         if chosen_match.interval_unsupported:
-            return _bounded_interval_hold(fact, [chosen] + unsupported)
+            return _with_admissions(_bounded_interval_hold(fact, [chosen] + unsupported))
         # Codex F4-R1 re-review: the unsupported-required-constraint gate applies to the
         # VERIFIED path too -- a bounded-interval code whose measurement the documentation
         # does not support must abstain regardless of selection OR corroborator agreement.
         if _interval_unsupported(fact, parse_descriptor(chosen.descriptor)):
-            return ResolvedLine(
+            return _with_admissions(ResolvedLine(
                 fact=fact, chosen=None, alternatives=shortlist,
                 method=ResolutionMethod.ABSTAINED,
                 documentation_gap=("the code's descriptor requires a measurement within a "
                     "specific range and the documentation provides no compatible measurement "
                     "of that dimension -- document the measurement or use a less-specific code"),
                 rationale="selected code requires a bounded measurement the documentation "
-                          "does not support -- not billed regardless of model agreement")
+                          "does not support -- not billed regardless of model agreement"))
         judgements = [primary]
         missing, why2 = False, ""
         if corroborate is not None:
@@ -3793,7 +3853,8 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                 {**constraint_eliminated, **tried}, why,
                 corroboration, reconciliation, requirements,
                 coverage, source, admissions=admissions,
-                evidence_packet=evidence_packet))
+                evidence_packet=evidence_packet,
+                defer_page_local_exhaustion=has_more_authoritative_candidates))
         # A missing element disqualifies THIS candidate; it does not prove every
         # other authoritative candidate is an under-code.  Continue through the
         # remaining pool exactly as for any other named elimination.  If nothing
@@ -3812,6 +3873,13 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
     if missing_tried and all(c.code in tried for c in verifiable):
         details = list(dict.fromkeys(missing_tried.values()))
         question = "; ".join(details)
+        if has_more_authoritative_candidates:
+            return _with_admissions(_candidate_recall_gap_line(
+                fact, shortlist,
+                "every candidate on this authoritative page was rejected; later "
+                "source candidates remain to be evaluated before a provider "
+                "question can be concluded",
+                {"page_missing_requirements": details}))
         return _with_admissions(ResolvedLine(
             fact=fact, chosen=None, alternatives=verifiable[:5],
             method=ResolutionMethod.ABSTAINED,

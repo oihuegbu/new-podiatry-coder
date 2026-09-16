@@ -13,11 +13,13 @@ Synthetic codes/descriptors/facts throughout.
 """
 import hashlib
 import unittest
+from unittest.mock import patch
 
 from app.contracts.source_evidence import (ReconciliationStatus, SourceReconciliation,
                                             SpanReconciliation)
 from claude_coder import requirement as req
 from claude_coder import resolution
+from claude_coder import tiebreak
 from claude_coder import verify as _verify
 from claude_coder.models import CandidateCode, ClinicalFact, EvidenceSpan, FactKind
 from claude_coder.models import ClaimSubmissionStatus
@@ -289,6 +291,39 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
         self.assertIn(CANDIDATE_RECALL_GAP_MARKER, line.rationale)
         self.assertEqual({c.code for c in line.alternatives},
                          {"CAND_FIRST", "CAND_SECOND"})
+
+    def test_page_local_rejection_defers_provider_question_until_later_candidates_run(self):
+        """A question exposed by an exhausted *page* cannot terminate recall.
+
+        A lower-ranked authoritative candidate may be fully documented, so the
+        page executor must advance before presenting a provider question.  The
+        synthetic tie outcome isolates that lifecycle policy from terminology.
+        """
+        first = _cand("CAND_FIRST", "assembly service, variant one")
+        second = _cand("CAND_SECOND", "assembly service, variant two")
+        fact = _fact("assembly service performed today")
+        dispositions = (
+            _disp(first, "not_documented", missing_fact="variant one documented"),
+            _disp(second, "not_documented", missing_fact="variant two documented"),
+        )
+        judges = [_judgement(dispositions), _judgement(dispositions)]
+        tie = tiebreak.TieOutcome(
+            provider_question="document the synthetic qualifying fact",
+            detail="synthetic differentiator is not documented")
+
+        with patch.object(resolution._tiebreak, "narrow", return_value=tie):
+            deferred = resolution._settle_uniqueness(
+                fact, first, [first, second], judges, {}, "no supported candidate", "",
+                reconciliation=None, coverage=_coverage("assembly service performed today"),
+                defer_page_local_exhaustion=True)
+            final = resolution._settle_uniqueness(
+                fact, first, [first, second], judges, {}, "no supported candidate", "",
+                reconciliation=None, coverage=_coverage("assembly service performed today"))
+
+        self.assertTrue(deferred.candidate_recall_gap)
+        self.assertIsNone(deferred.documentation_gap)
+        self.assertFalse(final.candidate_recall_gap)
+        self.assertEqual(final.documentation_gap, "document the synthetic qualifying fact")
 
     def test_an_unvalidated_entailed_disposition_is_system_unresolved_never_released(self):
         """Codex's independent exact-SHA reproduction: two bare "entailed"
