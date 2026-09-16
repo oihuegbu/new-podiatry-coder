@@ -45,6 +45,7 @@ import json
 import re
 from dataclasses import dataclass, field, replace as _dc_replace
 from enum import Enum
+from typing import Any
 
 from .data_access import CodeSource
 from .models import CandidateCode, ClinicalFact, FactKind, Outcome, ResolutionMethod, ResolvedLine
@@ -3119,6 +3120,135 @@ def _system_unresolved_line(fact: ClinicalFact, shortlist: list[CandidateCode],
                   f"never a provider question or a coder's judgement call"))
 
 
+def _evidence_constrained_disagreement_resolution(
+        fact: ClinicalFact, shortlist: list[CandidateCode],
+        independently_supported: list[CandidateCode],
+        system_unresolved: dict[str, str], judgements: list,
+        reconciliation, coverage, requirements: tuple,
+        evidence_packet, why: str, corroboration: str, record: dict,
+        ) -> ResolvedLine | None:
+    """Resolve a *validated semantic disagreement* from the shared evidence.
+
+    A cross-vendor disagreement is neither a vote nor a reason to silently
+    discard a candidate.  It is a signal to re-run the existing deterministic
+    candidate comparison over the same authoritative descriptors and the same
+    reconciled document evidence.  This function is intentionally narrower
+    than ``_system_unresolved_line``:
+
+    * both evaluator entries must name the candidate's current descriptor;
+    * each entry must independently establish a *validated* semantic class;
+    * the only permitted disagreement is supported-versus-rejected; and
+    * the deterministic comparison may release only a candidate that both
+      evaluators positively supported.  It may never select the disputed
+      candidate, nor treat a malformed citation, an incomplete answer, or a
+      descriptor-identity failure as a provider question.
+
+    Consequently this is an evidence-constrained resolver after two frozen,
+    independent assessments -- not model voting, confidence ranking, or a
+    third semantic interpretation.  A deterministic winner still proceeds
+    through the ordinary downstream claim controls.  A genuinely documentable
+    authoritative tie can become the existing specific provider query; every
+    other system defect remains a retryable system hold.
+    """
+    if not system_unresolved or not independently_supported or len(judgements) < 2:
+        return None
+
+    # `_candidate_disposition_uniqueness` uses the first two independent
+    # matrices as its pairwise agreement contract.  Reconstruct exactly that
+    # contract here rather than inferring disagreement from legacy choice
+    # fields or free-text reasons.
+    entries: list[dict[str, Any]] = []
+    for judgement in judgements[:2]:
+        by_code = {d.candidate_code: d
+                   for d in getattr(judgement, "candidate_dispositions", ())}
+        if not all(code in by_code for code in system_unresolved):
+            return None
+        entries.append(by_code)
+    first, second = entries
+    settled, permitted = _reconciled_span_lookup(reconciliation)
+
+    def _spans_validated(disposition, candidate: CandidateCode) -> bool:
+        # Production resolution uses the stronger Gate-A fact membership and
+        # content check.  Retain the legacy status-only form only for the
+        # contract-free callers that do not supply a fact, matching
+        # `_candidate_disposition_uniqueness` exactly.
+        if fact is not None:
+            from .verify import _agreed_citable_spans
+            return bool(_agreed_citable_spans(
+                disposition.evidence_span_ids, fact, candidate, reconciliation,
+                disposition.status, evidence_packet))
+        return _disposition_spans_validated(disposition, settled, permitted)
+
+    candidates_by_code = {candidate.code: candidate for candidate in shortlist}
+    disputed: list[CandidateCode] = []
+    for code in system_unresolved:
+        candidate = candidates_by_code.get(code)
+        if candidate is None:
+            return None
+        left, right = first[code], second[code]
+        # A stale descriptor, an uncited outcome, or an unknown status is a
+        # verification defect.  The provider cannot remedy it, so it must not
+        # enter the document-side resolver.
+        if not (_disposition_identity_matches(candidate, left)
+                and _disposition_identity_matches(candidate, right)):
+            return None
+        classes = {
+            _validated_disposition_class(left, candidate, coverage, _spans_validated),
+            _validated_disposition_class(right, candidate, coverage, _spans_validated),
+        }
+        if classes != {"supported", "rejected"}:
+            return None
+        disputed.append(candidate)
+
+    # Preserve the authoritative shortlist order for a reproducible audit and
+    # ensure the evidence resolver sees every viable contender.  The model can
+    # only be overruled in favour of a candidate BOTH independent assessments
+    # already supported.
+    supported_codes = {candidate.code for candidate in independently_supported}
+    disputed_codes = {candidate.code for candidate in disputed}
+    contenders = [candidate for candidate in shortlist
+                  if candidate.code in supported_codes | disputed_codes]
+    if len(contenders) < 2:
+        return None
+    tie = _tiebreak.narrow(fact, contenders, reconciliation, requirements)
+    audit = {
+        **record,
+        "evidence_constrained_disagreement": {
+            "contenders": [candidate.code for candidate in contenders],
+            "independently_supported": sorted(supported_codes),
+            "validated_disagreements": sorted(disputed_codes),
+            "decision_rule": (
+                "source-evidence tie narrowing; no evaluator vote, confidence, "
+                "or third semantic assessment"),
+            **tie.as_record(),
+        },
+    }
+
+    winner = tie.winner
+    if (winner is not None
+            and winner.code in supported_codes
+            and _evaluate(fact, winner, reconciliation=reconciliation) is not None
+            and not _interval_unsupported(fact, parse_descriptor(winner.descriptor))):
+        note = ("the independent evaluators disagreed about a rival, but the "
+                "same authoritative descriptors and reconciled source evidence "
+                f"uniquely support {winner.code} ({tie.proof}): {tie.detail}")
+        return _entailed_line(
+            fact, winner, shortlist, f"{why}; {note}" if why else note,
+            corroboration, uniqueness=audit)
+
+    # Only a fully validated semantic disagreement reaches here.  If the
+    # authoritative descriptors identify a real, typed, missing fact, the
+    # existing tie policy owns the precise query.  A malformed/system failure
+    # returned above and therefore can never be laundered into a provider task.
+    if tie.provider_question and not tie.source_integrity:
+        return _tie_escalation(
+            fact, contenders, reconciliation,
+            "the authoritative candidates remain distinguishable only by one "
+            "documentable fact after evidence-constrained disagreement resolution",
+            tie=tie, record=audit, requirements=requirements)
+    return None
+
+
 def _candidate_recall_gap_line(fact: ClinicalFact,
                                candidates: list[CandidateCode],
                                detail: str,
@@ -3261,6 +3391,19 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
     # a provider query or a tie question, regardless of how cleanly
     # `remaining` itself narrowed.
     if _system_unresolved:
+        # An evaluator disagreement is an adjudication signal, not a terminal
+        # selector.  Before returning a retryable system hold, give the shared
+        # authoritative descriptor/evidence resolver one opportunity to prove
+        # a winner or identify a genuinely documentable distinguishing fact.
+        # The helper refuses malformed identities, uncited verdicts, incomplete
+        # matrices, and every other system failure, so those remain below as
+        # system holds rather than becoming provider questions.
+        evidence_constrained = _evidence_constrained_disagreement_resolution(
+            fact, shortlist, remaining, _system_unresolved, judgements,
+            reconciliation, coverage, _elimination_requirements,
+            evidence_packet, why, corroboration, record)
+        if evidence_constrained is not None:
+            return evidence_constrained
         return _system_unresolved_line(fact, shortlist, _system_unresolved,
                                        eliminated, record)
 

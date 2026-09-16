@@ -679,6 +679,79 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
         self.assertIsNotNone(line.chosen, line.rationale)
         self.assertEqual(line.chosen.code, "CAND_CHOSEN")
 
+    def test_validated_cross_evaluator_disagreement_uses_shared_evidence_not_a_vote(self):
+        """A valid semantic split is an adjudication signal, not a terminal hold.
+
+        The candidate descriptors define a structural qualified-child axis.  Both
+        evaluators positively support ``chosen``; they disagree about its sibling,
+        but every cited disposition is descriptor-bound and source-confirmed.  The
+        resolver must settle the pair from the original document's same
+        authoritative axis, never by preferring either evaluator.
+        """
+        chosen = _cand("CAND_ALPHA", "assembly service; variant alpha")
+        rival = _cand("CAND_BETA", "assembly service; variant beta")
+        fact = _fact("assembly service; variant alpha performed")
+        span = EvidenceSpan(text="assembly service; variant alpha performed",
+                            anchored=True, span_id="s1")
+        fact.evidence = [span]
+        recon = self._reconciliation({"s1": "AGREED"})
+        primary = _verify.Judgement(
+            chosen=chosen, entailed=(chosen.code, rival.code), declared=True,
+            candidate_dispositions=(
+                _disp(chosen, "entailed", evidence_span_ids=("s1",)),
+                _disp(rival, "entailed", evidence_span_ids=("s1",))))
+        corroborator = _verify.Judgement(
+            chosen=chosen, entailed=(chosen.code,), declared=True,
+            candidate_dispositions=(
+                _disp(chosen, "entailed", evidence_span_ids=("s1",)),
+                _disp(rival, "different_concept", evidence_span_ids=("s1",))))
+
+        line = resolution._settle_uniqueness(
+            fact, chosen, [chosen, rival], [primary, corroborator], {},
+            "independent verification", "cross-vendor corroboration", recon)
+
+        self.assertEqual(line.chosen.code if line.chosen else None, chosen.code,
+                         line.rationale)
+        audit = line.tie_record["evidence_constrained_disagreement"]
+        self.assertEqual(audit["validated_disagreements"], [rival.code])
+        self.assertEqual(audit["winner"], chosen.code)
+        self.assertIn("no evaluator vote", audit["decision_rule"])
+
+    def test_malformed_disagreement_remains_a_system_hold_not_a_provider_question(self):
+        """The new resolver must not launder a citation failure into autonomy.
+
+        This superficially resembles the resolvable case above, but the rival's
+        negative disposition is uncited.  It is therefore a system-integrity
+        failure, not a fact a provider could repair and not a basis to release
+        the independently supported candidate.
+        """
+        from claude_coder.models import SYSTEM_UNRESOLVED_MARKER
+        chosen = _cand("CAND_ALPHA", "assembly service; variant alpha")
+        rival = _cand("CAND_BETA", "assembly service; variant beta")
+        fact = _fact("assembly service; variant alpha performed")
+        span = EvidenceSpan(text="assembly service; variant alpha performed",
+                            anchored=True, span_id="s1")
+        fact.evidence = [span]
+        recon = self._reconciliation({"s1": "AGREED"})
+        primary = _verify.Judgement(
+            chosen=chosen, entailed=(chosen.code, rival.code), declared=True,
+            candidate_dispositions=(
+                _disp(chosen, "entailed", evidence_span_ids=("s1",)),
+                _disp(rival, "entailed", evidence_span_ids=("s1",))))
+        corroborator = _verify.Judgement(
+            chosen=chosen, entailed=(chosen.code,), declared=True,
+            candidate_dispositions=(
+                _disp(chosen, "entailed", evidence_span_ids=("s1",)),
+                _disp(rival, "different_concept")))
+
+        line = resolution._settle_uniqueness(
+            fact, chosen, [chosen, rival], [primary, corroborator], {},
+            "independent verification", "cross-vendor corroboration", recon)
+
+        self.assertIsNone(line.chosen)
+        self.assertIsNone(line.documentation_gap)
+        self.assertIn(SYSTEM_UNRESOLVED_MARKER, line.rationale)
+
     def test_system_unresolved_candidates_route_to_a_retryable_hold_not_a_provider_query(self):
         from claude_coder.models import SYSTEM_UNRESOLVED_MARKER
         a = _cand("CAND_A", "assembly service, type A")
