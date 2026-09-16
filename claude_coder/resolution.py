@@ -51,6 +51,7 @@ from .data_access import CodeSource
 from .models import CandidateCode, ClinicalFact, FactKind, Outcome, ResolutionMethod, ResolvedLine
 from . import graph_consensus as _gc
 from . import tiebreak as _tiebreak
+from .extraction import _ACTOR_IDENTITY_AXES
 from .ontology import (DescriptorFeatures, measurement_of, parse_descriptor,
                        support_score)
 
@@ -969,11 +970,31 @@ def _candidate_queries_for_fact(fact: ClinicalFact) -> list[str]:
     quotation behavior as a compatibility fallback; production enters this
     function only after anchoring, so that fallback cannot widen a released
     encounter's evidence base.
+
+    issue #6, independent root-cause investigation (real-data replay against
+    the designated note): every attribute VALUE used to flow into this query
+    unconditionally (only "count" was ever excluded) -- including
+    `extraction._ACTOR_IDENTITY_AXES` (`performer_id`, `performer_function`,
+    `organization_id`, `billing_entity_id`), WHO performed/bills the service,
+    never WHAT was performed. For a short, precise fact ("Suture anchors"),
+    the real captured query was reproduced verbatim: "suture anchors
+    cascade-foot-ankle-pllc suture anchors" -- a billing entity's legal
+    practice name, injected between two copies of the actual clinical term
+    (the description and an attribute already restating it), diluting a
+    2-word signal with administrative noise a dense embedding has no way to
+    discount. The correct code (HCPCS C1713, an implantable bone anchor)
+    ranks #1 at score 1.0 for the clean query "Suture anchors" alone;
+    reproducing the real polluted query pushed it out of the recalled pool
+    entirely. `_ACTOR_IDENTITY_AXES` is already the governed, existing
+    classification of ownership axes (`extraction.py`, used to keep this
+    exact distinction elsewhere in the pipeline) -- reused here, not
+    reinvented, so this can never drift from what extraction itself already
+    treats as identity rather than clinical content.
     """
     attributes = fact.attributes or {}
     query = fact.description + " " + " ".join(
         str(attributes[axis]) for axis in sorted(attributes, key=lambda value: str(value))
-        if str(axis).lower() != "count")
+        if str(axis).lower() != "count" and axis not in _ACTOR_IDENTITY_AXES)
     source_spans = [
         span for span in (fact.evidence or [])
         if getattr(span, "anchored", False) and str(getattr(span, "text", "")).strip()
@@ -1385,7 +1406,7 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
             attrs = dict(fact.attributes, **{axis: alt})
             alt_query = fact.description + " " + " ".join(
                 str(attrs[key]) for key in sorted(attrs, key=lambda value: str(value))
-                if str(key).lower() != "count")
+                if str(key).lower() != "count" and key not in _ACTOR_IDENTITY_AXES)
             if alt_query.strip():
                 queries.append(alt_query.strip())
     # ADVISORY PROCEDURE-SYNONYM RECALL (issue #6 item 3/F8-R2): widens the query

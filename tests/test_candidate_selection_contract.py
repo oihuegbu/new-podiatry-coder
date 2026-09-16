@@ -347,3 +347,39 @@ def test_cross_run_guard_does_not_compare_different_execution_contracts():
 
     assert guarded.chosen is candidate
     assert "cross_run_variance" not in guarded.tie_record
+
+
+def test_recall_queries_exclude_actor_identity_attributes():
+    """issue #6, independent root-cause investigation (real-data replay
+    against the designated note): `_candidate_queries_for_fact` joined
+    EVERY attribute value into the recall query text (only "count" was
+    ever excluded) -- including who performed/bills the service
+    (`resolution._ACTOR_IDENTITY_AXES`: performer_id, performer_function,
+    organization_id, billing_entity_id), never what was performed. The
+    real captured query for a "Suture anchors" fact was reproduced
+    verbatim: "suture anchors cascade-foot-ankle-pllc suture anchors" --
+    a billing entity's legal practice name injected between two copies of
+    the actual clinical term. Reproducing that exact polluted query
+    against the live retrieval index returned lower-extremity prosthesis
+    codes; the clean query "Suture anchors" alone ranks the correct
+    implantable-anchor code #1 at score 1.0. A short, precise fact's
+    query is exactly where a few tokens of administrative noise can
+    dominate a dense embedding -- this must never happen regardless of
+    how many identity attributes a fact carries."""
+    fact = ClinicalFact(
+        kind=FactKind.SUPPLY, description="structure alpha anchors", fact_id="F1",
+        attributes={
+            "performer_id": "some-billing-entity-llc",
+            "billing_entity_id": "some-billing-entity-llc",
+            "organization_id": "some-billing-entity-llc",
+            "performer_function": "operating surgeon",
+            "product/material": "structure alpha anchors",
+            "count": "2",
+        })
+
+    queries = resolution._candidate_queries_for_fact(fact)
+
+    assert len(queries) == 1
+    assert "some-billing-entity-llc" not in queries[0]
+    assert "operating surgeon" not in queries[0]
+    assert queries[0] == "structure alpha anchors structure alpha anchors"
