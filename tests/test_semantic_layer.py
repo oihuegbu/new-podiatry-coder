@@ -129,6 +129,60 @@ class UmlsCrosswalkAccessor(unittest.TestCase):
         self.assertEqual(result, {})
 
 
+class IcdChapterClassification(unittest.TestCase):
+    """issue #6, independent root-cause investigation (real-data replay
+    against the designated note, F13 "Insertional Achilles tendon
+    degeneration"): `AuthoritativeSource._icd_chapter_ranges()` declared its
+    source identity as `"icd10cm_chapters"`, but the release-source manifest
+    (`app.release.source_manifest`) registers the SAME file
+    (`config.ICD10_CHAPTERS_FILE`) under `"icd10_chapters"` -- a naming
+    mismatch that made every lookup raise `SemanticClassUnavailable`
+    unconditionally, taking every `icd_chapter_ids`-based `coding_semantics`
+    class (`injury_poisoning`, `external_cause`,
+    `assessment_completion_excluded`) down with it, silently, for every
+    real ICD-10-CM code, since nothing in this repo previously called this
+    path to notice. Real, un-mocked `AuthoritativeSource`, subject selected
+    DYNAMICALLY (never a hardcoded literal code), per this suite's own
+    stated philosophy above."""
+
+    def test_icd_chapter_ranges_loads_without_raising_and_covers_chapter_19(self):
+        source = AuthoritativeSource()
+        ranges = source._icd_chapter_ranges()
+        self.assertTrue(ranges)
+        chapter_19 = [r for r in ranges if r[0] == 19]
+        self.assertEqual(len(chapter_19), 1, ranges)
+        _cid, start, end = chapter_19[0]
+        self.assertEqual((start, end), ("S00", "T88"))
+
+    def test_a_real_injury_chapter_code_classifies_as_injury_poisoning(self):
+        """Selected dynamically from `_icd_chapter_ranges()`'s own declared
+        chapter-19 boundary plus real loaded ICD-10-CM data -- never a
+        hardcoded code literal."""
+        source = AuthoritativeSource()
+        _cid, start, end = next(r for r in source._icd_chapter_ranges() if r[0] == 19)
+        found = None
+        for code in source.leaf_codes(start[:3], "icd10"):
+            undotted = code.replace(".", "")
+            if start <= undotted[:3] <= end:
+                found = code
+                break
+        if found is None:
+            self.skipTest("no real chapter-19 code found in the loaded ICD-10-CM data")
+        self.assertEqual(source.semantic_class(found, "icd10"), "injury_poisoning")
+
+    def test_a_real_non_injury_diagnosis_code_does_not_classify_as_injury_poisoning(self):
+        source = AuthoritativeSource()
+        # Chapter 13 (M00-M99, "Diseases of the musculoskeletal system") never
+        # overlaps chapter 19 (S00-T88) -- selected the same dynamic way.
+        found = None
+        for code in source.leaf_codes("M79", "icd10"):
+            found = code
+            break
+        if found is None:
+            self.skipTest("no real chapter-13 code found in the loaded ICD-10-CM data")
+        self.assertNotEqual(source.semantic_class(found, "icd10"), "injury_poisoning")
+
+
 class UmlsCandidatesAccessor(unittest.TestCase):
     """`AuthoritativeSource.umls_candidates` (issue #6 F9-R7 item 2, and its
     F9-R7-C/D remediation -- Codex's independent re-review of 92f4596). A REAL

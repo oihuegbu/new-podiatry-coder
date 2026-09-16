@@ -1951,11 +1951,22 @@ class AuthoritativeSource:
 
     def _icd_chapter_ranges(self) -> list[tuple[int, str, str]]:
         """[(chapter id, undotted start code, undotted end code)] from the CDC/NCHS
-        chapter boundaries. Cached."""
+        chapter boundaries. Cached.
+
+        issue #6, independent root-cause investigation: the release-source
+        manifest (`app.release.source_manifest`) registers this file's
+        declared identity under `"icd10_chapters"` (config.ICD10_CHAPTERS_FILE
+        -> data/codes/icd10cm_chapters.json) -- this call must use that exact
+        key, not the filename's own "icd10cm_chapters" stem, or every lookup
+        raises `SemanticClassUnavailable` unconditionally, taking every
+        `icd_chapter_ids`-based `coding_semantics` class (`injury_poisoning`,
+        `external_cause`, `assessment_completion_excluded`) down with it for
+        every ICD-10-CM code, silently, since nothing in this repo previously
+        called this path to notice."""
         cache = getattr(self, "_icdchap", None)
         if cache is not None:
             return cache
-        doc, identity = declared_document_snapshot("icd10cm_chapters",
+        doc, identity = declared_document_snapshot("icd10_chapters",
                                                     SemanticClassUnavailable)
         chapters = doc.get("chapters")
         if not isinstance(chapters, list) or not chapters:
