@@ -3125,6 +3125,7 @@ def _evidence_constrained_disagreement_resolution(
         independently_supported: list[CandidateCode],
         system_unresolved: dict[str, str], judgements: list,
         reconciliation, coverage, requirements: tuple,
+        admissions: dict[str, CandidateAdmission] | None,
         evidence_packet, why: str, corroboration: str, record: dict,
         ) -> ResolvedLine | None:
     """Resolve a *validated semantic disagreement* from the shared evidence.
@@ -3138,9 +3139,10 @@ def _evidence_constrained_disagreement_resolution(
     * both evaluator entries must name the candidate's current descriptor;
     * each entry must independently establish a *validated* semantic class;
     * the only permitted disagreement is supported-versus-rejected; and
-    * the deterministic comparison may release only a candidate that both
-      evaluators positively supported.  It may never select the disputed
-      candidate, nor treat a malformed citation, an incomplete answer, or a
+    * the deterministic comparison may release only a candidate both
+      evaluators positively supported, OR one whose source-governed identity
+      and every compiled MUST_SUPPORT requirement are already complete; and
+    * it may never treat a malformed citation, an incomplete answer, or a
       descriptor-identity failure as a provider question.
 
     Consequently this is an evidence-constrained resolver after two frozen,
@@ -3150,7 +3152,7 @@ def _evidence_constrained_disagreement_resolution(
     authoritative tie can become the existing specific provider query; every
     other system defect remains a retryable system hold.
     """
-    if not system_unresolved or not independently_supported or len(judgements) < 2:
+    if not system_unresolved or len(judgements) < 2:
         return None
 
     # `_candidate_disposition_uniqueness` uses the first two independent
@@ -3200,15 +3202,40 @@ def _evidence_constrained_disagreement_resolution(
             return None
         disputed.append(candidate)
 
+    # A model split may also be settled when the source already establishes a
+    # candidate's normalized identity and every one of its compiled
+    # MUST_SUPPORT requirements.  This is deliberately independent of both
+    # model answers: it requires a source-backed admission record, no
+    # unresolved or contradicted contract axis, and original-document support
+    # for this event.  It is the only path that can settle a single disputed
+    # candidate, where a pairwise tie has no second candidate to narrow.
+    source_supported, source_proof, _source_text, _source_spans = _gc.source_support(
+        fact, reconciliation)
+
+    def _deterministically_supported(candidate: CandidateCode) -> bool:
+        admission = (admissions or {}).get(candidate.code)
+        return bool(
+            source_supported
+            and admission is not None
+            and admission.standing is CandidateStanding.SUPPORTED
+            and not admission.contradicted_axes
+            and not admission.unresolved_axes)
+
     # Preserve the authoritative shortlist order for a reproducible audit and
-    # ensure the evidence resolver sees every viable contender.  The model can
-    # only be overruled in favour of a candidate BOTH independent assessments
-    # already supported.
+    # ensure the evidence resolver sees every viable contender.  A model can
+    # be overruled only in favour of independently positive semantic evidence
+    # or a complete source-governed candidate contract -- never by a vote.
     supported_codes = {candidate.code for candidate in independently_supported}
     disputed_codes = {candidate.code for candidate in disputed}
+    deterministic_codes = {
+        candidate.code for candidate in disputed
+        if _deterministically_supported(candidate)}
+    releaseable_codes = supported_codes | deterministic_codes
+    if not releaseable_codes:
+        return None
     contenders = [candidate for candidate in shortlist
                   if candidate.code in supported_codes | disputed_codes]
-    if len(contenders) < 2:
+    if not contenders:
         return None
     tie = _tiebreak.narrow(fact, contenders, reconciliation, requirements)
     audit = {
@@ -3216,7 +3243,9 @@ def _evidence_constrained_disagreement_resolution(
         "evidence_constrained_disagreement": {
             "contenders": [candidate.code for candidate in contenders],
             "independently_supported": sorted(supported_codes),
+            "deterministically_supported": sorted(deterministic_codes),
             "validated_disagreements": sorted(disputed_codes),
+            "source_proof": source_proof,
             "decision_rule": (
                 "source-evidence tie narrowing; no evaluator vote, confidence, "
                 "or third semantic assessment"),
@@ -3226,12 +3255,17 @@ def _evidence_constrained_disagreement_resolution(
 
     winner = tie.winner
     if (winner is not None
-            and winner.code in supported_codes
+            and winner.code in releaseable_codes
             and _evaluate(fact, winner, reconciliation=reconciliation) is not None
             and not _interval_unsupported(fact, parse_descriptor(winner.descriptor))):
-        note = ("the independent evaluators disagreed about a rival, but the "
-                "same authoritative descriptors and reconciled source evidence "
-                f"uniquely support {winner.code} ({tie.proof}): {tie.detail}")
+        support_basis = (
+            "both independent evaluators positively supported it"
+            if winner.code in supported_codes else
+            "its source-governed identity and every compiled requirement were "
+            "already positively established")
+        note = ("the independent evaluators disagreed, but the same authoritative "
+                f"descriptors and reconciled source evidence uniquely support {winner.code}; "
+                f"{support_basis} ({tie.proof or source_proof}): {tie.detail}")
         return _entailed_line(
             fact, winner, shortlist, f"{why}; {note}" if why else note,
             corroboration, uniqueness=audit)
@@ -3401,6 +3435,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
         evidence_constrained = _evidence_constrained_disagreement_resolution(
             fact, shortlist, remaining, _system_unresolved, judgements,
             reconciliation, coverage, _elimination_requirements,
+            admissions,
             evidence_packet, why, corroboration, record)
         if evidence_constrained is not None:
             return evidence_constrained

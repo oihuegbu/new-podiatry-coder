@@ -717,6 +717,82 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
         self.assertEqual(audit["winner"], chosen.code)
         self.assertIn("no evaluator vote", audit["decision_rule"])
 
+    def test_single_disputed_candidate_releases_only_on_complete_source_contract(self):
+        """A single semantic split can be settled by non-model evidence.
+
+        There is no rival for ordinary tie narrowing here.  Release is allowed
+        only because the source admission proves normalized identity, every
+        compiled required axis is complete, and the event's source quotation is
+        reconciled.  This is intentionally not a one-model-wins fallback.
+        """
+        candidate = _cand("CAND_ALPHA", "assembly service; variant alpha")
+        fact = _fact("assembly service; variant alpha performed")
+        span = EvidenceSpan(text="assembly service; variant alpha performed",
+                            anchored=True, span_id="s1")
+        fact.evidence = [span]
+        recon = self._reconciliation({"s1": "AGREED"})
+        primary = _verify.Judgement(
+            chosen=candidate, entailed=(candidate.code,), declared=True,
+            candidate_dispositions=(
+                _disp(candidate, "entailed", evidence_span_ids=("s1",)),))
+        corroborator = _verify.Judgement(
+            chosen=None, entailed=(), declared=True,
+            candidate_dispositions=(
+                _disp(candidate, "different_concept", evidence_span_ids=("s1",)),))
+        admissions = {
+            candidate.code: resolution.CandidateAdmission(
+                (candidate.code, candidate.system),
+                resolution.CandidateStanding.SUPPORTED,
+                ("governed_term_mapping",), (), (), ("s1",),
+                {"code": candidate.code, "descriptor": candidate.descriptor},
+                ("authoritative-index",), "source-governed identity"),
+        }
+
+        line = resolution._settle_uniqueness(
+            fact, candidate, [candidate], [primary, corroborator], {},
+            "independent verification", "cross-vendor corroboration", recon,
+            admissions=admissions)
+
+        self.assertEqual(line.chosen.code if line.chosen else None, candidate.code,
+                         line.rationale)
+        audit = line.tie_record["evidence_constrained_disagreement"]
+        self.assertEqual(audit["deterministically_supported"], [candidate.code])
+
+    def test_single_disputed_candidate_with_incomplete_source_contract_stays_held(self):
+        """An unresolved requirement prevents the source-contract release path."""
+        from claude_coder.models import SYSTEM_UNRESOLVED_MARKER
+        candidate = _cand("CAND_ALPHA", "assembly service; variant alpha")
+        fact = _fact("assembly service; variant alpha performed")
+        span = EvidenceSpan(text="assembly service; variant alpha performed",
+                            anchored=True, span_id="s1")
+        fact.evidence = [span]
+        recon = self._reconciliation({"s1": "AGREED"})
+        primary = _verify.Judgement(
+            chosen=candidate, entailed=(candidate.code,), declared=True,
+            candidate_dispositions=(
+                _disp(candidate, "entailed", evidence_span_ids=("s1",)),))
+        corroborator = _verify.Judgement(
+            chosen=None, entailed=(), declared=True,
+            candidate_dispositions=(
+                _disp(candidate, "different_concept", evidence_span_ids=("s1",)),))
+        admissions = {
+            candidate.code: resolution.CandidateAdmission(
+                (candidate.code, candidate.system),
+                resolution.CandidateStanding.SUPPORTED,
+                ("governed_term_mapping",), (), ("typed_attribute",), ("s1",),
+                {"code": candidate.code, "descriptor": candidate.descriptor},
+                ("authoritative-index",), "source identity but incomplete contract"),
+        }
+
+        line = resolution._settle_uniqueness(
+            fact, candidate, [candidate], [primary, corroborator], {},
+            "independent verification", "cross-vendor corroboration", recon,
+            admissions=admissions)
+
+        self.assertIsNone(line.chosen)
+        self.assertIsNone(line.documentation_gap)
+        self.assertIn(SYSTEM_UNRESOLVED_MARKER, line.rationale)
+
     def test_malformed_disagreement_remains_a_system_hold_not_a_provider_question(self):
         """The new resolver must not launder a citation failure into autonomy.
 
