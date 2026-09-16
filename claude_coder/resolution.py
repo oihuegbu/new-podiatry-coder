@@ -1953,9 +1953,31 @@ def _diagnosis_specificity_candidates(
         undotted = base.code.replace(".", "").upper()
         if len(undotted) < 2:
             continue
-        roots = list(dict.fromkeys((undotted[:-1], undotted[:3])))
         family = _strip_laterality(descriptor)
         concept = _tokens(family)
+        # issue #6, independent review of Codex's 610f7fb round: every RELATIVE
+        # below is required to share distinctive vocabulary with the BASE's own
+        # descriptor family, but the base itself was never held to any concept-
+        # relatedness bar against the FACT it is meant to expand -- only a
+        # laterality-attribute check, which a base with no declared laterality
+        # (the "unspecified" shape this function targets) trivially passes.
+        # `_evaluate` cannot catch this either; its own docstring is explicit
+        # that "concept relevance is not judged here -- retrieval already
+        # guaranteed it." When retrieval hands this function a base that is
+        # NOT conceptually related to the fact at all (a coincidental broad-
+        # recall hit, e.g. a real "pathologic fracture" leaf surfacing for a
+        # synthetic, unrelated diagnosis phrase), expanding it manufactures an
+        # entire FAMILY of equally-irrelevant siblings that can tie against
+        # each other with no real distinguishing axis -- worse than the single
+        # weak candidate retrieval alone would have produced. Reproduced
+        # directly: `tests/test_encounter_context_e2e.py`'s shared synthetic
+        # fixture ("condition alpha of the right side") coincidentally recalls
+        # a real ICD-10-CM pathologic-fracture family and this expansion turned
+        # that single weak hit into an 8-way encounter-type tie.
+        fact_tokens = _tokens(str(getattr(fact, "description", "") or ""))
+        if fact_tokens and not (concept & fact_tokens):
+            continue
+        roots = list(dict.fromkeys((undotted[:-1], undotted[:3])))
         for root in roots:
             for code in source.leaf_codes(root, "icd10"):
                 normalized = str(code).replace(".", "").upper()
@@ -3924,10 +3946,29 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
     # its MUST_SUPPORT axes is satisfied, and every rival is positively
     # contradicted.  Ungrounded or unresolved rivals continue to the independent
     # semantic evaluators; retrieval score never closes this path.
+    #
+    # issue #6, independent review of Codex's 610f7fb round: `not
+    # admissions[c.code].unresolved_axes` is true whenever a candidate has ZERO
+    # compiled MUST_SUPPORT axes at all -- not only when every one of them was
+    # actually checked and satisfied. A SNOMED-CT-crosswalk candidate typically
+    # has no compiled requirement of its own, so this vacuous case let a
+    # `governed_term_mapping`-only admission close deterministically with NO
+    # requirement ever having been evaluated. `governed_term_mapping`'s own
+    # admission signal is source-identity evidence, not entailment confirmation
+    # -- its default map can be wrong for the documented condition (the whole
+    # reason it is admitted `requires_verification=True`, matching the SAME
+    # invariant this file already enforces for the no-LLM deterministic path:
+    # "with an LLM available, `_propose_then_verify` already re-verifies every
+    # candidate through entailment regardless of provenance" -- this fast path
+    # must not be the one route that silently skips it. Reproduced directly:
+    # `test_snomed_crosswalk_hit_is_verified_not_blindly_trusted` released a
+    # crosswalk hit through this path even when BOTH stubbed evaluators
+    # explicitly rejected it.
     structured_winners = [
         c for c in shortlist
         if admissions[c.code].standing is CandidateStanding.SUPPORTED
         and not admissions[c.code].unresolved_axes
+        and not c.requires_verification
     ]
     if (len(structured_winners) == 1
             and all(c.code == structured_winners[0].code

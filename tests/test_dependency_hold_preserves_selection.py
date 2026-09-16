@@ -483,5 +483,76 @@ class PerEventResolutionFailureDoesNotAbortEncounterTest(unittest.TestCase):
                              for gate in result.gates))
 
 
+class DecidePreservingDependencyHoldsTest(unittest.TestCase):
+    """`pipeline._decide_preserving_dependency_holds` (issue #6, independent
+    review of Codex's 514e0c1/610f7fb round): three late-stage call sites in
+    `code_encounter` (a missing data fingerprint, a certificate-build
+    exception, an audit-persist exception) run AFTER
+    `_reconcile_claim_after_pruning` has already returned its merged,
+    correct `dependency_hold_reasons`. `autonomy.decide()` itself
+    deliberately sets that field fresh on every call ("never accumulated
+    here; the caller is the one with a reason to accumulate") -- so a bare
+    `decide()` call at those three sites would silently overwrite the fuller
+    history with whatever THIS one call happens to see, exactly the "fix
+    works round 1, loses state one call later" class this codebase has hit
+    before. Nothing external reads this field today, so nothing user-facing
+    breaks yet, but the field exists specifically so a held line stays
+    auditable without reverse-engineering a generic prose message."""
+
+    def test_a_prior_hold_reason_survives_a_call_that_finds_nothing_new(self):
+        from claude_coder import pipeline
+
+        service = _resolved_line("P1", "SERVICE_A")
+        result = _result([service])
+        result.dependency_hold_reasons = {
+            "D1": [{"basis": "grounded_reason_for", "source_fact_id": "X1"}]}
+
+        pipeline._decide_preserving_dependency_holds(result, source=None)
+
+        self.assertIn("D1", result.dependency_hold_reasons,
+                      "a hold reason recorded by an earlier reconciliation round "
+                      "must survive a later, unrelated decide() call that finds "
+                      "nothing new to block")
+        self.assertEqual(result.dependency_hold_reasons["D1"][0]["source_fact_id"],
+                         "X1")
+
+    def test_a_new_hold_reason_from_this_call_is_added_not_dropped(self):
+        from claude_coder import pipeline
+
+        diagnosis = _unresolved_line("D2", kind=FactKind.DIAGNOSIS)
+        service = _resolved_line("P1", "SERVICE_A")
+        relation = _reason_for("D2", "P1")
+        result = _result([diagnosis, service], relations=[relation])
+        result.dependency_hold_reasons = {
+            "D1": [{"basis": "grounded_reason_for", "source_fact_id": "X1"}]}
+
+        pipeline._decide_preserving_dependency_holds(result, source=None)
+
+        self.assertIn("D1", result.dependency_hold_reasons,
+                      "the prior round's reason must still be present")
+        self.assertIn("P1", result.dependency_hold_reasons,
+                      "a genuinely new dependency this call discovers must still "
+                      "be recorded, not suppressed by the preservation logic")
+        self.assertEqual(result.dependency_hold_reasons["P1"][0]["basis"],
+                         "grounded_reason_for")
+
+    def test_no_duplicate_entries_when_the_same_reason_recurs(self):
+        from claude_coder import pipeline
+
+        diagnosis = _unresolved_line("D1", kind=FactKind.DIAGNOSIS)
+        service = _resolved_line("P1", "SERVICE_A")
+        relation = _reason_for("D1", "P1")
+        result = _result([diagnosis, service], relations=[relation])
+        autonomy.decide(result)
+        prior_reasons = {k: list(v) for k, v in result.dependency_hold_reasons.items()}
+
+        pipeline._decide_preserving_dependency_holds(result, source=None)
+
+        self.assertEqual(result.dependency_hold_reasons.keys(), prior_reasons.keys())
+        for fact_id, reasons in prior_reasons.items():
+            self.assertEqual(result.dependency_hold_reasons[fact_id], reasons,
+                             "re-finding the SAME reason must not duplicate it")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -368,6 +368,32 @@ def _valid_run_contract(value) -> bool:
         return False
 
 
+def _decide_preserving_dependency_holds(result, source) -> None:
+    """`decide()`, without losing `dependency_hold_reasons` already accumulated by an
+    earlier round of `_reconcile_claim_after_pruning` in this same encounter.
+
+    `autonomy.decide` deliberately sets `result.dependency_hold_reasons` fresh on every
+    call -- by its own comment, "never accumulated here; the caller is the one with a
+    reason to accumulate" -- because only a caller running the full claim-set
+    reconciliation loop can tell which holds are still live. The three call sites this
+    wraps (a missing data fingerprint, a certificate-build exception, an audit-persist
+    exception) all run AFTER that reconciliation loop has already returned its merged,
+    correct dict; a bare `decide()` call there sees only what is visible in ITS one
+    round and would silently overwrite the fuller history with a smaller one -- the
+    same "fix works round 1, loses state one call later" class this codebase has hit
+    before. Nothing reads this field outside `autonomy.py`/`pipeline.py` today, so nothing
+    user-facing breaks yet, but the field exists specifically so a held line stays
+    auditable without reverse-engineering a generic prose message, and it must stay
+    correct even through these late-stage failure branches."""
+    prior = dict(result.dependency_hold_reasons or {})
+    decide(result, source=source)
+    for fact_id, reasons in prior.items():
+        bucket = result.dependency_hold_reasons.setdefault(fact_id, [])
+        for reason in reasons:
+            if reason not in bucket:
+                bucket.append(reason)
+
+
 def code_encounter(
     encounter_id: str,
     note_text: str,
@@ -1568,7 +1594,7 @@ def code_encounter(
             "data_fingerprint", Outcome.UNKNOWN,
             "authoritative-data fingerprint unavailable or incomplete; provenance cannot be attested",
             "audit/certificate integrity", retryable=True))
-        decide(result, source=source)
+        _decide_preserving_dependency_holds(result, source)
         result.certificate = None
     else:
         try:
@@ -1582,7 +1608,7 @@ def code_encounter(
                 "release_evidence_persistence", Outcome.UNKNOWN,
                 f"certificate could not be built: {type(exc).__name__}",
                 "audit/certificate integrity", retryable=True))
-            decide(result, source=source)
+            _decide_preserving_dependency_holds(result, source)
             result.certificate = None
         else:
             result.certificate = cert
@@ -1612,7 +1638,7 @@ def code_encounter(
             "release_evidence_persistence", Outcome.UNKNOWN,
             f"terminal release decision could not be persisted: {type(exc).__name__}",
             "audit/certificate integrity", retryable=True))
-        decide(result, source=source)
+        _decide_preserving_dependency_holds(result, source)
     return result
 
 
