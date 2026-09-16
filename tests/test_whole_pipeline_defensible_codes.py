@@ -12,22 +12,46 @@ autonomy -> certificate -- with every model-facing callable a deterministic,
 scripted stub. It spends NO real API credits and makes NO network calls
 (safe to run with `--network none`).
 
+issue #6, independent verification: the RESULT this harness inspects is the
+same canonical `ClaimBundle` payload production actually writes to
+`output/results/*_results.json` -- `app.contracts.claim_bundle.
+bundle_from_coding_result(result, ...).to_payload()`, the EXACT call
+`run.py`'s own `build_bundle()` makes -- never the raw internal
+`CodingResult`'s ad-hoc `.billable_lines`/`.notes` attributes (what an
+earlier draft of this file inspected, before this was checked against the
+real production shape and found NOT to mirror it: `.billable_lines` is a
+pipeline-internal convenience property, not what a real note's artifact
+ever contains). "Defensible", for a code in this payload, is production's
+own vocabulary: `external_disposition == "BILLABLE_AND_DEFENSIBLE"`
+(`app.contracts.claim_bundle.ExternalDisposition`).
+
 To verify a NEW fix with this harness: build a `MockSource` shaped like the
 fix's real bug (real candidate descriptors reproduced with SYNTHETIC
 vocabulary, never a hardcoded real code/scenario), a minimal extraction
-`facts_json` (see `_facts_json` below for the wire shape), and one or two
-scripted `shortlist_verdict.judge(...)` callables; call `run_pipeline(...)`;
-assert on `defensible_codes(result)` (the set of codes that actually reached
-`result.billable_lines`) and/or `result.verdict`/`result.notes` for a
-scenario whose correct outcome is a held/reviewed line rather than a release
--- both are "defensible": a wrongly-released code and a wrongly-silent hold
-are the SAME category of defect this harness exists to catch.
+`facts_json` (see the wire shape in the scenarios below), and one or two
+scripted `shortlist_verdict.judge(...)` callables (via `_declare`, never the
+same judge object declared twice -- see its own docstring); call
+`run_pipeline(...)`, then `build_claim_bundle_payload(result)`; assert on
+`defensible_codes(payload)` and/or `payload["release"]["producer_verdict"]`/
+`payload["candidate_lines"]` for a scenario whose correct outcome is a
+held/reviewed line rather than a release -- both are "defensible": a
+wrongly-released code and a wrongly-silent hold are the SAME category of
+defect this harness exists to catch. A MINIMAL synthetic scenario's
+`payload["release"]["holds"]` will still legitimately list every missing
+real-world claim field this harness never supplies (patient demographics,
+payer, coverage, authoritative-data fingerprints) -- that is expected and
+orthogonal to what a fix under test changes; `producer_verdict`/
+`external_disposition` are the fields that answer "did resolution pick (or
+correctly withhold) a defensible code," which is what this harness verifies.
 """
 import json
 import unittest
 
+from app.contracts.claim_bundle import (AuthorityBinding, SourceDocument,
+                                        bundle_from_coding_result)
+from app.contracts.encounter_context import EncounterContext
 from claude_coder.data_access import MockSource
-from claude_coder.models import CandidateCode, Verdict
+from claude_coder.models import CandidateCode
 from claude_coder.pipeline import code_encounter
 from claude_coder.provenance import NullAuditRepository
 from claude_coder.verify import declare_model_profile
@@ -51,10 +75,26 @@ def run_pipeline(note_text, facts_json, source, *, verify_llm=None,
             "participants": [{"id": "actor-1", "type": "person", "roles": ["performer"]}]})
 
 
-def defensible_codes(result) -> set[str]:
-    """The codes that actually reached the released ClaimBundle's billable
-    lines -- the one assertion every fix's whole-pipeline scenario shares."""
-    return {ln.chosen.code for ln in result.billable_lines if ln.chosen}
+def build_claim_bundle_payload(result) -> dict:
+    """The SAME canonical ClaimBundle JSON payload production writes to
+    `output/results/*_results.json` -- `run.py`'s `build_bundle()` makes
+    this EXACT call (`bundle_from_coding_result(...).to_payload()`), just
+    with a real PDF's `SourceDocument`/resolved `EncounterContext` in place
+    of the minimal defaults a synthetic scenario has no need to supply."""
+    bundle = bundle_from_coding_result(
+        result, source_document=SourceDocument(), context=EncounterContext(),
+        authority=AuthorityBinding())
+    return bundle.to_payload()
+
+
+def defensible_codes(payload: dict) -> set[str]:
+    """The codes production itself calls defensible: every `service_lines`/
+    `diagnoses` entry in the REAL ClaimBundle payload whose
+    `external_disposition` is `BILLABLE_AND_DEFENSIBLE` -- the one assertion
+    every fix's whole-pipeline scenario shares."""
+    lines = (*payload.get("service_lines", ()), *payload.get("diagnoses", ()))
+    return {ln["code"] for ln in lines
+           if ln.get("external_disposition") == "BILLABLE_AND_DEFENSIBLE"}
 
 
 def _declare(*, entails, provider, reason="stub", **judge_kwargs):
@@ -165,9 +205,10 @@ class WholePipelineDefensibleCodes(unittest.TestCase):
             corroborate_llm=_declare(entails=entails, provider="provider-b",
                                     reason="documented act matches"))
 
-        self.assertEqual(result.verdict, Verdict.AUTO_READY, result.notes)
-        codes = defensible_codes(result)
-        self.assertEqual(codes, {"GROUNDED", "DX_ALPHA_RIGHT"}, result.notes)
+        payload = build_claim_bundle_payload(result)
+        self.assertEqual(payload["release"]["producer_verdict"], "AUTO_READY", payload)
+        codes = defensible_codes(payload)
+        self.assertEqual(codes, {"GROUNDED", "DX_ALPHA_RIGHT"}, payload)
         self.assertNotIn("CARDINALITY_ONLY", codes)
 
     def test_an_undocumented_indication_clause_becomes_a_provider_question_not_a_silent_hold(self):
@@ -217,9 +258,12 @@ class WholePipelineDefensibleCodes(unittest.TestCase):
         result = run_pipeline(note, facts_json, source,
                               verify_llm=primary, corroborate_llm=corroborator)
 
-        self.assertEqual(defensible_codes(result), set(), result.notes)
-        self.assertIn(result.verdict, (Verdict.REVIEW_REQUIRED,), result.notes)
-        joined_notes = " ".join(result.notes)
-        self.assertIn("PROVIDER_QUERY", joined_notes)
-        self.assertIn("variant condition", joined_notes)
-        self.assertNotIn("SYSTEM_UNRESOLVED", joined_notes)
+        payload = build_claim_bundle_payload(result)
+        self.assertEqual(defensible_codes(payload), set(), payload)
+        self.assertEqual(payload["release"]["producer_verdict"], "REVIEW_REQUIRED", payload)
+        self.assertEqual(payload["release"]["producer_destination"], "PROVIDER_QUERY", payload)
+        (line,) = payload["candidate_lines"]
+        self.assertEqual(line["external_disposition"], "CANDIDATE_REQUIRING_FACT", line)
+        self.assertIn("variant condition", line["blocking_reason"])
+        self.assertIn("indication_clause", line["blocking_reason"])
+        self.assertNotIn("SYSTEM_UNRESOLVED", line["blocking_reason"])
