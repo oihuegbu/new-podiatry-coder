@@ -2581,6 +2581,65 @@ class ProposeVerifyTest(unittest.TestCase):
         self.assertEqual(line.chosen.code, "C3")
 
 
+class IndicationClauseWholePipelineTest(unittest.TestCase):
+    """issue #6, independent root-cause investigation, whole-pipeline
+    verification (per the free-verification-before-real-note policy: a
+    unit-level test of `_settle_uniqueness`/`tiebreak` in isolation is not
+    sufficient proof -- this exercises the SAME `resolve()` entrypoint
+    `code_encounter` calls per-fact, propose -> verify -> tie-resolution,
+    with a scripted two-judge disagreement, synthetic vocabulary only).
+
+    Reproduces the real note's F1 shape: one candidate states a positive
+    "(eg, ...)" indication clause (CPT grammar `tiebreak.
+    AXIS_INDICATION_CLAUSE` recognizes) that the record never documents;
+    before that axis existed, this shortlist had no governed axis to
+    adjudicate the tie through at all, and fell to a permanent,
+    unrescuable SYSTEM_UNRESOLVED hold with no path to resolution. It must
+    now become a specific, answerable provider question naming the exact
+    undocumented fact."""
+
+    def test_an_undocumented_indication_clause_becomes_a_specific_provider_question(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CandidateCode, ClinicalFact, EvidenceSpan, FactKind
+        from claude_coder.resolution import resolve
+
+        alpha_desc = "assembly service, broad category"
+        beta_desc = "assembly service, broad category (eg, variant condition)"
+        src = MockSource(
+            records={("CAND_ALPHA", "cpt"): {"long_description": alpha_desc,
+                                             "active": True},
+                    ("CAND_BETA", "cpt"): {"long_description": beta_desc,
+                                          "active": True}},
+            retrieval={("*", "cpt"): [CandidateCode("CAND_ALPHA", "cpt", alpha_desc, 0.8),
+                                     CandidateCode("CAND_BETA", "cpt", beta_desc, 0.7)]})
+        fact = ClinicalFact(
+            kind=FactKind.PROCEDURE, description="assembly service performed today",
+            evidence=[EvidenceSpan("assembly service performed today", anchored=True,
+                                   span_id="s1")],
+            confidence=0.95, fact_id="F1")
+
+        # Primary: looser, entails both (mirrors the real note's OpenAI
+        # judgement wrongly accepting the indication-clause candidate).
+        primary = _sv.judge(entails=lambda d: True, reason="documented act matches")
+        # Corroborator: the indication clause's own fact ("variant condition")
+        # is genuinely undocumented -- correctly flags it as missing (mirrors
+        # the real note's Claude judgement, which correctly rejected the
+        # indication-requiring candidate).
+        corroborator = _sv.judge(
+            entails=lambda d: "variant condition" not in d.lower(),
+            missing_element=True, reason="variant condition is not documented")
+
+        line = resolve(_request(fact), src,
+                       llm=_from(primary, "provider-a"),
+                       corroborate=_from(corroborator, "provider-b"))
+
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertIsNotNone(line.documentation_gap)
+        self.assertIn("variant condition", line.documentation_gap)
+        self.assertIn("indication_clause", line.documentation_gap)
+        self.assertNotIn("SYSTEM_UNRESOLVED", line.rationale or "")
+
+
 class ProposedCandidateServiceRoleTest(unittest.TestCase):
     """issue #6 F9-R11-H-D: `_service_role_control`'s `blocks_line` backstop
     only ever saw the RETRIEVAL-time candidate universe -- a candidate
