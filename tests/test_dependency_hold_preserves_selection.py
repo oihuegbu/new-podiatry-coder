@@ -31,7 +31,9 @@ unreconciled edge of ANY predicate must never propagate a hold either.
 
 Synthetic facts/codes throughout.
 """
+import json
 import unittest
+from unittest.mock import patch
 
 from claude_coder import autonomy
 from claude_coder.models import (CandidateCode, ClaimSubmissionStatus, ClinicalFact,
@@ -391,6 +393,94 @@ class EncounterWideFailurePreservesLinesTest(unittest.TestCase):
             "enc-1", "2026-01-01", "source_evidence_integrity",
             RuntimeError("simulated failure"), source=None)
         self.assertEqual(result.lines, [])
+
+
+class PerEventResolutionFailureDoesNotAbortEncounterTest(unittest.TestCase):
+    """A provider/retrieval failure for one event must classify that event only.
+
+    This is intentionally end-to-end through ``code_encounter`` rather than a
+    helper-only test: the former regression returned from the middle of the
+    per-fact loop, meaning subsequent, independently documented services never
+    entered the ClaimBundle at all.
+    """
+
+    @staticmethod
+    def _facts():
+        facts = []
+        for fact_id, wording in (("F1", "service alpha performed"),
+                                 ("F2", "service beta performed"),
+                                 ("F3", "service gamma performed")):
+            facts.append({
+                "fact_id": fact_id,
+                "kind": "procedure",
+                "description": wording,
+                "attributes": {"performer_id": "actor-1",
+                               "billing_entity_id": "actor-1"},
+                "disposition": "performed_today",
+                "negated": False,
+                "evidence": [wording],
+                "confidence": 0.99,
+            })
+        return json.dumps({"facts": facts})
+
+    def test_one_resolution_failure_holds_only_its_event_and_continues(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CandidateCode
+        from claude_coder.pipeline import code_encounter
+        from claude_coder.provenance import NullAuditRepository
+
+        source = MockSource()
+
+        def resolve_one(request, _source, **_kwargs):
+            if request.fact.fact_id == "F2":
+                raise RuntimeError("simulated provider outage")
+            return ResolvedLine(
+                fact=request.fact,
+                chosen=CandidateCode(
+                    code=f"SYNTHETIC_{request.fact.fact_id}", system="cpt",
+                    descriptor="synthetic service", score=1.0,
+                    source="test-authority"),
+                method=ResolutionMethod.VERIFIED,
+                rationale="synthetically supported")
+
+        note = ("service alpha performed. service beta performed. "
+                "service gamma performed.")
+        with patch("claude_coder.pipeline.resolution.resolve", side_effect=resolve_one):
+            result = code_encounter(
+                "enc", note, "2026-01-01", source=source,
+                extract_llm=lambda _system, _user: self._facts(),
+                # Supplying a verifier prevents the production default provider
+                # client from being created; the patched resolver never invokes it.
+                verify_llm=lambda _system, _user: "{}",
+                audit_repository=NullAuditRepository(),
+                billing_context={
+                    "billing_entity_id": "actor-1",
+                    "participants": [{"id": "actor-1", "type": "person",
+                                      "roles": ["performer"]}],
+                })
+
+        by_id = {line.fact.fact_id: line for line in result.lines}
+        self.assertEqual(set(by_id), {"F1", "F2", "F3"})
+        self.assertTrue(by_id["F1"].resolved)
+        self.assertTrue(by_id["F3"].resolved)
+        self.assertEqual(
+            {line.fact.fact_id for line in result.billable_lines}, {"F1", "F3"},
+            "a fact-scoped provider failure must not hold independently defensible "
+            "sibling lines at final ClaimBundle routing")
+        self.assertFalse(by_id["F2"].resolved)
+        self.assertTrue(by_id["F2"].retrieval_attempted)
+        self.assertIn("retry required", by_id["F2"].rationale)
+        self.assertIsNone(by_id["F2"].documentation_gap,
+                          "an external execution failure is never a provider query")
+
+        failures = [gate for gate in result.gates
+                    if gate.name == "retrieval_execution:F2"]
+        self.assertEqual(len(failures), 1)
+        self.assertTrue(failures[0].retryable)
+        self.assertEqual(failures[0].affected_fact_ids, ("F2",))
+        self.assertFalse(any(gate.name.startswith("retrieval_execution:")
+                             and not gate.affected_fact_ids
+                             for gate in result.gates))
 
 
 if __name__ == "__main__":

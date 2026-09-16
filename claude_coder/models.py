@@ -518,12 +518,13 @@ class ResolvedLine:
     # CPT/HCPCS) or no unique advisory match was found -- a different, honest
     # thing from "found matches and used none of them."
     advisory_terminology: list[dict] | None = None
-    # True only when the canonical event actually crossed the eligibility capability
-    # boundary and a retrieval/resolution implementation returned for it.  This is a
-    # pipeline-integrity signal, not a confidence score: it lets the release gate prove
-    # that no performed service was silently classified away before authoritative code
-    # data was consulted. Duplicate mentions remain False because their canonical
-    # ClaimLineIntent member performs the one retrieval for that occurrence.
+    # True once the canonical event actually crosses the eligibility capability
+    # boundary and invokes retrieval/resolution.  A returned line and a typed,
+    # fact-scoped operational failure both count as attempted: the latter is already
+    # represented by its own retryable gate and must not be misreported as a silently
+    # skipped service.  This is a pipeline-integrity signal, not a confidence score.
+    # Duplicate mentions remain False because their canonical ClaimLineIntent member
+    # performs the one retrieval for that occurrence.
     retrieval_attempted: bool = False
 
     @property
