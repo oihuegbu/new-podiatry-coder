@@ -1147,10 +1147,35 @@ def code_encounter(
                         # searched.
                         coverage=_line_coverage, page_text=_line_page_text)
             except Exception as exc:
-                return _system_hold_result(encounter_id, date_of_service,
-                                           f"retrieval_execution:{fact.fact_id}", exc, source,
-                                           lines=lines)
-            _retrieval_attempted = True
+                # A resolution/provider/data-call failure happens while deciding ONE
+                # independently extracted event.  It is therefore a retryable,
+                # fact-scoped system hold -- not an encounter-wide conclusion and
+                # never a provider question.  Returning `_system_hold_result` here
+                # used to terminate this loop, so one transient verifier failure
+                # prevented every later, independently supported service from even
+                # reaching candidate selection or the ClaimBundle.  The failure type
+                # is enough for the artifact; exception text can contain note text,
+                # so it remains in the protected operator log only.
+                logger.error("  %s: resolution failed for %s (%s)",
+                             encounter_id, fact.fact_id, type(exc).__name__,
+                             exc_info=True)
+                line = ResolvedLine(
+                    fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
+                    rationale=("system retrieval/verification execution failed "
+                               f"({type(exc).__name__}); retry required, never a "
+                               "provider question"))
+                pre_retrieval_gates.append(GateResult(
+                    f"retrieval_execution:{fact.fact_id}", Outcome.UNKNOWN,
+                    f"retrieval/verification execution failed ({type(exc).__name__})",
+                    "per-event retrieval and verification boundary", retryable=True,
+                    affected_fact_ids=(fact.fact_id,)))
+                # The event did cross the enforced retrieval boundary.  The separate
+                # scoped gate above records that it did not complete, while this flag
+                # prevents the service-completeness invariant from misreporting an
+                # operational failure as a silently skipped service.
+                _retrieval_attempted = True
+            else:
+                _retrieval_attempted = True
             # issue #6 item 8: captured here, before arbitration/refinement below MAY
             # reconstruct `line` (see the item 7 comment at the end of this loop for
             # why that matters) -- `em.resolve_em` does not run semantic eligibility
