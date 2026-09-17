@@ -1621,6 +1621,39 @@ class ModelCitedDescriptorTermGroundingTest(unittest.TestCase):
         self.assertTrue(grounded, detail)
         self.assertIn("gamma type technique", detail)
 
+    def test_never_engages_laterality_even_when_a_reason_names_a_side(self):
+        """A real prior defect in this codebase showed lexical laterality
+        matching can silently resolve the WRONG side once a negation falls
+        outside a naive window -- laterality is settled EXCLUSIVELY by the
+        fact's own typed attribute everywhere else in this module
+        (`tiebreak._typed_laterality_support`), and this path must never
+        quietly reopen that exact risk just because an evaluator's free-form
+        reason happens to mention a side. "left"/"right"/"bilateral" must
+        never enter a checked phrase here at all -- refuses (None), never
+        grounds either way, regardless of what the document says elsewhere."""
+        winner = _cand("CAND_RIGHT", "assembly service, structure alpha, right side")
+        loser = _cand("CAND_LEFT", "assembly service, structure alpha, left side")
+        fact = ClinicalFact(
+            kind=FactKind.PROCEDURE, description="assembly service",
+            attributes={"laterality": "right"},
+            evidence=[EvidenceSpan(text="Assembly service performed on structure alpha",
+                                   anchored=True, span_id="s1")],
+            confidence=0.9, fact_id="F1")
+        # A DIFFERENT, unrelated mention of "left" elsewhere in a long
+        # document -- exactly the construction that broke naive lexical
+        # laterality matching before ("right ... ultimately ruled out"
+        # wrongly counting "right" as stated).
+        coverage = self._coverage(
+            "Patient presents for evaluation. Left knee was examined and "
+            "found unremarkable. Assembly service performed on structure alpha.")
+        judgement = verify.Judgement(
+            chosen=winner, entailed=(winner.code,),
+            eliminated={loser.code: "the documentation does not support the left side"},
+            declared=True)
+        grounded = resolution._model_cited_descriptor_term_grounded(
+            fact, loser, winner, [judgement], coverage)
+        self.assertIsNone(grounded)
+
 
 class ExclusionClauseDeterministicGroundingTest(unittest.TestCase):
     """issue #6, real-note investigation: an evaluator can reasonably label an

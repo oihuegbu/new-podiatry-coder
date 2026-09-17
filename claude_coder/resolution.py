@@ -2390,6 +2390,18 @@ def _model_cited_descriptor_term_grounded(fact: ClinicalFact, loser: CandidateCo
        own existing negation-aware matcher -- never the model's own say-so
        that it is absent.
 
+    Laterality words (`ontology._LATERALITY`) never enter a phrase here at
+    all -- the SAME closed vocabulary `discriminating_axes` already excludes
+    from its own bag-of-words residual, for the SAME reason `_grounded_
+    elimination`'s own pairwise fallback excludes `AXIS_LATERALITY`: a real
+    prior defect in this codebase showed lexical laterality matching can
+    silently resolve the WRONG side once a negation falls outside a naive
+    window ("right ... ultimately ruled out" wrongly counting "right" as
+    stated). Laterality is settled EXCLUSIVELY by the fact's own typed
+    attribute (`tiebreak._typed_laterality_support`) everywhere else in this
+    module; this path must never quietly reopen that exact class of risk
+    just because a model's free-form reason happens to mention a side.
+
     Any judgement lacking the full `Judgement.elimination_of` interface (some
     callers duck-type a lighter test double exposing only
     `requirement_judgements`, for `_requirement_grounded_status` above), that
@@ -2401,12 +2413,13 @@ def _model_cited_descriptor_term_grounded(fact: ClinicalFact, loser: CandidateCo
     """
     if coverage is None or not coverage.complete or not judgements:
         return None
+    from .ontology import _LATERALITY
     winner_words = _tiebreak._descriptor_tokens(winner.descriptor)
     fact_text = " ".join(str(getattr(s, "text", "") or "")
                         for s in (getattr(fact, "evidence", None) or ()))
     fact_words = {_tiebreak._sing(w)
                  for w in re.split(r"[^a-z0-9]+", fact_text.lower()) if w}
-    excluded = winner_words | fact_words | {"eg", "example"}
+    excluded = winner_words | fact_words | {"eg", "example"} | set(_LATERALITY)
     phrases: list[str] = []
     current: list[str] = []
     for raw in re.split(r"[^a-z0-9]+", (loser.descriptor or "").lower()):
