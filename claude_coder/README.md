@@ -65,9 +65,9 @@ note ─► 1. EXTRACT    Clinical Language Understanding. The LLM emits evidenc
         2b. VERIFY    Propose-then-verify (license-clean CPT-Index substitute):
         │             the LLM PROPOSES candidate code numbers (validated against
         │             the registry — it can't invent one), a code is accepted only
-        │             when its AUTHORITATIVE DESCRIPTOR is ENTAILED by the facts,
-        │             and an INDEPENDENT second model must corroborate. Nothing
-        │             bills on recall or on one model's say-so.
+        │             when its AUTHORITATIVE DESCRIPTOR is ENTAILED by the facts
+        │             and every OTHER shortlisted candidate is genuinely
+        │             eliminated. Nothing bills on recall alone.
         ▼
         3. SHAPE      Claim-level mechanics from the data: dedup, section
         │             applicability, modifiers, NCCI PTP bundling, integral
@@ -153,7 +153,7 @@ grounded in authoritative data; nothing bills on vector rank or model memory.**
 | **Authoritative index** | ICD-10-CM Alphabetic Index (`index_codes`) → SNOMED→ICD map (`snomed_codes`) for diagnoses; CMS Table of Drugs (`drug_index_codes`) → AMA CPT Index (`cpt_index_codes`) → learned index (`learned_index_codes`) → CPT/HCPCS descriptor index (`procedure_index_codes`) for procedures/supplies/drugs | A single, unambiguous authoritative term→code hit. Taken deterministically. |
 | **Structured decision** | `_decide` / `_evaluate`: eliminate candidates that *contradict* documented attributes (wrong laterality, measurement outside the descriptor's interval, inactive on the DOS); select **only** a candidate that uniquely satisfies a documented axis. | The index has no clean hit; a retrieval pool exists. |
 | **Tie policy** | `tiebreak.narrow`: several candidates survive, so re-inspect **only their discriminating axes** against the **original document**; release the one the page uniquely entails, else raise **one targeted provider query**. | Two or more survivors, none uniquely satisfying a documented axis. |
-| **Propose-then-verify** | `verify.propose_codes` (LLM proposes, registry validates) → `verify.select_entailed` (descriptor entailment) → `verify.corroborate` (independent second model). Bounded re-selection on a wrong-concept rejection; a `missing_element` rejection becomes a provider query. | Procedures/imaging, and diagnoses that reach the embedding fallback. The license-clean substitute for the AMA CPT Index. |
+| **Propose-then-verify** | `verify.propose_codes` (LLM proposes, registry validates) → `verify.select_entailed` (descriptor entailment against the WHOLE shortlist). A `missing_element` rejection becomes a provider query. | Procedures/imaging, and diagnoses that reach the embedding fallback. The license-clean substitute for the AMA CPT Index. |
 | **Arbitration** | `arbitration.arbitrate`: a single bounded LLM pick over the *retrieved* candidate descriptors — it can never recall or invent a code, and `autonomy` never auto-releases its result. | Residual ambiguity for kinds that did **not** go through propose-then-verify **and** that neither a failed deterministic constraint nor the tie policy has already answered. |
 
 Retrieval is the repo's hybrid dense(bge)+sparse(BM25) RRF store, reused **as
@@ -189,7 +189,7 @@ algorithm. `_decide` runs exactly those steps, in that order:
    both descriptors' words. A line held this way carries a `documentation_gap`, so
    `autonomy` routes it to `PROVIDER_QUERY` and `recommendations` emits a
    documentation query — never the generic coder queue, which the directive forbids
-   as the response to a tie or to two models disagreeing.
+   as the response to a tie.
 
 Three things may therefore **never** select a code, and each has a regression test:
 
@@ -197,8 +197,9 @@ Three things may therefore **never** select a code, and each has a regression te
   candidate to the pool;
 - **lexical token overlap** (`support_score`) — it orders the shortlist and the
   audit's `alternatives`, and decides nothing;
-- **model agreement** — an entailment the corroborator rejected escalates with a
-  targeted question; the page, not a vote, is what can still settle it.
+- **model agreement** — an entailment named but not document-confirmed
+  escalates with a targeted question; the page, not a model's say-so, is
+  what can still settle it.
 
 Every tie that was re-inspected writes a `code_tie_resolution` audit record: the
 axes, what the document was proven to say about each candidate, which axes it left
@@ -223,10 +224,10 @@ is supported. Two steps, most conservative first:
    code whose specific counterpart lives in a *different* descriptor family, gather
    the code's more-specific, on-concept, documented-side relatives from its **own
    authoritative category leaves**, offer `{chosen + relatives}` to the same
-   entailment verifier, and adopt a strictly-more-specific relative it selects *and*
-   an independent model confirms. If a specific relative is proposed but the
-   independent check splits, **escalate** rather than silently bill the unspecified
-   code (fail-closed). If no specific relative exists, keep the unspecified code.
+   entailment verifier, and adopt a strictly-more-specific relative it selects.
+   If several equally-documented relatives remain entailed, **escalate** rather
+   than silently pick one (fail-closed). If no specific relative exists, keep
+   the unspecified code.
 
 *Effect (real data): `M77.9 "Enthesopathy, unspecified"` → `M77.51 "Other
 enthesopathy of right foot and ankle"`.*
@@ -296,10 +297,11 @@ NOT_APPLICABLE. `UNKNOWN`/`ERROR`/`BLOCKED` all stop autonomy.
 `autonomy.decide` grants hands-off release **only when the chain closes**: no
 gate BLOCKED/ERROR, no gate UNKNOWN, every *performed* fact resolved, and every
 released line's confidence ≥ the floor (`AUTONOMY_CONFIDENCE = 0.95`, a policy
-dial). `DETERMINISTIC` and `VERIFIED` (cross-model-confirmed) lines are gated only
-by how well the underlying fact is documented; a single-model `ARBITRATED`
-tie-break is discounted. Verdicts: `AUTO_READY`, `REVIEW_REQUIRED`, `BLOCKED` —
-each with an audit note naming exactly why.
+dial). `DETERMINISTIC` and `VERIFIED` (positively entailed against the
+candidate's own descriptor/requirement contract) lines are gated only by how
+well the underlying fact is documented; `arbitration.arbitrate`'s single-model
+tie-break (`ARBITRATED`) is discounted. Verdicts: `AUTO_READY`,
+`REVIEW_REQUIRED`, `BLOCKED` — each with an audit note naming exactly why.
 
 ### Deterministic routing — who actually has to act
 
@@ -335,8 +337,9 @@ Three rules hold this together and are pinned by
 
 What legitimately **remains** a coder's: a modifier-1 NCCI pair with no applied
 distinct-service modifier (is the service genuinely separate?); an Excludes1 pair
-that may be an unrelated-conditions exception; a code chosen by a single model among
-candidates with no independent corroboration (`ARBITRATED`); a resolution the
+that may be an unrelated-conditions exception; a code chosen among leftover
+candidates by `arbitration.arbitrate`'s single-model tie-break, when propose-
+then-verify itself did not resolve the line (`ARBITRATED`); a resolution the
 documentation leaves ambiguous with no single missing element to ask for; and a
 barely-documented event with no identifiable weakest axis. These are irreducible
 clinical/coding judgement, not defaults.
@@ -411,7 +414,7 @@ Swap the data files and the answers change with no code change.
 | `extraction.py` | Stage 1 CLU — note → evidence-linked `ClinicalFact`s (code-free prompt). |
 | `resolution.py` | Stage 2 — deterministic resolution ladder, the tie policy's steps 1–2, propose-then-verify driver, laterality + specificity upgrades. |
 | `tiebreak.py` | Tie policy steps 3–5 — derive the discriminating axes from the tied descriptors, settle them against the original document, else one targeted provider query. |
-| `verify.py` | Propose / select-entailed / corroborate — the license-clean CPT-Index substitute. |
+| `verify.py` | Propose / select-entailed — the license-clean CPT-Index substitute. |
 | `em.py` | E/M leveling from the MDM 2-of-3 grid + descriptor setting/new-vs-established. |
 | `arbitration.py` | Bounded single-LLM pick over *retrieved* descriptors (residual ambiguity only). |
 | `ontology.py` | Descriptor grammar: `parse_descriptor`, measurement intervals, `code_section`, `is_separate_procedure`, `support_score`, dose/drug-unit parsing, `billing_units`. |
@@ -457,7 +460,7 @@ Taking a right retrocalcaneal exostectomy operative note as the running example:
 
 ```bash
 # Real note (needs the RAG index + an LLM key; real mode auto-enables
-# propose-then-verify + cross-model corroboration):
+# propose-then-verify):
 python -m claude_coder.cli path/to/note.txt --dos 2026-01-05
 python -m claude_coder.cli - --dos 2026-01-05 --json   # stdin, JSON certificate
 
@@ -465,9 +468,12 @@ python -m claude_coder.cli - --dos 2026-01-05 --json   # stdin, JSON certificate
 python -m pytest tests/test_claude_coder.py -q
 ```
 
-Verify env: `CLAUDE_VERIFY_MODEL` / `CLAUDE_VERIFY_EFFORT` select the independent
-corroboration model (typically the Opus verification tier); `LEARNED_PROMOTE_AT`
-tunes the learned-index promotion threshold.
+Verify env: `CLAUDE_VERIFY_MODEL` / `CLAUDE_VERIFY_EFFORT` configure
+`verify.default_corroborate_llm` — the axis-consensus corroborator used for
+resolving conflicting *attribute* readings across two document readings
+(`graph_consensus.py`), a separate mechanism from code selection's single
+verifying evaluator; `LEARNED_PROMOTE_AT` tunes the learned-index promotion
+threshold.
 
 ---
 
@@ -539,6 +545,7 @@ today and improves by adding gates/axes, never by hardcoding codes.
   than auto-decided.
 - **The certificate** provides an integrity hash; an HMAC with a private key would
   add non-repudiation.
-- **Two independent models can be jointly wrong** — cross-model corroboration lowers
-  that risk but does not eliminate it; the autonomy floor and human review are the
-  backstop.
+- **A single evaluator can be systematically wrong** — code selection relies on
+  one verifying model's entailment against the candidate's own authoritative
+  descriptor/requirement contract, not a second independent model's agreement;
+  the autonomy floor and human review are the backstop.

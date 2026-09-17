@@ -413,6 +413,7 @@ def code_encounter(
     source_evidence=None,
     source_reader=None,
     service_date_binding: dict | None = None,
+    capability_manifest: dict | None = None,
 ) -> CodingResult:
     """`source_evidence` is a `contracts.source_evidence.SourceEvidenceDocument`: the
     ORIGINAL document as read by more than one channel. Without it the note text is one
@@ -421,7 +422,16 @@ def code_encounter(
     (issue #6 F6-R6-A). `source_reader` is the OPTIONAL, lazily-invoked second model
     read used only for pages no deterministic channel could read — see the escalation
     below, which is the cost control that keeps this from doubling the price of notes
-    whose text layer already covers them."""
+    whose text layer already covers them.
+
+    `capability_manifest` (issue #6, independent review, P1-3 correction):
+    forwarded to `gates.run_gates`/`source_manifest_gate` -- see that
+    function's own docstring. Every real caller omits it, so production
+    gates against the real, configured authoritative filesystem exactly as
+    before; this exists so a hermetic whole-pipeline test can prove the
+    gate's PASS/BLOCKED behavior from a controlled fixture instead of
+    depending on whatever real data files happen to be mounted wherever the
+    test runs."""
     from .models import GateResult, Outcome
     from .modifiers import ModifierEngine
     source = source or AuthoritativeSource()
@@ -469,10 +479,13 @@ def code_encounter(
 
     # Propose-then-verify is enabled in real mode (no stubbed LLMs). It grounds every
     # procedure code in an authoritative descriptor the documentation entails — the
-    # license-clean substitute for the CPT Index. In real mode it is also corroborated
-    # by an INDEPENDENT second model, so a procedure bills only when two independent
-    # judgements agree. Tests pass stub LLMs and leave these None -> deterministic
-    # path unchanged, no corroboration.
+    # license-clean substitute for the CPT Index, off a single verifying evaluator
+    # (code selection no longer reconciles a second, independently-provider'd
+    # corroborator against it). `corroborate_llm` is still wired here in real mode --
+    # it is `_run_graph_consensus`'s own axis-consensus corroborator (resolving
+    # conflicting ATTRIBUTE readings across two document readings), a separate
+    # mechanism from code selection. Tests pass stub LLMs and leave these None ->
+    # deterministic path unchanged.
     if verify_llm is None and arbitrate_llm is None:
         from .verify import default_corroborate_llm, default_verify_llm
         verify_llm = default_verify_llm
@@ -1160,7 +1173,7 @@ def code_encounter(
                             _it, fact, intent_facts=_intent_facts,
                             service_context_facts=_service_context_facts,
                             service_context_id=_service_context_id), source,
-                        llm=verify_llm, corroborate=corroborate_llm,
+                        llm=verify_llm,
                         dos=date_of_service, reconciliation=source_reconciliation,
                         # issue #6 F9-R6 Phase 3, `CoverageCorpus`-typed since the
                         # F9-R6-R4/R5 re-review: real, non-model-self-report page
@@ -1287,7 +1300,7 @@ def code_encounter(
         # the record supports a specific one but verification is split.
         if line.resolved and fact.kind is FactKind.DIAGNOSIS:
             line = resolution.refine_diagnosis_specificity(
-                line, source, verify_llm, corroborate_llm,
+                line, source, verify_llm,
                 reconciliation=source_reconciliation, coverage=_line_coverage)
         # issue #6, Codex's independent re-review (F9-R14-A): `resolution.resolve`
         # already applies this guard once internally, but `arbitration.arbitrate`
@@ -1311,7 +1324,7 @@ def code_encounter(
         # own material, unresolved clinical-attribute conflict was never
         # independently authorized.
         line = resolution._apply_attribute_axis_conflict_guard(
-            line, source, verify_llm, corroborate_llm, source_reconciliation,
+            line, source, verify_llm, source_reconciliation,
             _line_coverage, _line_page_text, date_of_service)
         logger.info("    -> %s: %s", fact.fact_id,
                    (f"{line.chosen.system}/{line.chosen.code} ({line.method.value})"
@@ -1499,7 +1512,8 @@ def code_encounter(
     # chosen, so escalation targets what will actually be billed.
     _reconcile_claim_after_pruning(result, source, note_text, modifier_engine,
                                    source_reconciliation, pre_retrieval_gates,
-                                   readings, baseline=_pre_claim_set_baseline)
+                                   readings, baseline=_pre_claim_set_baseline,
+                                   capability_manifest=capability_manifest)
     # ---- Escalation to a PAID independent read, scoped to where it matters -----------
     # Only now is it known WHICH quotations justify a released line, so only now can the
     # second read be aimed. A page is re-read only when (a) a quotation behind a billed
@@ -1564,7 +1578,8 @@ def code_encounter(
                     _reconcile_claim_after_pruning(
                         result, source, note_text, modifier_engine,
                         source_reconciliation, pre_retrieval_gates, readings,
-                        baseline=_pre_claim_set_baseline)
+                        baseline=_pre_claim_set_baseline,
+                        capability_manifest=capability_manifest)
     result.source_reconciliation = source_reconciliation
     # Actionable documentation guidance for whatever could not be coded confidently.
     from . import recommendations as _recs
@@ -2615,7 +2630,8 @@ def _reconcile_claim_after_pruning(
         result: CodingResult, source: CodeSource, note_text: str,
         modifier_engine: "ModifierEngine", source_reconciliation,
         pre_retrieval_gates: list, readings: dict[str, str] | None,
-        baseline: dict | None = None) -> None:
+        baseline: dict | None = None,
+        capability_manifest: dict | None = None) -> None:
     """issue #6 F9-R9-B/F9-R10-A/F9-R11-A/F9-R11-B, Codex's independent
     re-reviews of 6ff2761/9038a83/aff9da6: claim-set-dependent modifier/NCCI/
     integral/global-package processing and gate evaluation must describe the
@@ -2682,7 +2698,8 @@ def _reconcile_claim_after_pruning(
         apply_global_package(result, source)
         result.gates = pre_retrieval_gates + gates.run_gates(
             result, note_text, source, readings=readings,
-            reconciliation=source_reconciliation)
+            reconciliation=source_reconciliation,
+            capability_manifest=capability_manifest)
         decide(result, source=source)
         new_ids = set(result.dependency_excluded_fact_ids)
         for fact_id, reasons in (result.dependency_hold_reasons or {}).items():

@@ -64,7 +64,7 @@ def _run(monkeypatch=None, *, audit=None, fingerprint_fails=False, cert_fails=Fa
     audit = audit or _CapturingAudit()
     r = code_encounter("e", _NOTE, "2026-03-14", source=src,
                        extract_llm=lambda s, u: _FACTS, verify_llm=_sel,
-                       corroborate_llm=_sel, audit_repository=audit, billing_context=_CTX)
+                       audit_repository=audit, billing_context=_CTX)
     return r, audit
 
 
@@ -131,7 +131,7 @@ def test_empty_or_partial_fingerprint_prevents_certification():
         src.data_fingerprint = lambda b=bad: b
         r = code_encounter("e", _NOTE, "2026-03-14", source=src,
                            extract_llm=lambda s, u: _FACTS, verify_llm=_sel,
-                           corroborate_llm=_sel, audit_repository=_CapturingAudit(),
+                           audit_repository=_CapturingAudit(),
                            billing_context=_CTX)
         assert r.certificate is None                                       # not certified
         assert _has_gate(r, "data_fingerprint")
@@ -847,7 +847,7 @@ def test_removing_any_newly_required_source_blocks_the_real_capability_manifest(
         src.data_fingerprint = lambda f=fp: f
         r = code_encounter("e", _NOTE, "2026-03-14", source=src,
                            extract_llm=lambda s, u: _FACTS, verify_llm=_sel,
-                           corroborate_llm=_sel, audit_repository=_CapturingAudit(),
+                           audit_repository=_CapturingAudit(),
                            billing_context=_CTX)
         assert r.certificate is None, source_id
         # WHICH fail-closed boundary catches it is asserted exactly, not loosely:
@@ -901,7 +901,7 @@ def test_a_manifest_omitting_a_newly_required_source_holds_through_code_encounte
         src.data_fingerprint = lambda f=_reseal(fp): f
         r = code_encounter("e", _NOTE, "2026-03-14", source=src,
                            extract_llm=lambda s, u: _FACTS, verify_llm=_sel,
-                           corroborate_llm=_sel, audit_repository=_CapturingAudit(),
+                           audit_repository=_CapturingAudit(),
                            billing_context=_CTX)
         assert r.certificate is None, source_id
         assert _has_gate(r, "data_fingerprint"), source_id
@@ -1340,7 +1340,7 @@ def test_corrupt_claim_assembly_data_holds_the_whole_pipeline(monkeypatch, tmp_p
     _corrupted_source(monkeypatch, source_id, "{not json", tmp_path)
     r = code_encounter("e", _NOTE, "2026-03-14", source=AuthoritativeSource(),
                        extract_llm=lambda s, u: _FACTS, verify_llm=_sel,
-                       corroborate_llm=_sel, audit_repository=_CapturingAudit(),
+                       audit_repository=_CapturingAudit(),
                        billing_context=_CTX)
     assert _has_gate(r, "authoritative_data_integrity")
     hold = [g for g in r.gates if g.name == "authoritative_data_integrity"][0]

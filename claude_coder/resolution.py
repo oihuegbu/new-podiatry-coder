@@ -408,7 +408,7 @@ def _merge_candidate(existing: CandidateCode, incoming: CandidateCode) -> Candid
 
 
 def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
-            llm=None, corroborate=None, dos: str | None = None,
+            llm=None, dos: str | None = None,
             reconciliation=None,
             coverage: "_requirement.CoverageCorpus | None" = None,
             page_text: dict | None = None) -> ResolvedLine:
@@ -421,6 +421,11 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
     resolution logic, `_apply_attribute_evidence_gap_guard` for the first
     guard, and `_apply_attribute_axis_conflict_guard` for the second.
 
+    Code selection runs ONE verifying evaluator (`llm`); it no longer
+    reconciles a second, independently-provider'd corroborator against it --
+    a candidate's own positively-supported, uniquely-settled entailment is
+    sufficient for VERIFIED.
+
     `page_text` (page_number -> that page's own primary-channel text, issue
     #6, Codex's independent re-review, F9-R18-A reopened P1): the ONE bounded
     original-document region `_apply_attribute_axis_conflict_guard` may
@@ -428,12 +433,12 @@ def resolve(request, source: CodeSource, top_k: int = _RECALL_POOL,
     evaluator's own cited evidence settles. `None` (the default) simply means
     that guard's bounded-reconciliation step has nothing to check -- every
     other guarantee still applies."""
-    line = _resolve_core(request, source, top_k=top_k, llm=llm, corroborate=corroborate,
+    line = _resolve_core(request, source, top_k=top_k, llm=llm,
                          dos=dos, reconciliation=reconciliation, coverage=coverage)
     line = _apply_attribute_evidence_gap_guard(
         line, coverage, source=source, dos=dos)
     return _apply_attribute_axis_conflict_guard(
-        line, source, llm, corroborate, reconciliation, coverage, page_text, dos)
+        line, source, llm, reconciliation, coverage, page_text, dos)
 
 
 def _apply_attribute_evidence_gap_guard(line: ResolvedLine, coverage,
@@ -701,7 +706,7 @@ def _event_page_region_text(fact: ClinicalFact, page_text: dict | None) -> str:
 
 def _resolve_material_axis_conflict(
         fact: ClinicalFact, chosen: CandidateCode, axis: str, conflict,
-        source: CodeSource, llm, corroborate, reconciliation,
+        source: CodeSource, llm, reconciliation,
         coverage: "_requirement.CoverageCorpus | None",
         page_text: dict | None) -> tuple[str, str]:
     """Settle ONE material, unresolved clinical-attribute conflict against
@@ -709,20 +714,20 @@ def _resolve_material_axis_conflict(
 
       "authorized"   -- `graph_consensus.claim_authorized_value` now
                         authorizes this axis (either it already did, or the
-                        bounded autonomous-adjudication step below settled it
-                        and the axis now reproduces through that SAME,
-                        pre-existing, fail-closed accessor); release may stand.
-      "contradicted" -- both independent evaluators, with validated evidence,
-                        call `chosen`'s own descriptor identity CONTRADICTED
-                        or a DIFFERENT CONCEPT; `chosen` is wrong.
-      "silent"       -- both independent evaluators agree the note genuinely
-                        never documents this axis (validated per
-                        `_candidate_disposition_uniqueness`'s own
-                        `not_documented` bar, itself gated on the COMPLETE
-                        NOTE having actually been rendered to both), and a
-                        bounded, page-scoped re-check of this event's own
-                        source region confirms it is not there either -- a
-                        real, provider-answerable gap.
+                        step below settled it and the axis now reproduces
+                        through that SAME, pre-existing, fail-closed
+                        accessor); release may stand.
+      "contradicted" -- the evaluator, with validated evidence, calls
+                        `chosen`'s own descriptor identity CONTRADICTED or a
+                        DIFFERENT CONCEPT; `chosen` is wrong.
+      "silent"       -- the evaluator's disposition validly establishes the
+                        note genuinely never documents this axis (the SAME
+                        `not_documented` validity bar `_candidate_
+                        disposition_uniqueness` applies to each judgement --
+                        complete whole-document coverage AND a named
+                        `missing_fact`), and a bounded, page-scoped re-check
+                        of this event's own source region confirms it is not
+                        there either -- a real, provider-answerable gap.
       "system_error" -- the bounded, page-scoped reconciliation check itself
                         raised (never "the value was not found" -- that is
                         "silent"), OR the page-scoped check DID find one of
@@ -731,25 +736,37 @@ def _resolve_material_axis_conflict(
                         it, but no event-local AttributeEvidence/
                         AxisAdjudication binds it; retryable, never a
                         documentation gap or a manufactured authorization.
-      "unverified"   -- no verifier is configured, only one evaluator is
-                        configured, the evaluators disagree, or the bounded
-                        autonomous adjudication could not settle it either --
-                        the conservative default: `chosen` is withdrawn, not
-                        eliminated, so it stays visible as a candidate rather
-                        than either billing or falsely ruling it out (issue
-                        #6, Codex's independent re-review, F9-R18-A reopened
-                        P1, required correction item 2).
+      "unverified"   -- no verifier is configured, or the evaluator's own
+                        disposition for this candidate does not meet the
+                        validity bar (mismatched descriptor identity, no
+                        validated evidence spans, incomplete coverage for a
+                        not_documented verdict) -- the conservative default:
+                        `chosen` is withdrawn, not eliminated, so it stays
+                        visible as a candidate rather than either billing or
+                        falsely ruling it out (issue #6, Codex's independent
+                        re-review, F9-R18-A reopened P1, required correction
+                        item 2).
 
     A candidate disposition may ELIMINATE (contradicted/different_concept) or
     defer -- it may NEVER itself manufacture clinical-axis proof (issue #6,
     Codex's independent re-review, F9-R18-A reopened P1 correction). Positive
     authorization runs EXCLUSIVELY through `claim_authorized_value`, the same
     fail-closed accessor every other claim-affecting consumer in this
-    codebase already uses; a "both evaluators say entailed" or "the page
+    codebase already uses; a bare "the evaluator says entailed" or "the page
     lexically contains the word" verdict is deliberately never treated as
     substitute proof, since either was shown exploitable (a reconciled but
     UNRELATED cited span; a term stated for a DIFFERENT event on a shared
     page).
+
+    Runs off a SINGLE evaluator (`llm`) -- code selection no longer
+    reconciles a second, independently-provider'd corroborator against it.
+    The per-judgement validity bar applied here (matching descriptor
+    identity via `_disposition_identity_matches`, validated reconciled
+    evidence spans, complete coverage plus a named `missing_fact` for a
+    not_documented verdict -- via the SAME `_validated_disposition_class`
+    `_candidate_disposition_uniqueness` applies to each judgement) is
+    unchanged; only the requirement that a second judgement independently
+    agree is gone.
     """
     label = f"{axis!r} ({conflict.value_primary!r} vs {conflict.value_second!r})"
 
@@ -767,31 +784,19 @@ def _resolve_material_axis_conflict(
         j0 = _verify.select_entailed(fact, [chosen], source, llm, requirements,
                                      force_disposition=True,
                                      reconciliation=reconciliation, coverage=coverage)
-        judgements = [j0]
-        if corroborate is not None:
-            j1 = _verify.corroborate(fact, [chosen], source, corroborate, requirements,
-                                     force_disposition=True,
-                                     reconciliation=reconciliation, coverage=coverage)
-            judgements.append(j1)
     except Exception as exc:
         return "system_error", (
             f"verifying {label} for {chosen.code} failed "
             f"({type(exc).__name__}: {exc})")
-    if len(judgements) < 2:
-        return "unverified", (
-            f"only one independent evaluator is configured to confirm {label} for "
-            f"{chosen.code} -- retained as a candidate, not billed")
-    settled = _candidate_disposition_uniqueness(
-        [chosen], chosen, judgements, reconciliation, coverage, fact=fact)
-    entries = [{d.candidate_code: d for d in getattr(j, "candidate_dispositions", ())}
-              for j in judgements]
-    d0 = entries[0].get(chosen.code)
-    d1 = entries[1].get(chosen.code)
-    if settled is not None:
-        remaining, eliminated, _system_unresolved = settled
-        if chosen.code in eliminated:
-            status = getattr(d0, "status", "")
-            if status == "not_documented":
+    entries = {d.candidate_code: d for d in getattr(j0, "candidate_dispositions", ())}
+    d0 = entries.get(chosen.code)
+    if d0 is not None and _disposition_identity_matches(chosen, d0):
+        from .verify import _agreed_citable_spans
+        spans_validated = lambda d, cand: bool(_agreed_citable_spans(
+            d.evidence_span_ids, fact, cand, reconciliation, d.status, None))
+        cls = _validated_disposition_class(d0, chosen, coverage, spans_validated)
+        if cls == "rejected":
+            if d0.status == "not_documented":
                 region = _event_page_region_text(fact, page_text)
                 try:
                     values = tuple(v for v in
@@ -816,37 +821,17 @@ def _resolve_material_axis_conflict(
                     f"source text may state {label} for {fact.fact_id}, but no "
                     f"event-local AttributeEvidence/AxisAdjudication binds it; "
                     f"retry targeted reconciliation")
-            return "contradicted", eliminated[chosen.code]
-    # Neither entailed-and-authorized nor validly eliminated. Last resort,
-    # bounded and autonomous (issue #6, Codex's independent re-review,
-    # F9-R18-A reopened P1 correction): an independent, cross-vendor verifier
-    # pair may settle the axis itself from ONLY the reconciled attribute
-    # spans already attached to THIS target fact -- never a full page, never
-    # a preference between two readings' say-so. `second=None`: this module
-    # only ever has the canonical, already-merged fact, never the original
-    # second reading's own object.
-    disagreement = _gc.AxisDisagreement(
-        node_id=fact.fact_id, axis=axis, value_primary=conflict.value_primary,
-        value_second=conflict.value_second, basis="unresolved cross-reading conflict")
-    try:
-        support = _gc.adjudicate_axis(disagreement, fact, None, reconciliation,
-                                      llm, corroborate)
-    except Exception as exc:
-        return "system_error", (
-            f"autonomous adjudication of {label} for {fact.fact_id} failed "
-            f"({type(exc).__name__}: {exc})")
-    if support is not None:
-        _gc._record_axis_adjudication(fact, axis, support.value,
-                                      _gc.PROOF_CROSS_VENDOR, support.span_ids)
-        if _try_authorize() is not None:
-            return "authorized", ""
+            return "contradicted", (
+                f"the evaluator, on {chosen.code}'s own official descriptor "
+                f"(identity {d0.descriptor_sha256[:12]}...), rejected it with "
+                f"source-confirmed evidence (raw verdict: {d0.status!r})")
     return "unverified", (
-        f"the independent evaluators did not both confirm {label} for {chosen.code} "
-        f"with source-cited evidence -- retained as a candidate, not billed")
+        f"the evaluator did not confirm {label} for {chosen.code} with a "
+        f"validated, source-cited disposition -- retained as a candidate, not billed")
 
 
 def _apply_attribute_axis_conflict_guard(
-        line: ResolvedLine, source: CodeSource, llm, corroborate, reconciliation,
+        line: ResolvedLine, source: CodeSource, llm, reconciliation,
         coverage: "_requirement.CoverageCorpus | None",
         page_text: dict | None, dos: str | None = None) -> ResolvedLine:
     """The ONE shared post-resolution finalizer for clinical-attribute axis
@@ -873,12 +858,12 @@ def _apply_attribute_axis_conflict_guard(
     this everywhere it is the accessor, including modifier/unit generation in
     `modifiers.py`); this guard additionally requires, for any conflict
     MATERIAL to `line.chosen`'s own descriptor
-    (`_material_axis_conflicts_for`), either an existing independent
-    authorization or a fresh, source-cited disposition from BOTH configured
-    evaluators (`_resolve_material_axis_conflict`) before letting the
-    selection stand. Applied before modifier/unit generation and ClaimBundle
-    projection (both live downstream of `resolve()`'s return), so an
-    unauthorized release can never reach either.
+    (`_material_axis_conflicts_for`), either an existing authorization or a
+    fresh, source-cited disposition from the configured evaluator
+    (`_resolve_material_axis_conflict`) before letting the selection stand.
+    Applied before modifier/unit generation and ClaimBundle projection (both
+    live downstream of `resolve()`'s return), so an unauthorized release can
+    never reach either.
     """
     fact = line.fact
     conflicts = getattr(fact, "attribute_axis_conflicts", None) or {}
@@ -921,7 +906,7 @@ def _apply_attribute_axis_conflict_guard(
         return line
     for axis, conflict in outstanding:
         outcome, detail = _resolve_material_axis_conflict(
-            fact, chosen, axis, conflict, source, llm, corroborate, reconciliation,
+            fact, chosen, axis, conflict, source, llm, reconciliation,
             coverage, page_text)
         if outcome == "authorized":
             continue
@@ -1032,7 +1017,7 @@ def _candidate_queries_for_fact(fact: ClinicalFact) -> list[str]:
 
 
 def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
-                  llm=None, corroborate=None, dos: str | None = None,
+                  llm=None, dos: str | None = None,
                   reconciliation=None,
                   coverage: "_requirement.CoverageCorpus | None" = None) -> ResolvedLine:
     """Resolve an eligible retrieval request, never a raw clinical fact.
@@ -1595,7 +1580,7 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
         # "complete" report. `_propose_then_verify` recomputes eligibility over
         # this same set itself (cheap -- no LLM call), so nothing here is
         # trusted twice; it is simply given everything to report on.
-        line = _propose_then_verify(fact, source, _all_candidates, llm, corroborate,
+        line = _propose_then_verify(fact, source, _all_candidates, llm,
                                     dos=dos, reconciliation=reconciliation,
                                     coverage=coverage, elig_facts=elig_facts,
                                     evidence_packet=evidence_packet,
@@ -1749,7 +1734,7 @@ def upgrade_diagnosis_laterality(line: ResolvedLine, source: CodeSource,
 
 
 def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
-                                 llm=None, corroborate=None,
+                                 llm=None,
                                  reconciliation=None,
                                  coverage: "_requirement.CoverageCorpus | None" = None
                                  ) -> ResolvedLine:
@@ -1770,11 +1755,7 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
          '<concept> of right <site>'):
          gather the code's MORE-specific, on-concept, documented-side relatives from
          its OWN authoritative category, offer {chosen + relatives} to the SAME
-         entailment verifier, and adopt a strictly-more-specific relative it selects
-         AND an independent model confirms. If a specific relative is selected but
-         the independent check REJECTS it, the choice is genuinely ambiguous —
-         escalate rather than silently bill the unspecified code when the record
-         supports a specific one (fail-closed).
+         entailment verifier, and adopt a strictly-more-specific relative it selects.
 
     Agnostic: 'unspecified' is descriptor text; relatives come from the code's own
     authoritative category leaves; the judgement is the existing entailment
@@ -1834,27 +1815,7 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
     picked, why = judgement.chosen, judgement.reason
     if picked is None or picked.code == line.chosen.code:
         return line                                # verifier keeps the unspecified code -> respect it
-    corroboration = _verify.corroboration_origin(llm, corroborate)
     judgements = [judgement]
-    if corroborate is not None:
-        second = _verify.corroborate(fact, shortlist, source, corroborate,
-                                     reconciliation=reconciliation, coverage=coverage)
-        ok = second.entails(picked.code)
-        if ok:
-            judgements.append(second)
-        if not ok:
-            prior = line.chosen
-            line.chosen = None
-            line.method = ResolutionMethod.ABSTAINED
-            line.alternatives = [prior] + relatives[:4]
-            line.documentation_gap = (
-                f"the record documents a {lat} side but resolution is split between the "
-                f"unspecified '{prior.descriptor}' and a more-specific code")
-            line.rationale = (
-                f"specificity ambiguous — documentation supports a more specific {lat} "
-                f"code than the unspecified '{prior.code}', but independent verification "
-                f"did not confirm the specific candidate — escalate")
-            return line
     # F8-R1, the adjacent instance: this function also used to adopt whichever ONE relative
     # the selector named. ICD-10-CM's specificity rule authoritatively eliminates the
     # ORIGINAL unspecified code (that is this function's entire premise), but it says
@@ -1878,20 +1839,12 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
             f"them is not evidence the others are wrong — escalate")
         return line
     line.chosen = picked
-    # The SAME independence rule as the propose-then-verify path: this upgrade replaced the
-    # resolved code with one a model selected, so it can only carry the grounded VERIFIED
-    # method when an INDEPENDENT origin confirmed it. Otherwise the sharper code is adopted
-    # (billing the unspecified one when the record supports a specific one is the error this
-    # function exists to prevent) but the line is ARBITRATED, so a coder confirms it instead
-    # of it auto-releasing on one vendor's say-so. (Round 5, phase 5.)
-    _independent = _independently_corroborated(corroboration)
-    line.method = (ResolutionMethod.VERIFIED if _independent
-                   else ResolutionMethod.ARBITRATED)
+    # The single evaluator's positively-supported, uniquely-settled entailment
+    # is sufficient for VERIFIED (billing the unspecified code when the record
+    # supports a specific one is the error this function exists to prevent).
+    line.method = ResolutionMethod.VERIFIED
     line.rationale = (f"{line.rationale}; upgraded to the most specific entailed code "
                       f"({why})" if why else f"{line.rationale}; upgraded to most specific entailed code")
-    if not _independent:
-        line.rationale = (f"{line.rationale}; NOT independently corroborated — "
-                          f"{_origin_caveat(corroboration)} — needs a coder")
     return line
 
 
@@ -2469,7 +2422,6 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
                      eliminated_earlier: dict[str, str], reconciliation=None,
                      requirements: tuple = (),
                      coverage: "_requirement.CoverageCorpus | None" = None,
-                     source: Any = None,
                      ) -> tuple[list[CandidateCode], dict[str, str]]:
     """Which shortlisted candidates are STILL ENTAILED once every judging model has
     answered about every one of them, and the NAMED reason each of the others is out.
@@ -2498,40 +2450,6 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
         if prior:
             eliminated[cand.code] = prior
             continue
-        # issue #6, independent investigation ("same code, different wording"):
-        # a candidate the governed SNOMED Procedure concept graph resolves to
-        # the SAME real-world procedure as `chosen` is not a competing
-        # alternative for the named-elimination bar below to adjudicate -- it
-        # IS the released code, filed under a different authoritative code
-        # entry. Without this, a judge that entails `cand` (because it names
-        # the same procedure under a different descriptor) never NAMES an
-        # elimination reason for it -- `elimination_of` returns "" for
-        # anything a judge itself still entails -- so `cand` would sit
-        # STANDING forever, manufacturing a permanent tie out of two
-        # evaluators who actually agree. Checked only against `chosen`
-        # (never between two non-chosen candidates), and only fires with a
-        # real `source` wired through -- the one existing caller that does
-        # not pass one (specificity-disambiguation's unspecified-vs-relatives
-        # check) is unaffected.
-        if source is not None and cand.system == chosen.system:
-            from . import coreference as _coref
-            # governed_procedure_relation, NOT action_relation_detail: two
-            # CANDIDATES' own official descriptors must never be merged via
-            # the free wording/elaboration shortcut that is only safe for a
-            # fact's description against one candidate -- see that
-            # function's docstring (a code-family's own indication-clause-
-            # qualified variant is a DISTINCT entry by design, not the same
-            # event elaborated).
-            verdict, _detail = _coref.governed_procedure_relation(
-                chosen.descriptor, cand.descriptor, source)
-            if verdict == _coref.SAME_EVENT:
-                eliminated[cand.code] = (
-                    f"the governed procedure concept graph resolves this to the "
-                    f"same real-world procedure as the released code "
-                    f"{chosen.code!r} ({chosen.descriptor!r}) -- a different "
-                    f"authoritative code entry for the same event, not a "
-                    f"competing alternative")
-                continue
         named = [j.elimination_of(cand.code) for j in judgements]
         if named and all(named):
             grounded, ground_detail = _grounded_elimination(fact, cand, chosen,
@@ -3184,7 +3102,14 @@ def _system_unresolved_line(fact: ClinicalFact, shortlist: list[CandidateCode],
     synthesize the SAME retryable, `Destination.SYSTEM_HOLD`-routed gate
     shape already used for every other system-integrity hold in this
     codebase (e.g. `second_reading_relation_unplaced`) -- never a new,
-    parallel destination."""
+    parallel destination.
+
+    Still reachable with code selection's single evaluator: `_settle_
+    uniqueness` remains a general utility any caller may exercise with
+    however many judgements it has (e.g. direct unit tests constructing 2+
+    by hand); this narrows `remaining` further only when `_candidate_
+    disposition_uniqueness` had 2+ judgements to cross-check, which is the
+    caller's choice, not something this function assumes."""
     from .models import SYSTEM_UNRESOLVED_MARKER
     named = ", ".join(f"{code} ({reason})" for code, reason in sorted(system_unresolved.items()))
     return ResolvedLine(
@@ -3204,7 +3129,7 @@ def _evidence_constrained_disagreement_resolution(
         system_unresolved: dict[str, str], judgements: list,
         reconciliation, coverage, requirements: tuple,
         admissions: dict[str, CandidateAdmission] | None,
-        evidence_packet, why: str, corroboration: str, record: dict,
+        evidence_packet, why: str, record: dict,
         ) -> ResolvedLine | None:
     """Resolve a *validated semantic disagreement* from the shared evidence.
 
@@ -3229,7 +3154,11 @@ def _evidence_constrained_disagreement_resolution(
     through the ordinary downstream claim controls.  A genuinely documentable
     authoritative tie can become the existing specific provider query; every
     other system defect remains a retryable system hold.
-    """
+
+    Requires 2+ judgements (its own `len(judgements) < 2` guard below): code
+    selection's single evaluator never reaches this from `_propose_then_
+    verify_core` anymore, but `_settle_uniqueness` is still a general utility
+    a caller may exercise with 2+ hand-built judgements directly."""
     if not system_unresolved or len(judgements) < 2:
         return None
 
@@ -3346,7 +3275,7 @@ def _evidence_constrained_disagreement_resolution(
                 f"{support_basis} ({tie.proof or source_proof}): {tie.detail}")
         return _entailed_line(
             fact, winner, shortlist, f"{why}; {note}" if why else note,
-            corroboration, uniqueness=audit)
+            uniqueness=audit)
 
     # Only a fully validated semantic disagreement reaches here.  If the
     # authoritative descriptors identify a real, typed, missing fact, the
@@ -3389,7 +3318,7 @@ def _candidate_recall_gap_line(fact: ClinicalFact,
 def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                        shortlist: list[CandidateCode], judgements: list,
                        eliminated_earlier: dict[str, str], why: str,
-                       corroboration: str, reconciliation,
+                       reconciliation,
                        requirements: tuple = (),
                        coverage: "_requirement.CoverageCorpus | None" = None,
                        source: Any = None,
@@ -3439,7 +3368,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
     else:
         remaining, eliminated = _uniqueness_view(
             fact, shortlist, chosen, judgements, eliminated_earlier,
-            reconciliation, _elimination_requirements, coverage, source)
+            reconciliation, _elimination_requirements, coverage)
     # issue #6, Codex's independent re-review (F9-R15-B): tried in ADDITION to
     # (never instead of) the axis/requirement-based elimination just above --
     # narrows `remaining` further only when both independent evaluators'
@@ -3502,6 +3431,13 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
     # or a coding judgement -- so it routes to a retryable system hold, not
     # a provider query or a tie question, regardless of how cleanly
     # `remaining` itself narrowed.
+    # `_system_unresolved` can only be non-empty when `_candidate_disposition_
+    # uniqueness` had at least 2 judgements to cross-check against each other
+    # (see that function's own `len(judgements) < 2` guard) -- code selection
+    # now runs one evaluator, so `_propose_then_verify_core` never populates
+    # it, but `_settle_uniqueness` remains a general utility any caller may
+    # exercise with 2+ hand-built judgements directly (e.g. its own direct
+    # unit tests), so this branch stays real and reachable, not dead.
     if _system_unresolved:
         # An evaluator disagreement is an adjudication signal, not a terminal
         # selector.  Before returning a retryable system hold, give the shared
@@ -3514,7 +3450,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
             fact, shortlist, remaining, _system_unresolved, judgements,
             reconciliation, coverage, _elimination_requirements,
             admissions,
-            evidence_packet, why, corroboration, record)
+            evidence_packet, why, record)
         if evidence_constrained is not None:
             return evidence_constrained
         return _system_unresolved_line(fact, shortlist, _system_unresolved,
@@ -3585,9 +3521,9 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                     "source-cited candidate")
             return _entailed_line(
                 fact, survivor, shortlist, f"{why}; {note}" if why else note,
-                corroboration, uniqueness=matrix_record)
+                uniqueness=matrix_record)
         if chosen is not None and survivor.code == chosen.code:
-            return _entailed_line(fact, survivor, shortlist, why, corroboration,
+            return _entailed_line(fact, survivor, shortlist, why,
                                   uniqueness=record)
         survivor_admission = (admissions or {}).get(survivor.code)
         if (chosen is not None
@@ -3605,7 +3541,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                     "with governed identity standing")
             return _entailed_line(
                 fact, survivor, shortlist, f"{why}; {note}" if why else note,
-                corroboration, uniqueness=reselection_record)
+                uniqueness=reselection_record)
 
     # issue #6, Codex's independent re-review (F9-R13-C): one additional
     # selection condition, tried BEFORE the original-document tie policy --
@@ -3624,7 +3560,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                 f"own action/qualifier requirements are the only ones fully supported by "
                 f"this fact's own reconciled evidence")
         return _entailed_line(fact, semantic_winner, shortlist,
-                              (f"{why}; {note}" if why else note), corroboration,
+                              (f"{why}; {note}" if why else note),
                               uniqueness={**record, "semantic_axis_selection": semantic_winner.code})
 
     # STEPS 3 and 4 -- several candidates are independently entailed, so the ORIGINAL
@@ -3639,7 +3575,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
         note = (f"{len(remaining)} candidates remained entailed, and the tie was narrowed "
                 f"against the original document ({tie.proof}): {tie.detail}")
         return _entailed_line(fact, winner, shortlist,
-                              (f"{why}; {note}" if why else note), corroboration,
+                              (f"{why}; {note}" if why else note),
                               uniqueness={**record, **tie.as_record()})
 
     # STEP 5 -- ONE targeted provider query, never a generic coder queue.
@@ -3652,7 +3588,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
 
 
 def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
-                         pool: list[CandidateCode], llm, corroborate=None,
+                         pool: list[CandidateCode], llm,
                          dos: str | None = None,
                          reconciliation=None,
                          coverage: "_requirement.CoverageCorpus | None" = None,
@@ -3663,17 +3599,17 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
                          ) -> ResolvedLine:
     """Deterministic recall as GENERATOR, descriptor + entailment as TRUTH.
     Evaluate the source-derived, reproducible candidate pool against each OFFICIAL
-    descriptor, then (when a corroborator is supplied)
-    require an INDEPENDENT second model to agree before accepting. Escalate if the
-    selection finds nothing OR the second model disagrees. Nothing bills on recall
-    alone, and nothing bills on a single model's say-so.
+    descriptor. Escalate if the selection finds nothing entailed. Nothing bills
+    on recall alone -- only a positively-supported entailment against a
+    candidate's own descriptor/requirement contract.
 
-    Agreement is necessary and NOT sufficient. Both judgements answer about the WHOLE
-    shortlist, and the selected candidate is released only when every OTHER shortlisted
-    candidate carries a NAMED elimination. When more than one candidate is still entailed
-    the line is a TIE, and it goes to the same document-first tie policy the deterministic
-    path uses -- narrowed against the original page, else ONE targeted provider query.
-    (Codex F8-R1: two models agreeing on one candidate never eliminated the rest.)
+    A single evaluator's entailment is necessary and NOT sufficient by itself.
+    The selected candidate is released only when every OTHER shortlisted
+    candidate carries a NAMED elimination. When more than one candidate is still
+    entailed the line is a TIE, and it goes to the same document-first tie
+    policy the deterministic path uses -- narrowed against the original page,
+    else ONE targeted provider query. (Codex F8-R1: a model preferring one
+    candidate never eliminated the rest.)
 
     Model-authored code proposals are intentionally absent from the decisive
     universe.  Even when registry-valid, they varied between otherwise identical
@@ -3790,7 +3726,7 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     evaluated_pages: list[dict[str, Any]] = []
     while True:
         line = _propose_then_verify_core(
-            fact, source, pool, proposals, proposals_unsupported, llm, corroborate,
+            fact, source, pool, proposals, proposals_unsupported, llm,
             dos=dos, reconciliation=reconciliation, coverage=coverage,
             evidence_packet=evidence_packet, candidate_queries=candidate_queries,
             service_context_id=service_context_id, page_offset=page_offset)
@@ -3828,67 +3764,11 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     return line
 
 
-def _corroborated_via_equivalent_concept(chosen: CandidateCode, second, cands: list,
-                                         source) -> CandidateCode | None:
-    """When the corroborator's own independent reading does not entail
-    `chosen` by its literal code, check whether it instead entails a
-    DIFFERENT candidate on the SAME shortlist that the governed SNOMED
-    Procedure concept graph resolves to the SAME real-world procedure as
-    `chosen` (issue #6, independent investigation: "evaluator A entails
-    code X, evaluator B entails code Y, and X/Y are clinically synonymous
-    -- the system should recognize that as agreement, not a disagreement
-    to hold on"). Two evaluators independently, correctly identifying the
-    SAME documented act, merely differing on which of two overlapping
-    authoritative code entries names it, is CONFIRMATION -- not the
-    disagreement `tried[chosen.code]` exists to record.
-
-    Calls `coreference.governed_procedure_relation` -- deliberately NOT
-    `action_relation_detail` -- the SAME strict, SOURCE-BACKED bar (a
-    unique, equal-candidate-set match through `source.
-    procedure_relation_detail`, gated on a bound source identity) already
-    proven safe for fact-to-candidate paraphrase matching (F9-R4), applied
-    here to two candidates' own official descriptors instead of a fact
-    description and a candidate's -- but WITHOUT `action_relation_detail`'s
-    free wording/elaboration shortcut, which is unsafe for this comparison
-    shape: confirmed live that reusing it unchanged let a broad CPT
-    descriptor and its own indication-clause-qualified variant (two
-    DISTINCT, code-defining entries by design -- see F1/
-    AXIS_INDICATION_CLAUSE) falsely resolve SAME_EVENT via stemmed-subset
-    wording alone, no governed source needed at all. See
-    `governed_procedure_relation`'s own docstring for the full reasoning.
-    Never a new, independently invented equivalence heuristic -- and never
-    a way to ELIMINATE anything: a candidate this finds no match for still
-    falls through to the ordinary "not entailed" disagreement path
-    unchanged. It can only ever ADD a way to CONFIRM `chosen`; it never
-    changes WHICH code releases -- `chosen` still does, exactly as if the
-    corroborator had entailed it by its own literal code. Restricted to
-    same-system pairs (never compares a CPT candidate's descriptor
-    against an ICD-10 one) as a cheap, unconditional safety guard, even
-    though a genuine cross-system match is not a shape
-    `procedure_relation_detail`'s own governed index would ever confirm
-    anyway."""
-    if not second.entailed:
-        return None
-    from . import coreference as _coref
-    by_code = {c.code: c for c in cands}
-    for code in second.entailed:
-        if code == chosen.code:
-            continue
-        candidate = by_code.get(code)
-        if candidate is None or candidate.system != chosen.system:
-            continue
-        verdict, _detail = _coref.governed_procedure_relation(
-            chosen.descriptor, candidate.descriptor, source)
-        if verdict == _coref.SAME_EVENT:
-            return candidate
-    return None
-
-
 def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                               pool: list[CandidateCode],
                               proposals: list[CandidateCode],
                               proposals_unsupported: list[CandidateCode],
-                              llm, corroborate=None, dos: str | None = None,
+                              llm, dos: str | None = None,
                               reconciliation=None,
                               coverage: "_requirement.CoverageCorpus | None" = None,
                               evidence_packet=None,
@@ -3899,13 +3779,12 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
     """The shortlist-build + verification loop, over an ALREADY role-
     eligibility-filtered `pool`/`proposals` (issue #6 F9-R11-H-D, fifth
     re-review split this out of `_propose_then_verify` so eligibility runs
-    BEFORE any candidate reaches a verifier, not after one is selected)."""
+    BEFORE any candidate reaches a verifier, not after one is selected).
+
+    Runs ONE verifying evaluator (`llm`) -- code selection no longer
+    reconciles a second, independently-provider'd corroborator (see
+    `resolve()`'s own docstring)."""
     from . import verify as _verify
-    # WHOSE second opinion this run has, decided once from the two callables' declared
-    # identities: it governs whether an agreement may be credited as independent
-    # confirmation below (and it must be computed even when `corroborate` is None, since
-    # "no second opinion" is itself one of the non-independent origins).
-    corroboration = _verify.corroboration_origin(llm, corroborate)
     # Bind before ranking or interval evaluation.  Retrieval descriptors are
     # recall text; every semantic/structured decision must consume the same
     # authoritative snapshot later shown to the evaluators and recorded in audit.
@@ -4010,9 +3889,9 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
     # `_settle_uniqueness` (issue #6, F9-R24-B second re-review, then
     # reverted for the ORDINARY branch after regression testing): choosing
     # a different candidate than the original proposal requires that
-    # survivor to have `CandidateStanding.SUPPORTED`, converting a
-    # reselection onto an UNGROUNDED survivor into a system-hold via
-    # `_system_unresolved_line`. The ordinary "the proposal survives,
+    # survivor to have `CandidateStanding.SUPPORTED`, so a reselection onto
+    # an UNGROUNDED survivor falls through to the ordinary tie/elimination
+    # path below rather than silently adopting it. The ordinary "the proposal survives,
     # nothing contests it" shape deliberately does NOT add this check --
     # see the comment at that branch for why a blanket veto there
     # reproduces the exact regression this pre-verification pool filter's
@@ -4127,208 +4006,76 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
     # now the SHARED `_apply_attribute_axis_conflict_guard`, applied once in
     # public `resolve()` after `_resolve_core` returns, regardless of which
     # internal path produced the line -- see that function's docstring.
-    # code -> the NAMED reason an earlier round's judgement ruled that candidate out.
-    # Keyed by code (not a bare set) because a release now has to be able to say WHY every
-    # alternative is gone, not merely that it was skipped.
-    tried: dict[str, str] = {}
-    missing_tried: dict[str, str] = {}
     # Deterministically eliminated before any model saw them: a required bounded interval
     # the documentation does not support. Named in the uniqueness record so the audit trail
     # shows the whole pool being accounted for, not just the part the models judged.
     constraint_eliminated = {c.code: ("the descriptor requires a bounded measurement the "
                                       "documentation does not support")
                              for c in unsupported}
-    last_reason = ""
-    # Every bounded shortlist candidate gets one chance.  The former fixed
-    # re-selection count could stop before a lower-ranked but fully supported
-    # candidate was ever evaluated.  This bound is still finite (the shortlist
-    # is already capped above) and ``tried`` removes at least one candidate on
-    # every continuing iteration, so it cannot loop indefinitely.
-    for _ in range(len(verifiable)):
-        cands = [c for c in verifiable if c.code not in tried]
-        if not cands:
-            break
-        primary = _verify.select_entailed(fact, cands, source, llm, requirements,
-                                          reconciliation=reconciliation, coverage=coverage,
-                                          evidence_packet=evidence_packet)
-        chosen, why = primary.chosen, primary.reason
-        if chosen is None:
-            # A complete per-candidate answer is useful even when the evaluator
-            # deliberately declines to nominate a billing code.  Obtain the
-            # independent matrix over the exact same shortlist and let the shared
-            # deterministic settlement function select only a unique, source-cited
-            # survivor.  Without a second evaluator we retain the existing tie path.
-            if corroborate is not None:
-                second = _verify.corroborate(
-                    fact, cands, source, corroborate, requirements,
-                    reconciliation=reconciliation, coverage=coverage,
-                    evidence_packet=evidence_packet)
-                note = ("independent disposition reconciliation"
-                        if _independently_corroborated(corroboration)
-                        else "a second disposition was obtained, but not from an "
-                             "independent origin")
-                # A prior candidate may have failed solely for a missing
-                # requirement.  If both evaluators now eliminate every remaining
-                # candidate, the prior gap is the only live path and must retain
-                # its provider-query classification.  Do this only after the
-                # remaining pool has actually been evaluated; if either evaluator
-                # still entails an alternative, normal uniqueness settlement below
-                # remains authoritative.
-                if (missing_tried
-                        and all(not primary.entails(c.code)
-                                and not second.entails(c.code) for c in cands)):
-                    details = list(dict.fromkeys(missing_tried.values()))
-                    question = "; ".join(details)
-                    if has_more_authoritative_candidates:
-                        return _with_admissions(_candidate_recall_gap_line(
-                            fact, shortlist,
-                            "every candidate on this authoritative page was rejected; "
-                            "later source candidates remain to be evaluated before a "
-                            "provider question can be concluded",
-                            {"page_missing_requirements": details}))
-                    return _with_admissions(ResolvedLine(
-                        fact=fact, chosen=None, alternatives=verifiable[:5],
-                        method=ResolutionMethod.ABSTAINED,
-                        documentation_gap=question,
-                        rationale=("PROVIDER QUERY — every otherwise-plausible "
-                                   "remaining candidate requires an element the "
-                                   "documentation does not establish "
-                                   f"({question})")))
-                return _with_admissions(_settle_uniqueness(
-                    fact, None, cands, [primary, second],
-                    {**constraint_eliminated, **tried},
-                    f"{why}; {note}" if why else note,
-                    corroboration, reconciliation, requirements,
-                    coverage, source, admissions=admissions,
-                    evidence_packet=evidence_packet,
-                    defer_page_local_exhaustion=has_more_authoritative_candidates))
-            # Tie policy step 5: one evaluator supplied no unique selection and
-            # there is no independent disposition matrix, so name the missing
-            # discriminating fact rather than guessing.
-            return _with_admissions(_tie_escalation(
-                fact, verifiable, reconciliation,
-                "no candidate's authoritative descriptor is fully entailed by the "
-                "documentation (verified)", requirements=requirements))
-        chosen_match = _evaluate(fact, chosen, source, reconciliation)
-        if chosen_match is None:
+    if not verifiable:
+        return _with_admissions(_tie_escalation(
+            fact, verifiable, reconciliation,
+            "no candidate's authoritative descriptor is fully entailed by the "
+            "documentation (verified)", requirements=requirements))
+    primary = _verify.select_entailed(fact, verifiable, source, llm, requirements,
+                                      reconciliation=reconciliation, coverage=coverage,
+                                      evidence_packet=evidence_packet)
+    chosen, why = primary.chosen, primary.reason
+    if chosen is None:
+        # A candidate the evaluator rejected specifically because a required
+        # element is not documented deserves a targeted, answerable provider
+        # question -- never the generic "nothing entailed" tie message, which
+        # would silently discard exactly the fact a provider could supply.
+        missing_details = list(dict.fromkeys(
+            primary.elimination_of(c.code) or primary.reason
+            or "a required element is not documented"
+            for c in verifiable if primary.missing_element.get(c.code, False)))
+        if missing_details:
+            question = "; ".join(missing_details)
             return _with_admissions(ResolvedLine(
-                fact=fact, chosen=None, alternatives=shortlist,
+                fact=fact, chosen=None, alternatives=verifiable[:5],
                 method=ResolutionMethod.ABSTAINED,
-                rationale="verifier selected a candidate that contradicts documented axes"))
-        if chosen_match.interval_unsupported:
-            return _with_admissions(_bounded_interval_hold(fact, [chosen] + unsupported))
-        # Codex F4-R1 re-review: the unsupported-required-constraint gate applies to the
-        # VERIFIED path too -- a bounded-interval code whose measurement the documentation
-        # does not support must abstain regardless of selection OR corroborator agreement.
-        if _interval_unsupported(fact, parse_descriptor(chosen.descriptor)):
-            return _with_admissions(ResolvedLine(
-                fact=fact, chosen=None, alternatives=shortlist,
-                method=ResolutionMethod.ABSTAINED,
-                documentation_gap=("the code's descriptor requires a measurement within a "
-                    "specific range and the documentation provides no compatible measurement "
-                    "of that dimension -- document the measurement or use a less-specific code"),
-                rationale="selected code requires a bounded measurement the documentation "
-                          "does not support -- not billed regardless of model agreement"))
-        judgements = [primary]
-        missing, why2 = False, ""
-        if corroborate is not None:
-            # The second opinion re-judges the WHOLE shortlist under the same contract and
-            # is not told which candidate was picked -- a corroborator asked only "is THIS
-            # one entailed?" cannot notice that another candidate is entailed too, which is
-            # precisely how a non-unique code used to auto-release (Codex F8-R1).
-            second = _verify.corroborate(fact, cands, source, corroborate, requirements,
-                                         reconciliation=reconciliation, coverage=coverage,
-                                         evidence_packet=evidence_packet)
-            if not second.entails(chosen.code):
-                equivalent = _corroborated_via_equivalent_concept(
-                    chosen, second, cands, source)
-                if equivalent is not None:
-                    judgements.append(second)
-                    origin = ("independently confirmed"
-                             if _independently_corroborated(corroboration)
-                             else "a second opinion agreed, but not from an "
-                                  "independent origin")
-                    note = (
-                        f"{origin} via a governed-equivalent code "
-                        f"({equivalent.code}: {equivalent.descriptor!r}) -- the "
-                        f"second evaluator's own pick names the same governed "
-                        f"procedure concept under a different code entry, not a "
-                        f"different procedure")
-                    why = f"{why}; {note}" if why else note
-                else:
-                    why2 = (second.elimination_of(chosen.code) or second.reason
-                            or "the independent second judgement does not find this "
-                               "descriptor entailed by the documentation")
-                    last_reason = why2
-                    missing = second.missing_element.get(chosen.code, False)
-                    tried[chosen.code] = why2
-                    if missing:
-                        missing_tried[chosen.code] = why2
-            else:
-                judgements.append(second)
-                note = ("independently confirmed"
-                        if _independently_corroborated(corroboration)
-                        else "a second opinion agreed, but not from an independent origin")
-                why = f"{why}; {note}" if why else note
-        if chosen.code not in tried:
-            # Both judgements (or the only one there is) accept the chosen candidate. That
-            # makes it DEFENSIBLE, not UNIQUE -- which is the whole finding -- so release
-            # only if nothing else on the shortlist survived, and otherwise settle it
-            # against the original document through the same tie policy.
-            return _with_admissions(_settle_uniqueness(
-                fact, chosen, verifiable, judgements,
-                {**constraint_eliminated, **tried}, why,
-                corroboration, reconciliation, requirements,
-                coverage, source, admissions=admissions,
-                evidence_packet=evidence_packet,
-                defer_page_local_exhaustion=has_more_authoritative_candidates))
-        # A missing element disqualifies THIS candidate; it does not prove every
-        # other authoritative candidate is an under-code.  Continue through the
-        # remaining pool exactly as for any other named elimination.  If nothing
-        # else survives, `_tie_escalation` below still converts the compiled missing
-        # requirement into one targeted provider question.  This avoids the generic
-        # failure where a first-ranked overqualified candidate prevented a later,
-        # fully supported candidate from ever being evaluated.
-        #
-        # Otherwise this is a WRONG code; `tried` already carries the named reason,
-        # so the next round likewise re-selects from the candidates that remain.
-    # If every candidate has now been eliminated and at least one survivor-in-
-    # principle failed only because a required element is not documented, the
-    # unresolved work is a provider question.  Reaching this point proves the
-    # whole pool was tried; this is deliberately later than reselection so one
-    # overqualified first pick cannot hide a fully supported alternative.
-    if missing_tried and all(c.code in tried for c in verifiable):
-        details = list(dict.fromkeys(missing_tried.values()))
-        question = "; ".join(details)
-        if has_more_authoritative_candidates:
-            return _with_admissions(_candidate_recall_gap_line(
-                fact, shortlist,
-                "every candidate on this authoritative page was rejected; later "
-                "source candidates remain to be evaluated before a provider "
-                "question can be concluded",
-                {"page_missing_requirements": details}))
+                documentation_gap=question,
+                rationale=("PROVIDER QUERY — every otherwise-plausible remaining "
+                          "candidate requires an element the documentation does "
+                          f"not establish ({question})")))
+        # Tie policy step 5: the evaluator supplied no unique selection, so
+        # name the missing discriminating fact rather than guessing.
+        return _with_admissions(_tie_escalation(
+            fact, verifiable, reconciliation,
+            "no candidate's authoritative descriptor is fully entailed by the "
+            "documentation (verified)", requirements=requirements))
+    chosen_match = _evaluate(fact, chosen, source, reconciliation)
+    if chosen_match is None:
         return _with_admissions(ResolvedLine(
-            fact=fact, chosen=None, alternatives=verifiable[:5],
+            fact=fact, chosen=None, alternatives=shortlist,
             method=ResolutionMethod.ABSTAINED,
-            documentation_gap=question,
-            rationale=("PROVIDER QUERY — every otherwise-plausible remaining candidate "
-                       "requires an element the documentation does not establish "
-                       f"({question})")))
-
-    # Tie policy step 5, and the case the directive names explicitly: THE MODELS
-    # DISAGREED. That is never a reason to send an otherwise-resolved line to a generic
-    # coder queue. The candidates the two models argued over are re-inspected against
-    # the ORIGINAL DOCUMENT for the axes that actually distinguish them, and what the
-    # page cannot settle becomes one specific question about the record.
-    #
-    # The question is asked about the candidates that were actually SELECTED AND
-    # REJECTED, not about the whole shortlist: the directive asks for ONE targeted
-    # query, and a question naming every code retrieval happened to return is not one.
-    contested = [c for c in verifiable if c.code in tried] or verifiable
-    return _with_admissions(_tie_escalation(
-        fact, contested, reconciliation,
-        f"independent second-model verification confirmed no candidate after "
-        f"re-selection ({last_reason})", requirements=requirements))
+            rationale="verifier selected a candidate that contradicts documented axes"))
+    if chosen_match.interval_unsupported:
+        return _with_admissions(_bounded_interval_hold(fact, [chosen] + unsupported))
+    # Codex F4-R1 re-review: the unsupported-required-constraint gate applies to the
+    # VERIFIED path too -- a bounded-interval code whose measurement the documentation
+    # does not support must abstain regardless of selection.
+    if _interval_unsupported(fact, parse_descriptor(chosen.descriptor)):
+        return _with_admissions(ResolvedLine(
+            fact=fact, chosen=None, alternatives=shortlist,
+            method=ResolutionMethod.ABSTAINED,
+            documentation_gap=("the code's descriptor requires a measurement within a "
+                "specific range and the documentation provides no compatible measurement "
+                "of that dimension -- document the measurement or use a less-specific code"),
+            rationale="selected code requires a bounded measurement the documentation "
+                      "does not support -- not billed regardless of model agreement"))
+    # The single evaluator's positively-supported entailment is DEFENSIBLE,
+    # not yet UNIQUE -- so release only if nothing else on the shortlist
+    # survives elimination, and otherwise settle it against the original
+    # document through the same tie policy.
+    return _with_admissions(_settle_uniqueness(
+        fact, chosen, verifiable, [primary],
+        constraint_eliminated, why,
+        reconciliation, requirements,
+        coverage, source, admissions=admissions,
+        evidence_packet=evidence_packet,
+        defer_page_local_exhaustion=has_more_authoritative_candidates))
 
 
 def _bounded_interval_hold(fact: ClinicalFact,
@@ -4345,60 +4092,24 @@ def _bounded_interval_hold(fact: ClinicalFact,
                   "verified paths must abstain")
 
 
-def _origin_caveat(corroboration: str) -> str:
-    """Why this entailment did NOT earn independent status — the audit sentence that has to
-    accompany a code the system is keeping but cannot call independently confirmed."""
-    from . import verify as _verify
-    return {
-        _verify.NO_CORROBORATION:
-            "no independent second opinion was configured, so the entailment rests on a "
-            "single model judgement",
-        _verify.SHARED_ORIGIN:
-            "the second opinion came from the SAME model provider as the primary "
-            "verification — one vendor's judgement sampled twice is model self-confidence, "
-            "not independent confirmation",
-        _verify.UNDECLARED_ORIGIN:
-            "the verification and corroboration calls declare no provider identity, so "
-            "their independence could not be established",
-    }.get(corroboration, "independent corroboration was not established")
-
-
-def _independently_corroborated(corroboration: str) -> bool:
-    from . import verify as _verify
-    return corroboration in _verify.INDEPENDENT_CORROBORATION_ORIGINS
-
-
 def _entailed_line(fact: ClinicalFact, chosen: CandidateCode,
                    shortlist: list[CandidateCode], why: str,
-                   corroboration: str,
                    uniqueness: dict | None = None) -> ResolvedLine:
     """The line for a candidate whose AUTHORITATIVE descriptor the verifier found entailed.
 
-    VERIFIED is the GROUNDED, autonomy-eligible method, and `autonomy` reads it as "the
-    documentation entails this descriptor and an INDEPENDENT second model confirmed it".
-    That second half is a claim about the corroborating assertion's ORIGIN, so it is
-    checked here rather than assumed from the fact that a corroborator was configured:
-    unless the corroborating judgement came from a genuinely distinct origin, the two
-    agreeing calls are one vendor's opinion sampled twice.
-
-    When independence is not established the code is still KEPT and offered — it is a
-    candidate from the authoritative tables whose official descriptor the documentation
-    entails, and dropping it would under-code — but the method is ARBITRATED, which is
-    exactly "a model picked among candidates": `autonomy` discounts its confidence and
-    always routes it to a coder. The agreement itself stays visible in the rationale, so
-    the audit trail records that it happened and why it earned nothing. (Round 5, phase 5;
-    the milder, conjunctive sibling of the F6-R3 necessity defect.)"""
-    independent = _independently_corroborated(corroboration)
+    VERIFIED is the GROUNDED, autonomy-eligible method: the documentation entails this
+    candidate's official descriptor and its requirement contract, and every other
+    shortlisted candidate was genuinely eliminated (a named, document-confirmed reason,
+    or an uncontested requirement gap) -- never merely "not the one the model happened to
+    pick." A single evaluator's positively-supported, uniquely-settled entailment is
+    sufficient (the pipeline now runs one verifying evaluator, not two independent ones
+    reconciled against each other -- see resolve()'s own docstring)."""
     base = (f"authoritative descriptor entailed by documentation: {why}"
             if why else "authoritative descriptor entailed by documentation")
-    if not independent:
-        base = (f"{base}; NOT independently corroborated — {_origin_caveat(corroboration)}"
-                f" — needs a coder")
     return ResolvedLine(
         fact=fact, chosen=chosen,
         alternatives=[c for c in shortlist if c.code != chosen.code][:4],
-        method=(ResolutionMethod.VERIFIED if independent
-                else ResolutionMethod.ARBITRATED),
+        method=ResolutionMethod.VERIFIED,
         tie_record=({**uniqueness, "released_code": chosen.code} if uniqueness else None),
         rationale=base)
 

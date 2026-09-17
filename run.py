@@ -87,8 +87,9 @@ The post-batch "growth loop" this file used to drive is paradigm-specific to the
 retired `app.pipeline` self-consistency model: it re-ran each note N times,
 compared the N runs' billing arrays, and minted/replayed declarative rules out
 of the disagreements. `claude_coder` was explicitly designed to replace that
-approach with built-in propose-then-verify plus independent cross-model
-corroboration (see `claude_coder/README.md`, "Running it"), so there are no N
+approach with built-in propose-then-verify against each candidate's own
+authoritative descriptor/requirement contract (see `claude_coder/README.md`,
+"Running it"), so there are no N
 runs to compare and nothing for that machinery to consume. Porting it to the new
 paradigm is out of scope for this cutover.
 
@@ -703,11 +704,11 @@ def reject_retired_flags(args) -> int | None:
             f"--consistency-workers={args.consistency_workers} is retired "
             f"(issue #6, F6-R4-A1). The deployed entrypoint now runs "
             f"claude_coder.pipeline.code_encounter, which replaces the N-run "
-            f"self-consistency comparison with built-in propose-then-verify plus "
-            f"independent cross-model corroboration. Running once while you asked for "
-            f"multiple independent runs would silently give you less assurance than "
-            f"you requested, so this run is refused. Drop the flags to process the "
-            f"batch.")
+            f"self-consistency comparison with built-in propose-then-verify against "
+            f"each candidate's own authoritative descriptor/requirement contract. "
+            f"Running once while you asked for multiple independent runs would "
+            f"silently give you less assurance than you requested, so this run is "
+            f"refused. Drop the flags to process the batch.")
         return EXIT_RETIRED_FLAG
     return None
 

@@ -203,7 +203,7 @@ class GuardTest(unittest.TestCase):
                      conflicts={"laterality": _conflict("laterality", "right", "left")})
         line = self._line(cand, fact)
         out = res._apply_attribute_axis_conflict_guard(
-            line, _SourceStub(), None, None, None, None, None)
+            line, _SourceStub(), None, None, None, None)
         self.assertIs(out.chosen, cand)
 
     def test_direct_singleton_with_no_verifier_is_withdrawn_not_billed(self):
@@ -216,26 +216,14 @@ class GuardTest(unittest.TestCase):
                      conflicts={"laterality": _conflict("laterality", "right", "left")})
         line = self._line(cand, fact)
         out = res._apply_attribute_axis_conflict_guard(
-            line, _SourceStub(), None, None, None, None, None)
+            line, _SourceStub(), None, None, None, None)
         self.assertIsNone(out.chosen)
         self.assertIn(cand, out.alternatives)
         self.assertEqual(out.method, ResolutionMethod.ABSTAINED)
 
-    def test_only_one_evaluator_configured_is_withdrawn_not_billed(self):
-        cand = _cand("PROC_RIGHT", "Procedure alpha, right side")
-        fact = _fact(attributes={"laterality": "right"},
-                     conflicts={"laterality": _conflict("laterality", "right", "left")},
-                     evidence=[EvidenceSpan(text="x", span_id="s1")])
-        line = self._line(cand, fact)
-        llm = _disposition_llm("entailed", "Procedure alpha, right side", ["e1"])
-        out = res._apply_attribute_axis_conflict_guard(
-            line, _SourceStub(), llm, None, _reconciliation({"s1": "AGREED"}), None, None)
-        self.assertIsNone(out.chosen)
-        self.assertIn(cand, out.alternatives)
-
     def test_entailed_disposition_alone_never_authorizes_even_with_cited_evidence(self):
         """issue #6, Codex's independent re-review (F9-R18-A reopened P1
-        correction): both evaluators calling the candidate "entailed" and
+        correction): the evaluator calling the candidate "entailed" and
         citing a validly-reconciled span is NOT sufficient authorization on
         its own -- a candidate disposition may eliminate or defer, never
         itself manufacture clinical-axis proof. This replaces a prior version
@@ -248,73 +236,9 @@ class GuardTest(unittest.TestCase):
                      evidence=[EvidenceSpan(text="x", span_id="s1")])
         line = self._line(cand, fact)
         llm = _disposition_llm("entailed", "Procedure alpha, right side", ["e1"])
-        corroborate = _disposition_llm("entailed", "Procedure alpha, right side", ["e1"])
         out = res._apply_attribute_axis_conflict_guard(
-            line, _SourceStub(), llm, corroborate, _reconciliation({"s1": "AGREED"}),
-            None, None)
+            line, _SourceStub(), llm, _reconciliation({"s1": "AGREED"}), None, None)
         self.assertIsNone(out.chosen)
-
-    def test_autonomous_adjudication_can_still_authorize_from_real_axis_evidence(self):
-        """Positive path for the ONLY route left to authorize an entailed-
-        but-unauthorized candidate: a bounded, cross-vendor
-        `graph_consensus.adjudicate_axis` call over THIS fact's own real,
-        reconciled `attribute_evidence` for the axis. When it uniquely
-        resolves to the value the candidate's descriptor requires,
-        `claim_authorized_value` reproduces it and the release stands."""
-        import json as _json
-        from claude_coder.models import AttributeEvidence, RelationState
-        from claude_coder import verify as _v
-
-        span = EvidenceSpan(text="a right-sided finding was noted", span_id="s1",
-                           anchored=True)
-        cand = _cand("PROC_RIGHT", "Procedure alpha, right side")
-        fact = _fact(attributes={"laterality": "right"},
-                     conflicts={"laterality": _conflict("laterality", "right", "left")},
-                     evidence=[span])
-        fact.attribute_evidence = {"laterality": (
-            AttributeEvidence(span=span, scope="local",
-                              assertion_state=RelationState.UNCERTAIN, value="right"),)}
-        line = self._line(cand, fact)
-
-        # Both evaluators call the candidate "entailed" (never authorizing on
-        # its own) so the guard falls through to autonomous adjudication.
-        disposition_llm = _disposition_llm(
-            "entailed", "Procedure alpha, right side", ["e1"])
-
-        def _axis_resp(system, user):
-            return _json.dumps({"values": [
-                {"value": "right", "status": "supported", "span_ids": ["e1"]},
-                {"value": "left", "status": "not_documented", "span_ids": []}]})
-
-        # A DISTINCT-origin pair: `select_entailed`/`corroborate` are answered
-        # by the disposition stub; `adjudicate_axis`'s own two calls (shown a
-        # DIFFERENT, axis-judge system prompt) are answered by `_axis_resp` --
-        # one callable per role, each declared under a different provider
-        # name. Dispatched on `_AXIS_JUDGE_SYSTEM`'s own distinctive text,
-        # never on the axis name (which would be exactly the kind of
-        # hardcoded medical vocabulary this codebase forbids).
-        def _llm(system, user):
-            return (_axis_resp(system, user) if "candidate value(s)" in system
-                   else disposition_llm(system, user))
-
-        # `declare_model_profile` stamps IN PLACE -- each role needs its OWN
-        # distinct wrapper closure, never the same underlying callable
-        # stamped twice, or both would end up pointing at one shared object
-        # (SHARED_ORIGIN) regardless of which provider name was declared last.
-        def _verify_wrapped(system, user):
-            return _llm(system, user)
-
-        def _corroborate_wrapped(system, user):
-            return _llm(system, user)
-
-        llm = _v.declare_model_profile(_verify_wrapped, provider="test-verify")
-        corroborate = _v.declare_model_profile(_corroborate_wrapped,
-                                               provider="test-corroborate")
-        out = res._apply_attribute_axis_conflict_guard(
-            line, _SourceStub(), llm, corroborate, _reconciliation({"s1": "AGREED"}),
-            None, None)
-        self.assertIs(out.chosen, cand)
-        self.assertEqual(fact.axis_adjudications["laterality"].value, "right")
 
     def test_entailed_without_a_validated_cited_span_does_not_release(self):
         cand = _cand("PROC_RIGHT", "Procedure alpha, right side")
@@ -324,26 +248,22 @@ class GuardTest(unittest.TestCase):
         line = self._line(cand, fact)
         # No span_ids cited at all -- a bare "entailed" status, never sufficient.
         llm = _disposition_llm("entailed", "Procedure alpha, right side", [])
-        corroborate = _disposition_llm("entailed", "Procedure alpha, right side", [])
         out = res._apply_attribute_axis_conflict_guard(
-            line, _SourceStub(), llm, corroborate, _reconciliation({"s1": "AGREED"}),
-            None, None)
+            line, _SourceStub(), llm, _reconciliation({"s1": "AGREED"}), None, None)
         self.assertIsNone(out.chosen)
 
-    def test_both_evaluators_contradict_the_singleton_withdraws_it(self):
+    def test_the_evaluator_contradicts_the_singleton_withdraws_it(self):
         cand = _cand("PROC_RIGHT", "Procedure alpha, right side")
         fact = _fact(attributes={"laterality": "right"},
                      conflicts={"laterality": _conflict("laterality", "right", "left")},
                      evidence=[EvidenceSpan(text="x", span_id="s1")])
         line = self._line(cand, fact)
         llm = _disposition_llm("contradicted", "Procedure alpha, right side", ["e1"])
-        corroborate = _disposition_llm("contradicted", "Procedure alpha, right side", ["e1"])
         out = res._apply_attribute_axis_conflict_guard(
-            line, _SourceStub(), llm, corroborate, _reconciliation({"s1": "AGREED"}),
-            None, None)
+            line, _SourceStub(), llm, _reconciliation({"s1": "AGREED"}), None, None)
         self.assertIsNone(out.chosen)
 
-    def test_both_not_documented_and_page_region_silent_yields_candidates_needing_fact(self):
+    def test_not_documented_and_page_region_silent_yields_candidates_needing_fact(self):
         cand = _cand("PROC_RIGHT", "Procedure alpha, right side")
         fact = _fact(attributes={"laterality": "right"},
                      conflicts={"laterality": _conflict(
@@ -352,8 +272,6 @@ class GuardTest(unittest.TestCase):
         line = self._line(cand, fact)
         llm = _disposition_llm("not_documented", "Procedure alpha, right side", [],
                                missing_fact="the operative side")
-        corroborate = _disposition_llm("not_documented", "Procedure alpha, right side", [],
-                                       missing_fact="the operative side")
 
         class _Coverage:
             complete = True
@@ -361,12 +279,11 @@ class GuardTest(unittest.TestCase):
 
         page_text = {1: "The procedure was performed without stating a side."}
         out = res._apply_attribute_axis_conflict_guard(
-            line, _SourceStub(), llm, corroborate, _reconciliation({}), _Coverage(),
-            page_text)
+            line, _SourceStub(), llm, _reconciliation({}), _Coverage(), page_text)
         self.assertIsNone(out.chosen)
         self.assertEqual(out.documentation_gap, "which side?")
 
-    def test_both_not_documented_but_the_page_region_states_it_is_a_system_hold_never_authorized(self):
+    def test_not_documented_but_the_page_region_states_it_is_a_system_hold_never_authorized(self):
         """issue #6, Codex's independent re-review (F9-R18-A reopened P1
         correction): the document lexically asserting a disputed value
         somewhere on this event's own anchored page is evidence of a BINDING
@@ -385,8 +302,6 @@ class GuardTest(unittest.TestCase):
         line = self._line(cand, fact)
         llm = _disposition_llm("not_documented", "Procedure alpha, right side", [],
                                missing_fact="the operative side")
-        corroborate = _disposition_llm("not_documented", "Procedure alpha, right side", [],
-                                       missing_fact="the operative side")
 
         class _Coverage:
             complete = True
@@ -394,8 +309,7 @@ class GuardTest(unittest.TestCase):
 
         page_text = {1: "The procedure was performed on the right side today."}
         out = res._apply_attribute_axis_conflict_guard(
-            line, _SourceStub(), llm, corroborate, _reconciliation({}), _Coverage(),
-            page_text)
+            line, _SourceStub(), llm, _reconciliation({}), _Coverage(), page_text)
         self.assertIsNone(out.chosen)
         self.assertIn("SYSTEM ERROR, retryable", out.rationale)
 
@@ -415,8 +329,6 @@ class GuardTest(unittest.TestCase):
         line = self._line(cand, fact)
         llm = _disposition_llm("not_documented", "Procedure alpha, right side", [],
                                missing_fact="the operative side")
-        corroborate = _disposition_llm("not_documented", "Procedure alpha, right side", [],
-                                       missing_fact="the operative side")
 
         class _Coverage:
             complete = True
@@ -427,8 +339,7 @@ class GuardTest(unittest.TestCase):
         page_text = {1: "Event A was performed on the right side. Event B was "
                        "performed."}
         out = res._apply_attribute_axis_conflict_guard(
-            line, _SourceStub(), llm, corroborate, _reconciliation({}), _Coverage(),
-            page_text)
+            line, _SourceStub(), llm, _reconciliation({}), _Coverage(), page_text)
         self.assertIsNone(out.chosen)
 
     def test_a_term_from_another_events_page_never_settles_this_conflict(self):
@@ -442,8 +353,6 @@ class GuardTest(unittest.TestCase):
         line = self._line(cand, fact)
         llm = _disposition_llm("not_documented", "Procedure alpha, right side", [],
                                missing_fact="the operative side")
-        corroborate = _disposition_llm("not_documented", "Procedure alpha, right side", [],
-                                       missing_fact="the operative side")
 
         class _Coverage:
             complete = True
@@ -454,8 +363,7 @@ class GuardTest(unittest.TestCase):
         page_text = {1: "A different procedure was performed on the right side.",
                     2: "This procedure was performed."}
         out = res._apply_attribute_axis_conflict_guard(
-            line, _SourceStub(), llm, corroborate, _reconciliation({}), _Coverage(),
-            page_text)
+            line, _SourceStub(), llm, _reconciliation({}), _Coverage(), page_text)
         self.assertIsNone(out.chosen)
         self.assertIsNotNone(out.documentation_gap)
 
@@ -467,7 +375,7 @@ class GuardTest(unittest.TestCase):
         line = self._line(cand, fact)
         llm = _disposition_llm("entailed", "Procedure alpha, right side", ["e1"], raises=True)
         out = res._apply_attribute_axis_conflict_guard(
-            line, _SourceStub(), llm, None, _reconciliation({"s1": "AGREED"}), None, None)
+            line, _SourceStub(), llm, _reconciliation({"s1": "AGREED"}), None, None)
         self.assertIsNone(out.chosen)
         self.assertIn("SYSTEM ERROR, retryable", out.rationale)
 
@@ -487,19 +395,18 @@ class GuardTest(unittest.TestCase):
         cand = _cand("PROC_RIGHT", "Procedure alpha, right side")
         line = self._line(cand, fact)
         out = res._apply_attribute_axis_conflict_guard(
-            line, _SourceStub(), None, None, _reconciliation({"s1": "AGREED"}), None, None)
+            line, _SourceStub(), None, _reconciliation({"s1": "AGREED"}), None, None)
         self.assertIs(out.chosen, cand)
 
-    def test_both_evaluators_citing_a_reconciled_but_unrelated_span_cannot_release(self):
+    def test_citing_a_reconciled_but_unrelated_span_cannot_release(self):
         """Required regression #2 (issue #6, Codex's independent re-review,
-        F9-R18-A reopened P1): both evaluators call the candidate "entailed"
-        and cite a span_id that IS validly reconciled (AGREED) -- but that
+        F9-R18-A reopened P1): the evaluator calls the candidate "entailed"
+        and cites a span_id that IS validly reconciled (AGREED) -- but that
         span is the fact's own generic procedure-confirmation evidence, never
         anything that actually states the disputed axis. An "entailed"
         disposition never authorizes by itself (only
-        `claim_authorized_value` may); with no real axis-specific
-        `attribute_evidence` for `adjudicate_axis` to work from either, the
-        candidate stays withdrawn, not released."""
+        `claim_authorized_value` may), so the candidate stays withdrawn, not
+        released."""
         cand = _cand("PROC_RIGHT", "Procedure alpha, right side")
         fact = _fact(attributes={"laterality": "right"},
                      conflicts={"laterality": _conflict("laterality", "right", "left")},
@@ -509,46 +416,16 @@ class GuardTest(unittest.TestCase):
                                             span_id="s1")])
         line = self._line(cand, fact)
         llm = _disposition_llm("entailed", "Procedure alpha, right side", ["e1"])
-        corroborate = _disposition_llm("entailed", "Procedure alpha, right side", ["e1"])
         out = res._apply_attribute_axis_conflict_guard(
-            line, _SourceStub(), llm, corroborate, _reconciliation({"s1": "AGREED"}),
-            None, None)
+            line, _SourceStub(), llm, _reconciliation({"s1": "AGREED"}), None, None)
         self.assertIsNone(out.chosen)
-
-    def test_evaluators_describing_the_missing_fact_differently_still_settles(self):
-        """Required regression #4: both evaluators assess the same candidate
-        identity as "not_documented" but phrase `missing_fact` differently --
-        elimination/settlement never required the two evaluators' free text
-        to match verbatim, only that each independently named SOMETHING."""
-        cand = _cand("PROC_RIGHT", "Procedure alpha, right side")
-        fact = _fact(attributes={"laterality": "right"},
-                     conflicts={"laterality": _conflict(
-                         "laterality", "right", "left", question="which side?")},
-                     evidence=[EvidenceSpan(text="x", span_id="s1", page=1)])
-        line = self._line(cand, fact)
-        llm = _disposition_llm("not_documented", "Procedure alpha, right side", [],
-                               missing_fact="which side the procedure was on")
-        corroborate = _disposition_llm(
-            "not_documented", "Procedure alpha, right side", [],
-            missing_fact="the specific laterality documented in the operative note")
-
-        class _Coverage:
-            complete = True
-            text = ""
-
-        page_text = {1: "The procedure was performed without stating a side."}
-        out = res._apply_attribute_axis_conflict_guard(
-            line, _SourceStub(), llm, corroborate, _reconciliation({}), _Coverage(),
-            page_text)
-        self.assertIsNone(out.chosen)
-        self.assertEqual(out.documentation_gap, "which side?")
 
     def test_no_chosen_candidate_is_a_no_op(self):
         fact = _fact(conflicts={"laterality": _conflict("laterality", "right", "left")})
         line = ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
                             rationale="held")
         out = res._apply_attribute_axis_conflict_guard(
-            line, _SourceStub(), None, None, None, None, None)
+            line, _SourceStub(), None, None, None, None)
         self.assertIs(out, line)
 
 

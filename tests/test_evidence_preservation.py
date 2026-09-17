@@ -102,7 +102,7 @@ class ServiceIntentsAndCandidateEligibilitySurviveIntoTheBundle(unittest.TestCas
         non-empty here whether or not every event billed."""
         r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
                            extract_llm=lambda s, u: _FACTS_TWO_SERVICES, verify_llm=_sel,
-                           corroborate_llm=_sel, audit_repository=NullAuditRepository())
+                           audit_repository=NullAuditRepository())
         self.assertTrue(r.service_intents)
         ids_covered = {eid for si in r.service_intents for eid in si["component_event_ids"]}
         self.assertIn("F1", ids_covered)
@@ -111,7 +111,7 @@ class ServiceIntentsAndCandidateEligibilitySurviveIntoTheBundle(unittest.TestCas
     def test_candidate_eligibility_present_on_a_line_that_reached_retrieval(self):
         r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
                            extract_llm=lambda s, u: _FACTS_TWO_SERVICES, verify_llm=_sel,
-                           corroborate_llm=_sel, audit_repository=NullAuditRepository())
+                           audit_repository=NullAuditRepository())
         resolved = [ln for ln in r.lines if ln.fact.fact_id == "F1"]
         self.assertTrue(resolved)
         self.assertIsNotNone(resolved[0].candidate_eligibility)
@@ -122,7 +122,7 @@ class ServiceIntentsAndCandidateEligibilitySurviveIntoTheBundle(unittest.TestCas
         from 'ran and excluded nothing', never guessed as an empty list."""
         r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
                            extract_llm=lambda s, u: _FACTS_TWO_SERVICES, verify_llm=_sel,
-                           corroborate_llm=_sel, audit_repository=NullAuditRepository())
+                           audit_repository=NullAuditRepository())
         diverted = [ln for ln in r.lines if ln.fact.fact_id == "F2"]
         self.assertTrue(diverted)
         self.assertIsNone(diverted[0].candidate_eligibility)
@@ -130,7 +130,7 @@ class ServiceIntentsAndCandidateEligibilitySurviveIntoTheBundle(unittest.TestCas
     def test_bundle_audit_surfaces_both_fields(self):
         r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
                            extract_llm=lambda s, u: _FACTS_TWO_SERVICES, verify_llm=_sel,
-                           corroborate_llm=_sel, audit_repository=NullAuditRepository())
+                           audit_repository=NullAuditRepository())
         bundle = bundle_from_coding_result(
             r,
             source_document=SourceDocument(),

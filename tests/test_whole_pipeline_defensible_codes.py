@@ -42,9 +42,8 @@ claim-envelope layer instead may pass `context=EncounterContext()` explicitly.
 To verify a NEW fix with this harness: build a `MockSource` shaped like the
 fix's real bug (real candidate descriptors reproduced with SYNTHETIC
 vocabulary, never a hardcoded real code/scenario), a minimal extraction
-`facts_json` (see the wire shape in the scenarios below), and one or two
-scripted `shortlist_verdict.judge(...)` callables (via `_declare`, never the
-same judge object declared twice -- see its own docstring); call
+`facts_json` (see the wire shape in the scenarios below), and a scripted
+`shortlist_verdict.judge(...)` callable (via `_declare`); call
 `run_pipeline(...)`, then `build_claim_bundle_payload(result)`; assert on
 `defensible_codes(payload)` and/or `payload["release"]["producer_verdict"]`/
 `holds`/`payload["candidate_lines"]` for a scenario whose correct outcome is
@@ -69,18 +68,77 @@ from claude_coder.verify import declare_model_profile
 from tests import shortlist_verdict as _sv
 
 
+def complete_capability_manifest() -> dict:
+    """A synthetic, COMPLETE capability manifest -- `gates.source_manifest_gate`
+    reads only `missing_required`/`integrity_errors`/`degraded_optional`, so
+    this is a minimal, valid instance of exactly what that gate inspects.
+
+    issue #6, independent review (P1-3 correction): `source_manifest_gate`
+    is the ONE gate in this pipeline that does not take a `source: CodeSource`
+    parameter -- unlike `code_active_gate`/`medical_necessity_gate`/`ncci_gate`
+    /etc., which this harness's `MockSource` already correctly substitutes
+    for the real authoritative data, `source_manifest_gate` always called
+    `capability.build_manifest()`, which probes the REAL, configured
+    filesystem paths regardless of what `source` the rest of the pipeline
+    used. Confirmed live: this harness's own scenarios passed inside this
+    repo's docker test image (which bind-mounts the real, complete
+    `data/codes/` directory from the host) and FAILED in an isolated
+    checkout lacking it -- the AUTO_READY result was never actually
+    reproducible from the test's own fixtures, only from ambient host state.
+    Injected via `code_encounter`'s `capability_manifest=` parameter (which
+    every REAL caller omits, so production gates against the real,
+    configured sources exactly as before), this makes the harness's result
+    reproduce identically in ANY environment."""
+    return {
+        "manifest_version": "test-fixture-v1",
+        "required_sources_schema": "test-fixture-v1",
+        "sources": [],
+        "missing_required": [],
+        "degraded_optional": [],
+        "integrity_errors": [],
+        "status": "OK",
+    }
+
+
+def blocked_capability_manifest(missing_source_id: str = "synthetic_required_source") -> dict:
+    """A synthetic manifest with ONE required source missing -- the other
+    outcome `source_manifest_gate` must prove, per the same P1-3 correction:
+    an absent/corrupt required source BLOCKS release, it does not merely
+    happen to pass because the harness never truly exercised the failure
+    path either."""
+    return {
+        "manifest_version": "test-fixture-v1",
+        "required_sources_schema": "test-fixture-v1",
+        "sources": [],
+        "missing_required": [missing_source_id],
+        "degraded_optional": [],
+        "integrity_errors": [],
+        "status": "BLOCKED",
+    }
+
+
 def run_pipeline(note_text, facts_json, source, *, verify_llm=None,
-                 corroborate_llm=None, dos="2026-01-01", encounter_id="enc-verify"):
+                 dos="2026-01-01", encounter_id="enc-verify",
+                 capability_manifest=None):
     """Runs the REAL `code_encounter()` entrypoint end to end. Every model
     callable is a scripted stub (`extract_llm` returns `facts_json` verbatim;
-    `verify_llm`/`corroborate_llm` are `shortlist_verdict.judge(...)`
-    callables, or `declare_model_profile`-wrapped ones for a genuinely
-    independent two-model scenario) -- zero LLM credits spent, ever."""
+    `verify_llm` is a `shortlist_verdict.judge(...)` callable) -- zero LLM
+    credits spent, ever. Code selection runs ONE verifying evaluator; it no
+    longer reconciles a second, independently-provider'd corroborator
+    against it (see `resolution.resolve`'s own docstring).
+
+    `capability_manifest` defaults to `complete_capability_manifest()` (not
+    `None`) so this harness's AUTO_READY scenarios never depend on ambient,
+    real on-disk data files -- pass `blocked_capability_manifest()`
+    explicitly for a scenario that wants to prove the BLOCKED outcome
+    instead (see P1-3 correction above)."""
     return code_encounter(
         encounter_id, note_text, dos, source=source,
         extract_llm=lambda s, u: facts_json,
-        verify_llm=verify_llm, corroborate_llm=corroborate_llm,
+        verify_llm=verify_llm,
         audit_repository=NullAuditRepository(),
+        capability_manifest=(complete_capability_manifest()
+                             if capability_manifest is None else capability_manifest),
         billing_context={
             "billing_entity_id": "actor-1",
             "participants": [{"id": "actor-1", "type": "person", "roles": ["performer"]}]})
@@ -171,16 +229,11 @@ def defensible_codes(payload: dict) -> set[str]:
 
 def _declare(*, entails, provider, reason="stub", **judge_kwargs):
     """A FRESH `shortlist_verdict.judge(...)` callable, declared under
-    `provider` in one step. `declare_model_profile` STAMPS the provider
-    identity directly onto the callable object it is given
-    (`fn.model_profile = ...`) -- passing the SAME judge object to this
-    twice for two different providers silently overwrites the first
-    declaration with the second (both roles then carry the LAST provider
-    stamped), which reads to the resolver as "one vendor's opinion sampled
-    twice" and downgrades a genuine two-model VERIFIED release to a bare,
-    coder-routed ARBITRATED one -- discovered live while building this
-    harness. Always builds a NEW judge object per call so two declared
-    roles can never alias the same underlying callable by accident."""
+    `provider` in one step (`declare_model_profile` stamps the provider
+    identity directly onto the callable object it is given, for the
+    ClaimBundle's audit-facing model-profile record). Always builds a NEW
+    judge object per call so no two scenarios can ever alias the same
+    underlying callable by accident."""
     judge = _sv.judge(entails=entails, reason=reason, **judge_kwargs)
     return declare_model_profile(judge, provider=provider)
 
@@ -200,10 +253,10 @@ class WholePipelineDefensibleCodes(unittest.TestCase):
         survived eligibility against a fact documenting "Achilles tendon").
         Whole-pipeline proof: a candidate whose only anatomy signal is a
         cardinality-led phrase ("each structure") must never reach the
-        released ClaimBundle when a genuinely grounded, independently
-        verified sibling was retrieved for the same fact -- and the grounded
-        sibling itself must actually arrive there, AUTO_READY, with a
-        genuinely independent two-model verification behind it."""
+        released ClaimBundle when a genuinely grounded sibling was retrieved
+        for the same fact -- and the grounded sibling itself must actually
+        arrive there, AUTO_READY, with a positively verified entailment
+        behind it."""
         link = "Repair of structure alpha was performed for condition alpha of the right side"
         note = ("Procedure: repair of structure alpha. "
                 "Assessment: condition alpha, right side. " + link + ".")
@@ -273,9 +326,7 @@ class WholePipelineDefensibleCodes(unittest.TestCase):
         result = run_pipeline(
             note, facts_json, source,
             verify_llm=_declare(entails=entails, provider="provider-a",
-                               reason="documented act matches"),
-            corroborate_llm=_declare(entails=entails, provider="provider-b",
-                                    reason="documented act matches"))
+                               reason="documented act matches"))
 
         payload = build_claim_bundle_payload(result)
         self.assertEqual(payload["release"]["producer_verdict"], "AUTO_READY", payload)
@@ -287,20 +338,25 @@ class WholePipelineDefensibleCodes(unittest.TestCase):
         self.assertEqual(codes, {"GROUNDED", "DX_ALPHA_RIGHT"}, payload)
         self.assertNotIn("CARDINALITY_ONLY", codes)
 
-    def test_an_undocumented_indication_clause_becomes_a_provider_question_not_a_silent_hold(self):
+    def test_an_undocumented_indication_clause_never_becomes_a_fabricated_provider_question(self):
         """issue #6, independent root-cause investigation (real note: F1,
-        CPT 28118 vs 28120, "(eg, osteomyelitis or bossing)"). Whole-pipeline
-        proof of the OTHER defensible outcome this harness must also catch:
-        when the record genuinely does not settle a tie, the pipeline must
-        never silently force a code into the ClaimBundle NOR fall back to an
-        unanswerable, unrescuable hold -- it must route to ONE specific,
-        answerable provider question naming the exact undocumented fact.
-        Before this fix, this exact scripted disagreement (a looser primary
-        judge, a corroborator correctly flagging the indication-requiring
-        candidate's own precondition as undocumented) had no governed axis
-        to resolve through and fell to a permanent SYSTEM_UNRESOLVED hold --
-        a defect this harness would have caught just as decisively as the
-        positive-release case above."""
+        CPT 28118 vs 28120, "(eg, osteomyelitis or bossing)"), then Codex's
+        independent re-review (P1-2 correction). Whole-pipeline proof of the
+        OTHER defensible outcome this harness must also catch: when the
+        record genuinely does not settle a tie, the pipeline must never
+        silently force a code into the ClaimBundle -- but it must also never
+        fabricate a SPECIFIC provider question out of a purely illustrative
+        "(eg, ...)" example with no typed, authoritative requirement field or
+        source-governed rule behind it (an earlier version of
+        `tiebreak.AXIS_INDICATION_CLAUSE` did exactly that, which Codex
+        found unsafe: AMA/CPT convention makes such a clause a
+        non-exhaustive example, never a checklist). The evaluator honestly
+        finds BOTH the broad and the indication-qualified candidate
+        plausible (neither is eliminated by its own say-so); with no
+        governed, provider-answerable axis distinguishing them, this must
+        route to an honest, generic "candidates still tied" review -- never
+        a confident-looking but unearned question naming "variant
+        condition" specifically."""
         note = "Assembly service performed today for structure alpha."
         facts_json = _facts_json(facts=[
             {"fact_id": "F1", "kind": "procedure",
@@ -320,58 +376,52 @@ class WholePipelineDefensibleCodes(unittest.TestCase):
             retrieval={("*", "cpt"): [CandidateCode("CAND_ALPHA", "cpt", alpha_desc, 0.8),
                                      CandidateCode("CAND_BETA", "cpt", beta_desc, 0.7)]})
 
-        # Primary: looser, entails both (mirrors the real note's real
-        # evaluator that wrongly accepted the indication-clause candidate).
+        # Looser: entails both candidates plausible (mirrors the real note's
+        # real evaluator that could not rule out the indication-clause
+        # candidate on its own). Neither candidate is eliminated by this
+        # evaluator's own say-so, so the tie reaches the original-document
+        # axis check unchanged.
         primary = _declare(entails=lambda d: True, provider="provider-a",
                           reason="documented act matches")
-        # Corroborator: the indication clause's own fact ("variant condition")
-        # is genuinely undocumented -- correctly flags it as missing (mirrors
-        # the real note's other evaluator, which correctly rejected it).
-        corroborator = _declare(
-            entails=lambda d: "variant condition" not in d.lower(), provider="provider-b",
-            missing_element=True, reason="variant condition is not documented")
 
-        result = run_pipeline(note, facts_json, source,
-                              verify_llm=primary, corroborate_llm=corroborator)
+        result = run_pipeline(note, facts_json, source, verify_llm=primary)
 
         payload = build_claim_bundle_payload(result)
         self.assertEqual(defensible_codes(payload), set(), payload)
         self.assertEqual(payload["release"]["producer_verdict"], "REVIEW_REQUIRED", payload)
-        self.assertEqual(payload["release"]["producer_destination"], "PROVIDER_QUERY", payload)
+        # P1-2 correction: with the illustrative clause no longer selectable/
+        # queryable, no governed axis distinguishes these two candidates, so
+        # this is an honest, generic coder-review tie -- never a fabricated
+        # PROVIDER_QUERY naming an unearned specific fact.
+        self.assertEqual(payload["release"]["producer_destination"], "REVIEW", payload)
         (line,) = payload["candidate_lines"]
-        self.assertEqual(line["external_disposition"], "CANDIDATE_REQUIRING_FACT", line)
-        self.assertIn("variant condition", line["blocking_reason"])
-        self.assertIn("indication_clause", line["blocking_reason"])
+        self.assertEqual(line["external_disposition"], "EXCLUDED", line)
+        self.assertNotIn("variant condition", line["blocking_reason"])
+        self.assertNotIn("indication_clause", line["blocking_reason"])
+        self.assertIn("still entailed by the documentation", line["blocking_reason"])
         self.assertNotIn("SYSTEM_UNRESOLVED", line["blocking_reason"])
 
-    def test_crossed_governed_equivalent_candidates_reach_the_claim_bundle(self):
-        """issue #6, independent investigation ("same code, different
-        wording"): evaluator A independently entails an OLDER code entry for
-        a documented procedure; evaluator B independently entails a
-        DIFFERENT, NEWER code entry for the SAME real-world procedure. Naively
-        this is indistinguishable from the F8-R1 "two shortlisted candidates
-        both still entailed" tie -- but the governed SNOMED Procedure concept
-        graph resolves the two code entries to one procedure, so this must
-        release, AUTO_READY, exactly like a genuinely unique pick -- not fall
-        to a permanent, unrescuable hold over two evaluators who actually
-        agree. Whole-pipeline proof of `resolution.
-        _corroborated_via_equivalent_concept`/the matching elimination path in
-        `_uniqueness_view`, both of which call `coreference.
-        governed_procedure_relation` -- the STRICT, source-backed-only half
-        of the F9-R4 governed concept-graph mechanism, deliberately never
-        `action_relation_detail`'s free wording shortcut (unsafe for
-        comparing two candidates' own descriptors to each other -- see that
-        function's docstring) -- applied here to two candidates' own
-        official descriptors."""
-        note = ("Excision of structure alpha performed today for condition "
-                "alpha of the right side.")
+
+class HarnessHermeticityTest(unittest.TestCase):
+    """issue #6, independent review (P1-3 correction): proves this harness's
+    `AUTO_READY` result is reproducible from the test's OWN injected fixture,
+    never from whatever real data files happen to be mounted wherever the
+    test runs -- and that `source_manifest_gate` genuinely BLOCKS on an
+    absent required source rather than having no live failure path at all.
+    Uses the SAME grounded scenario as
+    `test_a_grounded_candidate_reaches_the_claim_bundle_past_a_poisoned_sibling`,
+    varying only the injected `capability_manifest`."""
+
+    def _grounded_scenario(self, capability_manifest):
+        link = "Repair of structure alpha was performed for condition alpha of the right side"
+        note = ("Assessment: condition alpha, right side. " + link + ".")
         facts_json = _facts_json(
             facts=[
                 {"fact_id": "F1", "kind": "procedure",
-                 "description": "excision of structure alpha",
+                 "description": "repair of structure alpha",
                  "attributes": {"performer_id": "actor-1", "billing_entity_id": "actor-1"},
                  "disposition": "performed_today", "negated": False,
-                 "evidence": ["Excision of structure alpha performed today"],
+                 "evidence": ["Repair of structure alpha was performed"],
                  "confidence": 0.97,
                  "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
                                     "temporal": 0.99, "performer": 0.99,
@@ -383,7 +433,8 @@ class WholePipelineDefensibleCodes(unittest.TestCase):
                      "laterality": [{"text": "condition alpha, right side", "scope": "local",
                                     "assertion_state": "asserted", "value": "right"}]},
                  "disposition": "performed_today", "negated": False,
-                 "evidence": ["condition alpha of the right side"],
+                 "evidence": ["condition alpha, right side",
+                             "condition alpha of the right side"],
                  "confidence": 0.98,
                  "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
                                     "temporal": 0.99, "assertion": 0.99,
@@ -393,46 +444,45 @@ class WholePipelineDefensibleCodes(unittest.TestCase):
                 {"subject_event_id": "F2", "object_event_id": "F1", "predicate": "reason_for",
                  "state": "asserted", "evidence_fact_ids": ["F1", "F2"], "confidence": 0.99},
             ])
-
-        old_desc = "Excision, structure alpha, older code entry"
-        new_desc = "Excision, structure alpha, newer code entry"
-        dx_desc = "condition alpha, right side"
+        grounded_desc = "Repair, structure alpha"
         source = MockSource(
-            records={("CODE_OLD", "cpt"): {"long_description": old_desc, "active": True},
-                    ("CODE_NEW", "cpt"): {"long_description": new_desc, "active": True},
-                    ("DX_ALPHA_RIGHT", "icd10"): {"long_description": dx_desc,
+            records={("GROUNDED", "cpt"): {"long_description": grounded_desc, "active": True},
+                    ("DX_ALPHA_RIGHT", "icd10"): {"long_description": "condition alpha, right side",
                                                  "active": True}},
-            retrieval={("*", "cpt"): [CandidateCode("CODE_OLD", "cpt", old_desc, 0.9),
-                                     CandidateCode("CODE_NEW", "cpt", new_desc, 0.8)],
-                      ("*", "icd10"): [CandidateCode("DX_ALPHA_RIGHT", "icd10", dx_desc, 0.9)]},
-            index={"condition alpha of the right side": {"DX_ALPHA_RIGHT"}},
-            # The governed concept graph confirms the two code entries name
-            # the SAME real-world procedure -- the crossed disagreement below
-            # must resolve through this, never through an invented heuristic.
-            procedure_relation={(old_desc, new_desc): {
-                "verdict": "same",
-                "term_a": {"term": "a", "candidates": ["C1"], "method": "exact",
-                          "unique": True},
-                "term_b": {"term": "b", "candidates": ["C1"], "method": "exact",
-                          "unique": True}}})
+            retrieval={("*", "cpt"): [CandidateCode("GROUNDED", "cpt", grounded_desc, 0.8)],
+                      ("*", "icd10"): [CandidateCode("DX_ALPHA_RIGHT", "icd10",
+                                                    "condition alpha, right side", 0.9)]},
+            index={"condition alpha of the right side": {"DX_ALPHA_RIGHT"}})
+        primary = _declare(
+            entails=lambda d: "repair" in d.lower() or "condition alpha" in d.lower(),
+            provider="provider-a", reason="documented act matches")
+        return run_pipeline(note, facts_json, source, verify_llm=primary,
+                            capability_manifest=capability_manifest)
 
-        # Primary independently entails only the OLDER code entry (plus the
-        # undisputed diagnosis); the corroborator independently entails only
-        # the NEWER one (plus the same diagnosis) -- a genuine crossed pick
-        # on the procedure, not a scripted agreement.
-        primary = _declare(entails=lambda d: "older" in d or "condition alpha" in d.lower(),
-                          provider="provider-a", reason="matches the older entry")
-        corroborator = _declare(
-            entails=lambda d: "newer" in d or "condition alpha" in d.lower(),
-            provider="provider-b", reason="matches the newer entry")
-
-        result = run_pipeline(note, facts_json, source,
-                              verify_llm=primary, corroborate_llm=corroborator)
-
+    def test_a_complete_injected_manifest_reaches_true_zero_hold_auto_ready(self):
+        """The fixture this harness's OTHER scenarios rely on by default:
+        proves `complete_capability_manifest()` alone -- no ambient real data
+        files -- is sufficient for `source_manifest_gate` to PASS and the
+        whole claim to reach a genuine, zero-`holds` AUTO_READY."""
+        result = self._grounded_scenario(complete_capability_manifest())
         payload = build_claim_bundle_payload(result)
         self.assertEqual(payload["release"]["producer_verdict"], "AUTO_READY", payload)
-        self.assertEqual(payload["release"]["destination"], "AUTO_READY", payload)
         self.assertEqual(payload["release"]["holds"], [], payload)
-        codes = defensible_codes(payload)
-        self.assertEqual(codes, {"CODE_OLD", "DX_ALPHA_RIGHT"}, payload)
-        self.assertNotIn("CODE_NEW", codes)
+        self.assertEqual(defensible_codes(payload), {"GROUNDED", "DX_ALPHA_RIGHT"}, payload)
+
+    def test_a_missing_required_source_blocks_release_not_a_silent_pass(self):
+        """The other outcome `source_manifest_gate` must prove: an
+        absent/corrupt required source BLOCKS release outright, even though
+        every OTHER fact about this encounter is identical to the clean,
+        AUTO_READY scenario above -- confirms the gate has a genuine,
+        reachable failure path through this harness, not just a fixture that
+        happens to always pass. This is a release-level block, not a
+        per-code one: `defensible_codes` reflects each line's own
+        evidence-grounded disposition, a concern this gate deliberately does
+        not touch, so a missing required source blocking the release is not
+        expected to empty it out."""
+        result = self._grounded_scenario(blocked_capability_manifest())
+        payload = build_claim_bundle_payload(result)
+        self.assertEqual(payload["release"]["producer_verdict"], "BLOCKED", payload)
+        self.assertIn("source_manifest", payload["release"]["reason_codes"], payload)
+        self.assertNotEqual(payload["release"]["holds"], [], payload)

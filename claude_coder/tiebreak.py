@@ -78,31 +78,26 @@ AXIS_QUALIFIED_CHILD = "qualified_child"
 #: issue #6, independent root-cause investigation (real-data replay against the
 #: designated note, F1/28118 vs 28120): a candidate's own authoritative
 #: descriptor stating a positive indication via "(eg, ...)"/"(e.g., ...)"/
-#: "(for example, ...)" grammar names a clinical circumstance the record must
-#: document for THIS candidate to apply -- the SAME "required precondition"
-#: polarity as `AXIS_QUALIFIED_CHILD`'s differential (never inverted, unlike
-#: `AXIS_EXCLUSION_CLAUSE`: documenting the clause SUPPORTS the candidate, it
-#: never eliminates it). Before this axis existed, two independent evaluators
-#: disagreeing specifically about whether such a clause was documented had no
-#: governed axis to adjudicate through: `_tiebreak.narrow` had nothing to test
-#: (no winner, no provider question either -- `discriminating_axes` simply
-#: never surfaced the clause), so the disagreement fell to a permanent,
-#: unrescuable system hold on every retry, deterministically, since nothing
-#: about the compiled data changes between runs. A comprehensive scan of the
-#: real CPT/ICD-10-CM data (grammar-only detection, no hardcoded code/term)
-#: found this clause shape on 1,697 real descriptors, 1,645 of them (97%)
-#: previously ungoverned by any existing axis mechanism -- this was not an
-#: isolated case. `selectable`/`queryable` exactly like `AXIS_QUALIFIED_CHILD`:
-#: the whole clause is checked as one phrase via the same
-#: `asserted_status`/`validated_requirement` machinery already proven safe for
-#: `laterality`/`qualified_child`/`inclusion_term`, never bag-of-words -- and,
-#: critically, elimination requires BOTH independent evaluators to validate
-#: NOT_DOCUMENTED against a fully-searched corpus (`_requirement_grounded_
-#: status`'s existing `coverage.complete` gate), so a genuine paraphrase (e.g.
-#: "chronic osteitis" for "osteomyelitis") that either evaluator correctly
-#: recognizes as SUPPORTED never gets silently eliminated -- it just leaves
-#: this axis ungrounded, exactly like every other MUST_SUPPORT axis already
-#: does.
+#: "(for example, ...)" grammar. An earlier version of this axis compiled it
+#: as a required, `selectable`/`queryable` MUST_SUPPORT precondition (the same
+#: polarity as `AXIS_QUALIFIED_CHILD`'s differential) so it could win a tie or
+#: ground a provider question. Codex's independent re-review (P1-2) found that
+#: unsafe: by AMA/CPT convention a "(eg, ...)" clause is a non-exhaustive
+#: ILLUSTRATIVE EXAMPLE, not an exhaustive checklist, and `_indication_clause`'s
+#: own docstring already said so -- compiling it as a discriminating/queryable
+#: axis let an undocumented example alone decide a tie or manufacture a
+#: provider question from punctuation/English grammar alone, with no typed,
+#: authoritative requirement field or source-governed rule behind it. This
+#: axis is retained (`provable=True`) for recall/audit/explanation ONLY --
+#: `selectable=False, queryable=False`, exactly like `AXIS_DESCRIPTOR_TERM`'s
+#: own bag-of-words residual -- never eliminates, never wins a tie, never
+#: becomes a provider question. Absent a genuine two-evaluator corroboration
+#: mechanism for code selection (removed separately, issue #6 single-evaluator
+#: change) or a real typed requirement field, a disagreement that turns
+#: specifically on an illustrative clause like this has no governed axis to
+#: adjudicate through and correctly falls to whatever generic
+#: disagreement/tie handling already exists -- never a fabricated, unearned
+#: specific question.
 AXIS_INDICATION_CLAUSE = "indication_clause"
 #: issue #6, Codex's independent re-review (F9-R19-A Finding 2): the shared
 #: pre-semicolon stem itself, as a REQUIRED precondition every member of a
@@ -439,9 +434,10 @@ def _indication_clause(descriptor: str) -> str | None:
     `_exclusion_clause`) because the marker itself is parenthesis-scoped, not
     comma/semicolon-scoped -- a real CPT descriptor commonly nests an
     "(eg, ...)" example clause inside a larger comma-separated phrase (e.g.
-    "Partial excision (...) bone (eg, osteomyelitis or bossing); talus or
-    calcaneus"), so splitting on commas first would sever the marker from its
-    own content, exactly the way it would for `_exclusion_clause` if that
+    "Partial excision (...) structure (eg, variant condition alpha or
+    variant condition beta); structure gamma or structure alpha"), so
+    splitting on commas first would sever the marker from its own content,
+    exactly the way it would for `_exclusion_clause` if that
     marker were ever nested in parentheses too. Reproduces verbatim from the
     descriptor by construction (a regex match on the real string), so a
     caller compiling this into a `requirement.DescriptorRequirement` can
@@ -621,19 +617,24 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
             provable=True, selectable=False, queryable=False))
 
     if any(indic.values()):
-        # issue #6, independent root-cause investigation: unlike
-        # `AXIS_EXCLUSION_CLAUSE`, this polarity is NOT inverted -- documenting
-        # one of a candidate's own indication alternatives SUPPORTS it, exactly
-        # like `AXIS_QUALIFIED_CHILD`'s differential, so it is NOT a member of
-        # `_GATE_ONLY_AXES`: it participates in `narrow()`'s ordinary
-        # literal-presence winner logic (`selectable=True`) and, when genuinely
-        # undocumented rather than merely absent from one candidate's own
-        # descriptor, is a real fact a provider could be asked to confirm
-        # (`queryable=True`) -- never a gate-only gap like an exclusion clause,
-        # which restates a condition the record already establishes elsewhere.
+        # issue #6, Codex's independent re-review (P1-2 correction): a
+        # "(eg, ...)" clause is, BY AMA/CPT CONVENTION, a non-exhaustive
+        # ILLUSTRATIVE EXAMPLE -- `_indication_clause`'s own docstring already
+        # called it that -- never a checklist item a coder or provider could
+        # be asked to confirm/deny. Compiling it as `selectable=True` let an
+        # undocumented example alone win a tie or ground a provider question
+        # from punctuation/English grammar alone, with no typed, authoritative
+        # requirement field or source-governed rule behind it. Retained here
+        # for recall/audit/explanation only -- `provable=True` so it still
+        # surfaces in `documented_axes`/audit bookkeeping -- but
+        # `selectable=False, queryable=False` exactly like `AXIS_DESCRIPTOR_TERM`
+        # above: it can never decide `narrow()`'s winner and never leaks into
+        # a provider question. A real, typed requirement field (were one ever
+        # added to this repo's authoritative sources) is the only thing that
+        # should flip this back.
         probes.append(AxisProbe(
             AXIS_INDICATION_CLAUSE, indic,
-            provable=True, selectable=True, queryable=True))
+            provable=True, selectable=False, queryable=False))
 
     if qualified:
         full = {c.code: qualified.get(c.code, ()) for c in candidates}

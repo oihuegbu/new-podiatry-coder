@@ -312,16 +312,16 @@ def test_verified_path_cannot_override_unsupported_interval():
 
     agree = _sv.judge(pick=1, reason="agree")
 
-    line = resolve(_request(fact), src, llm=agree, corroborate=agree)
+    line = resolve(_request(fact), src, llm=agree)
     assert line.chosen is None and line.documentation_gap
 
 
 # ---- Codex F4-R1 re-review: verified path must also abstain (model agreement != support) -
 def test_unsupported_interval_not_billed_via_verified_path():
-    """Even with select + independent corroboration AGREEING, a code whose bounded interval
-    lacks a dimension-compatible documented measurement must NOT bill through the verified
-    path. The required-constraint gate applies regardless of model agreement, fact kind, or
-    candidate source. Covers both the one-model and corroborated verified paths."""
+    """Even with the evaluator's own selection AGREEING with itself on the pick, a
+    code whose bounded interval lacks a dimension-compatible documented measurement
+    must NOT bill through the verified path. The required-constraint gate applies
+    regardless of model agreement, fact kind, or candidate source."""
     proc = CandidateCode("PROC_RANGE", "cpt", "excision, area 16 sq. cm. or less", 0.9)
     src = MockSource(
         records={("PROC_RANGE", "cpt"): {"long_description": "excision, area 16 sq. cm. or less",
@@ -334,8 +334,6 @@ def test_unsupported_interval_not_billed_via_verified_path():
 
     agree = _sv.judge(pick=1, reason="x")
 
-    corroborated = resolve(_request(fact), src, llm=agree, corroborate=agree)
-    assert corroborated.chosen is None and corroborated.documentation_gap
     one_model = resolve(_request(fact), src, llm=agree)
     assert one_model.chosen is None and one_model.documentation_gap
 

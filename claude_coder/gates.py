@@ -769,13 +769,30 @@ def claim_ownership_gate(result: CodingResult) -> GateResult:
                       "ownership")
 
 
-def source_manifest_gate(result: CodingResult) -> GateResult:
+def source_manifest_gate(result: CodingResult,
+                         manifest: dict | None = None) -> GateResult:
     """Fail closed on a MISSING REQUIRED authoritative source. Degradation is loud:
     an absent required source (a code table / edit-policy file) BLOCKS release; absent
-    OPTIONAL recall aids are recorded (NOT_APPLICABLE detail) but do not block."""
+    OPTIONAL recall aids are recorded (NOT_APPLICABLE detail) but do not block.
+
+    `manifest` (issue #6, independent review, P1-3 correction): an explicit,
+    pre-built capability manifest to gate against, INSTEAD of probing the real
+    configured filesystem paths -- the injection seam a hermetic whole-pipeline
+    test needs to prove this gate's actual PASS/BLOCKED behavior from a
+    controlled fixture, rather than depending on whichever real data files
+    happen to be mounted wherever the test runs (confirmed live: the same
+    scripted scenario passed inside this repo's own docker test image, which
+    bind-mounts the real, complete data/codes/ directory, and failed in an
+    isolated checkout lacking it -- the test was never actually hermetic).
+    Every REAL caller (this module's own default) omits it, so production
+    behavior -- the real, strict, unbypassed probe of the real configured
+    sources -- is completely unchanged; this only ever narrows what a caller
+    that explicitly supplies a manifest is gated against."""
     try:
-        from .capability import build_manifest
-        man = build_manifest()
+        if manifest is None:
+            from .capability import build_manifest
+            manifest = build_manifest()
+        man = manifest
     except Exception as exc:
         return GateResult("source_manifest", Outcome.ERROR, f"manifest unavailable: {exc}",
                           "capability manifest", retryable=True)
@@ -797,7 +814,8 @@ def source_manifest_gate(result: CodingResult) -> GateResult:
 
 
 def run_gates(result: CodingResult, note_text: str, source: CodeSource,
-              readings: dict[str, str] | None = None, reconciliation=None
+              readings: dict[str, str] | None = None, reconciliation=None,
+              capability_manifest: dict | None = None
               ) -> list[GateResult]:
     """All mandatory gates. Add a gate here (never a code list) as coverage grows.
 
@@ -806,10 +824,14 @@ def run_gates(result: CodingResult, note_text: str, source: CodeSource,
     `reconciliation` (issue #6, Codex's independent re-review, F9-R18-A
     reopened P1): threaded to `drug_units_gate` so its documented-dose text
     is built the SAME claim-authorized way `pipeline.py`'s own unit
-    computation already is, never from raw, possibly-conflicted attributes."""
+    computation already is, never from raw, possibly-conflicted attributes.
+    `capability_manifest` (issue #6, independent review, P1-3 correction):
+    forwarded to `source_manifest_gate` -- see that function's own docstring.
+    Every real caller omits it; production gates against the real, configured
+    filesystem exactly as before."""
     try:
         return [
-            source_manifest_gate(result),
+            source_manifest_gate(result, manifest=capability_manifest),
             claim_ownership_gate(result),
             dos_gate(result),
             evidence_gate(result, note_text, readings),

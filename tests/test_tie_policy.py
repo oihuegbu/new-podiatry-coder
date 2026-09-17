@@ -961,21 +961,20 @@ class SelectionUniquenessTest(unittest.TestCase):
                        "component two")
     ONE_DOCUMENTED = "assembly service performed, including component one"
 
-    def _resolve(self, evidence, primary, second):
+    def _resolve(self, evidence, primary):
         fact = _fact("assembly service", evidence)
         return resolve(_request(fact), _source(SYN_A, SYN_B),
                        llm=_pinned(primary, "provider-a"),
-                       corroborate=_pinned(second, "provider-b"),
                        reconciliation=_agreed("span-0"))
 
     # ---- the reviewer's exact reproduction ------------------------------------------
-    def test_two_entailed_candidates_do_not_release_even_when_both_models_agree(self):
-        """Codex F8-R1, reproduced end to end through `resolve`: both models judge BOTH
-        descriptors entailed and both would code SYN_A. Before this change that released
-        SYN_A on agreement alone. It must now hold, with the OTHER candidate named."""
+    def test_two_entailed_candidates_do_not_release_even_on_the_evaluators_own_say_so(self):
+        """Codex F8-R1, reproduced end to end through `resolve`: the evaluator judges BOTH
+        descriptors entailed and would code SYN_A. Before this change that released SYN_A
+        on the model's own preference alone. It must now hold, with the OTHER candidate
+        named -- the evaluator entailing BOTH candidates never eliminates either of them."""
         both = lambda d: True                                   # noqa: E731
         line = self._resolve(self.BOTH_DOCUMENTED,
-                             _judge(both, prefers=lambda d: _ONE in d),
                              _judge(both, prefers=lambda d: _ONE in d))
         self.assertIsNone(line.chosen, line.rationale)
         self.assertIs(line.method, ResolutionMethod.ABSTAINED)
@@ -1014,8 +1013,6 @@ class SelectionUniquenessTest(unittest.TestCase):
             extract_llm=lambda s, u: facts,
             arbitrate_llm=lambda s, u: NO_PICK,
             verify_llm=_pinned(_judge(both, prefers=lambda d: _ONE in d), "provider-a"),
-            corroborate_llm=_pinned(_judge(both, prefers=lambda d: _ONE in d),
-                                    "provider-b"),
             audit_repository=NullAuditRepository(),
             billing_context={"billing_entity_id": "actor-1",
                              "participants": [{"id": "actor-1", "type": "person",
@@ -1031,11 +1028,10 @@ class SelectionUniquenessTest(unittest.TestCase):
 
     # ---- the common path must not regress -------------------------------------------
     def test_model_named_elimination_needs_typed_independent_grounding(self):
-        """Two models naming an elimination plus a raw descriptor-token hit is still
+        """The evaluator naming an elimination plus a raw descriptor-token hit is still
         not independent typed evidence. Both candidates remain standing."""
         only_one = lambda d: _ONE in d                          # noqa: E731
-        line = self._resolve(self.ONE_DOCUMENTED,
-                             _judge(only_one), _judge(only_one))
+        line = self._resolve(self.ONE_DOCUMENTED, _judge(only_one))
         self.assertFalse(line.resolved, line.rationale)
         self.assertIsNone(line.chosen)
         self.assertIsNone(line.documentation_gap)
@@ -1047,7 +1043,6 @@ class SelectionUniquenessTest(unittest.TestCase):
         needed to eliminate the other candidate."""
         both = lambda d: True                                   # noqa: E731
         line = self._resolve(self.ONE_DOCUMENTED,
-                             _judge(both, prefers=lambda d: _ONE in d),
                              _judge(both, prefers=lambda d: _ONE in d))
         self.assertFalse(line.resolved, line.rationale)
         self.assertIsNone(line.chosen)
@@ -1056,18 +1051,15 @@ class SelectionUniquenessTest(unittest.TestCase):
 
     # ---- what "eliminated" has to mean ----------------------------------------------
     def test_neither_named_nor_bare_model_pick_can_replace_typed_grounding(self):
-        """Naming a reason improves auditability but cannot turn model agreement and
-        a raw word hit into independent elimination evidence."""
+        """Naming a reason improves auditability but cannot turn a raw word hit into
+        independent elimination evidence."""
         named = _judge(lambda d: _ONE in d)
-        named_held = self._resolve(self.ONE_DOCUMENTED, named,
-                                   _judge(lambda d: _ONE in d))
+        named_held = self._resolve(self.ONE_DOCUMENTED, named)
         self.assertIsNone(named_held.chosen, named_held.rationale)
         self.assertEqual(named_held.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
 
         bare = _judge(lambda d: True, prefers=lambda d: _ONE in d, declare=False)
-        held = self._resolve(self.BOTH_DOCUMENTED, bare,
-                             _judge(lambda d: True, prefers=lambda d: _ONE in d,
-                                    declare=False))
+        held = self._resolve(self.BOTH_DOCUMENTED, bare)
         self.assertIsNone(held.chosen, held.rationale)
         self.assertEqual(held.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
         self.assertFalse(
@@ -1076,16 +1068,16 @@ class SelectionUniquenessTest(unittest.TestCase):
     # ---- Codex F8-R1, round-9 re-review: a NAMED reason is not itself grounds ---------
     def test_a_false_named_elimination_the_document_contradicts_does_not_release(self):
         """The reviewer's exact round-9 counterexample: the documentation states BOTH
-        components (so SYN_B is genuinely, independently entailed), but two SEPARATE
-        judging models both falsely name SYN_B as eliminated. Before this fix, any
-        non-empty reason string from every model was enough to drop a candidate from the
-        standing set — 'model agreement as proof, only in a richer JSON shape.' The
-        elimination must now be independently confirmed against the original document
-        (the same `tiebreak.narrow` proof the tie policy already uses) before it can
-        remove a candidate, and the document here confirms the OPPOSITE of what both
-        models claimed, so SYN_B must stay standing."""
+        components (so SYN_B is genuinely, independently entailed), but the judging
+        model falsely names SYN_B as eliminated. Before this fix, any non-empty reason
+        string was enough to drop a candidate from the standing set — 'model say-so as
+        proof, only in a richer JSON shape.' The elimination must now be independently
+        confirmed against the original document (the same `tiebreak.narrow` proof the
+        tie policy already uses) before it can remove a candidate, and the document
+        here confirms the OPPOSITE of what the model claimed, so SYN_B must stay
+        standing."""
         only_one = lambda d: _ONE in d                          # noqa: E731
-        line = self._resolve(self.BOTH_DOCUMENTED, _judge(only_one), _judge(only_one))
+        line = self._resolve(self.BOTH_DOCUMENTED, _judge(only_one))
         self.assertIsNone(line.chosen, line.rationale)
         self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
         # BOTH_DOCUMENTED states both distinguishing words -- issue #6 F9-R2-B: an
@@ -1105,7 +1097,6 @@ class SelectionUniquenessTest(unittest.TestCase):
         fact = _fact("assembly service", self.ONE_DOCUMENTED)
         line = resolve(_request(fact), _source(SYN_A, SYN_B),
                        llm=_pinned(_judge(only_one), "provider-a"),
-                       corroborate=_pinned(_judge(only_one), "provider-b"),
                        reconciliation=_disagreed("span-0"))
         self.assertIsNone(line.chosen, line.rationale)
         self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
@@ -1131,26 +1122,10 @@ class SelectionUniquenessTest(unittest.TestCase):
             confidence=0.99, fact_id="F1")
         line = resolve(_request(fact), _source(SYN_A, SYN_B),
                        llm=_pinned(_judge(only_one), "provider-a"),
-                       corroborate=_pinned(_judge(only_one), "provider-b"),
                        reconciliation=_agreed("span-0"))
         self.assertIsNone(line.chosen, line.rationale)
         self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
         self.assertNotIn("SYN_B", line.tie_record["eliminated"])
-
-    def test_the_corroborator_evaluates_the_shortlist_not_only_the_pick(self):
-        """The corroborator's own view of the OTHER candidates has to count. Here it
-        agrees with the pick — the only thing it used to be asked — while independently
-        finding the alternative entailed too. That disagreement leaves the alternative
-        STANDING, so the line holds instead of releasing on the agreement."""
-        line = self._resolve(self.BOTH_DOCUMENTED,
-                             _judge(lambda d: _ONE in d),
-                             _judge(lambda d: True, prefers=lambda d: _ONE in d))
-        self.assertIsNone(line.chosen, line.rationale)
-        self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
-        # BOTH_DOCUMENTED states both distinguishing words -- issue #6 F9-R2-B: an
-        # axis the record already documents is never a provider question.
-        self.assertIsNone(line.documentation_gap)
-
 
 LAT_LEFT = _cand("CAND_LEFT", "assembly service performed on the left", 0.90)
 LAT_RIGHT = _cand("CAND_RIGHT", "assembly service performed on the right", 0.90)
@@ -1214,7 +1189,7 @@ class RequirementGroundedEliminationTest(unittest.TestCase):
                                   covered_pages=(1,), page_image_sha256=("stub-hash",),
                                   uncovered_pages=uncovered_pages)
 
-    def _resolve(self, primary, second, reconciliation=None,
+    def _resolve(self, primary, reconciliation=None,
                 terms=None, coverage=None):
         fact = _fact("condition alpha", self.ALPHA_DOCUMENTED, kind=FactKind.DIAGNOSIS)
         source = _icd_source(DX_ALPHA, DX_BETA, instructional_terms=(
@@ -1222,7 +1197,6 @@ class RequirementGroundedEliminationTest(unittest.TestCase):
             {"SYNDX1": {"classic presentation"}, "SYNDX2": {"modern presentation"}}))
         return resolve(_request(fact), source,
                        llm=_pinned(primary, "provider-a"),
-                       corroborate=_pinned(second, "provider-b"),
                        reconciliation=(reconciliation
                                        if reconciliation is not None
                                        else _agreed("span-0")),
@@ -1230,36 +1204,36 @@ class RequirementGroundedEliminationTest(unittest.TestCase):
 
     def test_a_unanimous_contradiction_never_eliminates(self):
         """issue #6 F9-R6-R2, the direct regression pin: CONTRADICTED is retired
-        permanently. Both evaluators name the standard elimination AND cite a
+        permanently. The judging model names the standard elimination AND cites a
         real, agreed span claiming the loser's inclusion-term requirement is
         contradicted -- this must never ground an elimination anymore, no matter
         how well-cited the claim looks."""
         judge = _sv.judge(pick=1,
                           requirement_status={"inclusion_term:SYNDX2": "contradicted"})
-        line = self._resolve(judge, judge, coverage=self._coverage())
+        line = self._resolve(judge, coverage=self._coverage())
         self.assertIsNone(line.chosen, line.rationale)
         self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
 
     def test_positive_alias_never_enters_the_elimination_loop_even_when_fully_covered(self):
         """issue #6 F9-R6-R3 re-review, the core positive-alias regression: SYNDX2's
-        inclusion-term requirement is unanimously, validly reported NOT_DOCUMENTED
-        (absence genuinely confirmed against the real `coverage` corpus), yet must
-        NEVER eliminate -- `role=POSITIVE_ALIAS` structurally excludes it from
+        inclusion-term requirement is validly reported NOT_DOCUMENTED (absence
+        genuinely confirmed against the real `coverage` corpus), yet must NEVER
+        eliminate -- `role=POSITIVE_ALIAS` structurally excludes it from
         `_grounded_elimination`'s loop, unconditionally, regardless of how strong
         the absence evidence looks."""
         judge = _sv.judge(pick=1,
                           requirement_status={"inclusion_term:SYNDX2": "not_documented"})
-        line = self._resolve(judge, judge, coverage=self._coverage())
+        line = self._resolve(judge, coverage=self._coverage())
         self.assertIsNone(line.chosen, line.rationale)
         self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
 
     def test_all_inclusion_terms_not_documented_still_never_eliminates(self):
         """The old "all aliases absent" rule (issue #6 F9-R6-R3, first fix) is
         ALSO now insufficient -- both of SYNDX2's two inclusion terms
-        independently, unanimously, validly reported NOT_DOCUMENTED, against a
-        corpus that genuinely lacks both, must still never eliminate. Absence of
-        every LISTED example is not the same as disproof: an unlisted synonym
-        can map to the same code."""
+        independently, validly reported NOT_DOCUMENTED, against a corpus that
+        genuinely lacks both, must still never eliminate. Absence of every
+        LISTED example is not the same as disproof: an unlisted synonym can map
+        to the same code."""
         terms = {"SYNDX1": {"classic presentation"},
                  "SYNDX2": {"modern presentation", "atypical presentation"}}
 
@@ -1270,7 +1244,7 @@ class RequirementGroundedEliminationTest(unittest.TestCase):
             statuses = {rid: "not_documented" for rid in shown
                        if rid.startswith("inclusion_term:SYNDX2")}
             return _sv.verdict(user, pick=1, requirement_status=statuses)
-        line = self._resolve(_judge, _judge, terms=terms, coverage=self._coverage())
+        line = self._resolve(_judge, terms=terms, coverage=self._coverage())
         self.assertIsNone(line.chosen, line.rationale)
         self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
 
@@ -1284,7 +1258,7 @@ class RequirementGroundedEliminationTest(unittest.TestCase):
         trusting the elimination prose on its own."""
         judge = _sv.judge(pick=1,
                           requirement_status={"inclusion_term:SYNDX2": "not_documented"})
-        line = self._resolve(judge, judge, coverage=self._coverage())
+        line = self._resolve(judge, coverage=self._coverage())
         requirements = line.tie_record["requirements"]
         self.assertTrue(requirements)
         by_id = {r["requirement_id"]: r for r in requirements}
@@ -1309,7 +1283,6 @@ class RequirementGroundedEliminationTest(unittest.TestCase):
         judge = _sv.judge(entails=lambda d: True)
         line = resolve(_request(fact), source,
                        llm=_pinned(judge, "provider-a"),
-                       corroborate=_pinned(judge, "provider-b"),
                        reconciliation=_agreed("span-0"))
         self.assertIsNone(line.chosen, line.rationale)
         self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
@@ -1327,7 +1300,6 @@ class RequirementGroundedEliminationTest(unittest.TestCase):
         judge = _sv.judge(entails=lambda d: True)
         line = resolve(_request(fact), source,
                        llm=_pinned(judge, "provider-a"),
-                       corroborate=_pinned(judge, "provider-b"),
                        reconciliation=_agreed("span-0"))
         self.assertIsNone(line.chosen, line.rationale)
         self.assertEqual(sorted(line.tie_record["still_entailed"]), ["SYNDX1", "SYNDX2"])
@@ -1354,36 +1326,29 @@ class MustSupportGroundedEliminationTest(unittest.TestCase):
                                   covered_pages=(1,), page_image_sha256=("stub-hash",),
                                   uncovered_pages=uncovered_pages)
 
-    def _resolve(self, primary, second, coverage, reconciliation=None):
+    def _resolve(self, primary, coverage, reconciliation=None):
         fact = _fact("assembly service", self.NOT_MENTIONED)
         return resolve(_request(fact), _source(LAT_LEFT, LAT_RIGHT),
                        llm=_pinned(primary, "provider-a"),
-                       corroborate=_pinned(second, "provider-b"),
                        reconciliation=(reconciliation if reconciliation is not None
                                        else _agreed("span-0")),
                        coverage=coverage)
 
-    def test_unanimous_validated_not_documented_grounds_a_must_support_elimination(self):
-        """The positive-path proof: both evaluators unanimously, validly report
-        CAND_RIGHT's own laterality requirement ("right") as NOT_DOCUMENTED,
-        against a `coverage` corpus that genuinely never mentions either side --
-        only MUST_SUPPORT requirements can ground this way."""
+    def test_validated_not_documented_grounds_a_must_support_elimination(self):
+        """The positive-path proof: the evaluator validly reports CAND_RIGHT's own
+        laterality requirement ("right") as NOT_DOCUMENTED, against a `coverage`
+        corpus that genuinely never mentions either side -- only MUST_SUPPORT
+        requirements can ground this way."""
         judge = _sv.judge(pick=1, requirement_status={"laterality:CAND_RIGHT": "not_documented"})
-        line = self._resolve(judge, judge, self._coverage(self.NOT_MENTIONED))
+        line = self._resolve(judge, self._coverage(self.NOT_MENTIONED))
         self.assertEqual(line.chosen.code if line.chosen else None, "CAND_LEFT",
                          line.rationale)
         self.assertIn("CAND_RIGHT", line.tie_record["eliminated"])
         # This exact phrasing is only ever produced by _grounded_elimination's
-        # NEW judgement-based path -- distinguishes it from tiebreak.narrow's
-        # own, separate fallback, which would phrase it differently.
+        # judgement-based path -- distinguishes it from tiebreak.narrow's own,
+        # separate fallback, which would phrase it differently.
         self.assertIn("validated NOT_DOCUMENTED by every evaluator",
                       line.tie_record["eliminated"]["CAND_RIGHT"])
-
-    def test_disagreement_never_grounds_a_must_support_elimination(self):
-        primary = _sv.judge(pick=1, requirement_status={"laterality:CAND_RIGHT": "not_documented"})
-        second = _sv.judge(pick=1, requirement_status={"laterality:CAND_RIGHT": "supported"})
-        line = self._resolve(primary, second, self._coverage(self.NOT_MENTIONED))
-        self.assertIsNone(line.chosen, line.rationale)
 
     def test_negated_mention_never_grounds_a_must_support_elimination(self):
         """issue #6 F9-R6-R6: "not on the right" is a genuinely different,
@@ -1391,19 +1356,18 @@ class MustSupportGroundedEliminationTest(unittest.TestCase):
         CONTRADICTED (negated), not NOT_DOCUMENTED, so the judgement's claim
         must fail to validate."""
         judge = _sv.judge(pick=1, requirement_status={"laterality:CAND_RIGHT": "not_documented"})
-        line = self._resolve(judge, judge,
-                             self._coverage("assembly service, not on the right"))
+        line = self._resolve(judge, self._coverage("assembly service, not on the right"))
         self.assertIsNone(line.chosen, line.rationale)
 
     def test_incomplete_coverage_never_grounds_a_must_support_elimination(self):
         judge = _sv.judge(pick=1, requirement_status={"laterality:CAND_RIGHT": "not_documented"})
-        line = self._resolve(judge, judge,
+        line = self._resolve(judge,
                              self._coverage(self.NOT_MENTIONED, uncovered_pages=(2,)))
         self.assertIsNone(line.chosen, line.rationale)
 
     def test_no_coverage_at_all_never_grounds_a_must_support_elimination(self):
         judge = _sv.judge(pick=1, requirement_status={"laterality:CAND_RIGHT": "not_documented"})
-        line = self._resolve(judge, judge, None)
+        line = self._resolve(judge, None)
         self.assertIsNone(line.chosen, line.rationale)
 
     def test_no_typed_requirements_falls_back_to_pre_existing_behavior_unchanged(self):
@@ -1417,7 +1381,6 @@ class MustSupportGroundedEliminationTest(unittest.TestCase):
                      "assembly service performed, including component one")
         line = resolve(_request(fact), _source(SYN_A, SYN_B),
                        llm=_pinned(_judge(only_one), "provider-a"),
-                       corroborate=_pinned(_judge(only_one), "provider-b"),
                        reconciliation=_agreed("span-0"))
         self.assertIsNone(line.chosen, line.rationale)
         self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
@@ -1438,7 +1401,6 @@ class MustSupportGroundedEliminationTest(unittest.TestCase):
         judge = _sv.judge(entails=lambda d: "left" in d, prefer=lambda d: "left" in d)
         line = resolve(_request(fact), _source(LAT_LEFT, LAT_RIGHT),
                        llm=_pinned(judge, "provider-a"),
-                       corroborate=_pinned(judge, "provider-b"),
                        reconciliation=_agreed("span-0"))
         self.assertEqual(line.chosen.code if line.chosen else None, "CAND_LEFT",
                          line.rationale)

@@ -283,7 +283,7 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
         )
         judges = [_judgement(dispositions), _judgement(dispositions)]
         line = resolution._settle_uniqueness(
-            fact, first, [first, second], judges, {}, "no supported candidate", "",
+            fact, first, [first, second], judges, {}, "no supported candidate",
             reconciliation=None, coverage=_coverage("assembly service performed today"))
         self.assertIsNone(line.chosen)
         self.assertTrue(line.candidate_recall_gap)
@@ -313,11 +313,11 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
 
         with patch.object(resolution._tiebreak, "narrow", return_value=tie):
             deferred = resolution._settle_uniqueness(
-                fact, first, [first, second], judges, {}, "no supported candidate", "",
+                fact, first, [first, second], judges, {}, "no supported candidate",
                 reconciliation=None, coverage=_coverage("assembly service performed today"),
                 defer_page_local_exhaustion=True)
             final = resolution._settle_uniqueness(
-                fact, first, [first, second], judges, {}, "no supported candidate", "",
+                fact, first, [first, second], judges, {}, "no supported candidate",
                 reconciliation=None, coverage=_coverage("assembly service performed today"))
 
         self.assertTrue(deferred.candidate_recall_gap)
@@ -338,7 +338,7 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
             chosen=chosen, entailed=("CAND_CHOSEN",), declared=True,
             candidate_dispositions=(_disp(chosen, "entailed"),))
         line = resolution._settle_uniqueness(
-            fact, chosen, [chosen], [j0, j1], {}, "entailed", "", None)
+            fact, chosen, [chosen], [j0, j1], {}, "entailed", None)
         self.assertIsNone(line.chosen)
         self.assertNotEqual(getattr(line, "method", None), None)
 
@@ -362,7 +362,7 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
             candidate_dispositions=(_disp(chosen, "entailed", evidence_span_ids=("s1",)),
                                     _disp(rival, "contradicted")))
         line = resolution._settle_uniqueness(
-            fact, chosen, [chosen, rival], [j0, j1], {}, "entailed", "", recon)
+            fact, chosen, [chosen, rival], [j0, j1], {}, "entailed", recon)
         self.assertIsNone(line.chosen,
                          "an unresolved eligible rival must block release, never be "
                          "silently ignored")
@@ -398,7 +398,7 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
             candidate_dispositions=(_disp(chosen, "entailed", evidence_span_ids=("s1",)),
                                     _disp(rival, "entailed", evidence_span_ids=("s2",))))
         line = resolution._settle_uniqueness(
-            fact, chosen, [chosen, rival], [j0, j1], {}, "entailed", "", recon)
+            fact, chosen, [chosen, rival], [j0, j1], {}, "entailed", recon)
         self.assertIsNone(line.chosen,
                          "a Gate-A-failing rival must block release, never be silently "
                          "treated as proven wrong or ignored")
@@ -446,7 +446,7 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
                 (chosen.source,), "synthetic recall-only candidate, no positive identity signal"),
         }
         line = resolution._settle_uniqueness(
-            fact, chosen, [chosen], [j0, j1], {}, "entailed", "", recon,
+            fact, chosen, [chosen], [j0, j1], {}, "entailed", recon,
             admissions=admissions)
         self.assertEqual(line.chosen.code if line.chosen else None, "CAND_CHOSEN",
                          "an uncontested sole survivor must still release on Gate A + "
@@ -479,7 +479,7 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
 
         line = resolution._settle_uniqueness(
             fact, None, [supported, excluded], judgements, {},
-            "no proposal", "distinct_origin", recon)
+            "no proposal", recon)
 
         self.assertEqual(line.chosen.code if line.chosen else None,
                          "CAND_SUPPORTED")
@@ -504,7 +504,7 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
 
         line = resolution._settle_uniqueness(
             fact, None, [first, second], judgements, {},
-            "no proposal", "distinct_origin", recon)
+            "no proposal", recon)
 
         self.assertIsNone(line.chosen)
         self.assertEqual(sorted(c.code for c in line.alternatives),
@@ -545,7 +545,7 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
         }
         line = resolution._settle_uniqueness(
             fact, chosen, [chosen, rival], [j0, j1], {}, "entailed",
-            "distinct_origin", recon, admissions=admissions)
+            recon, admissions=admissions)
         self.assertEqual(line.chosen.code if line.chosen else None, "CAND_CHOSEN")
         self.assertIsNone(line.documentation_gap)
 
@@ -616,7 +616,7 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
         }
 
         line = resolution._settle_uniqueness(
-            fact, proposed, [governed, proposed], judgements, {}, "verified", "",
+            fact, proposed, [governed, proposed], judgements, {}, "verified",
             recon, admissions=admissions)
 
         self.assertEqual(line.chosen.code if line.chosen else None, "CAND_GOVERNED")
@@ -675,7 +675,7 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
                 _disp(chosen, "entailed", evidence_span_ids=("s1",)),
                 _disp(excluded, "contradicted", evidence_span_ids=("s2",))))
         line = resolution._settle_uniqueness(
-            fact, chosen, [chosen, excluded], [j0, j1], {}, "entailed", "", recon)
+            fact, chosen, [chosen, excluded], [j0, j1], {}, "entailed", recon)
         self.assertIsNotNone(line.chosen, line.rationale)
         self.assertEqual(line.chosen.code, "CAND_CHOSEN")
 
@@ -708,7 +708,7 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
 
         line = resolution._settle_uniqueness(
             fact, chosen, [chosen, rival], [primary, corroborator], {},
-            "independent verification", "cross-vendor corroboration", recon)
+            "independent verification", recon)
 
         self.assertEqual(line.chosen.code if line.chosen else None, chosen.code,
                          line.rationale)
@@ -750,7 +750,7 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
 
         line = resolution._settle_uniqueness(
             fact, candidate, [candidate], [primary, corroborator], {},
-            "independent verification", "cross-vendor corroboration", recon,
+            "independent verification", recon,
             admissions=admissions)
 
         self.assertEqual(line.chosen.code if line.chosen else None, candidate.code,
@@ -786,30 +786,34 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
 
         line = resolution._settle_uniqueness(
             fact, candidate, [candidate], [primary, corroborator], {},
-            "independent verification", "cross-vendor corroboration", recon,
+            "independent verification", recon,
             admissions=admissions)
 
         self.assertIsNone(line.chosen)
         self.assertIsNone(line.documentation_gap)
         self.assertIn(SYSTEM_UNRESOLVED_MARKER, line.rationale)
 
-    def test_a_disputed_candidates_own_undocumented_indication_clause_becomes_a_provider_question(self):
+    def test_a_disputed_candidates_own_undocumented_indication_clause_stays_a_system_hold(self):
         """issue #6, independent root-cause investigation (real-data replay
-        against the designated note): before `tiebreak.AXIS_INDICATION_CLAUSE`
-        existed, two evaluators disagreeing specifically about a candidate
-        whose OWN descriptor states a positive "(eg, ...)" indication clause
-        had NO governed axis to adjudicate through -- `_tiebreak.narrow` had
-        nothing to test (no winner, and no provider question either, since
-        `discriminating_axes` never surfaced the clause at all), so the
-        disagreement fell to a permanent, unrescuable SYSTEM_UNRESOLVED hold
-        that reproduced identically on every retry. Reproduced live on the
-        real note (CPT 28118 vs 28120, "...eg, osteomyelitis or bossing...");
-        pinned here with synthetic vocabulary. Both evaluators agree on
-        CAND_ALPHA (states no indication clause); they disagree specifically
-        about CAND_BETA, whose own descriptor requires documenting "variant
-        condition" -- a fact the evidence never states either way. This must
-        now become a genuine, specific, answerable provider question naming
-        that exact fact, never a silent hold with no path to resolution."""
+        against the designated note), then Codex's independent re-review
+        (P1-2 correction): two evaluators disagreeing specifically about a
+        candidate whose OWN descriptor states a positive "(eg, ...)"
+        indication clause. A prior version of this axis compiled the clause
+        as a queryable MUST_SUPPORT requirement so this disagreement could
+        become a specific provider question -- Codex found that unsafe: by
+        AMA/CPT convention such a clause is a non-exhaustive ILLUSTRATIVE
+        EXAMPLE, never a checklist, and fabricating a provider question from
+        it (with no typed, authoritative requirement field or
+        source-governed rule behind it) is exactly the over-querying pattern
+        this correction removes. The clause is now recorded for
+        recall/audit only (`POSITIVE_ALIAS`, never elimination- or
+        query-eligible), so this disagreement has no governed axis to
+        adjudicate through and correctly reverts to the SAME permanent,
+        unrescuable SYSTEM_UNRESOLVED hold this axis was originally built to
+        rescue -- reproduced live on the real note (CPT 28118 vs 28120,
+        "...eg, osteomyelitis or bossing..."); pinned here with synthetic
+        vocabulary. Both evaluators agree on CAND_ALPHA (states no
+        indication clause); they disagree specifically about CAND_BETA."""
         from claude_coder.models import SYSTEM_UNRESOLVED_MARKER
         chosen = _cand("CAND_ALPHA", "assembly service, broad category")
         rival = _cand("CAND_BETA",
@@ -832,13 +836,11 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
 
         line = resolution._settle_uniqueness(
             fact, chosen, [chosen, rival], [primary, corroborator], {},
-            "independent verification", "cross-vendor corroboration", recon)
+            "independent verification", recon)
 
         self.assertIsNone(line.chosen)
-        self.assertNotIn(SYSTEM_UNRESOLVED_MARKER, line.rationale or "")
-        self.assertIsNotNone(line.documentation_gap)
-        self.assertIn("variant condition", line.documentation_gap)
-        self.assertIn("indication_clause", line.documentation_gap)
+        self.assertIsNone(line.documentation_gap)
+        self.assertIn(SYSTEM_UNRESOLVED_MARKER, line.rationale)
 
     def test_malformed_disagreement_remains_a_system_hold_not_a_provider_question(self):
         """The new resolver must not launder a citation failure into autonomy.
@@ -869,7 +871,7 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
 
         line = resolution._settle_uniqueness(
             fact, chosen, [chosen, rival], [primary, corroborator], {},
-            "independent verification", "cross-vendor corroboration", recon)
+            "independent verification", recon)
 
         self.assertIsNone(line.chosen)
         self.assertIsNone(line.documentation_gap)
@@ -887,7 +889,7 @@ class SettleUniquenessSystemHoldTest(unittest.TestCase):
             chosen=a, entailed=("CAND_A", "CAND_B"), declared=True,
             candidate_dispositions=(_disp(a, "contradicted"), _disp(b, "entailed")))
         line = resolution._settle_uniqueness(
-            fact, a, [a, b], [j0, j1], {}, "entailed", "", None)
+            fact, a, [a, b], [j0, j1], {}, "entailed", None)
         self.assertIsNone(line.chosen)
         self.assertIsNone(line.documentation_gap,
                           "a system verification gap must never become a provider "

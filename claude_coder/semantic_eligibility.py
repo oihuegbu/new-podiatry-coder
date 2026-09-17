@@ -614,21 +614,22 @@ _WITH_OR_WITHOUT = re.compile(r"[,;]?\s*\bwith\s+or\s+without\b.*$", re.IGNORECA
 #: and "and"/"&" for a single compound target ("skin and subcutaneous tissue").
 _TARGET_SPLIT = re.compile(r"\s*(?:,|;|/|\bor\b)\s*", re.IGNORECASE)
 #: issue #6, independent root-cause investigation (real-data replay against
-#: the designated note: CPT 24305 "Tendon lengthening, upper arm or elbow,
-#: EACH TENDON" wrongly grounded as anatomically compatible with a fact
-#: documenting "Achilles tendon" -- `_TARGET_SPLIT` correctly separates
-#: "each tendon" from "upper arm"/"elbow" as its own component, but that
-#: component is a BILLING-UNIT qualifier ("each"/"per"/"single"/"pair"/
-#: "bilateral" -- `ontology._CARDINALITY`, the SAME closed vocabulary
-#: `parse_descriptor` already uses to detect a descriptor's cardinality),
-#: never a second alternative anatomical site. Left in, its generic head
-#: noun ("tendon") ancestor-relates to almost any specific tendon concept
-#: (Achilles tendon IS a tendon), so `_anatomy_compatibility` reported
-#: SUPPORTED_HIERARCHICAL for a candidate whose ACTUAL named sites --
-#: "upper arm", "elbow" -- correctly related as UNRESOLVED. A target
-#: component whose own first word is a cardinality word states HOW MANY,
-#: never WHERE, so it is dropped here exactly like the "with or without"
-#: qualifier clause above -- never split into a false anatomical target.
+#: the designated note: a candidate descriptor "Lengthening, other site,
+#: EACH STRUCTURE" wrongly grounded as anatomically compatible with a fact
+#: documenting a specific named structure -- `_TARGET_SPLIT` correctly
+#: separates "each structure" from the descriptor's other named sites as its
+#: own component, but that component is a BILLING-UNIT qualifier ("each"/
+#: "per"/"single"/"pair"/"bilateral" -- `ontology._CARDINALITY`, the SAME
+#: closed vocabulary `parse_descriptor` already uses to detect a descriptor's
+#: cardinality), never a second alternative anatomical site. Left in, its
+#: generic head noun ("structure") ancestor-relates to almost any specific
+#: structure concept (the documented structure IS a structure), so
+#: `_anatomy_compatibility` reported SUPPORTED_HIERARCHICAL for a candidate
+#: whose ACTUAL named sites -- the descriptor's other, unrelated sites --
+#: correctly related as UNRESOLVED. A target component whose own first word
+#: is a cardinality word states HOW MANY, never WHERE, so it is dropped here
+#: exactly like the "with or without" qualifier clause above -- never split
+#: into a false anatomical target.
 _CARDINALITY_LEADING_RE = re.compile(
     r"^(?:" + "|".join(re.escape(w) for w in _ontology._CARDINALITY) + r")\b",
     re.IGNORECASE)
@@ -765,9 +766,9 @@ def _traumatic_onset_dominance_exclusions(facts: list[ClinicalFact], candidates:
                                           reconciliation=None) -> dict[tuple[str, str], str]:
     """`{(code, system) -> reason}` for injury-chapter candidates the record's
     OWN documented onset mechanism rules out (issue #6, independent root-
-    cause investigation: the real note's "Insertional Achilles tendon
+    cause investigation: the real note's "Insertional structure-alpha
     degeneration" diagnosis kept losing a ranking tie to an acute-injury
-    Achilles-strain code with no governed signal to settle it).
+    structure-alpha-strain code with no governed signal to settle it).
 
     `extraction.py`'s "traumatic_onset" attribute (boolean) is the record's
     OWN, extraction-time answer to "does the note document this condition

@@ -135,7 +135,7 @@ class PipelineEndToEnd(unittest.TestCase):
         # real-world "no billing context available yet" case.
         r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
                            extract_llm=lambda s, u: _FACTS_UNRESOLVED, verify_llm=_sel,
-                           corroborate_llm=_sel, audit_repository=NullAuditRepository())
+                           audit_repository=NullAuditRepository())
         billed = [ln for ln in r.lines if ln.chosen and ln.chosen.code == "PROC_X"]
         self.assertTrue(billed, "unresolved (not contradicted) ownership must still reach retrieval")
         self.assertEqual(billed[0].claim_submission_status, ClaimSubmissionStatus.HELD)
@@ -143,7 +143,7 @@ class PipelineEndToEnd(unittest.TestCase):
     def test_contradicted_ownership_never_reaches_retrieval(self):
         r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
                            extract_llm=lambda s, u: _FACTS_CONTRADICTED, verify_llm=_sel,
-                           corroborate_llm=_sel, audit_repository=NullAuditRepository(),
+                           audit_repository=NullAuditRepository(),
                            billing_context=_CONTRADICTING_CONTEXT)
         billed = [ln for ln in r.lines if ln.chosen and ln.chosen.code == "PROC_X"]
         self.assertFalse(billed, "an affirmative ownership contradiction must still block retrieval")
@@ -157,7 +157,7 @@ class HeldSubmissionIsEnforcedNotOnlyStamped(unittest.TestCase):
     def test_held_line_is_excluded_from_billable_lines(self):
         r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
                            extract_llm=lambda s, u: _FACTS_UNRESOLVED, verify_llm=_sel,
-                           corroborate_llm=_sel, audit_repository=NullAuditRepository())
+                           audit_repository=NullAuditRepository())
         self.assertTrue(any(ln.chosen and ln.chosen.code == "PROC_X" for ln in r.lines))
         self.assertFalse(any(ln.chosen and ln.chosen.code == "PROC_X"
                              for ln in r.billable_lines),
@@ -170,7 +170,7 @@ class HeldSubmissionIsEnforcedNotOnlyStamped(unittest.TestCase):
         from claude_coder.models import Destination, Verdict
         r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
                            extract_llm=lambda s, u: _FACTS_UNRESOLVED, verify_llm=_sel,
-                           corroborate_llm=_sel, audit_repository=NullAuditRepository())
+                           audit_repository=NullAuditRepository())
         self.assertNotEqual(r.destination, Destination.AUTO_READY)
         self.assertNotEqual(r.verdict, Verdict.AUTO_READY)
         self.assertTrue(any(item["blocking"] for item in r.routing))
@@ -190,7 +190,7 @@ class HeldSubmissionIsEnforcedNotOnlyStamped(unittest.TestCase):
                                                  bundle_from_coding_result)
         r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
                            extract_llm=lambda s, u: _FACTS_UNRESOLVED, verify_llm=_sel,
-                           corroborate_llm=_sel, audit_repository=NullAuditRepository())
+                           audit_repository=NullAuditRepository())
         bundle = bundle_from_coding_result(
             r, source_document=SourceDocument(), context=EncounterContext(),
             authority=AuthorityBinding())
@@ -251,7 +251,7 @@ class HeldSubmissionIsEnforcedNotOnlyStamped(unittest.TestCase):
                                                  bundle_from_coding_result)
         r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
                            extract_llm=lambda s, u: _FACTS_UNRESOLVED, verify_llm=_sel,
-                           corroborate_llm=_sel, audit_repository=NullAuditRepository())
+                           audit_repository=NullAuditRepository())
         bundle = bundle_from_coding_result(
             r, source_document=SourceDocument(), context=EncounterContext(),
             authority=AuthorityBinding())

@@ -315,23 +315,25 @@ def _semantic_anatomy_requirements(candidates: list[CandidateCode], source: Any
     by_code = {c.code: c for c in candidates}
     for code in sorted(resolved):
         # issue #6, independent review: a candidate's OWN anatomy targets can
-        # themselves be ALTERNATIVES ("talus or calcaneus" -- either bone
-        # qualifies this ONE code), not a set of co-required sites. If any one
-        # of THIS candidate's own alternatives is already a concept every tied
-        # candidate accepts (`shared`), this candidate is fully satisfiable
-        # through that same shared anatomy, exactly like its rivals -- so its
-        # OTHER, candidate-unique alternative must not be promoted into a
-        # MUST_SUPPORT requirement the documentation is then held to. Doing so
-        # demanded MORE anatomy specificity than the candidate's own descriptor
-        # actually requires (its alternatives are an OR, not an AND), reliably
-        # producing an unresolvable evaluator split: one evaluator correctly
-        # reads the descriptor's real OR semantics and finds the documented
-        # anatomy sufficient, the other correctly finds the wrongly-compiled
-        # single-target requirement unmet. Reproduced directly against the
-        # designated operative note: CPT 28120 ("...talus or calcaneus")
-        # against a documented calcaneus procedure, tied with 28118/28119
-        # (calcaneus only) -- calcaneus is `shared`, so this fix now excludes
-        # 28120 entirely rather than manufacturing a "must document talus"
+        # themselves be ALTERNATIVES ("structure alpha or structure beta" --
+        # either structure qualifies this ONE code), not a set of co-required
+        # sites. If any one of THIS candidate's own alternatives is already a
+        # concept every tied candidate accepts (`shared`), this candidate is
+        # fully satisfiable through that same shared anatomy, exactly like its
+        # rivals -- so its OTHER, candidate-unique alternative must not be
+        # promoted into a MUST_SUPPORT requirement the documentation is then
+        # held to. Doing so demanded MORE anatomy specificity than the
+        # candidate's own descriptor actually requires (its alternatives are
+        # an OR, not an AND), reliably producing an unresolvable evaluator
+        # split: one evaluator correctly reads the descriptor's real OR
+        # semantics and finds the documented anatomy sufficient, the other
+        # correctly finds the wrongly-compiled single-target requirement
+        # unmet. Reproduced directly against the designated operative note: a
+        # candidate whose own descriptor names "...structure alpha or
+        # structure beta" against a documented structure-alpha procedure,
+        # tied with siblings naming structure alpha only -- structure alpha is
+        # `shared`, so this fix now excludes the alpha-or-beta candidate
+        # entirely rather than manufacturing a "must document structure beta"
         # requirement no candidate's own descriptor actually imposes.
         if concept_sets[code] & shared:
             continue

@@ -29,7 +29,7 @@ def test_eligible_service_reaches_retrieval_and_resolves():
     and resolves as today."""
     r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
                        extract_llm=lambda s, u: _FACTS, verify_llm=_sel,
-                       corroborate_llm=_sel, audit_repository=_audit(),
+                       audit_repository=_audit(),
                        billing_context={"billing_entity_id": "actor-1", "participants": [{"id": "actor-1", "type": "person", "roles": ["performer"]}]})
     assert any(ln.chosen and ln.chosen.code == "PROC_X" for ln in r.lines)
 
@@ -54,7 +54,7 @@ def test_service_accounting_gate_rejects_a_suppressed_performed_service(monkeypa
 
     r = code_encounter("e", _NOTE, "2026-03-14", source=_src(),
                        extract_llm=lambda s, u: _FACTS, verify_llm=_sel,
-                       corroborate_llm=_sel, audit_repository=_audit())
+                       audit_repository=_audit())
     # Nothing was retrieved, but the omission is now a typed, fact-scoped system
     # failure rather than a successful-looking non-claim classification.
     assert not any(ln.chosen and ln.chosen.code == "PROC_X" for ln in r.lines)
@@ -93,7 +93,7 @@ def test_asserted_part_of_services_each_cross_retrieval_boundary():
     r = code_encounter(
         "e", note, "2026-03-14", source=src,
         extract_llm=lambda s, u: facts, verify_llm=_sel,
-        corroborate_llm=_sel, audit_repository=_audit(),
+        audit_repository=_audit(),
         billing_context={"billing_entity_id": "actor-1", "participants": [
             {"id": "actor-1", "type": "person", "roles": ["performer"]}]})
 

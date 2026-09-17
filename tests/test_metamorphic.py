@@ -83,8 +83,7 @@ def test_specificity_upgrade():
     line = ResolvedLine(fact=f, chosen=CandidateCode("RR10", "icd10", "Widgetopathy, unspecified", 1.0),
                         method=ResolutionMethod.VERIFIED)
     out = resolution.refine_diagnosis_specificity(
-        line, src, _sv.judge(pick=2, reason="more specific"),
-        _sv.judge(pick=2, reason="ok"))
+        line, src, _sv.judge(pick=2, reason="more specific"))
     assert out.resolved and out.chosen.code == "RR1.9"
 
 
@@ -331,9 +330,9 @@ def test_snomed_crosswalk_hit_is_verified_not_blindly_trusted():
                             evidence=[EvidenceSpan("documented thing")], disposition=Disposition.PERFORMED)
     def stub(entailed):
         return _sv.judge(entails=lambda d: bool(entailed), reason="x")
-    reject = resolution.resolve(_request(fact()), src, llm=stub(False), corroborate=stub(False))
+    reject = resolution.resolve(_request(fact()), src, llm=stub(False))
     assert not reject.resolved                              # crosswalk default not blindly accepted
-    accept = resolution.resolve(_request(fact()), src, llm=stub(True), corroborate=stub(True))
+    accept = resolution.resolve(_request(fact()), src, llm=stub(True))
     assert accept.resolved and accept.chosen.code == "WW01"  # confirmed -> resolves
 
 
@@ -620,7 +619,7 @@ def test_residual_catchall_escalates_through_resolve():
         retrieval={("*", "icd10"): [CandidateCode("Z999", "icd10", "Other specified disorders of bone, ankle and foot", 0.9)]})
     fact = ClinicalFact(FactKind.DIAGNOSIS, "Haglund-type retrocalcaneal exostosis",
                         evidence=[EvidenceSpan("Haglund-type retrocalcaneal exostosis")])
-    line = resolution.resolve(_request(fact), src, llm=stub, corroborate=stub)
+    line = resolution.resolve(_request(fact), src, llm=stub)
     assert not line.resolved and line.method is ResolutionMethod.ABSTAINED
     # routes to coder REVIEW, not PROVIDER_QUERY: no documentation_gap, and the
     # residual candidate is surfaced as an alternative for the coder to classify.
@@ -634,19 +633,19 @@ def test_residual_catchall_escalates_through_resolve():
         retrieval={("*", "icd10"): [CandidateCode("Z998", "icd10", "Other bursitis, not elsewhere classified, right ankle and foot", 0.9)]})
     fact2 = ClinicalFact(FactKind.DIAGNOSIS, "Retrocalcaneal bursitis",
                          evidence=[EvidenceSpan("Retrocalcaneal bursitis")])
-    line2 = resolution.resolve(_request(fact2), src2, llm=stub, corroborate=stub)
+    line2 = resolution.resolve(_request(fact2), src2, llm=stub)
     assert line2.resolved and line2.chosen.code == "Z998"
 
     # A governed term map can ground a synonym that a residual descriptor does
-    # not repeat, but the mapped candidate is still accepted only after both
-    # entailment evaluators confirm it.
+    # not repeat, but the mapped candidate is still accepted only after the
+    # entailment evaluator confirms it.
     src3 = MockSource(
         records={("ZX99", "icd10"): {
             "long_description": "Other specified category", "active": True}},
         snomed={"documented alpha": {"ZX99"}})
     fact3 = ClinicalFact(FactKind.DIAGNOSIS, "documented alpha",
                          evidence=[EvidenceSpan("documented alpha")])
-    line3 = resolution.resolve(_request(fact3), src3, llm=stub, corroborate=stub)
+    line3 = resolution.resolve(_request(fact3), src3, llm=stub)
     assert line3.resolved and line3.chosen.source == "snomed-crosswalk"
     assert line3.chosen.authority["term_to_code_match"]["source_identity"]
 
@@ -795,7 +794,7 @@ def test_llm_proposals_cannot_crowd_out_retrieval():
     stub = _sv.judge(entails=lambda d: "retrieved service" in d.lower(),
                      propose=["P0", "P1", "P2", "P3", "P4", "P5"], reason="retrieved")
 
-    line = resolve(_request(fact), src, llm=stub, corroborate=stub)
+    line = resolve(_request(fact), src, llm=stub)
     assert line.tie_record is not None, line.rationale
     assert "RCODE" in line.tie_record["shortlist"]        # the retrieval floor held
     assert "RCODE" in line.tie_record["still_entailed"]   # and it was never ruled out

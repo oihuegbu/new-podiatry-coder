@@ -135,14 +135,15 @@ def _line_confidence(line: ResolvedLine) -> float:
     if not line.resolved:
         return 0.0
     # DETERMINISTIC = authoritative index / structural descriptor entailment;
-    # VERIFIED = propose-then-verify confirmed by an INDEPENDENT second model. Both
-    # are high-trust groundings of the code itself, so both are gated only by how
-    # well the underlying fact is documented (fact.confidence) — a cross-model-
-    # confirmed line is not penalized to 0 just because an LLM was in the loop.
-    # "INDEPENDENT" is a checked precondition, not a naming convention: `resolution`
-    # mints VERIFIED only when the corroborating judgement came from a different declared
-    # model provider (`verify.corroboration_origin`), so this branch cannot be reached by
-    # one vendor agreeing with itself. Everything short of that lands on ARBITRATED below.
+    # VERIFIED = propose-then-verify's single evaluator positively entailed the
+    # candidate's own descriptor/requirement contract, with every other shortlisted
+    # candidate genuinely eliminated. Both are high-trust groundings of the code
+    # itself, so both are gated only by how well the underlying fact is documented
+    # (fact.confidence) — a verified line is not penalized to 0 just because an LLM
+    # was in the loop. ARBITRATED below is a DIFFERENT mechanism entirely
+    # (`arbitration.arbitrate`'s single-model tie-break among leftover alternatives
+    # when propose-then-verify itself did not resolve a line), not a discount tier
+    # code selection can still land on.
     if line.method in (ResolutionMethod.DETERMINISTIC, ResolutionMethod.VERIFIED):
         return line.fact.confidence
     if line.method is ResolutionMethod.ARBITRATED:      # single-model tie-break
@@ -603,11 +604,13 @@ def decide(result: CodingResult,
 
     # 4. Release rests on CLOSURE, not on a self-reported confidence number. A line
     #    is autonomous when its code is GROUNDED — resolved by a deterministic
-    #    authoritative match (DETERMINISTIC) or a code the documentation entails,
-    #    confirmed by an INDEPENDENT second model (VERIFIED) — AND every applicable
-    #    deterministic gate above cleared. A single-model tie-break (ARBITRATED) is
-    #    NOT grounded: one model's pick among candidates, with no independent
-    #    corroboration, is exactly the judgement call a coder owns. The LLM's
+    #    authoritative match (DETERMINISTIC) or a code the evaluator positively
+    #    entailed against its own descriptor/requirement contract, with every other
+    #    candidate genuinely eliminated (VERIFIED) — AND every applicable
+    #    deterministic gate above cleared. `arbitration.arbitrate`'s tie-break
+    #    (ARBITRATED) is NOT grounded: a pick among leftover alternatives when
+    #    propose-then-verify itself did not resolve the line is exactly the
+    #    judgement call a coder owns. The LLM's
     #    self-reported/agreement confidence is deliberately NOT the gate (it is poorly
     #    calibrated); the only self-report still consulted is the SHAKY_EXTRACTION
     #    floor — a fact the note barely documents gets a human even when its code is

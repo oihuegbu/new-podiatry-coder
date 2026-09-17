@@ -2437,8 +2437,7 @@ class ProposeVerifyTest(unittest.TestCase):
                      ("CODEBETA", "cpt"): {"long_description": self.BETA, "active": True}},
             retrieval={("*", "cpt"): [CandidateCode("CODEBETA", "cpt", self.BETA, 0.95)]})
         line = resolve(_request(self._fact()), src,
-                       llm=_from(self._llm(propose=["CODEALPHA"]), "provider-a"),
-                       corroborate=_from(self._corroborator(confirm=True), "provider-b"))
+                       llm=self._llm(propose=["CODEALPHA"]))
         self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
         self.assertIsNone(line.chosen)
         self.assertEqual({c.code for c in line.alternatives}, {"CODEBETA"})
@@ -2460,125 +2459,31 @@ class ProposeVerifyTest(unittest.TestCase):
         self.assertEqual([c.code for c in cands], ["CODEALPHA"])   # nonexistent code dropped
         self.assertEqual(cands[0].descriptor, self.ALPHA)          # descriptor from the record
 
-    def _corroborator(self, confirm, missing=False):
-        """The INDEPENDENT judge, answering about the WHOLE shortlist. `confirm` means it
-        finds the documented act (alpha) entailed and eliminates the near-synonym."""
-        return _sv.judge(entails=(lambda d: "alpha" in d.lower() and "beta" not in d.lower()) if confirm else (lambda d: False),
-                         missing_element=missing, reason="second opinion")
-
-    def test_corroboration_cannot_make_untyped_terms_selecting(self):
-        """Two declared, distinct model origins do not convert a raw descriptor-token
-        difference into independent typed evidence."""
+    def test_untyped_descriptor_terms_cannot_ground_elimination(self):
+        """A raw descriptor-token difference (untyped, no governed axis behind
+        it) does not ground an elimination even when the single evaluator
+        itself names a reason -- `_grounded_elimination` independently
+        confirms every named reason, and a bare wording difference does not
+        clear that bar."""
         from claude_coder.models import ResolutionMethod
         from claude_coder.resolution import resolve
-        line = resolve(_request(self._fact()), self._src(),
-                       llm=_from(self._llm(), "provider-a"),
-                       corroborate=_from(self._corroborator(confirm=True), "provider-b"))
+        line = resolve(_request(self._fact()), self._src(), llm=self._llm())
         self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
         self.assertIsNone(line.chosen)
         self.assertEqual(line.tie_record["still_entailed"],
                          ["CODEBETA", "CODEALPHA"])
 
     def test_missing_element_escalates_as_provider_query(self):
-        # second model says the code fits but the note omits a required element ->
+        # the evaluator says the code fits but the note omits a required element ->
         # escalate as a provider query, do NOT down-code to something that omits it.
         from claude_coder.models import ResolutionMethod
         from claude_coder.resolution import resolve
-        line = resolve(_request(self._fact()), self._src(), llm=self._llm(),
-                       corroborate=self._corroborator(confirm=False, missing=True))
+        line = resolve(_request(self._fact()), self._src(),
+                       llm=_sv.judge(entails=lambda d: False, missing_element=True,
+                                    reason="documented act matches"))
         self.assertFalse(line.resolved)
         self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
         self.assertIn("PROVIDER QUERY", line.rationale)
-
-    def test_wrong_code_reselects_to_confirmed_alternative(self):
-        # second model rejects the first pick as a WRONG code (not a doc gap) -> the
-        # loop re-selects among the remaining candidates and accepts the one both
-        # models agree on.
-        import json
-        import re
-        from claude_coder.data_access import MockSource
-        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
-                                         ResolutionMethod)
-        from claude_coder.resolution import resolve
-        d1, d2 = "act alpha primary form", "act alpha secondary form"
-        src = MockSource(
-            records={("A1", "cpt"): {"long_description": d1, "active": True},
-                     ("A2", "cpt"): {"long_description": d2, "active": True}},
-            retrieval={("*", "cpt"): [CandidateCode("A1", "cpt", d1, 0.9),
-                                      CandidateCode("A2", "cpt", d2, 0.8)]})
-
-        # picks the first alpha still on the list; both forms are entailed for it
-        sel = _sv.judge(entails=lambda d: "alpha" in d.lower(), reason="alpha")
-        # the independent judge entails only A2, so A1 is rejected as a WRONG code
-        corr = _sv.judge(entails=lambda d: "secondary" in d.lower(), reason="x")
-
-        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="act alpha",
-                            evidence=[EvidenceSpan("act alpha performed")], confidence=0.9)
-        line = resolve(_request(fact), src, llm=_from(sel, "provider-a"),
-                       corroborate=_from(corr, "provider-b"))
-        self.assertEqual(line.method, ResolutionMethod.VERIFIED)
-        self.assertEqual(line.chosen.code, "A2")     # re-selected past the rejected A1
-
-    def test_overqualified_first_pick_reselects_to_supported_alternative(self):
-        """A missing-element verdict eliminates only the overqualified candidate.
-        A different authoritative candidate that both evaluators support must still
-        be evaluated and may release; the first candidate must not terminate the
-        entire service line as a provider query."""
-        from claude_coder.data_access import MockSource
-        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
-                                         ResolutionMethod)
-        from claude_coder.resolution import resolve
-        narrow = "act alpha with additional documented requirement"
-        supported = "act alpha"
-        src = MockSource(
-            records={("NARROW", "cpt"): {"long_description": narrow, "active": True},
-                     ("SUPPORTED", "cpt"): {"long_description": supported,
-                                              "active": True}},
-            retrieval={("*", "cpt"): [CandidateCode("NARROW", "cpt", narrow, 0.9),
-                                       CandidateCode("SUPPORTED", "cpt", supported, 0.8)]})
-        primary = _sv.judge(entails=lambda d: "act alpha" in d.lower(),
-                            prefer=lambda d: "additional" in d.lower(), reason="alpha")
-        corroborator = _sv.judge(
-            entails=lambda d: "additional" not in d.lower(),
-            missing_element=True, reason="the additional requirement is not documented")
-        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="act alpha",
-                            evidence=[EvidenceSpan("act alpha performed")], confidence=0.95)
-
-        line = resolve(_request(fact), src,
-                       llm=_from(primary, "provider-a"),
-                       corroborate=_from(corroborator, "provider-b"))
-
-        self.assertEqual(line.method, ResolutionMethod.VERIFIED, line.rationale)
-        self.assertEqual(line.chosen.code, "SUPPORTED")
-
-    def test_reselection_evaluates_the_entire_bounded_shortlist(self):
-        """A supported lower-ranked candidate must not be hidden behind a fixed
-        number of rejected candidates.  Every candidate in the already-bounded
-        shortlist is evaluated at most once."""
-        from claude_coder.data_access import MockSource
-        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
-                                         ResolutionMethod)
-        from claude_coder.resolution import resolve
-        descriptors = [f"act alpha variant {n}" for n in range(4)]
-        records = {(f"C{n}", "cpt"): {"long_description": desc, "active": True}
-                   for n, desc in enumerate(descriptors)}
-        retrieval = {("*", "cpt"): [
-            CandidateCode(f"C{n}", "cpt", desc, 1.0 - n / 10)
-            for n, desc in enumerate(descriptors)]}
-        src = MockSource(records=records, retrieval=retrieval)
-        primary = _sv.judge(entails=lambda d: True, reason="plausible candidate")
-        corroborator = _sv.judge(
-            entails=lambda d: "variant 3" in d.lower(),
-            missing_element=True, reason="earlier variant is overqualified")
-        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="act alpha",
-                            evidence=[EvidenceSpan("act alpha performed")], confidence=0.95)
-
-        line = resolve(_request(fact), src,
-                       llm=_from(primary, "provider-a"),
-                       corroborate=_from(corroborator, "provider-b"))
-
-        self.assertEqual(line.method, ResolutionMethod.VERIFIED, line.rationale)
-        self.assertEqual(line.chosen.code, "C3")
 
 
 class ProposedCandidateServiceRoleTest(unittest.TestCase):
@@ -3255,414 +3160,6 @@ class ProposedAndRetrievedSameCodeExclusionTest(unittest.TestCase):
         self.assertEqual(line.chosen.code, "UNBOUNDED", line.rationale)
 
 
-class CorroborationIndependenceTest(unittest.TestCase):
-    """Round 5, phase 5 — agreement between two calls to the SAME model provider is not
-    corroboration, so it cannot buy the grounded VERIFIED method or the autonomy that rides
-    on it.
-
-    This is the milder, CONJUNCTIVE sibling of the F6-R3 necessity defect: a corroborator
-    can only ever subtract (a disagreeing one abstains), never manufacture a code that was
-    not already an authoritative-table candidate. What it could wrongly do is CERTIFY —
-    turn one vendor's opinion, sampled twice, into the 'independently confirmed' status
-    `autonomy` treats as grounded and releases without a human. Synthetic codes throughout;
-    the mechanic is about assertion origins, not about any medical term."""
-
-    ALPHA = "Act alpha of the structure, unspecified approach"
-
-    def _src(self):
-        from claude_coder.data_access import MockSource
-        return MockSource(
-            records={("CODEALPHA", "cpt"): {"long_description": self.ALPHA, "active": True}},
-            retrieval={("*", "cpt"): [CandidateCode("CODEALPHA", "cpt", self.ALPHA, 0.9)]})
-
-    def _fact(self):
-        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
-        return ClinicalFact(kind=FactKind.PROCEDURE,
-                            description="act alpha of the structure",
-                            evidence=[EvidenceSpan("act alpha performed on the structure")],
-                            confidence=0.95)
-
-    def _select(self):
-        return _sv.judge(pick=1, reason="documented act matches")
-
-    def _corroborator(self, confirm=True):
-        return _sv.judge(entails=lambda d: bool(confirm), reason="second opinion")
-
-    def _resolve(self, primary_provider, second_provider, confirm=True):
-        from claude_coder.resolution import resolve
-        llm = self._select()
-        corr = self._corroborator(confirm)
-        if primary_provider:
-            llm = _from(llm, primary_provider)
-        if second_provider:
-            corr = _from(corr, second_provider)
-        return resolve(_request(self._fact()), self._src(), llm=llm, corroborate=corr)
-
-    # ---- the defect ---------------------------------------------------------------
-    def test_same_provider_agreement_is_not_verified(self):
-        """The deployed shape the finding named: a 'corroborator' that is a second profile
-        of the SAME vendor. The code is still offered (it is an authoritative candidate the
-        documentation entails, and dropping it would under-code), but it is ARBITRATED."""
-        line = self._resolve("claude", "claude")
-        self.assertTrue(line.resolved)
-        self.assertEqual(line.chosen.code, "CODEALPHA")
-        self.assertEqual(line.method, ResolutionMethod.ARBITRATED)
-        # and it must not CLAIM independence anywhere a human or an auditor would read it
-        self.assertNotIn("independently confirmed", line.rationale)
-        self.assertIn("same model provider", line.rationale.lower())
-
-    def test_same_provider_agreement_is_recorded_not_erased(self):
-        """Suppressing the CREDIT must not suppress the RECORD: the audit trail still says
-        a second opinion agreed, and says why that earned nothing."""
-        line = self._resolve("claude", "claude")
-        self.assertIn("a second opinion agreed", line.rationale)
-        self.assertIn("not independently corroborated", line.rationale.lower())
-
-    def test_undeclared_origins_fail_closed(self):
-        """Two callables that declare no identity prove nothing about independence, and
-        'we cannot tell' must never read as 'confirmed'."""
-        line = self._resolve(None, None)
-        self.assertTrue(line.resolved)
-        self.assertEqual(line.method, ResolutionMethod.ARBITRATED)
-        self.assertIn("declare no provider identity", line.rationale)
-
-    def test_same_callable_for_both_roles_is_not_independent(self):
-        """Passing ONE callable as both the verifier and the corroborator is the most
-        literal form of self-agreement."""
-        from claude_coder.resolution import resolve
-
-        both = _from(_sv.judge(entails=lambda d: True, reason="x"), "provider-a")
-        line = resolve(_request(self._fact()), self._src(), llm=both, corroborate=both)
-        self.assertEqual(line.method, ResolutionMethod.ARBITRATED)
-
-    # ---- the intended path still works --------------------------------------------
-    def test_cross_provider_agreement_is_verified(self):
-        line = self._resolve("provider-a", "provider-b")
-        self.assertTrue(line.resolved)
-        self.assertEqual(line.method, ResolutionMethod.VERIFIED)
-        self.assertIn("independently confirmed", line.rationale)
-
-    def test_declared_providers_compare_case_and_space_insensitively(self):
-        """'Claude' and ' claude ' are one vendor; a formatting difference must not be
-        mistaken for an independence difference."""
-        line = self._resolve("Claude", "  claude ")
-        self.assertEqual(line.method, ResolutionMethod.ARBITRATED)
-
-    # ---- the direction that was already safe stays safe ----------------------------
-    def test_disagreement_abstains_whatever_the_providers_are(self):
-        """A corroborator can only ever SUBTRACT. Disagreement abstains — and it does so
-        identically for a same-provider and a cross-provider second opinion, so nothing in
-        this change made the conjunctive direction weaker."""
-        for primary, second in (("claude", "claude"), ("provider-a", "provider-b"),
-                                (None, None)):
-            with self.subTest(primary=primary, second=second):
-                line = self._resolve(primary, second, confirm=False)
-                self.assertFalse(line.resolved)
-                self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
-                self.assertIsNone(line.chosen)
-
-    # ---- the consequence the finding is actually about: autonomy -------------------
-    def test_same_provider_line_is_discounted_and_always_reviewed(self):
-        """The end of the chain. A same-provider 'corroborated' line must lose BOTH things
-        VERIFIED buys it: the undiscounted confidence and eligibility for auto-release."""
-        from claude_coder.autonomy import _ARBITRATED_DISCOUNT, _line_confidence, decide
-        from claude_coder.models import CodingResult, Destination, Verdict
-
-        same = self._resolve("claude", "claude")
-        cross = self._resolve("provider-a", "provider-b")
-        self.assertAlmostEqual(_line_confidence(cross), cross.fact.confidence)
-        self.assertAlmostEqual(_line_confidence(same),
-                               same.fact.confidence * _ARBITRATED_DISCOUNT)
-        self.assertLess(_line_confidence(same), _line_confidence(cross))
-
-        result = CodingResult(encounter_id="e", date_of_service="2026-03-14")
-        result.lines = [same]
-        self.assertIs(decide(result), Verdict.REVIEW_REQUIRED)
-        self.assertIs(result.destination, Destination.REVIEW)
-        self.assertTrue(any(r["destination"] == Destination.REVIEW.value and r["blocking"]
-                            for r in result.routing))
-
-    # ---- the same rule on the OTHER path that mints VERIFIED -----------------------
-    def test_specificity_upgrade_needs_an_independent_origin_too(self):
-        """`refine_diagnosis_specificity` is the second place a VERIFIED line is minted —
-        it swaps the resolved code for a more specific one a model selected. Adjacent
-        instance of the same bug class, so it obeys the same rule: the sharper code is
-        still adopted (billing the unspecified one when the record supports a specific one
-        is the error the function exists to prevent), but without an independent origin the
-        line is ARBITRATED and gets a coder."""
-        from claude_coder.data_access import MockSource
-        from claude_coder.models import (AttributeEvidence, CandidateCode, ClinicalFact,
-                                         EvidenceSpan, FactKind, RelationState, ResolvedLine)
-        from claude_coder.resolution import refine_diagnosis_specificity
-        broad = "Condition alpha, unspecified"
-        specific = "Condition alpha of right structure"
-        # same 3-character category, so the specific one is a RELATIVE of the broad one
-        src = MockSource(
-            records={("QQ000", "icd10"): {"long_description": broad, "active": True},
-                     ("QQ011", "icd10"): {"long_description": specific, "active": True}})
-
-        sel = _sv.judge(entails=lambda d: "right" in d.lower(),
-                        reason="documented side")
-
-        def line():
-            span = EvidenceSpan("condition alpha, right", anchored=True, span_id="s1")
-            fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="condition alpha",
-                                attributes={"laterality": "right"},
-                                evidence=[span],
-                                attribute_evidence={"laterality": (
-                                    AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
-                                                      value="right"),)},
-                                confidence=0.95)
-            return ResolvedLine(fact=fact,
-                                chosen=CandidateCode("QQ000", "icd10", broad, 1.0),
-                                method=ResolutionMethod.DETERMINISTIC, rationale="r")
-
-        undot = lambda c: c.replace(".", "")
-        same = refine_diagnosis_specificity(
-            line(), src, _from(sel, "claude"), _from(self._corroborator(True), "claude"))
-        self.assertEqual(undot(same.chosen.code), "QQ011")        # still sharpened
-        self.assertEqual(same.method, ResolutionMethod.ARBITRATED)
-        self.assertIn("not independently corroborated", same.rationale.lower())
-
-        cross = refine_diagnosis_specificity(
-            line(), src, _from(sel, "provider-a"),
-            _from(self._corroborator(True), "provider-b"))
-        self.assertEqual(undot(cross.chosen.code), "QQ011")
-        self.assertEqual(cross.method, ResolutionMethod.VERIFIED)
-
-
-class CrossedCandidateEquivalenceTest(unittest.TestCase):
-    """Issue #6, independent investigation: two evaluators can disagree about
-    WHICH SHORTLIST ENTRY is entailed while agreeing about the underlying
-    real-world procedure -- one reads the documentation and picks the older
-    code entry for it, the other independently picks a newer code entry for
-    the SAME procedure. Naively that looks exactly like the F8-R1 "two
-    shortlisted candidates are both still entailed" tie this resolver already
-    guards against -- but it is not a disagreement to hold on; it is
-    agreement expressed through two different authoritative code entries for
-    one governed procedure concept.
-
-    `resolution._corroborated_via_equivalent_concept` (the initial gate, so
-    the flow proceeds to uniqueness settlement at all) and the matching
-    governed-equivalence check inside `_uniqueness_view` (so the OTHER
-    candidate is correctly ELIMINATED as the same concept rather than left
-    standing) both reuse `coreference.action_relation_detail` unchanged --
-    the same governed SNOMED Procedure concept graph the F9-R4 wording-
-    paraphrase mechanism already relies on (`tests/test_evidence_graph.py`'s
-    `GovernedActionIdentity`), applied here to two CANDIDATES' own official
-    descriptors instead of a fact description against one candidate.
-    Synthetic codes/descriptors throughout; the mechanic is about resolving
-    a governed code-identity relationship, not about any real procedure."""
-
-    OLD = "Excision, structure alpha, older code entry"
-    NEW = "Excision, structure alpha, newer code entry"
-
-    #: Mirrors `GovernedActionIdentity._SAME` in test_evidence_graph.py -- a
-    #: unique, bound governed match. The mechanic under test is the crossed-
-    #: candidate wiring, not the concept-graph gate itself (already covered
-    #: there).
-    _SAME_CONCEPT = {
-        "verdict": "same",
-        "term_a": {"term": "a", "candidates": ["C1"], "method": "exact", "unique": True},
-        "term_b": {"term": "b", "candidates": ["C1"], "method": "exact", "unique": True},
-    }
-
-    def _src(self, related=True):
-        relation = {(self.OLD, self.NEW): self._SAME_CONCEPT} if related else {}
-        return MockSource(
-            records={("CODE_OLD", "cpt"): {"long_description": self.OLD, "active": True},
-                     ("CODE_NEW", "cpt"): {"long_description": self.NEW, "active": True}},
-            retrieval={("*", "cpt"): [CandidateCode("CODE_OLD", "cpt", self.OLD, 0.9),
-                                      CandidateCode("CODE_NEW", "cpt", self.NEW, 0.8)]},
-            procedure_relation=relation)
-
-    def _fact(self):
-        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
-        return ClinicalFact(kind=FactKind.PROCEDURE,
-                            description="excision of structure alpha",
-                            evidence=[EvidenceSpan("excision of structure alpha performed")],
-                            confidence=0.95)
-
-    def _primary(self):
-        # entails only the OLDER code entry
-        return _sv.judge(entails=lambda d: "older" in d, reason="matches the older entry")
-
-    def _corroborator(self):
-        # independently entails only the NEWER code entry -- a genuine crossed pick
-        return _sv.judge(entails=lambda d: "newer" in d, reason="matches the newer entry")
-
-    def _resolve(self, primary_provider, second_provider, related=True):
-        from claude_coder.resolution import resolve
-        llm = self._primary()
-        corr = self._corroborator()
-        if primary_provider:
-            llm = _from(llm, primary_provider)
-        if second_provider:
-            corr = _from(corr, second_provider)
-        return resolve(_request(self._fact()), self._src(related=related),
-                       llm=llm, corroborate=corr)
-
-    def test_crossed_governed_equivalent_candidates_resolve_not_hold(self):
-        """The exact scenario: evaluator A entails code X, evaluator B independently
-        entails a DIFFERENT code Y, and the governed concept graph resolves X/Y to
-        the same real-world procedure. This must release the primary's own pick,
-        not fall through to the generic two-candidates-still-entailed tie."""
-        line = self._resolve("provider-a", "provider-b")
-        self.assertTrue(line.resolved)
-        self.assertEqual(line.chosen.code, "CODE_OLD")
-        self.assertEqual(line.method, ResolutionMethod.VERIFIED)
-        self.assertIn("governed-equivalent code", line.rationale)
-        self.assertIn("independently confirmed", line.rationale)
-        # the equivalent candidate must not be left standing as a competing tie
-        self.assertNotIn(
-            "still entailed by the documentation", line.rationale)
-
-    def test_same_provider_equivalent_agreement_is_still_discounted(self):
-        """Adjacent instance of the F6-R3/Round-5-phase-5 rule (`CorroborationIndependenceTest`):
-        the governed-equivalence path must obey the SAME independence bar as literal
-        agreement does. Two calls to the same vendor recognizing the same governed
-        concept is still one vendor's opinion, sampled twice -- not independent
-        confirmation -- so it must stay ARBITRATED and say so, never silently claim
-        'independently confirmed' just because the equivalence mechanism fired."""
-        line = self._resolve("claude", "claude")
-        self.assertTrue(line.resolved)
-        self.assertEqual(line.chosen.code, "CODE_OLD")
-        self.assertEqual(line.method, ResolutionMethod.ARBITRATED)
-        self.assertIn("governed-equivalent code", line.rationale)
-        self.assertNotIn("independently confirmed", line.rationale)
-        self.assertIn("not independently corroborated", line.rationale.lower())
-
-    def test_genuinely_different_candidates_still_disagree(self):
-        """Safety check: with NO governed relation configured between the two
-        descriptors (a genuinely different, unrelated procedure), a crossed pick
-        must still fall through to the ordinary disagreement handling -- this
-        mechanism only ever CONFIRMS a governed match, it must never manufacture
-        one to paper over a real disagreement."""
-        line = self._resolve("provider-a", "provider-b", related=False)
-        self.assertFalse(line.resolved)
-        self.assertIsNone(line.chosen)
-        self.assertNotIn("governed-equivalent code",
-                         line.rationale + (line.documentation_gap or ""))
-
-
-class CorroborationIndependenceEndToEndTest(unittest.TestCase):
-    """The unit rule has to SURVIVE the pipeline. `code_encounter` is where the two
-    judgement callables are chosen, where the resolved line is post-processed (bundling,
-    the learned index, global package) and where the released verdict is decided — so a
-    same-provider 'corroboration' is proven non-grounding by driving the whole flow, not by
-    inspecting `resolution` in isolation."""
-
-    def _run(self, primary_provider, second_provider):
-        """The suite's OWN auto-releasable encounter (`NOTE`), driven through
-        propose-then-verify instead of the deterministic path, so the corroborating call's
-        ORIGIN is the only variable between the two runs below.
-
-        issue #6 F9-R12-E, third re-review: uses a PLAIN-retrieval source
-        (no direct CPT/ICD Index route), deliberately NOT the shared
-        `_source()` -- that helper now configures a direct authoritative
-        hit so AutonomousCoderTest's no-verifier convention stays safe,
-        but a direct hit would close PROC/DX via `_take()` before ever
-        reaching propose-then-verify, defeating this test's whole premise
-        (it needs the candidates to actually reach verification so the
-        corroborating call's origin is what decides the outcome)."""
-        from claude_coder.data_access import MockSource
-        seen = []
-
-        class _Capture:
-            def append(self, encounter_id, kind, record):
-                seen.append((kind, record))
-                return "sha256:" + "0" * 64
-
-        sel = _sv.judge(pick=1, reason="documented act")
-        corr = _sv.judge(entails=lambda d: True, reason="second opinion")
-
-        plain_retrieval_source = MockSource(
-            records={("PROC_ALPHA_EXC", "cpt"): {"active": True},
-                    ("DX_ALPHA_RIGHT", "icd10"): {"active": True}},
-            retrieval={("*", "cpt"): [PROC], ("*", "icd10"): [DX]})
-        result = code_encounter(
-            "enc-independence", NOTE, "2026-03-14", source=plain_retrieval_source,
-            extract_llm=_extract_stub,
-            verify_llm=_from(sel, primary_provider),
-            corroborate_llm=_from(corr, second_provider),
-            audit_repository=_Capture(),
-            billing_context={"billing_entity_id": "actor-1",
-                             "participants": [{"id": "actor-1", "type": "person",
-                                               "roles": ["performer"]}]})
-        profiles = next(rec["model_profiles"] for kind, rec in seen
-                        if kind == "eligibility_enforced")
-        return result, profiles
-
-    def _arbitrated_routes(self, result):
-        from claude_coder.models import Destination
-        return [r for r in result.routing
-                if r["destination"] == Destination.REVIEW.value
-                and "arbitrated" in r["reason"]]
-
-    def test_cross_provider_corroboration_still_releases(self):
-        """Control for the test below: with two DECLARED, distinct origins this exact
-        encounter resolves VERIFIED and auto-releases, as it always has."""
-        from claude_coder import verify
-        result, profiles = self._run("provider-a", "provider-b")
-        self.assertEqual({ln.chosen.code for ln in result.billable_lines},
-                         {"PROC_ALPHA_EXC", "DX_ALPHA_RIGHT"})
-        self.assertTrue(all(ln.method is ResolutionMethod.VERIFIED
-                            for ln in result.billable_lines))
-        self.assertEqual(result.verdict, Verdict.AUTO_READY, result.notes)
-        self.assertFalse(self._arbitrated_routes(result))
-        self.assertEqual(profiles["corroboration_origin"], verify.DISTINCT_ORIGIN)
-        self.assertIs(profiles["independent_providers"], True)
-        self.assertEqual(result.certificate["source_identity"]["models"]["corroboration_origin"],
-                         verify.DISTINCT_ORIGIN)
-
-    def test_same_provider_corroboration_never_reaches_verified_or_autonomy(self):
-        """The same encounter, the same agreeing second opinion — but from the SAME
-        provider. The codes are unchanged (a corroborator can only ever subtract), and
-        every one of them now needs a coder instead of releasing."""
-        from claude_coder import verify
-        from claude_coder.models import Destination
-        result, profiles = self._run("claude", "claude")
-        self.assertEqual({ln.chosen.code for ln in result.billable_lines},
-                         {"PROC_ALPHA_EXC", "DX_ALPHA_RIGHT"})
-        self.assertTrue(all(ln.method is ResolutionMethod.ARBITRATED
-                            for ln in result.billable_lines))
-        self.assertIsNot(result.verdict, Verdict.AUTO_READY)
-        self.assertIs(result.destination, Destination.REVIEW)
-        routes = self._arbitrated_routes(result)
-        self.assertEqual(len(routes), len(result.billable_lines))
-        self.assertTrue(all(r["blocking"] for r in routes))
-        # ... and the durable audit says why, from the run's own recorded identity
-        self.assertEqual(profiles["corroboration_origin"], verify.SHARED_ORIGIN)
-        self.assertIs(profiles["independent_providers"], False)
-        # the certificate carries the same story, so the record cannot claim more than the
-        # run earned: no line is certified as a verified entailment, and the recorded model
-        # identity states the origins were shared
-        cert = result.certificate
-        self.assertEqual(cert["verdict"], Verdict.REVIEW_REQUIRED.value)
-        self.assertTrue(all(ln["method"] == ResolutionMethod.ARBITRATED.value
-                            for ln in cert["lines"]))
-        models = cert["source_identity"]["models"]
-        self.assertEqual(models["corroboration_origin"], verify.SHARED_ORIGIN)
-        self.assertIs(models["independent_providers"], False)
-
-    def test_learned_index_is_not_fed_by_non_independent_agreement(self):
-        """The learned verified-resolution index promotes a phrase->code mapping toward
-        DETERMINISTIC trust, and the pipeline feeds it only from VERIFIED lines. It must
-        therefore not be fed by an agreement that was not independent — otherwise the
-        defect would launder itself into determinism a few encounters later."""
-        import claude_coder.learned as learned
-        observed = []
-        real = learned.observe
-        try:
-            learned.observe = lambda *a, **k: observed.append(a)
-            self._run("claude", "claude")
-            self.assertEqual(observed, [])
-            self._run("provider-a", "provider-b")
-            self.assertTrue(observed)
-        finally:
-            learned.observe = real
-
-
 class ModelProfileIdentityTest(unittest.TestCase):
     """The recorded model identity must describe the RUN, not this function's assumptions —
     it is what an auditor reads to check the independence claim."""
@@ -3892,7 +3389,7 @@ class LearnedIndexTest(unittest.TestCase):
 
         reject = _sv.judge(entails=lambda d: False, reason="none entailed")
 
-        line = resolve(_request(fact), src, llm=reject, corroborate=reject)
+        line = resolve(_request(fact), src, llm=reject)
         self.assertFalse(line.resolved)                       # not billed on learned trust
         self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
         self.assertNotIn("learned verified-resolution index", line.rationale)
@@ -4069,14 +3566,8 @@ class LateralityUpgradeTest(unittest.TestCase):
                                   value="right"),)}, confidence=0.98)
         primary = _sv.judge(entails=lambda descriptor: "right" in descriptor.lower(),
                             reason="documented specificity")
-        corroborator = _sv.judge(
-            entails=lambda descriptor: "right" in descriptor.lower(),
-            reason="independently documented specificity")
 
-        line = resolve(
-            _request(fact), src,
-            llm=_from(primary, "provider-a"),
-            corroborate=_from(corroborator, "provider-b"))
+        line = resolve(_request(fact), src, llm=primary)
 
         self.assertEqual(line.method, ResolutionMethod.VERIFIED, line.rationale)
         self.assertEqual(line.chosen.code, "DX1", line.rationale)
@@ -4161,11 +3652,12 @@ class DiagnosisModifierTest(unittest.TestCase):
 
 class AutonomyVerifiedTest(unittest.TestCase):
     """Release rests on CLOSURE, not a self-reported confidence number. A GROUNDED
-    line — deterministic authoritative match or a cross-model-confirmed (VERIFIED)
-    entailment — with its gates clear auto-releases regardless of the LLM's
-    (poorly calibrated) self-report; the only self-report still consulted is the
-    SHAKY_EXTRACTION floor, which reviews a fact the note barely documents. A
-    single-model ARBITRATED pick is not grounded and always reviews."""
+    line — deterministic authoritative match or a VERIFIED entailment against
+    the candidate's own descriptor/requirement contract — with its gates clear
+    auto-releases regardless of the LLM's (poorly calibrated) self-report; the
+    only self-report still consulted is the SHAKY_EXTRACTION floor, which
+    reviews a fact the note barely documents. `arbitration.arbitrate`'s tie-break
+    pick (ARBITRATED) is not grounded and always reviews."""
 
     def _result(self, method, fact_conf):
         from claude_coder.models import (ClinicalFact, CodingResult, EvidenceSpan,
@@ -4204,8 +3696,8 @@ class AutonomyVerifiedTest(unittest.TestCase):
         self.assertEqual(r.verdict, Verdict.REVIEW_REQUIRED)
 
     def test_arbitrated_line_reviews(self):
-        # A single-model ARBITRATED pick is not grounded and never auto-releases,
-        # however high its self-reported confidence.
+        # arbitration.arbitrate's single-model tie-break pick is not grounded
+        # and never auto-releases, however high its self-reported confidence.
         from claude_coder.autonomy import decide
         from claude_coder.models import ResolutionMethod, Verdict
         r = self._result(ResolutionMethod.ARBITRATED, fact_conf=0.98)
@@ -4233,13 +3725,11 @@ class DiagnosisVerifyTest(unittest.TestCase):
                                         CandidateCode("DXR", "icd10", d_right, 0.80)]})
 
         sel = _sv.judge(entails=lambda d: "alpha" in d.lower() and "beta" not in d.lower(), reason="documented condition")
-        corr = _sv.judge(entails=lambda d: "alpha" in d.lower(), reason="x")
 
         fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="condition alpha",
                             evidence=[EvidenceSpan("condition alpha documented")],
                             confidence=0.95)
-        line = resolve(_request(fact), src, llm=_from(sel, "provider-a"),
-                       corroborate=_from(corr, "provider-b"))
+        line = resolve(_request(fact), src, llm=sel)
         self.assertEqual(line.method, ResolutionMethod.ABSTAINED)
         self.assertIsNone(line.chosen)
         self.assertEqual({c.code for c in line.alternatives}, {"DXW", "DXR"})

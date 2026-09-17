@@ -1176,13 +1176,18 @@ class IndicationClauseRequirementTest(unittest.TestCase):
     """issue #6, independent root-cause investigation (real-data replay
     against the designated note, F1/CPT 28118 vs 28120): a candidate's own
     descriptor stating a positive "(eg, ...)"/"(e.g., ...)"/"(for example,
-    ...)" indication clause compiles into a `RequirementRole.MUST_SUPPORT`
-    requirement -- the SAME "required precondition" polarity as
-    `AXIS_QUALIFIED_CHILD`'s differential (never inverted, unlike
-    `AXIS_EXCLUSION_CLAUSE`): genuinely documenting one of the clause's
-    alternatives SUPPORTS the candidate that carries it; genuinely NOT
-    documenting any of them, in a fully-searched record, is what may ground
-    an elimination. Synthetic descriptors throughout."""
+    ...)" indication clause.
+
+    Codex's independent re-review (P1-2 correction) found the original
+    version of this axis unsafe: it compiled into a `RequirementRole.
+    MUST_SUPPORT` requirement, letting an undocumented, purely-illustrative
+    example (AMA/CPT convention: "(eg, ...)" is non-exhaustive, never a
+    checklist) alone ground a candidate's elimination or a provider
+    question, with no typed, authoritative requirement field or
+    source-governed rule behind it. It now compiles as
+    `RequirementRole.POSITIVE_ALIAS` (`required=False`) -- recorded for
+    recall/audit/explanation only, exactly like an ICD-10-CM inclusion
+    term, never elimination-eligible. Synthetic descriptors throughout."""
 
     WITH_INDICATION = _cand("CAND_IND", "assembly service (eg, variant condition)")
     PLAIN = _cand("CAND_PLAIN", "assembly service performed")
@@ -1201,14 +1206,17 @@ class IndicationClauseRequirementTest(unittest.TestCase):
             SpanReconciliation(span_id=sid, status=ReconciliationStatus[status])
             for sid, status in statuses.items()))
 
-    def test_an_indication_clause_compiles_as_a_required_must_support_requirement(self):
+    def test_an_indication_clause_compiles_as_a_non_required_positive_alias(self):
+        """P1-2 correction: an illustrative "(eg, ...)" clause compiles for
+        recall/audit only -- never `required`, never `MUST_SUPPORT` -- so it
+        can never ground an elimination or a provider question on its own."""
         reqs = [r for r in req.compile_requirements([self.WITH_INDICATION, self.PLAIN])
                if r.axis == "indication_clause"]
         self.assertEqual(len(reqs), 1)     # only CAND_IND states one
         r = reqs[0]
         self.assertEqual(r.candidate_code, "CAND_IND")
-        self.assertTrue(r.required)
-        self.assertEqual(r.role, req.RequirementRole.MUST_SUPPORT)
+        self.assertFalse(r.required)
+        self.assertEqual(r.role, req.RequirementRole.POSITIVE_ALIAS)
         self.assertEqual(r.expected, ("variant condition",))
         self.assertEqual(r.authority_source_text, self.WITH_INDICATION.descriptor)
 
@@ -1256,13 +1264,18 @@ class IndicationClauseRequirementTest(unittest.TestCase):
         model_b = type("J", (), {"requirement_judgements": rjs})()
         return [model_a, model_b]
 
-    def test_grounded_elimination_eliminates_on_an_undocumented_indication_clause(self):
-        """End-to-end through the REAL `resolution._grounded_elimination` --
-        the actual function `_uniqueness_view` calls, not merely
-        `validated_requirement` in isolation. Both models unanimously report
-        NOT_DOCUMENTED for CAND_IND's own indication requirement, over a
-        fully-covered corpus that never states it -- this is what may
-        eliminate it, the OPPOSITE polarity from `AXIS_EXCLUSION_CLAUSE`."""
+    def test_grounded_elimination_never_eliminates_on_an_undocumented_indication_clause(self):
+        """P1-2 correction, end-to-end through the REAL
+        `resolution._grounded_elimination` -- the actual function
+        `_uniqueness_view` calls, not merely `validated_requirement` in
+        isolation. Both models unanimously report NOT_DOCUMENTED for
+        CAND_IND's own indication clause, over a fully-covered corpus that
+        never states it -- unlike before this correction, an illustrative
+        example alone must NEVER ground an elimination (it compiles as
+        `POSITIVE_ALIAS`, elimination-ineligible), so this falls through to
+        whatever else `_grounded_elimination` uses to decide, which finds
+        no other governed, provider-answerable axis distinguishing these
+        two candidates either."""
         from claude_coder import resolution
         from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
 
@@ -1279,14 +1292,13 @@ class IndicationClauseRequirementTest(unittest.TestCase):
         grounded, detail = resolution._grounded_elimination(
             fact, self.WITH_INDICATION, self.PLAIN, reconciliation=None,
             requirements=reqs, judgements=judgements, coverage=coverage)
-        self.assertTrue(grounded, detail)
-        self.assertIn("NOT_DOCUMENTED", detail)
+        self.assertFalse(grounded, detail)
 
     def test_grounded_elimination_never_eliminates_on_a_documented_indication_clause(self):
-        """The mirror case: the SAME indication requirement, but every
-        evaluator reports SUPPORTED for it (a real cited span backs it) --
-        the required precondition IS met, so nothing grounds an elimination
-        through this axis."""
+        """The mirror case: the SAME indication clause, but every evaluator
+        reports SUPPORTED for it (a real cited span backs it) -- documented
+        or not, this axis is elimination-ineligible (`POSITIVE_ALIAS`), so
+        nothing grounds an elimination through it either way."""
         from claude_coder import resolution
         from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
         from app.contracts.source_evidence import (ReconciliationStatus,

@@ -5268,9 +5268,7 @@ class GovernedActionIdentity(unittest.TestCase):
 
 
 class GovernedProcedureRelationCandidateComparison(unittest.TestCase):
-    """Issue #6, independent investigation ("same code, different wording"
-    for two CANDIDATES rather than a fact-vs-candidate match):
-    `action_relation_detail`'s free wording shortcut (`action_identity`'s
+    """`action_relation_detail`'s free wording shortcut (`action_identity`'s
     exact-stemmed-set / subset-elaboration check, needing no `source` at
     all) is safe for a fact's own description against ONE candidate's
     official descriptor -- a note's phrasing eliding detail the descriptor
@@ -5282,18 +5280,20 @@ class GovernedProcedureRelationCandidateComparison(unittest.TestCase):
     code-defining entries, and the subset-elaboration check cannot tell
     that apart from a genuine paraphrase.
 
-    Confirmed live: `resolution._corroborated_via_equivalent_concept` (built
-    to reconcile two evaluators who independently pick DIFFERENT but
-    governed-equivalent candidates) initially called
-    `action_relation_detail` unchanged, which let a broad CPT descriptor and
-    its own indication-clause-qualified variant falsely resolve SAME_EVENT
-    via stemmed-subset wording alone -- with NO governed source configured
-    at all -- silently defeating the very axis the F1 fix exists to
-    enforce. `governed_procedure_relation` is the fix: the SAME strict,
-    source-backed-only half of `action_relation_detail`, with the free
-    wording shortcut removed, so a governed match is the ONLY way two
-    distinct code entries can ever be treated as the same released
-    concept. Synthetic descriptors throughout."""
+    Found live (issue #6): an earlier candidate-equivalence mechanism in
+    resolution.py (since removed -- code selection now runs a single
+    evaluator, so it no longer needs to reconcile two evaluators picking
+    different candidates) called `action_relation_detail` unchanged for
+    exactly this comparison, which let a broad CPT descriptor and its own
+    indication-clause-qualified variant falsely resolve SAME_EVENT via
+    stemmed-subset wording alone -- with NO governed source configured at
+    all -- silently defeating the very axis the F1 fix exists to enforce.
+    `governed_procedure_relation` is the strict, source-backed-only half of
+    `action_relation_detail`, with the free wording shortcut removed --
+    still `action_relation_detail`'s own fallback path today, and the
+    correct entry point for any FUTURE caller that needs to compare two
+    candidates' own descriptors to each other rather than a fact's
+    description against one candidate. Synthetic descriptors throughout."""
 
     _SAME = GovernedActionIdentity._SAME
 
