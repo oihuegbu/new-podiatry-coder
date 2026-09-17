@@ -343,3 +343,96 @@ class WholePipelineDefensibleCodes(unittest.TestCase):
         self.assertIn("variant condition", line["blocking_reason"])
         self.assertIn("indication_clause", line["blocking_reason"])
         self.assertNotIn("SYSTEM_UNRESOLVED", line["blocking_reason"])
+
+    def test_crossed_governed_equivalent_candidates_reach_the_claim_bundle(self):
+        """issue #6, independent investigation ("same code, different
+        wording"): evaluator A independently entails an OLDER code entry for
+        a documented procedure; evaluator B independently entails a
+        DIFFERENT, NEWER code entry for the SAME real-world procedure. Naively
+        this is indistinguishable from the F8-R1 "two shortlisted candidates
+        both still entailed" tie -- but the governed SNOMED Procedure concept
+        graph resolves the two code entries to one procedure, so this must
+        release, AUTO_READY, exactly like a genuinely unique pick -- not fall
+        to a permanent, unrescuable hold over two evaluators who actually
+        agree. Whole-pipeline proof of `resolution.
+        _corroborated_via_equivalent_concept`/the matching elimination path in
+        `_uniqueness_view`, both of which call `coreference.
+        governed_procedure_relation` -- the STRICT, source-backed-only half
+        of the F9-R4 governed concept-graph mechanism, deliberately never
+        `action_relation_detail`'s free wording shortcut (unsafe for
+        comparing two candidates' own descriptors to each other -- see that
+        function's docstring) -- applied here to two candidates' own
+        official descriptors."""
+        note = ("Excision of structure alpha performed today for condition "
+                "alpha of the right side.")
+        facts_json = _facts_json(
+            facts=[
+                {"fact_id": "F1", "kind": "procedure",
+                 "description": "excision of structure alpha",
+                 "attributes": {"performer_id": "actor-1", "billing_entity_id": "actor-1"},
+                 "disposition": "performed_today", "negated": False,
+                 "evidence": ["Excision of structure alpha performed today"],
+                 "confidence": 0.97,
+                 "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
+                                    "temporal": 0.99, "performer": 0.99,
+                                    "relationship": 0.99}},
+                {"fact_id": "F2", "kind": "diagnosis",
+                 "description": "condition alpha of the right side",
+                 "attributes": {"laterality": "right"},
+                 "attribute_evidence": {
+                     "laterality": [{"text": "condition alpha, right side", "scope": "local",
+                                    "assertion_state": "asserted", "value": "right"}]},
+                 "disposition": "performed_today", "negated": False,
+                 "evidence": ["condition alpha of the right side"],
+                 "confidence": 0.98,
+                 "axis_confidence": {"occurrence": 0.99, "action": 0.99, "evidence": 0.99,
+                                    "temporal": 0.99, "assertion": 0.99,
+                                    "experiencer": 0.99}},
+            ],
+            relations=[
+                {"subject_event_id": "F2", "object_event_id": "F1", "predicate": "reason_for",
+                 "state": "asserted", "evidence_fact_ids": ["F1", "F2"], "confidence": 0.99},
+            ])
+
+        old_desc = "Excision, structure alpha, older code entry"
+        new_desc = "Excision, structure alpha, newer code entry"
+        dx_desc = "condition alpha, right side"
+        source = MockSource(
+            records={("CODE_OLD", "cpt"): {"long_description": old_desc, "active": True},
+                    ("CODE_NEW", "cpt"): {"long_description": new_desc, "active": True},
+                    ("DX_ALPHA_RIGHT", "icd10"): {"long_description": dx_desc,
+                                                 "active": True}},
+            retrieval={("*", "cpt"): [CandidateCode("CODE_OLD", "cpt", old_desc, 0.9),
+                                     CandidateCode("CODE_NEW", "cpt", new_desc, 0.8)],
+                      ("*", "icd10"): [CandidateCode("DX_ALPHA_RIGHT", "icd10", dx_desc, 0.9)]},
+            index={"condition alpha of the right side": {"DX_ALPHA_RIGHT"}},
+            # The governed concept graph confirms the two code entries name
+            # the SAME real-world procedure -- the crossed disagreement below
+            # must resolve through this, never through an invented heuristic.
+            procedure_relation={(old_desc, new_desc): {
+                "verdict": "same",
+                "term_a": {"term": "a", "candidates": ["C1"], "method": "exact",
+                          "unique": True},
+                "term_b": {"term": "b", "candidates": ["C1"], "method": "exact",
+                          "unique": True}}})
+
+        # Primary independently entails only the OLDER code entry (plus the
+        # undisputed diagnosis); the corroborator independently entails only
+        # the NEWER one (plus the same diagnosis) -- a genuine crossed pick
+        # on the procedure, not a scripted agreement.
+        primary = _declare(entails=lambda d: "older" in d or "condition alpha" in d.lower(),
+                          provider="provider-a", reason="matches the older entry")
+        corroborator = _declare(
+            entails=lambda d: "newer" in d or "condition alpha" in d.lower(),
+            provider="provider-b", reason="matches the newer entry")
+
+        result = run_pipeline(note, facts_json, source,
+                              verify_llm=primary, corroborate_llm=corroborator)
+
+        payload = build_claim_bundle_payload(result)
+        self.assertEqual(payload["release"]["producer_verdict"], "AUTO_READY", payload)
+        self.assertEqual(payload["release"]["destination"], "AUTO_READY", payload)
+        self.assertEqual(payload["release"]["holds"], [], payload)
+        codes = defensible_codes(payload)
+        self.assertEqual(codes, {"CODE_OLD", "DX_ALPHA_RIGHT"}, payload)
+        self.assertNotIn("CODE_NEW", codes)

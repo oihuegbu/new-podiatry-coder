@@ -219,6 +219,41 @@ def action_relation_detail(left: Any, right: Any, source: Any = None
     """
     if action_identity(left, right) == SAME_EVENT:
         return SAME_EVENT, {}
+    return governed_procedure_relation(left, right, source)
+
+
+def governed_procedure_relation(left: Any, right: Any, source: Any = None
+                                ) -> tuple[str, dict]:
+    """SAME_EVENT ONLY through `source`'s governed SNOMED Procedure concept
+    graph -- deliberately WITHOUT `action_identity`'s free wording shortcut
+    (the exact-stemmed-set / subset-elaboration check `action_relation_detail`
+    tries first).
+
+    issue #6, independent investigation ("same code, different wording" for
+    two CANDIDATES, not a fact-vs-candidate match): the wording shortcut is
+    safe for a fact's own description against ONE candidate's official
+    descriptor -- a note's phrasing eliding detail the authoritative
+    descriptor states outright is elaboration, not a different action, and
+    matching loosely against one candidate never merges two DIFFERENT code
+    entries. It is NOT safe between two candidates' own official
+    descriptors: two CPT entries differing by exactly an added qualifying
+    clause (e.g. an indication-clause suffix -- the F1/AXIS_INDICATION_CLAUSE
+    axis) are BY DESIGN two distinct, code-defining entries, not one
+    elaborated the other -- confirmed live: reusing `action_relation_detail`
+    unchanged for candidate-vs-candidate comparison let exactly this pair
+    (a broad descriptor and its own indication-clause-qualified variant)
+    falsely resolve SAME_EVENT via the stemmed-subset shortcut alone, with no
+    source configured at all, which would have silently defeated the very
+    axis that fix exists to enforce. Callers comparing two candidates to
+    each other must call THIS function, never `action_relation_detail`,
+    so a governed match is the ONLY way two distinct code entries can ever
+    be treated as the same released concept.
+
+    Same strict bar `action_relation_detail` applies to its own source path:
+    `source.procedure_relation_detail` must report `CONCEPT_SAME`, carry a
+    bound `source_identity`, and resolve BOTH sides uniquely to the SAME
+    candidate set -- never ancestor/descendant, ambiguity, or a missing/
+    corrupt/exception-raising source, which all stay UNDETERMINED."""
     resolver = getattr(source, "procedure_relation_detail", None)
     if not callable(resolver):
         return UNDETERMINED, {}

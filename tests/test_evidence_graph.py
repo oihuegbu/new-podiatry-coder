@@ -5267,6 +5267,86 @@ class GovernedActionIdentity(unittest.TestCase):
         self.assertEqual(verdict, cr.DISTINCT_EVENT, reason)
 
 
+class GovernedProcedureRelationCandidateComparison(unittest.TestCase):
+    """Issue #6, independent investigation ("same code, different wording"
+    for two CANDIDATES rather than a fact-vs-candidate match):
+    `action_relation_detail`'s free wording shortcut (`action_identity`'s
+    exact-stemmed-set / subset-elaboration check, needing no `source` at
+    all) is safe for a fact's own description against ONE candidate's
+    official descriptor -- a note's phrasing eliding detail the descriptor
+    states outright is elaboration, never a merge risk, because only one
+    candidate is ever in play. It is NOT safe between two CANDIDATES' own
+    official descriptors: two authoritative code entries differing by
+    exactly an added qualifying clause (e.g. an indication-clause suffix --
+    the F1/AXIS_INDICATION_CLAUSE axis) are BY DESIGN distinct,
+    code-defining entries, and the subset-elaboration check cannot tell
+    that apart from a genuine paraphrase.
+
+    Confirmed live: `resolution._corroborated_via_equivalent_concept` (built
+    to reconcile two evaluators who independently pick DIFFERENT but
+    governed-equivalent candidates) initially called
+    `action_relation_detail` unchanged, which let a broad CPT descriptor and
+    its own indication-clause-qualified variant falsely resolve SAME_EVENT
+    via stemmed-subset wording alone -- with NO governed source configured
+    at all -- silently defeating the very axis the F1 fix exists to
+    enforce. `governed_procedure_relation` is the fix: the SAME strict,
+    source-backed-only half of `action_relation_detail`, with the free
+    wording shortcut removed, so a governed match is the ONLY way two
+    distinct code entries can ever be treated as the same released
+    concept. Synthetic descriptors throughout."""
+
+    _SAME = GovernedActionIdentity._SAME
+
+    def test_an_indication_clause_variant_is_not_the_same_event_by_wording_alone(self):
+        """The exact false positive found live: a broad descriptor and the
+        SAME descriptor plus an added indication-clause suffix must NOT
+        resolve SAME_EVENT through this function even with NO source
+        configured -- `action_relation_detail` would wrongly do so via the
+        stemmed-subset shortcut; `governed_procedure_relation` must not."""
+        from claude_coder import coreference as cr
+        broad = "assembly service, broad category"
+        qualified = "assembly service, broad category (eg, variant condition)"
+        # Sanity: confirms the shortcut this function must NOT use really
+        # does fire on `action_relation_detail` for this exact pair.
+        self.assertEqual(cr.action_relation_detail(broad, qualified)[0], cr.SAME_EVENT)
+        verdict, detail = cr.governed_procedure_relation(broad, qualified)
+        self.assertEqual(verdict, cr.UNDETERMINED)
+        self.assertEqual(detail, {})
+
+    def test_an_indication_clause_variant_still_stays_distinct_with_an_unrelated_source(self):
+        """Same pair, now WITH a source configured but no relation entry for
+        it -- must still stay UNDETERMINED, never fall back to the wording
+        shortcut this function deliberately omits."""
+        from claude_coder import coreference as cr
+        broad = "assembly service, broad category"
+        qualified = "assembly service, broad category (eg, variant condition)"
+        source = _procedure_source({})
+        verdict, _detail = cr.governed_procedure_relation(broad, qualified, source)
+        self.assertEqual(verdict, cr.UNDETERMINED)
+
+    def test_a_genuine_governed_match_between_two_candidates_still_confirms(self):
+        """The positive case this function exists to serve: two candidates'
+        own descriptors, textually UNRELATED (so the wording shortcut could
+        never fire either way), confirmed as one governed procedure concept
+        through the source -- must still resolve SAME_EVENT."""
+        from claude_coder import coreference as cr
+        old = "Excision, structure alpha, older code entry"
+        new = "Excision, structure alpha, newer code entry"
+        source = _procedure_source({(old, new): self._SAME})
+        verdict, detail = cr.governed_procedure_relation(old, new, source)
+        self.assertEqual(verdict, cr.SAME_EVENT)
+        self.assertEqual(detail["term_a"]["candidates"], ["C1"])
+
+    def test_no_source_at_all_stays_undetermined_never_same_event(self):
+        """Without a source, this function has no basis to confirm anything
+        -- unlike `action_relation_detail`, it must never fall through to
+        the wording shortcut, even for identical strings."""
+        from claude_coder import coreference as cr
+        verdict, detail = cr.governed_procedure_relation("same phrase", "same phrase")
+        self.assertEqual(verdict, cr.UNDETERMINED)
+        self.assertEqual(detail, {})
+
+
 class ActionIdentitySubsetElaboration(unittest.TestCase):
     """issue #6, independent root-cause investigation (real-data replay
     against the designated note): `action_identity`'s exact-stemmed-set

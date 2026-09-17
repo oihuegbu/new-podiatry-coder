@@ -2469,6 +2469,7 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
                      eliminated_earlier: dict[str, str], reconciliation=None,
                      requirements: tuple = (),
                      coverage: "_requirement.CoverageCorpus | None" = None,
+                     source: Any = None,
                      ) -> tuple[list[CandidateCode], dict[str, str]]:
     """Which shortlisted candidates are STILL ENTAILED once every judging model has
     answered about every one of them, and the NAMED reason each of the others is out.
@@ -2497,6 +2498,40 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
         if prior:
             eliminated[cand.code] = prior
             continue
+        # issue #6, independent investigation ("same code, different wording"):
+        # a candidate the governed SNOMED Procedure concept graph resolves to
+        # the SAME real-world procedure as `chosen` is not a competing
+        # alternative for the named-elimination bar below to adjudicate -- it
+        # IS the released code, filed under a different authoritative code
+        # entry. Without this, a judge that entails `cand` (because it names
+        # the same procedure under a different descriptor) never NAMES an
+        # elimination reason for it -- `elimination_of` returns "" for
+        # anything a judge itself still entails -- so `cand` would sit
+        # STANDING forever, manufacturing a permanent tie out of two
+        # evaluators who actually agree. Checked only against `chosen`
+        # (never between two non-chosen candidates), and only fires with a
+        # real `source` wired through -- the one existing caller that does
+        # not pass one (specificity-disambiguation's unspecified-vs-relatives
+        # check) is unaffected.
+        if source is not None and cand.system == chosen.system:
+            from . import coreference as _coref
+            # governed_procedure_relation, NOT action_relation_detail: two
+            # CANDIDATES' own official descriptors must never be merged via
+            # the free wording/elaboration shortcut that is only safe for a
+            # fact's description against one candidate -- see that
+            # function's docstring (a code-family's own indication-clause-
+            # qualified variant is a DISTINCT entry by design, not the same
+            # event elaborated).
+            verdict, _detail = _coref.governed_procedure_relation(
+                chosen.descriptor, cand.descriptor, source)
+            if verdict == _coref.SAME_EVENT:
+                eliminated[cand.code] = (
+                    f"the governed procedure concept graph resolves this to the "
+                    f"same real-world procedure as the released code "
+                    f"{chosen.code!r} ({chosen.descriptor!r}) -- a different "
+                    f"authoritative code entry for the same event, not a "
+                    f"competing alternative")
+                continue
         named = [j.elimination_of(cand.code) for j in judgements]
         if named and all(named):
             grounded, ground_detail = _grounded_elimination(fact, cand, chosen,
@@ -3404,7 +3439,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
     else:
         remaining, eliminated = _uniqueness_view(
             fact, shortlist, chosen, judgements, eliminated_earlier,
-            reconciliation, _elimination_requirements, coverage)
+            reconciliation, _elimination_requirements, coverage, source)
     # issue #6, Codex's independent re-review (F9-R15-B): tried in ADDITION to
     # (never instead of) the axis/requirement-based elimination just above --
     # narrows `remaining` further only when both independent evaluators'
@@ -3793,6 +3828,62 @@ def _propose_then_verify(fact: ClinicalFact, source: CodeSource,
     return line
 
 
+def _corroborated_via_equivalent_concept(chosen: CandidateCode, second, cands: list,
+                                         source) -> CandidateCode | None:
+    """When the corroborator's own independent reading does not entail
+    `chosen` by its literal code, check whether it instead entails a
+    DIFFERENT candidate on the SAME shortlist that the governed SNOMED
+    Procedure concept graph resolves to the SAME real-world procedure as
+    `chosen` (issue #6, independent investigation: "evaluator A entails
+    code X, evaluator B entails code Y, and X/Y are clinically synonymous
+    -- the system should recognize that as agreement, not a disagreement
+    to hold on"). Two evaluators independently, correctly identifying the
+    SAME documented act, merely differing on which of two overlapping
+    authoritative code entries names it, is CONFIRMATION -- not the
+    disagreement `tried[chosen.code]` exists to record.
+
+    Calls `coreference.governed_procedure_relation` -- deliberately NOT
+    `action_relation_detail` -- the SAME strict, SOURCE-BACKED bar (a
+    unique, equal-candidate-set match through `source.
+    procedure_relation_detail`, gated on a bound source identity) already
+    proven safe for fact-to-candidate paraphrase matching (F9-R4), applied
+    here to two candidates' own official descriptors instead of a fact
+    description and a candidate's -- but WITHOUT `action_relation_detail`'s
+    free wording/elaboration shortcut, which is unsafe for this comparison
+    shape: confirmed live that reusing it unchanged let a broad CPT
+    descriptor and its own indication-clause-qualified variant (two
+    DISTINCT, code-defining entries by design -- see F1/
+    AXIS_INDICATION_CLAUSE) falsely resolve SAME_EVENT via stemmed-subset
+    wording alone, no governed source needed at all. See
+    `governed_procedure_relation`'s own docstring for the full reasoning.
+    Never a new, independently invented equivalence heuristic -- and never
+    a way to ELIMINATE anything: a candidate this finds no match for still
+    falls through to the ordinary "not entailed" disagreement path
+    unchanged. It can only ever ADD a way to CONFIRM `chosen`; it never
+    changes WHICH code releases -- `chosen` still does, exactly as if the
+    corroborator had entailed it by its own literal code. Restricted to
+    same-system pairs (never compares a CPT candidate's descriptor
+    against an ICD-10 one) as a cheap, unconditional safety guard, even
+    though a genuine cross-system match is not a shape
+    `procedure_relation_detail`'s own governed index would ever confirm
+    anyway."""
+    if not second.entailed:
+        return None
+    from . import coreference as _coref
+    by_code = {c.code: c for c in cands}
+    for code in second.entailed:
+        if code == chosen.code:
+            continue
+        candidate = by_code.get(code)
+        if candidate is None or candidate.system != chosen.system:
+            continue
+        verdict, _detail = _coref.governed_procedure_relation(
+            chosen.descriptor, candidate.descriptor, source)
+        if verdict == _coref.SAME_EVENT:
+            return candidate
+    return None
+
+
 def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                               pool: list[CandidateCode],
                               proposals: list[CandidateCode],
@@ -4149,14 +4240,30 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                                          reconciliation=reconciliation, coverage=coverage,
                                          evidence_packet=evidence_packet)
             if not second.entails(chosen.code):
-                why2 = (second.elimination_of(chosen.code) or second.reason
-                        or "the independent second judgement does not find this "
-                           "descriptor entailed by the documentation")
-                last_reason = why2
-                missing = second.missing_element.get(chosen.code, False)
-                tried[chosen.code] = why2
-                if missing:
-                    missing_tried[chosen.code] = why2
+                equivalent = _corroborated_via_equivalent_concept(
+                    chosen, second, cands, source)
+                if equivalent is not None:
+                    judgements.append(second)
+                    origin = ("independently confirmed"
+                             if _independently_corroborated(corroboration)
+                             else "a second opinion agreed, but not from an "
+                                  "independent origin")
+                    note = (
+                        f"{origin} via a governed-equivalent code "
+                        f"({equivalent.code}: {equivalent.descriptor!r}) -- the "
+                        f"second evaluator's own pick names the same governed "
+                        f"procedure concept under a different code entry, not a "
+                        f"different procedure")
+                    why = f"{why}; {note}" if why else note
+                else:
+                    why2 = (second.elimination_of(chosen.code) or second.reason
+                            or "the independent second judgement does not find this "
+                               "descriptor entailed by the documentation")
+                    last_reason = why2
+                    missing = second.missing_element.get(chosen.code, False)
+                    tried[chosen.code] = why2
+                    if missing:
+                        missing_tried[chosen.code] = why2
             else:
                 judgements.append(second)
                 note = ("independently confirmed"

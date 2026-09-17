@@ -3431,6 +3431,120 @@ class CorroborationIndependenceTest(unittest.TestCase):
         self.assertEqual(cross.method, ResolutionMethod.VERIFIED)
 
 
+class CrossedCandidateEquivalenceTest(unittest.TestCase):
+    """Issue #6, independent investigation: two evaluators can disagree about
+    WHICH SHORTLIST ENTRY is entailed while agreeing about the underlying
+    real-world procedure -- one reads the documentation and picks the older
+    code entry for it, the other independently picks a newer code entry for
+    the SAME procedure. Naively that looks exactly like the F8-R1 "two
+    shortlisted candidates are both still entailed" tie this resolver already
+    guards against -- but it is not a disagreement to hold on; it is
+    agreement expressed through two different authoritative code entries for
+    one governed procedure concept.
+
+    `resolution._corroborated_via_equivalent_concept` (the initial gate, so
+    the flow proceeds to uniqueness settlement at all) and the matching
+    governed-equivalence check inside `_uniqueness_view` (so the OTHER
+    candidate is correctly ELIMINATED as the same concept rather than left
+    standing) both reuse `coreference.action_relation_detail` unchanged --
+    the same governed SNOMED Procedure concept graph the F9-R4 wording-
+    paraphrase mechanism already relies on (`tests/test_evidence_graph.py`'s
+    `GovernedActionIdentity`), applied here to two CANDIDATES' own official
+    descriptors instead of a fact description against one candidate.
+    Synthetic codes/descriptors throughout; the mechanic is about resolving
+    a governed code-identity relationship, not about any real procedure."""
+
+    OLD = "Excision, structure alpha, older code entry"
+    NEW = "Excision, structure alpha, newer code entry"
+
+    #: Mirrors `GovernedActionIdentity._SAME` in test_evidence_graph.py -- a
+    #: unique, bound governed match. The mechanic under test is the crossed-
+    #: candidate wiring, not the concept-graph gate itself (already covered
+    #: there).
+    _SAME_CONCEPT = {
+        "verdict": "same",
+        "term_a": {"term": "a", "candidates": ["C1"], "method": "exact", "unique": True},
+        "term_b": {"term": "b", "candidates": ["C1"], "method": "exact", "unique": True},
+    }
+
+    def _src(self, related=True):
+        relation = {(self.OLD, self.NEW): self._SAME_CONCEPT} if related else {}
+        return MockSource(
+            records={("CODE_OLD", "cpt"): {"long_description": self.OLD, "active": True},
+                     ("CODE_NEW", "cpt"): {"long_description": self.NEW, "active": True}},
+            retrieval={("*", "cpt"): [CandidateCode("CODE_OLD", "cpt", self.OLD, 0.9),
+                                      CandidateCode("CODE_NEW", "cpt", self.NEW, 0.8)]},
+            procedure_relation=relation)
+
+    def _fact(self):
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+        return ClinicalFact(kind=FactKind.PROCEDURE,
+                            description="excision of structure alpha",
+                            evidence=[EvidenceSpan("excision of structure alpha performed")],
+                            confidence=0.95)
+
+    def _primary(self):
+        # entails only the OLDER code entry
+        return _sv.judge(entails=lambda d: "older" in d, reason="matches the older entry")
+
+    def _corroborator(self):
+        # independently entails only the NEWER code entry -- a genuine crossed pick
+        return _sv.judge(entails=lambda d: "newer" in d, reason="matches the newer entry")
+
+    def _resolve(self, primary_provider, second_provider, related=True):
+        from claude_coder.resolution import resolve
+        llm = self._primary()
+        corr = self._corroborator()
+        if primary_provider:
+            llm = _from(llm, primary_provider)
+        if second_provider:
+            corr = _from(corr, second_provider)
+        return resolve(_request(self._fact()), self._src(related=related),
+                       llm=llm, corroborate=corr)
+
+    def test_crossed_governed_equivalent_candidates_resolve_not_hold(self):
+        """The exact scenario: evaluator A entails code X, evaluator B independently
+        entails a DIFFERENT code Y, and the governed concept graph resolves X/Y to
+        the same real-world procedure. This must release the primary's own pick,
+        not fall through to the generic two-candidates-still-entailed tie."""
+        line = self._resolve("provider-a", "provider-b")
+        self.assertTrue(line.resolved)
+        self.assertEqual(line.chosen.code, "CODE_OLD")
+        self.assertEqual(line.method, ResolutionMethod.VERIFIED)
+        self.assertIn("governed-equivalent code", line.rationale)
+        self.assertIn("independently confirmed", line.rationale)
+        # the equivalent candidate must not be left standing as a competing tie
+        self.assertNotIn(
+            "still entailed by the documentation", line.rationale)
+
+    def test_same_provider_equivalent_agreement_is_still_discounted(self):
+        """Adjacent instance of the F6-R3/Round-5-phase-5 rule (`CorroborationIndependenceTest`):
+        the governed-equivalence path must obey the SAME independence bar as literal
+        agreement does. Two calls to the same vendor recognizing the same governed
+        concept is still one vendor's opinion, sampled twice -- not independent
+        confirmation -- so it must stay ARBITRATED and say so, never silently claim
+        'independently confirmed' just because the equivalence mechanism fired."""
+        line = self._resolve("claude", "claude")
+        self.assertTrue(line.resolved)
+        self.assertEqual(line.chosen.code, "CODE_OLD")
+        self.assertEqual(line.method, ResolutionMethod.ARBITRATED)
+        self.assertIn("governed-equivalent code", line.rationale)
+        self.assertNotIn("independently confirmed", line.rationale)
+        self.assertIn("not independently corroborated", line.rationale.lower())
+
+    def test_genuinely_different_candidates_still_disagree(self):
+        """Safety check: with NO governed relation configured between the two
+        descriptors (a genuinely different, unrelated procedure), a crossed pick
+        must still fall through to the ordinary disagreement handling -- this
+        mechanism only ever CONFIRMS a governed match, it must never manufacture
+        one to paper over a real disagreement."""
+        line = self._resolve("provider-a", "provider-b", related=False)
+        self.assertFalse(line.resolved)
+        self.assertIsNone(line.chosen)
+        self.assertNotIn("governed-equivalent code",
+                         line.rationale + (line.documentation_gap or ""))
+
+
 class CorroborationIndependenceEndToEndTest(unittest.TestCase):
     """The unit rule has to SURVIVE the pipeline. `code_encounter` is where the two
     judgement callables are chosen, where the resolved line is post-processed (bundling,
