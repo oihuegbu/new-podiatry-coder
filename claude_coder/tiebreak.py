@@ -99,6 +99,21 @@ AXIS_QUALIFIED_CHILD = "qualified_child"
 #: disagreement/tie handling already exists -- never a fabricated, unearned
 #: specific question.
 AXIS_INDICATION_CLAUSE = "indication_clause"
+#: issue #6, real-note investigation (designated note, F1: a candidate's own
+#: descriptor names the several specific alternative forms a general act word
+#: covers, e.g. "excision (form alpha, form beta, or form gamma)") -- unlike
+#: `AXIS_INDICATION_CLAUSE`, this parenthetical carries NO "eg"/"for example"
+#: marker; its absence IS the signal (`_definitional_clause`'s own docstring).
+#: By CPT's own drafting convention this shape DEFINES what the adjacent term
+#: means, an exhaustive enumeration rather than a non-exhaustive example --
+#: the polarity `AXIS_QUALIFIED_CHILD` already trusts for a required
+#: precondition (documenting ONE alternative supports the candidate that
+#: carries it; documenting none of them, in a fully-searched record, may
+#: ground its elimination). `selectable=True, queryable=True`: safe to win a
+#: tie or become a provider question, because -- unlike the illustrative
+#: clause P1-2 corrected -- this clause's own enumeration is definitional,
+#: never merely illustrative.
+AXIS_DEFINITIONAL_CLAUSE = "definitional_clause"
 #: issue #6, Codex's independent re-review (F9-R19-A Finding 2): the shared
 #: pre-semicolon stem itself, as a REQUIRED precondition every member of a
 #: qualified-child family must clear before any of them may be considered
@@ -450,6 +465,62 @@ def _indication_clause(descriptor: str) -> str | None:
     return text or None
 
 
+_ANY_PAREN_RE = re.compile(r"\(([^()]+)\)")
+
+
+def _enumerated_alternatives(text: str) -> tuple[str, ...]:
+    """Split a definitional list like "form alpha, form beta, form gamma, or
+    form delta" into every individual alternative -- CPT's own Oxford-comma-
+    before-final-"or" convention for enumerating several equally-acceptable
+    forms, wider than `_descriptor_alternatives`'s own "X or Y" grammar
+    (which the comma-joined items in this list shape would otherwise collapse
+    into ONE unsplit, near-unmatchable phrase). Reuses `_descriptor_
+    alternatives` for the final "or"/"and/or" split first (so "with or
+    without"/comparative-threshold protection still applies exactly as it
+    always does), then further splits every resulting segment on its own
+    commas -- each comma in THIS list shape separates one more standalone
+    alternative, never a sub-clause of one. Still a boolean/grammar parse
+    only, still verbatim fragments of `text`."""
+    parts: list[str] = []
+    for segment in _descriptor_alternatives(text):
+        parts.extend(p.strip(" ,;.") for p in segment.split(",") if p.strip(" ,;."))
+    return tuple(parts)
+
+
+def _definitional_clause(descriptor: str) -> str | None:
+    """The FIRST parenthetical in `descriptor` that DEFINES what an adjacent
+    term itself means -- CPT's own drafting convention for naming the several
+    specific alternative forms a general act/component word covers (e.g.
+    "excision (form alpha, form beta, or form gamma)") -- or None when
+    `descriptor` states no such clause.
+
+    Told apart from `_indication_clause`'s illustrative "(eg, ...)" example
+    purely by grammar, never by which words appear: this marker's ABSENCE
+    (no "eg"/"e.g."/"for example" opener) is itself the signal, exactly the
+    same way `_exclusion_clause`'s marker presence is its own signal. Also
+    never an `_exclusion_clause` marker's own parenthetical, and never a
+    single, unsplittable phrase (`with or without ...`, a bare remark with no
+    genuine alternatives) -- only a parenthetical `_descriptor_alternatives`
+    resolves into two or more real OR-joined alternatives counts, since a
+    DEFINING enumeration is what CPT drafts this shape to be; anything that
+    doesn't actually enumerate alternatives is left to the ordinary
+    bag-of-words axis instead. Reproduces verbatim from the descriptor by
+    construction, the same guarantee `_exclusion_clause`/`_indication_clause`
+    already give."""
+    for match in _ANY_PAREN_RE.finditer(descriptor or ""):
+        content = match.group(1)
+        if _INDICATION_RE.search("(" + content + ")"):
+            continue
+        if _EXCLUSION_RE.search(content):
+            continue
+        if len(_enumerated_alternatives(content)) < 2:
+            continue
+        text = content.strip(" ,;.")
+        if text:
+            return text
+    return None
+
+
 def _semicolon_prefix(descriptor: str) -> tuple[str, str] | None:
     """(normalized stem including the semicolon, the candidate's own remaining
     qualifying clause) for a descriptor stating CPT's family-indentation
@@ -581,6 +652,8 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
             for c in candidates}
     indic = {c.code: _descriptor_alternatives(_indication_clause(c.descriptor) or "")
              for c in candidates}
+    defin = {c.code: _enumerated_alternatives(_definitional_clause(c.descriptor) or "")
+            for c in candidates}
     qualified = _qualified_child_terms(candidates)
     viability = _family_viability_terms(candidates) if qualified else {}
 
@@ -592,7 +665,8 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
     # candidate family.
     governed_words = (set(lat_words) | {_sing(word) for word in _EXCLUSION_MARKERS}
                       | {"eg", "example"})
-    for terms in (*excl.values(), *qualified.values(), *viability.values(), *indic.values()):
+    for terms in (*excl.values(), *qualified.values(), *viability.values(), *indic.values(),
+                 *defin.values()):
         governed_words |= {_sing(w) for phrase in terms
                            for w in re.split(r"[^a-z0-9]+", phrase.lower()) if w}
     toks = {c.code: _descriptor_tokens(c.descriptor) - governed_words for c in candidates}
@@ -635,6 +709,25 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
         probes.append(AxisProbe(
             AXIS_INDICATION_CLAUSE, indic,
             provable=True, selectable=False, queryable=False))
+
+    if any(defin.values()):
+        # issue #6, real-note investigation (designated note, F1: a candidate
+        # descriptor naming the several specific alternative forms a general
+        # act word covers -- e.g. "excision (form alpha, form beta, or form
+        # gamma)"): told apart from `AXIS_INDICATION_CLAUSE` purely by the
+        # ABSENCE of an "eg"/"for example" marker (`_definitional_clause`'s
+        # own docstring) -- CPT's own drafting convention for a definitional,
+        # exhaustive enumeration rather than a non-exhaustive example. Same
+        # polarity and treatment as `AXIS_QUALIFIED_CHILD`'s own required
+        # precondition: documenting one alternative supports the candidate
+        # that carries it; documenting none of them, in a fully-searched
+        # record, may ground its elimination. `selectable=True, queryable=
+        # True`: unlike the illustrative clause P1-2 corrected, this
+        # enumeration is definitional, so it is safe to win a tie or become a
+        # genuine, answerable provider question.
+        probes.append(AxisProbe(
+            AXIS_DEFINITIONAL_CLAUSE, defin,
+            provable=True, selectable=True, queryable=True))
 
     if qualified:
         full = {c.code: qualified.get(c.code, ()) for c in candidates}

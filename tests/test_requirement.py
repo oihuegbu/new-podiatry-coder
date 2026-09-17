@@ -1657,3 +1657,116 @@ class ExclusionClauseDeterministicGroundingTest(unittest.TestCase):
         grounded = resolution._requirement_grounded_status(
             fact, self.LOSER, self._requirements(), [], None, None, source=None)
         self.assertIsNone(grounded)
+
+
+class DefinitionalClauseRequirementTest(unittest.TestCase):
+    """issue #6, real-note investigation (designated note, F1: a candidate
+    descriptor naming the several specific alternative forms a general act
+    word covers, told apart from `AXIS_INDICATION_CLAUSE`'s illustrative
+    "(eg, ...)" example purely by grammar -- the ABSENCE of an "eg"/"for
+    example" marker is itself the signal that this parenthetical DEFINES
+    what the adjacent term means (CPT's own drafting convention for an
+    exhaustive enumeration), never an open-ended example. Same polarity as
+    `AXIS_QUALIFIED_CHILD`'s own required precondition: documenting ONE
+    alternative supports the candidate that carries it; documenting NONE of
+    them, in a fully-searched record, may ground its elimination.
+    Synthetic descriptors throughout."""
+
+    WITH_DEFINITION = _cand(
+        "CAND_DEF", "assembly service (form alpha, form beta, or form gamma)")
+    PLAIN = _cand("CAND_PLAIN", "assembly service performed")
+
+    def _coverage(self, text):
+        return req.CoverageCorpus(channel_id="test-channel", text=text,
+                                  text_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                                  covered_pages=(1,), page_image_sha256=("stub-hash",))
+
+    def test_told_apart_from_an_illustrative_clause_by_grammar_alone(self):
+        """The SAME parenthetical shape as an "(eg, ...)" clause, minus the
+        marker, must compile as `definitional_clause`, never
+        `indication_clause` -- and vice versa."""
+        illustrative = _cand("CAND_ILL", "assembly service (eg, form alpha)")
+        reqs_def = [r for r in req.compile_requirements([self.WITH_DEFINITION, self.PLAIN])
+                   if r.axis in ("definitional_clause", "indication_clause")]
+        reqs_ill = [r for r in req.compile_requirements([illustrative, self.PLAIN])
+                   if r.axis in ("definitional_clause", "indication_clause")]
+        self.assertEqual([r.axis for r in reqs_def], ["definitional_clause"])
+        self.assertEqual([r.axis for r in reqs_ill], ["indication_clause"])
+
+    def test_splits_every_comma_and_or_joined_alternative_separately(self):
+        """"A, B, or C" must compile as THREE separate alternatives, never one
+        unsplit, near-unmatchable joined phrase."""
+        reqs = [r for r in req.compile_requirements([self.WITH_DEFINITION, self.PLAIN])
+               if r.axis == "definitional_clause"]
+        self.assertEqual(len(reqs), 1)
+        self.assertEqual(reqs[0].expected, ("form alpha", "form beta", "form gamma"))
+
+    def test_compiles_as_a_required_must_support_requirement(self):
+        reqs = [r for r in req.compile_requirements([self.WITH_DEFINITION, self.PLAIN])
+               if r.axis == "definitional_clause"]
+        r = reqs[0]
+        self.assertEqual(r.candidate_code, "CAND_DEF")
+        self.assertTrue(r.required)
+        self.assertEqual(r.role, req.RequirementRole.MUST_SUPPORT)
+
+    def test_a_single_unenumerated_parenthetical_compiles_nothing(self):
+        """A bare remark or a protected "with or without" phrase is not a
+        genuine multi-alternative enumeration -- left to the ordinary
+        bag-of-words axis, never promoted here."""
+        single = _cand("CAND_SINGLE", "assembly service (with or without attachment)")
+        reqs = [r for r in req.compile_requirements([single, self.PLAIN])
+               if r.axis == "definitional_clause"]
+        self.assertEqual(reqs, [])
+
+    def test_an_except_marked_parenthetical_is_left_to_exclusion_clause(self):
+        excluded = _cand("CAND_EXC", "assembly service (except form alpha or form beta)")
+        reqs = [r for r in req.compile_requirements([excluded, self.PLAIN])
+               if r.axis in ("definitional_clause", "exclusion_clause")]
+        self.assertEqual([r.axis for r in reqs], ["exclusion_clause"])
+
+    def test_grounded_elimination_eliminates_on_no_documented_alternative(self):
+        """End-to-end through the REAL `resolution._grounded_elimination` --
+        every alternative genuinely NOT_DOCUMENTED in a fully-covered record
+        grounds an elimination, the SAME polarity `AXIS_QUALIFIED_CHILD`
+        already trusts."""
+        from claude_coder import resolution
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+
+        span = EvidenceSpan(text="assembly service performed, nothing else stated",
+                            anchored=True, span_id="s1")
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="assembly service",
+                            evidence=[span], confidence=0.9, fact_id="F1")
+        reqs = req.compile_requirements([self.WITH_DEFINITION, self.PLAIN])
+        coverage = self._coverage("assembly service performed, nothing else stated")
+        rjs = tuple(req.RequirementJudgement(
+            requirement_id=r.requirement_id, status=req.RequirementStatus.NOT_DOCUMENTED)
+            for r in reqs if r.axis == "definitional_clause")
+        judgements = [type("J", (), {"requirement_judgements": rjs})()]
+
+        grounded, detail = resolution._grounded_elimination(
+            fact, self.WITH_DEFINITION, self.PLAIN, reconciliation=None,
+            requirements=reqs, judgements=judgements, coverage=coverage)
+        self.assertTrue(grounded, detail)
+
+    def test_grounded_elimination_never_eliminates_on_one_documented_alternative(self):
+        """Documenting ONE alternative satisfies the whole requirement --
+        the mirror case, never eliminated."""
+        from claude_coder import resolution
+        from claude_coder.models import ClinicalFact, EvidenceSpan, FactKind
+
+        span = EvidenceSpan(text="assembly service performed via form beta",
+                            anchored=True, span_id="s1")
+        fact = ClinicalFact(kind=FactKind.PROCEDURE, description="assembly service",
+                            evidence=[span], confidence=0.9, fact_id="F1")
+        reqs = req.compile_requirements([self.WITH_DEFINITION, self.PLAIN])
+        coverage = self._coverage("assembly service performed via form beta")
+        rjs = tuple(req.RequirementJudgement(
+            requirement_id=r.requirement_id, status=req.RequirementStatus.SUPPORTED,
+            evidence_span_ids=("s1",))
+            for r in reqs if r.axis == "definitional_clause")
+        judgements = [type("J", (), {"requirement_judgements": rjs})()]
+
+        grounded, _detail = resolution._grounded_elimination(
+            fact, self.WITH_DEFINITION, self.PLAIN, reconciliation=None,
+            requirements=reqs, judgements=judgements, coverage=coverage)
+        self.assertFalse(grounded)
