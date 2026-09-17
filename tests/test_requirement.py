@@ -15,6 +15,8 @@ from claude_coder import resolution
 from claude_coder.data_access import MockSource
 from claude_coder.models import CandidateCode, ClinicalFact, EvidenceSpan, FactKind
 from claude_coder import verify
+from app.contracts.source_evidence import (ReconciliationStatus, SourceReconciliation,
+                                           SpanReconciliation)
 
 
 def _cand(code, descriptor, system="cpt"):
@@ -1840,3 +1842,148 @@ class DefinitionalClauseRequirementTest(unittest.TestCase):
             fact, self.WITH_DEFINITION, self.PLAIN, reconciliation=None,
             requirements=reqs, judgements=judgements, coverage=coverage)
         self.assertFalse(grounded)
+
+
+class SequenceQualifierRequirementTest(unittest.TestCase):
+    """issue #6, real-note investigation (designated note, F4: a candidate
+    descriptor stating a real, cross-specialty CPT drafting convention --
+    "Repair, primary, ..." vs "Repair, secondary, ..." -- released as
+    VERIFIED with nothing independently confirming which one applied).
+    "primary"/"secondary"/"initial"/"subsequent" are generic English
+    sequence/order words, told apart purely by POSITION (immediately after
+    the descriptor's own first comma) -- confirmed against the real,
+    complete CPT data set: 32 codes across orthopedics, ENT, plastic surgery,
+    and pathology, never scenario-specific. Synthetic descriptors
+    throughout."""
+
+    PRIMARY = _cand("CAND_PRIMARY", "assembly, primary, structure alpha")
+    SECONDARY = _cand("CAND_SECONDARY", "assembly, secondary, structure alpha")
+    PLAIN = _cand("CAND_PLAIN", "assembly service, structure alpha")
+
+    def test_compiles_only_when_the_qualifier_is_the_first_comma_delimited_word(self):
+        reqs = [r for r in req.compile_requirements([self.PRIMARY, self.PLAIN])
+               if r.axis == "sequence_qualifier"]
+        self.assertEqual(len(reqs), 1)
+        self.assertEqual(reqs[0].candidate_code, "CAND_PRIMARY")
+        self.assertEqual(reqs[0].expected, ("primary",))
+        self.assertTrue(reqs[0].required)
+        self.assertEqual(reqs[0].role, req.RequirementRole.MUST_SUPPORT)
+
+    def test_a_plain_descriptor_with_no_qualifier_compiles_nothing(self):
+        reqs = [r for r in req.compile_requirements([self.PRIMARY, self.PLAIN])
+               if r.axis == "sequence_qualifier" and r.candidate_code == "CAND_PLAIN"]
+        self.assertEqual(reqs, [])
+
+    def test_a_word_outside_the_closed_set_never_compiles(self):
+        """Purely structural + a closed, generic vocabulary -- an arbitrary
+        word in the same position must never be mistaken for one of these
+        four sequence markers."""
+        other = _cand("CAND_OTHER", "assembly, revised, structure alpha")
+        reqs = [r for r in req.compile_requirements([other, self.PLAIN])
+               if r.axis == "sequence_qualifier"]
+        self.assertEqual(reqs, [])
+
+    def test_primary_and_secondary_compile_as_distinct_required_alternatives(self):
+        reqs = {r.candidate_code: r.expected for r in
+               req.compile_requirements([self.PRIMARY, self.SECONDARY])
+               if r.axis == "sequence_qualifier"}
+        self.assertEqual(reqs["CAND_PRIMARY"], ("primary",))
+        self.assertEqual(reqs["CAND_SECONDARY"], ("secondary",))
+
+
+class ChosenCandidateOwnRequirementsConfirmedTest(unittest.TestCase):
+    """issue #6, real-note investigation (designated note, F4: "Repair,
+    secondary, Achilles tendon" released as VERIFIED with nothing
+    independently confirming "secondary" at all): `_uniqueness_view`/
+    `_settle_uniqueness` only ever spend a compiled requirement ELIMINATING a
+    rival -- the sole surviving, CHOSEN candidate's own required axes were
+    never symmetrically checked. `_chosen_own_requirements_confirmed` closes
+    that gap; `_entailed_line` now calls it before minting VERIFIED whenever
+    `requirements` is supplied. Synthetic descriptors throughout."""
+
+    WINNER = _cand("CAND_WIN", "assembly, primary, structure alpha")
+    LOSER = _cand("CAND_LOSE", "assembly, secondary, structure alpha")
+
+    def _fact(self, text):
+        return ClinicalFact(
+            kind=FactKind.PROCEDURE, description="assembly service",
+            evidence=[EvidenceSpan(text=text, anchored=True, span_id="s1")],
+            confidence=0.9, fact_id="F1")
+
+    def _coverage(self, text):
+        return req.CoverageCorpus(channel_id="test-channel", text=text,
+                                  text_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                                  covered_pages=(1,), page_image_sha256=("stub-hash",))
+
+    def test_never_releases_verified_when_the_winners_own_premise_is_unconfirmed(self):
+        fact = self._fact("Assembly service performed on structure alpha.")
+        candidates = [self.WINNER, self.LOSER]
+        requirements = req.compile_requirements(candidates)
+        judgement = verify.Judgement(
+            chosen=self.WINNER, entailed=(self.WINNER.code,),
+            eliminated={self.LOSER.code: "no secondary indication is documented"},
+            declared=True)
+        line = resolution._entailed_line(
+            fact, self.WINNER, candidates, "single-evaluator entailment",
+            requirements=requirements, judgements=[judgement], coverage=None)
+        self.assertIsNone(line.chosen)
+        self.assertEqual(line.method, resolution.ResolutionMethod.ABSTAINED)
+        self.assertIn("sequence_qualifier", line.documentation_gap)
+
+    def test_releases_verified_when_the_winners_own_premise_is_validated(self):
+        fact = self._fact("This is the primary repair on structure alpha.")
+        candidates = [self.WINNER, self.LOSER]
+        requirements = req.compile_requirements(candidates)
+        win_req = next(r for r in requirements
+                       if r.axis == "sequence_qualifier" and r.candidate_code == "CAND_WIN")
+        judgement = verify.Judgement(
+            chosen=self.WINNER, entailed=(self.WINNER.code,),
+            eliminated={self.LOSER.code: "no secondary indication is documented"},
+            declared=True,
+            requirement_judgements=(
+                req.RequirementJudgement(requirement_id=win_req.requirement_id,
+                                         status=req.RequirementStatus.SUPPORTED,
+                                         evidence_span_ids=("s1",)),))
+        reconciliation = SourceReconciliation(spans=(
+            SpanReconciliation(span_id="s1", status=ReconciliationStatus.AGREED),))
+        coverage = self._coverage("This is the primary repair on structure alpha.")
+        line = resolution._entailed_line(
+            fact, self.WINNER, candidates, "single-evaluator entailment",
+            requirements=requirements, judgements=[judgement],
+            reconciliation=reconciliation, coverage=coverage)
+        self.assertEqual(line.chosen.code if line.chosen else None, "CAND_WIN")
+        self.assertEqual(line.method, resolution.ResolutionMethod.VERIFIED)
+
+    def test_skips_the_check_entirely_when_no_requirements_are_supplied(self):
+        """A caller that omits `requirements` (the default) gets exactly
+        prior behavior -- this new check is additive, never mandatory for
+        callers that haven't been updated to supply the extra context."""
+        fact = self._fact("Assembly service performed on structure alpha.")
+        line = resolution._entailed_line(
+            fact, self.WINNER, [self.WINNER], "single-evaluator entailment")
+        self.assertEqual(line.chosen.code, "CAND_WIN")
+        self.assertEqual(line.method, resolution.ResolutionMethod.VERIFIED)
+
+    def test_never_demands_confirmation_for_laterality(self):
+        """AXIS_LATERALITY is settled EXCLUSIVELY by the fact's own typed
+        attribute -- this check must never demand a redundant
+        `requirement_judgements` entry for it."""
+        winner = _cand("CAND_R", "assembly service, right structure")
+        loser = _cand("CAND_L", "assembly service, left structure")
+        fact = ClinicalFact(
+            kind=FactKind.PROCEDURE, description="assembly service",
+            attributes={"laterality": "right"},
+            evidence=[EvidenceSpan(text="assembly service performed on the right structure",
+                                   anchored=True, span_id="s1")],
+            confidence=0.9, fact_id="F1")
+        candidates = [winner, loser]
+        requirements = req.compile_requirements(candidates)
+        judgement = verify.Judgement(
+            chosen=winner, entailed=(winner.code,),
+            eliminated={loser.code: "documented as the right side, not the left"},
+            declared=True)
+        line = resolution._entailed_line(
+            fact, winner, candidates, "single-evaluator entailment",
+            requirements=requirements, judgements=[judgement], coverage=None)
+        self.assertEqual(line.chosen.code if line.chosen else None, "CAND_R")
+        self.assertEqual(line.method, resolution.ResolutionMethod.VERIFIED)

@@ -114,6 +114,17 @@ AXIS_INDICATION_CLAUSE = "indication_clause"
 #: clause P1-2 corrected -- this clause's own enumeration is definitional,
 #: never merely illustrative.
 AXIS_DEFINITIONAL_CLAUSE = "definitional_clause"
+#: issue #6, real-note investigation (designated note, F4: "Repair, secondary,
+#: structure alpha" released as VERIFIED with nothing independently confirming
+#: "secondary" -- a real, cross-specialty CPT drafting convention this
+#: codebase had no axis for at all). Same polarity and treatment as
+#: `AXIS_QUALIFIED_CHILD`'s own required precondition: documenting the
+#: qualifier supports the candidate that states it; documenting the
+#: OPPOSITE/absent qualifier, in a fully-searched record, may ground its
+#: elimination. `selectable=True, queryable=True`: whether a procedure
+#: addresses an original event or a prior-treated/revision one is a real,
+#: answerable clinical fact a provider can confirm, never merely illustrative.
+AXIS_SEQUENCE_QUALIFIER = "sequence_qualifier"
 #: issue #6, Codex's independent re-review (F9-R19-A Finding 2): the shared
 #: pre-semicolon stem itself, as a REQUIRED precondition every member of a
 #: qualified-child family must clear before any of them may be considered
@@ -521,6 +532,44 @@ def _definitional_clause(descriptor: str) -> str | None:
     return None
 
 
+#: issue #6, real-note investigation (designated note, F4: "Repair, SECONDARY,
+#: structure alpha" auto-released as VERIFIED with nothing independently
+#: confirming "secondary" -- the note describes no prior surgery or injury at
+#: all). A GENERIC, cross-specialty CPT drafting convention (confirmed against
+#: the real, complete CPT data set: 32 codes across orthopedics, ENT, plastic
+#: surgery, and pathology -- never scenario- or specialty-specific) states,
+#: directly after the descriptor's own first comma, whether a procedure
+#: addresses an original/first-time event or a prior-treated/revision one:
+#: "Repair, primary, ..." vs "Repair, secondary, ..."; "Tonsillectomy, primary
+#: or secondary; ..."; "Smear, primary source ...". These four words are
+#: sequence/order English, the same category as "eg"/"except" -- never
+#: anatomy, pathology, or procedure-specific vocabulary -- so recognizing them
+#: is exactly the same kind of grammar-driven, agnostic signal as every other
+#: marker in this module, never a medical-code or clinical-term list.
+_SEQUENCE_QUALIFIERS = frozenset({"primary", "secondary", "initial", "subsequent"})
+_SEQUENCE_QUALIFIER_RE = re.compile(
+    r"^[a-z][a-z]*,\s*((?:%s)(?:\s+or\s+(?:%s))?)\b"
+    % ("|".join(_SEQUENCE_QUALIFIERS), "|".join(_SEQUENCE_QUALIFIERS)),
+    re.IGNORECASE)
+
+
+def _sequence_qualifier_clause(descriptor: str) -> str | None:
+    """The sequence-qualifying word or phrase (e.g. "primary", "secondary",
+    "primary or secondary") immediately following `descriptor`'s own FIRST
+    comma, when it is drawn entirely from `_SEQUENCE_QUALIFIERS`, or None
+    otherwise. Positional and closed-vocabulary, both structural: the
+    qualifier's POSITION (right after the leading act verb) is CPT's own
+    drafting convention for this shape, and the vocabulary itself is generic
+    sequence/order English, never a clinical concept. Reproduces verbatim
+    from the descriptor by construction, the same guarantee every other
+    clause-extractor in this module already gives."""
+    m = _SEQUENCE_QUALIFIER_RE.match(descriptor or "")
+    if not m:
+        return None
+    text = m.group(1).strip(" ,;.")
+    return text or None
+
+
 def _semicolon_prefix(descriptor: str) -> tuple[str, str] | None:
     """(normalized stem including the semicolon, the candidate's own remaining
     qualifying clause) for a descriptor stating CPT's family-indentation
@@ -654,6 +703,8 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
              for c in candidates}
     defin = {c.code: _enumerated_alternatives(_definitional_clause(c.descriptor) or "")
             for c in candidates}
+    seq = {c.code: _descriptor_alternatives(_sequence_qualifier_clause(c.descriptor) or "")
+          for c in candidates}
     qualified = _qualified_child_terms(candidates)
     viability = _family_viability_terms(candidates) if qualified else {}
 
@@ -666,7 +717,7 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
     governed_words = (set(lat_words) | {_sing(word) for word in _EXCLUSION_MARKERS}
                       | {"eg", "example"})
     for terms in (*excl.values(), *qualified.values(), *viability.values(), *indic.values(),
-                 *defin.values()):
+                 *defin.values(), *seq.values()):
         governed_words |= {_sing(w) for phrase in terms
                            for w in re.split(r"[^a-z0-9]+", phrase.lower()) if w}
     toks = {c.code: _descriptor_tokens(c.descriptor) - governed_words for c in candidates}
@@ -727,6 +778,26 @@ def discriminating_axes(candidates: list[CandidateCode]) -> tuple[AxisProbe, ...
         # genuine, answerable provider question.
         probes.append(AxisProbe(
             AXIS_DEFINITIONAL_CLAUSE, defin,
+            provable=True, selectable=True, queryable=True))
+
+    if any(seq.values()):
+        # issue #6, real-note investigation (designated note, F4: "Repair,
+        # secondary, structure alpha" released as VERIFIED with nothing
+        # independently confirming "secondary"): a real, cross-specialty CPT
+        # drafting convention (confirmed against the complete real CPT data
+        # set: 32 codes spanning orthopedics, ENT, plastic surgery, and
+        # pathology) states, directly after the descriptor's own first
+        # comma, whether a procedure addresses an original/first event or a
+        # prior-treated/revision one. Same polarity as `AXIS_QUALIFIED_CHILD`'s
+        # own required precondition: documenting the stated qualifier
+        # supports the candidate that carries it; documenting none of a
+        # candidate's own qualifier alternatives, in a fully-searched
+        # record, may ground its elimination. `selectable=True, queryable=
+        # True`: unlike an illustrative example, whether this was an
+        # original or a revision procedure is a real, answerable fact a
+        # provider can confirm.
+        probes.append(AxisProbe(
+            AXIS_SEQUENCE_QUALIFIER, seq,
             provable=True, selectable=True, queryable=True))
 
     if qualified:

@@ -3466,7 +3466,9 @@ def _evidence_constrained_disagreement_resolution(
                 f"{support_basis} ({tie.proof or source_proof}): {tie.detail}")
         return _entailed_line(
             fact, winner, shortlist, f"{why}; {note}" if why else note,
-            uniqueness=audit)
+            uniqueness=audit, requirements=requirements, judgements=judgements,
+            reconciliation=reconciliation, coverage=coverage,
+            evidence_packet=evidence_packet)
 
     # Only a fully validated semantic disagreement reaches here.  If the
     # authoritative descriptors identify a real, typed, missing fact, the
@@ -3712,10 +3714,14 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                     "source-cited candidate")
             return _entailed_line(
                 fact, survivor, shortlist, f"{why}; {note}" if why else note,
-                uniqueness=matrix_record)
+                uniqueness=matrix_record, requirements=requirements,
+                judgements=judgements, reconciliation=reconciliation,
+                coverage=coverage, evidence_packet=evidence_packet)
         if chosen is not None and survivor.code == chosen.code:
             return _entailed_line(fact, survivor, shortlist, why,
-                                  uniqueness=record)
+                                  uniqueness=record, requirements=requirements,
+                                  judgements=judgements, reconciliation=reconciliation,
+                                  coverage=coverage, evidence_packet=evidence_packet)
         survivor_admission = (admissions or {}).get(survivor.code)
         if (chosen is not None
                 and _disposition_verdict is not None
@@ -3732,7 +3738,9 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                     "with governed identity standing")
             return _entailed_line(
                 fact, survivor, shortlist, f"{why}; {note}" if why else note,
-                uniqueness=reselection_record)
+                uniqueness=reselection_record, requirements=requirements,
+                judgements=judgements, reconciliation=reconciliation,
+                coverage=coverage, evidence_packet=evidence_packet)
 
     # issue #6, Codex's independent re-review (F9-R13-C): one additional
     # selection condition, tried BEFORE the original-document tie policy --
@@ -3752,7 +3760,10 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                 f"this fact's own reconciled evidence")
         return _entailed_line(fact, semantic_winner, shortlist,
                               (f"{why}; {note}" if why else note),
-                              uniqueness={**record, "semantic_axis_selection": semantic_winner.code})
+                              uniqueness={**record, "semantic_axis_selection": semantic_winner.code},
+                              requirements=requirements, judgements=judgements,
+                              reconciliation=reconciliation, coverage=coverage,
+                              evidence_packet=evidence_packet)
 
     # STEPS 3 and 4 -- several candidates are independently entailed, so the ORIGINAL
     # DOCUMENT decides, exactly as it does for a deterministic tie.
@@ -3767,7 +3778,10 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                 f"against the original document ({tie.proof}): {tie.detail}")
         return _entailed_line(fact, winner, shortlist,
                               (f"{why}; {note}" if why else note),
-                              uniqueness={**record, **tie.as_record()})
+                              uniqueness={**record, **tie.as_record()},
+                              requirements=requirements, judgements=judgements,
+                              reconciliation=reconciliation, coverage=coverage,
+                              evidence_packet=evidence_packet)
 
     # STEP 5 -- ONE targeted provider query, never a generic coder queue.
     return _tie_escalation(
@@ -4283,9 +4297,103 @@ def _bounded_interval_hold(fact: ClinicalFact,
                   "verified paths must abstain")
 
 
+def _chosen_own_requirements_confirmed(fact: ClinicalFact, cand: CandidateCode,
+                                       requirements: tuple, judgements: list,
+                                       reconciliation, coverage,
+                                       evidence_packet=None,
+                                       ) -> tuple[bool, str]:
+    """Whether `cand` -- ALREADY the sole surviving, entailed candidate -- also
+    has every one of its OWN compiled MUST_SUPPORT/EXCLUSION requirements
+    independently confirmed, never merely assumed from a model's bare
+    "entailed" verdict on the whole shortlist.
+
+    issue #6, real-note investigation (designated note, F4: a candidate whose
+    own descriptor states a REQUIRED premise -- e.g. CPT's own drafting
+    convention marking a procedure "primary" vs "secondary" -- released as
+    VERIFIED with nothing independently confirming that premise at all).
+    `_uniqueness_view`/`_settle_uniqueness` only ever spend a compiled
+    requirement on ELIMINATING a RIVAL (`if cand.code == chosen.code:
+    remaining.append(cand); continue` -- the chosen survivor is never itself
+    checked). That is exactly the same "a model's own say-so is not, by
+    itself, grounds" principle Codex's F8-R1 finding already established for
+    eliminations -- it was simply never applied to the WINNER before now.
+
+    For a MUST_SUPPORT axis: at least one of the candidate's own stated
+    alternatives must be independently validated SUPPORTED (a genuinely
+    cited span whose own text states it, reconciled AGREED/VACUOUS -- never
+    the model's unvalidated claim). For an EXCLUSION axis: the excluded
+    condition must be independently validated NOT_DOCUMENTED (a fully-
+    searched, complete corpus genuinely does not state it) -- the SAME two
+    validated statuses `_requirement_grounded_status` already trusts for
+    eliminating a rival, just checked here for the opposite party.
+
+    Returns `(True, "")` when every required axis is confirmed (or `cand`
+    compiles none), `(False, detail)` naming the first unconfirmed one
+    otherwise. Never a third, more permissive answer: unlike the
+    elimination-side helpers, there is no weaker fallback to defer to here --
+    an unconfirmed premise on the WINNER must never be silently treated as
+    satisfied."""
+    from . import requirement as _requirement
+    from . import verify as _verify
+    cand_reqs = [r for r in requirements
+                if r.candidate_code == cand.code
+                and r.role in (_requirement.RequirementRole.MUST_SUPPORT,
+                              _requirement.RequirementRole.EXCLUSION)
+                # AXIS_LATERALITY is settled EXCLUSIVELY by the fact's own typed
+                # attribute (`tiebreak._typed_laterality_support`) -- it is
+                # mechanically compiled as a requirement like any other
+                # selectable axis, but no evaluator is ever asked, or needs, to
+                # answer it as one; requiring a `requirement_judgements` entry
+                # here would demand a redundant, never-populated confirmation
+                # for an axis a MORE reliable mechanism already settles.
+                # `_SEMANTIC_AXES` select, they do not need this confirmation
+                # either -- validated instead by `_select_by_semantic_axes`'s
+                # own governed concept-relation check, the SAME reason
+                # `_settle_uniqueness` already excludes them from
+                # `_elimination_requirements` before using this exact
+                # MUST_SUPPORT/EXCLUSION role filter for the losing side.
+                and r.axis != _tiebreak.AXIS_LATERALITY
+                and r.axis not in _SEMANTIC_AXES]
+    if not cand_reqs:
+        return True, ""
+    by_axis: dict[str, list] = {}
+    for r in cand_reqs:
+        by_axis.setdefault(r.axis, []).append(r)
+    evidence_by_span_id = _verify.evidence_text_by_span_id(fact, evidence_packet)
+    for axis, axis_reqs in by_axis.items():
+        is_exclusion = axis_reqs[0].role is _requirement.RequirementRole.EXCLUSION
+        target = (_requirement.RequirementStatus.NOT_DOCUMENTED if is_exclusion
+                 else _requirement.RequirementStatus.SUPPORTED)
+        confirmed = False
+        for req in axis_reqs:
+            outcomes = [rj for j in judgements
+                       for rj in getattr(j, "requirement_judgements", ())
+                       if rj.requirement_id == req.requirement_id]
+            if not outcomes or len(outcomes) < len(judgements):
+                continue
+            if not all(_requirement.validated_requirement(
+                    req, rj, evidence_by_span_id=evidence_by_span_id,
+                    reconciliation=reconciliation, coverage=coverage)
+                    for rj in outcomes):
+                continue
+            if {rj.status for rj in outcomes} == {target}:
+                confirmed = True
+                break
+        if not confirmed:
+            names = ", ".join(sorted(r.requirement_id for r in axis_reqs))
+            verb = "requires" if not is_exclusion else "excludes"
+            return False, (f"{cand.code}'s own descriptor {verb} a fact on axis "
+                          f"{axis!r} ({names}) that no evaluator independently "
+                          f"confirmed against the document")
+    return True, ""
+
+
 def _entailed_line(fact: ClinicalFact, chosen: CandidateCode,
                    shortlist: list[CandidateCode], why: str,
-                   uniqueness: dict | None = None) -> ResolvedLine:
+                   uniqueness: dict | None = None,
+                   requirements: tuple = (), judgements: list = (),
+                   reconciliation=None, coverage=None,
+                   evidence_packet=None) -> ResolvedLine:
     """The line for a candidate whose AUTHORITATIVE descriptor the verifier found entailed.
 
     VERIFIED is the GROUNDED, autonomy-eligible method: the documentation entails this
@@ -4294,7 +4402,29 @@ def _entailed_line(fact: ClinicalFact, chosen: CandidateCode,
     or an uncontested requirement gap) -- never merely "not the one the model happened to
     pick." A single evaluator's positively-supported, uniquely-settled entailment is
     sufficient (the pipeline now runs one verifying evaluator, not two independent ones
-    reconciled against each other -- see resolve()'s own docstring)."""
+    reconciled against each other -- see resolve()'s own docstring).
+
+    `requirements`/`judgements`/`reconciliation`/`coverage`/`evidence_packet` (issue #6,
+    real-note investigation, F4): before minting VERIFIED, `chosen`'s OWN compiled
+    required axes (if any) must ALSO be independently confirmed
+    (`_chosen_own_requirements_confirmed`) -- never assumed from the shortlist-level
+    entailment call alone. When unconfirmed, this returns a targeted, ABSTAINED
+    provider question instead -- never a silent release, and never a generic hold that
+    fails to name the exact unconfirmed fact. Callers that omit these (the defaults)
+    skip this check entirely, exactly preserving prior behavior for every call site
+    that has not been updated to supply them."""
+    if requirements:
+        confirmed, gap_detail = _chosen_own_requirements_confirmed(
+            fact, chosen, requirements, judgements, reconciliation, coverage,
+            evidence_packet)
+        if not confirmed:
+            return ResolvedLine(
+                fact=fact, chosen=None, alternatives=[chosen], method=ResolutionMethod.ABSTAINED,
+                documentation_gap=gap_detail,
+                tie_record=uniqueness,
+                rationale=(f"{chosen.code} is the sole entailed candidate, but {gap_detail} -- "
+                          f"a model's own say-so of its OWN required premise is not, by "
+                          f"itself, grounds to release it"))
     base = (f"authoritative descriptor entailed by documentation: {why}"
             if why else "authoritative descriptor entailed by documentation")
     return ResolvedLine(
