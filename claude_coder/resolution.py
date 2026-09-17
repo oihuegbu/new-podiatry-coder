@@ -2358,48 +2358,70 @@ def _model_cited_descriptor_term_grounded(fact: ClinicalFact, loser: CandidateCo
     into a release). Every one of these conditions must hold, unanimously,
     across every judgement:
 
-    1. `loser`'s own official descriptor states a word neither `winner`'s
-       descriptor NOR `fact`'s own evidence already states
-       (`_tiebreak._descriptor_tokens`'s existing, already-audited singularized
-       vocabulary -- the SAME words `AXIS_DESCRIPTOR_TERM` already computes for
-       audit, never a new, unvalidated parse). Excluding `fact`'s own words is
-       load-bearing, not incidental: a word already true of the EVENT itself
-       (e.g. the anatomy every sibling candidate shares) is never evidence
-       that one specific sibling's OWN additional concept (a distinct
-       pathology or technique) is absent -- checking it would launder a
-       coincidental shared word into a false absence signal.
-    2. That word is genuinely engaged by the WHOLE evaluator's own written
-       reason for eliminating `loser` -- not a coincidental keyword hit
-       against an already-known reason, since the caller could not otherwise
-       have known which word mattered.
+    1. `loser`'s own official descriptor states a maximal, CONTIGUOUS run of
+       words (never a decomposed bag of independent words) that is neither
+       part of `winner`'s descriptor, `fact`'s own evidence, nor ordinary
+       descriptor grammar (`_tiebreak._GRAMMAR`) -- the descriptor's own
+       distinguishing PHRASE, in its own original word order. Checking whole
+       phrases rather than single decomposed words is load-bearing, not
+       incidental: a real note (found live, designated note F2 vs a code
+       naming "a Dwyer or Chambers type PROCEDURE") can easily use one of a
+       phrase's own common connective words (here, "procedure") elsewhere,
+       alone, in an unrelated sense (a section header, a generic reference to
+       "the procedure" as a whole) -- checking that single word's absence in
+       isolation would launder a coincidental, unrelated reuse into a false
+       "supported" signal and wrongly refuse a genuine, correct elimination.
+       The full phrase ("chambers type procedure") recurring nowhere is a far
+       stronger, still fully deterministic bar, and is exactly the same
+       whole-phrase discipline every other multi-word clause in this module
+       (an indication clause, an exclusion clause, "with or without ...") is
+       already held to -- never a curated list of words to ignore.
+    2. That phrase is genuinely engaged by the WHOLE evaluator's own written
+       reason for eliminating `loser` -- at least one of the phrase's own
+       words appears in the reason, so the caller could not otherwise have
+       known which concept mattered.
     3. `coverage` is the identity-bound, complete reading of the ENTIRE
        document (never a partial excerpt) -- the SAME trust bar every other
        NOT_DOCUMENTED verdict in this module is already checked against.
-    4. Every one of THOSE engaged words is independently confirmed absent
-       (never merely un-negated, never merely unquoted -- `asserted_status`
-       itself distinguishes a genuine assertion from a negated mention) from
-       the complete document text, by this module's own existing negation-
-       aware matcher -- never the model's own say-so that it is absent.
+    4. Every one of THOSE engaged phrases is independently confirmed absent,
+       AS A WHOLE PHRASE (never merely un-negated, never merely unquoted --
+       `asserted_status` itself distinguishes a genuine assertion from a
+       negated mention) from the complete document text, by this module's
+       own existing negation-aware matcher -- never the model's own say-so
+       that it is absent.
 
     Any judgement lacking the full `Judgement.elimination_of` interface (some
     callers duck-type a lighter test double exposing only
     `requirement_judgements`, for `_requirement_grounded_status` above), that
     fails to name `loser` at all, or whose reason engages none of `loser`'s
-    own distinguishing words, refuses this path entirely (returns None,
+    own distinguishing phrases, refuses this path entirely (returns None,
     falling through to the existing weaker fallback UNCHANGED) -- this only
     ever ADDS a narrow, independently-verified grounding case, it never
     removes or loosens today's existing ones.
     """
     if coverage is None or not coverage.complete or not judgements:
         return None
-    loser_words = _tiebreak._descriptor_tokens(loser.descriptor)
     winner_words = _tiebreak._descriptor_tokens(winner.descriptor)
     fact_text = " ".join(str(getattr(s, "text", "") or "")
                         for s in (getattr(fact, "evidence", None) or ()))
     fact_words = {_tiebreak._sing(w)
                  for w in re.split(r"[^a-z0-9]+", fact_text.lower()) if w}
-    distinct = loser_words - winner_words - fact_words
-    if not distinct:
+    excluded = winner_words | fact_words | {"eg", "example"}
+    phrases: list[str] = []
+    current: list[str] = []
+    for raw in re.split(r"[^a-z0-9]+", (loser.descriptor or "").lower()):
+        if not raw:
+            continue
+        if raw.isdigit() or _tiebreak._sing(raw) in _tiebreak._GRAMMAR or \
+                _tiebreak._sing(raw) in excluded:
+            if current:
+                phrases.append(" ".join(current))
+            current = []
+        else:
+            current.append(raw)
+    if current:
+        phrases.append(" ".join(current))
+    if not phrases:
         return None
     engaged: set[str] = set()
     for j in judgements:
@@ -2411,15 +2433,16 @@ def _model_cited_descriptor_term_grounded(fact: ClinicalFact, loser: CandidateCo
             return None
         reason_words = {_tiebreak._sing(w)
                         for w in re.split(r"[^a-z0-9]+", reason.lower()) if w}
-        matched = distinct & reason_words
-        if not matched:
+        this_engaged = {p for p in phrases
+                       if reason_words & {_tiebreak._sing(w) for w in p.split()}}
+        if not this_engaged:
             return None
-        engaged |= matched
-    for word in sorted(engaged):
-        if _tiebreak.asserted_status((word,), coverage.text) == "supported":
-            return False, (f"the complete document states {word!r}, "
-                           f"{loser.code}'s own distinguishing term")
-    return True, (f"{loser.code}'s own distinguishing term(s) {sorted(engaged)} -- "
+        engaged |= this_engaged
+    for phrase in sorted(engaged):
+        if _tiebreak.asserted_status((phrase,), coverage.text) == "supported":
+            return False, (f"the complete document states {phrase!r}, "
+                           f"{loser.code}'s own distinguishing phrase")
+    return True, (f"{loser.code}'s own distinguishing phrase(s) {sorted(engaged)} -- "
                  f"named by every evaluator's own reason for ruling it out -- "
                  f"confirmed genuinely absent from the complete reconciled document")
 

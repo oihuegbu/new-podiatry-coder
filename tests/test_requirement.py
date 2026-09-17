@@ -1584,6 +1584,43 @@ class ModelCitedDescriptorTermGroundingTest(unittest.TestCase):
             fact, self.LOSER, self.WINNER, [bare], coverage)
         self.assertIsNone(grounded)
 
+    def test_checks_the_whole_distinguishing_phrase_not_a_decomposed_word(self):
+        """issue #6, real-note investigation (designated note, F4: a
+        candidate descriptor naming "a Dwyer or Chambers type PROCEDURE" --
+        the note separately uses the bare word "procedure" elsewhere, as a
+        section header and a generic reference to the whole encounter,
+        unrelated to any specific named technique). Decomposing the
+        descriptor's own phrase into independent words and checking each
+        one's absence separately would find "procedure" trivially present
+        (in that unrelated sense) and wrongly refuse a genuine, correct
+        elimination. Checking the WHOLE contiguous phrase ("structure gamma
+        type technique") as one unit -- never decomposed -- is the fix: that
+        exact phrase recurs nowhere, even though one of its own words does,
+        alone, elsewhere."""
+        winner = _cand("CAND_WIN", "assembly service, structure alpha")
+        loser = _cand("CAND_LOSE",
+                      "assembly service, structure alpha, structure gamma type technique")
+        fact = ClinicalFact(
+            kind=FactKind.PROCEDURE, description="assembly service",
+            evidence=[EvidenceSpan(text="Assembly service performed on structure alpha",
+                                   anchored=True, span_id="s1")],
+            confidence=0.9, fact_id="F1")
+        coverage = self._coverage(
+            "TECHNIQUE\n\n"
+            "Assembly service performed on structure alpha using a standard technique. "
+            "No complications occurred during the technique."
+        )
+        judgement = verify.Judgement(
+            chosen=winner, entailed=(winner.code,),
+            eliminated={loser.code: ("this was not a structure gamma type technique, "
+                                    "which requires a distinct technique")},
+            declared=True)
+        grounded, detail = resolution._grounded_elimination(
+            fact, loser, winner, reconciliation=None, requirements=(),
+            judgements=[judgement], coverage=coverage)
+        self.assertTrue(grounded, detail)
+        self.assertIn("gamma type technique", detail)
+
 
 class ExclusionClauseDeterministicGroundingTest(unittest.TestCase):
     """issue #6, real-note investigation: an evaluator can reasonably label an
