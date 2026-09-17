@@ -2189,6 +2189,7 @@ def _requirement_grounded_status(fact: ClinicalFact, cand: CandidateCode,
                                  requirements: tuple, judgements: list,
                                  reconciliation, coverage,
                                  evidence_packet=None,
+                                 source: Any = None,
                                  ) -> tuple[bool, str] | None:
     """Whether `cand`'s OWN compiled MUST_SUPPORT/EXCLUSION requirements
     ground a validated elimination -- UNCONDITIONALLY, never gated behind
@@ -2271,13 +2272,163 @@ def _requirement_grounded_status(fact: ClinicalFact, cand: CandidateCode,
                           f"{cand.code} ({names}) is validated NOT_DOCUMENTED by "
                           f"every evaluator, in a fully-covered, searched source")
             return True, detail
+        elif is_exclusion:
+            # issue #6, real-note investigation (designated note, F1: a
+            # candidate's own "except structure beta or structure gamma"
+            # exclusion clause): an evaluator can
+            # reasonably label this axis's inverted polarity CONTRADICTED
+            # instead of SUPPORTED (the record contradicts the DESCRIPTOR's
+            # own implicit "does not apply here" premise, from the model's own
+            # framing) -- `validated_requirement` correctly never trusts either
+            # label for what a model merely CLAIMS is contradicted, but an
+            # exclusion clause's own excluded term is exactly the SAME kind of
+            # closed, literal, negation-aware text-presence question
+            # `AXIS_LATERALITY` already answers judgement-independently
+            # (`tiebreak._typed_laterality_support`) rather than trusting any
+            # evaluator's status label at all. This is that same principle
+            # applied here: check the requirement's own `expected` term(s) --
+            # reproduced verbatim from `loser`'s official descriptor at
+            # compile time, never a new parse -- directly against the fact's
+            # own evidence text with this module's existing negation-aware
+            # matcher, independent of what status label any evaluator chose.
+            #
+            # A purely lexical check still misses the ordinary case where the
+            # note documents the SAME excluded anatomy in lay language (e.g.
+            # "structure alpha's lay name") rather than the descriptor's own
+            # clinical term (e.g. "structure alpha") -- so each excluded term
+            # not lexically found
+            # gets one more, still fully governed chance: the SAME SNOMED
+            # Body Structure concept-relation index `semantic_eligibility.
+            # _anatomy_compatibility` already trusts for the analogous
+            # candidate-vs-fact anatomy question, queried here for
+            # EXACT identity only (never the looser ancestor/descendant
+            # relation, which could conflate a broader or narrower structure
+            # with the specific excluded one) between the excluded term and
+            # every anatomy phrase this fact itself documents. Absent a
+            # `source` or its concept-relation capability, this second chance
+            # is simply unavailable -- never a guess, the same fail-closed
+            # posture every other concept-relation caller in this codebase
+            # already takes.
+            fact_text = " ".join(str(getattr(s, "text", "") or "")
+                                for s in (getattr(fact, "evidence", None) or ()))
+            def _excluded_term_confirmed(term: str) -> bool:
+                if fact_text and _tiebreak.asserted_status((term,), fact_text) == "supported":
+                    return True
+                relate = getattr(source, "concept_relation", None)
+                if not callable(relate):
+                    return False
+                from . import semantic_eligibility as _semelig
+                from . import terminology as _term_mod
+                for phrase in _semelig._fact_anatomy_phrases([fact]):
+                    try:
+                        verdict = relate(phrase, term)
+                    except Exception:
+                        continue
+                    if verdict == _term_mod.CONCEPT_SAME:
+                        return True
+                return False
+            if all(any(_excluded_term_confirmed(term) for term in req.expected)
+                  for req in axis_reqs):
+                names = ", ".join(sorted(r.requirement_id for r in axis_reqs))
+                detail = (f"axis {axis!r} for {cand.code} ({names}): "
+                         f"{cand.code}'s own descriptor names a condition it does "
+                         f"not apply under, and the fact's own evidence "
+                         f"deterministically, negation-awarely states that "
+                         f"condition -- independent of any evaluator's own "
+                         f"requirement-status label")
+                return True, detail
     return None
+
+
+def _model_cited_descriptor_term_grounded(fact: ClinicalFact, loser: CandidateCode,
+                                          winner: CandidateCode, judgements: list,
+                                          coverage: "_requirement.CoverageCorpus | None",
+                                          ) -> tuple[bool, str] | None:
+    """issue #6, real-note investigation (designated note, F1: the winning
+    candidate vs a wide, retrieval-broad code family including candidates for
+    an unrelated pathology/technique concept that share no compiled, typed
+    axis with the winner): a bounded grounding path
+    for exactly the gap between `_requirement_grounded_status` (typed axes
+    only) and the untyped pairwise/word-overlap fallback below (which can
+    never ground anything, because the one axis that carries this vocabulary,
+    `AXIS_DESCRIPTOR_TERM`, is deliberately non-selectable).
+
+    Never trusts a model's free-form reason alone -- the exact defect Codex's
+    F8-R1 re-review found (a model's own prose converting a false elimination
+    into a release). Every one of these conditions must hold, unanimously,
+    across every judgement:
+
+    1. `loser`'s own official descriptor states a word neither `winner`'s
+       descriptor NOR `fact`'s own evidence already states
+       (`_tiebreak._descriptor_tokens`'s existing, already-audited singularized
+       vocabulary -- the SAME words `AXIS_DESCRIPTOR_TERM` already computes for
+       audit, never a new, unvalidated parse). Excluding `fact`'s own words is
+       load-bearing, not incidental: a word already true of the EVENT itself
+       (e.g. the anatomy every sibling candidate shares) is never evidence
+       that one specific sibling's OWN additional concept (a distinct
+       pathology or technique) is absent -- checking it would launder a
+       coincidental shared word into a false absence signal.
+    2. That word is genuinely engaged by the WHOLE evaluator's own written
+       reason for eliminating `loser` -- not a coincidental keyword hit
+       against an already-known reason, since the caller could not otherwise
+       have known which word mattered.
+    3. `coverage` is the identity-bound, complete reading of the ENTIRE
+       document (never a partial excerpt) -- the SAME trust bar every other
+       NOT_DOCUMENTED verdict in this module is already checked against.
+    4. Every one of THOSE engaged words is independently confirmed absent
+       (never merely un-negated, never merely unquoted -- `asserted_status`
+       itself distinguishes a genuine assertion from a negated mention) from
+       the complete document text, by this module's own existing negation-
+       aware matcher -- never the model's own say-so that it is absent.
+
+    Any judgement lacking the full `Judgement.elimination_of` interface (some
+    callers duck-type a lighter test double exposing only
+    `requirement_judgements`, for `_requirement_grounded_status` above), that
+    fails to name `loser` at all, or whose reason engages none of `loser`'s
+    own distinguishing words, refuses this path entirely (returns None,
+    falling through to the existing weaker fallback UNCHANGED) -- this only
+    ever ADDS a narrow, independently-verified grounding case, it never
+    removes or loosens today's existing ones.
+    """
+    if coverage is None or not coverage.complete or not judgements:
+        return None
+    loser_words = _tiebreak._descriptor_tokens(loser.descriptor)
+    winner_words = _tiebreak._descriptor_tokens(winner.descriptor)
+    fact_text = " ".join(str(getattr(s, "text", "") or "")
+                        for s in (getattr(fact, "evidence", None) or ()))
+    fact_words = {_tiebreak._sing(w)
+                 for w in re.split(r"[^a-z0-9]+", fact_text.lower()) if w}
+    distinct = loser_words - winner_words - fact_words
+    if not distinct:
+        return None
+    engaged: set[str] = set()
+    for j in judgements:
+        elimination_of = getattr(j, "elimination_of", None)
+        if not callable(elimination_of):
+            return None
+        reason = elimination_of(loser.code)
+        if not reason:
+            return None
+        reason_words = {_tiebreak._sing(w)
+                        for w in re.split(r"[^a-z0-9]+", reason.lower()) if w}
+        matched = distinct & reason_words
+        if not matched:
+            return None
+        engaged |= matched
+    for word in sorted(engaged):
+        if _tiebreak.asserted_status((word,), coverage.text) == "supported":
+            return False, (f"the complete document states {word!r}, "
+                           f"{loser.code}'s own distinguishing term")
+    return True, (f"{loser.code}'s own distinguishing term(s) {sorted(engaged)} -- "
+                 f"named by every evaluator's own reason for ruling it out -- "
+                 f"confirmed genuinely absent from the complete reconciled document")
 
 
 def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: CandidateCode,
                           reconciliation, requirements: tuple = (),
                           judgements: list = (),
-                          coverage: "_requirement.CoverageCorpus | None" = None
+                          coverage: "_requirement.CoverageCorpus | None" = None,
+                          source: Any = None,
                           ) -> tuple[bool, str]:
     """issue #6 F9-R6: when `requirements` compiled a MANDATORY (`required=True`)
     requirement for `loser`'s own descriptor, elimination is decided from that first
@@ -2358,7 +2509,10 @@ def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: Cand
     reconciliation channel that was supplied could not confirm this," and must both refuse.
     """
     grounded = _requirement_grounded_status(fact, loser, requirements, judgements,
-                                            reconciliation, coverage)
+                                            reconciliation, coverage, source=source)
+    if grounded is not None:
+        return grounded
+    grounded = _model_cited_descriptor_term_grounded(fact, loser, winner, judgements, coverage)
     if grounded is not None:
         return grounded
     # issue #6 F9-R6 Phase 4 NOTE: `requirements` is deliberately NOT threaded into
@@ -2422,6 +2576,7 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
                      eliminated_earlier: dict[str, str], reconciliation=None,
                      requirements: tuple = (),
                      coverage: "_requirement.CoverageCorpus | None" = None,
+                     source: Any = None,
                      ) -> tuple[list[CandidateCode], dict[str, str]]:
     """Which shortlisted candidates are STILL ENTAILED once every judging model has
     answered about every one of them, and the NAMED reason each of the others is out.
@@ -2455,7 +2610,7 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
             grounded, ground_detail = _grounded_elimination(fact, cand, chosen,
                                                             reconciliation,
                                                             requirements, judgements,
-                                                            coverage)
+                                                            coverage, source=source)
             if grounded:
                 eliminated[cand.code] = (f"{'; '.join(dict.fromkeys(named))} "
                                          f"(document-confirmed: {ground_detail})")
@@ -3368,7 +3523,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
     else:
         remaining, eliminated = _uniqueness_view(
             fact, shortlist, chosen, judgements, eliminated_earlier,
-            reconciliation, _elimination_requirements, coverage)
+            reconciliation, _elimination_requirements, coverage, source=source)
     # issue #6, Codex's independent re-review (F9-R15-B): tried in ADDITION to
     # (never instead of) the axis/requirement-based elimination just above --
     # narrows `remaining` further only when both independent evaluators'

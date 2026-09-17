@@ -7,11 +7,14 @@ re-check (clause must reproduce, cited spans must be reconciled). Synthetic
 descriptors/ids throughout — the mechanism reads descriptor grammar and a real ICD
 Tabular data shape, never a term list.
 """
+import hashlib
 import unittest
 
 from claude_coder import requirement as req
+from claude_coder import resolution
 from claude_coder.data_access import MockSource
-from claude_coder.models import CandidateCode
+from claude_coder.models import CandidateCode, ClinicalFact, EvidenceSpan, FactKind
+from claude_coder import verify
 
 
 def _cand(code, descriptor, system="cpt"):
@@ -1479,3 +1482,178 @@ class QualifiedChildRequirementTest(unittest.TestCase):
             compared["CAND_C"],
             ("tier alpha", "tier beta, 3 units or greater"),
         )
+
+
+class ModelCitedDescriptorTermGroundingTest(unittest.TestCase):
+    """issue #6, real-note investigation (designated note, F1: a wide,
+    retrieval-broad candidate family sharing no compiled, typed axis with the
+    winner -- e.g. a tumor-resection code beside a plain excision code, where
+    nothing about "tumor" is a laterality/indication/exclusion/qualified-child
+    clause). `_requirement_grounded_status` (typed axes only) and the untyped
+    pairwise fallback (gated behind `selectable`, which the one axis carrying
+    this vocabulary, `AXIS_DESCRIPTOR_TERM`, deliberately is not) both decline
+    to ground these -- reproduced live: a real model correctly, citably
+    eliminated six such candidates by name, and every one of those correct
+    eliminations vanished before the final ClaimBundle. This is the bounded
+    fix: ground ONLY when every judging model's own reason for eliminating
+    the loser engages a real word from the loser's OWN official descriptor
+    that the winner's descriptor does not share, excluding any word the fact's
+    own evidence already establishes (a shared anatomy word is never grounds
+    to rule out a SIBLING's own additional concept), and that word is
+    independently confirmed absent from the complete document. Synthetic
+    descriptors throughout."""
+
+    WINNER = _cand("CAND_WIN", "assembly service, structure alpha")
+    LOSER = _cand("CAND_LOSE", "assembly service, structure alpha, technique gamma")
+
+    def _fact(self, evidence_text="Assembly service performed on structure alpha"):
+        return ClinicalFact(
+            kind=FactKind.PROCEDURE, description="assembly service",
+            evidence=[EvidenceSpan(text=evidence_text, anchored=True, span_id="s1")],
+            confidence=0.9, fact_id="F1")
+
+    def _coverage(self, text):
+        return req.CoverageCorpus(channel_id="test-channel", text=text,
+                                  text_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                                  covered_pages=(1,), page_image_sha256=("stub-hash",))
+
+    def _judgement(self, reason):
+        return verify.Judgement(chosen=self.WINNER, entailed=(self.WINNER.code,),
+                                eliminated={self.LOSER.code: reason}, declared=True)
+
+    def test_grounds_when_the_evaluators_own_reason_cites_a_real_absent_descriptor_word(self):
+        fact = self._fact()
+        coverage = self._coverage("Assembly service performed on structure alpha.")
+        judgement = self._judgement("technique gamma is not documented anywhere")
+        grounded, detail = resolution._grounded_elimination(
+            fact, self.LOSER, self.WINNER, reconciliation=None, requirements=(),
+            judgements=[judgement], coverage=coverage)
+        self.assertTrue(grounded, detail)
+        self.assertIn("gamma", detail)
+
+    def test_never_grounds_when_the_cited_word_is_actually_present(self):
+        fact = self._fact()
+        coverage = self._coverage(
+            "Assembly service performed on structure alpha using technique gamma.")
+        judgement = self._judgement("technique gamma is not documented anywhere")
+        grounded, _detail = resolution._grounded_elimination(
+            fact, self.LOSER, self.WINNER, reconciliation=None, requirements=(),
+            judgements=[judgement], coverage=coverage)
+        self.assertFalse(grounded)
+
+    def test_never_grounds_on_a_reason_that_names_none_of_the_losers_own_words(self):
+        """A free-floating reason that never engages the loser's OWN
+        descriptor vocabulary must never ground anything -- the whole point
+        is refusing exactly the untethered prose Codex's F8-R1 re-review
+        found could convert a false elimination into a release."""
+        fact = self._fact()
+        coverage = self._coverage("Assembly service performed on structure alpha.")
+        judgement = self._judgement("this is simply a different procedure")
+        grounded = resolution._model_cited_descriptor_term_grounded(
+            fact, self.LOSER, self.WINNER, [judgement], coverage)
+        self.assertIsNone(grounded)
+
+    def test_never_grounds_on_a_word_the_facts_own_evidence_already_establishes(self):
+        """A word shared with the fact's own evidence (here, "structure
+        alpha") can never ground an elimination through this path -- it is
+        already true of the event itself, not evidence one sibling's own
+        additional concept is absent. `technique`/`gamma` remain the only
+        engageable words; without them cited, nothing grounds."""
+        fact = self._fact()
+        coverage = self._coverage("Assembly service performed on structure alpha.")
+        judgement = self._judgement("structure alpha is documented but nothing else is")
+        grounded = resolution._model_cited_descriptor_term_grounded(
+            fact, self.LOSER, self.WINNER, [judgement], coverage)
+        self.assertIsNone(grounded)
+
+    def test_never_grounds_without_a_complete_coverage_corpus(self):
+        fact = self._fact()
+        judgement = self._judgement("technique gamma is not documented anywhere")
+        grounded = resolution._model_cited_descriptor_term_grounded(
+            fact, self.LOSER, self.WINNER, [judgement], None)
+        self.assertIsNone(grounded)
+
+    def test_tolerates_a_duck_typed_judgement_lacking_elimination_of(self):
+        """`_requirement_grounded_status`'s own callers sometimes pass a bare
+        test double exposing only `requirement_judgements` -- this path must
+        decline gracefully (None), never raise."""
+        fact = self._fact()
+        coverage = self._coverage("Assembly service performed on structure alpha.")
+        bare = type("J", (), {"requirement_judgements": ()})()
+        grounded = resolution._model_cited_descriptor_term_grounded(
+            fact, self.LOSER, self.WINNER, [bare], coverage)
+        self.assertIsNone(grounded)
+
+
+class ExclusionClauseDeterministicGroundingTest(unittest.TestCase):
+    """issue #6, real-note investigation: an evaluator can reasonably label an
+    exclusion clause's inverted polarity CONTRADICTED instead of SUPPORTED --
+    `validated_requirement` correctly never trusts either label for what a
+    model merely claims (Codex's own documented policy), which left an
+    exclusion clause with NO way to ground at all when a model chose the
+    "wrong" label for a genuinely correct conclusion. This is the fix: the
+    SAME judgement-independent, closed, literal, negation-aware check
+    `AXIS_LATERALITY` already uses (never trusting any evaluator's status
+    label) applied to an exclusion clause's own excluded term -- first
+    lexically against the fact's own evidence, then (when a `source` capable
+    of `concept_relation` is supplied) through the SAME governed SNOMED
+    Body Structure concept index `semantic_eligibility._anatomy_compatibility`
+    already trusts, for EXACT identity only -- never the weaker ancestor/
+    descendant tier, which the terminology module's own docstring calls
+    "not a confirmed verdict either way". Synthetic descriptors throughout."""
+
+    WINNER = _cand("CAND_WIN", "assembly service")
+    LOSER = _cand("CAND_EXC", "assembly service, except structure gamma")
+
+    def _fact(self, evidence_text, anatomy=""):
+        attrs = {"anatomy": anatomy} if anatomy else {}
+        return ClinicalFact(
+            kind=FactKind.PROCEDURE, description="assembly service", attributes=attrs,
+            evidence=[EvidenceSpan(text=evidence_text, anchored=True, span_id="s1")],
+            confidence=0.9, fact_id="F1")
+
+    def _requirements(self):
+        return req.compile_requirements([self.WINNER, self.LOSER])
+
+    def test_grounds_deterministically_on_a_literal_mention_with_no_judgements_at_all(self):
+        fact = self._fact("Assembly service performed on structure gamma.")
+        grounded, detail = resolution._requirement_grounded_status(
+            fact, self.LOSER, self._requirements(), [], None, None)
+        self.assertTrue(grounded, detail)
+
+    def test_never_grounds_when_the_excluded_term_is_genuinely_absent(self):
+        fact = self._fact("Assembly service performed on structure alpha.")
+        grounded = resolution._requirement_grounded_status(
+            fact, self.LOSER, self._requirements(), [], None, None)
+        self.assertIsNone(grounded)
+
+    def test_grounds_via_a_governed_exact_concept_synonym_when_no_literal_match_exists(self):
+        """The fact documents "structure zeta" in lay/alternate phrasing; a
+        governed source confirms it is the SAME concept as the excluded
+        "structure gamma" -- bridging exactly the vocabulary gap a pure
+        lexical check cannot."""
+        fact = self._fact("Assembly service performed on structure zeta.",
+                          anatomy="structure zeta")
+        source = MockSource(concept_relation={("structure zeta", "structure gamma"): "same"})
+        grounded, detail = resolution._requirement_grounded_status(
+            fact, self.LOSER, self._requirements(), [], None, None, source=source)
+        self.assertTrue(grounded, detail)
+
+    def test_never_grounds_on_a_merely_related_not_confirmed_concept_tier(self):
+        """`CONCEPT_RELATED` ("ancestor_descendant") is documented as "not a
+        confirmed verdict either way" -- must never, by itself, ground a hard
+        elimination, only the exact `CONCEPT_SAME` tier may."""
+        fact = self._fact("Assembly service performed on structure zeta.",
+                          anatomy="structure zeta")
+        source = MockSource(concept_relation={
+            ("structure zeta", "structure gamma"): "ancestor_descendant"})
+        grounded = resolution._requirement_grounded_status(
+            fact, self.LOSER, self._requirements(), [], None, None, source=source)
+        self.assertIsNone(grounded)
+
+    def test_never_grounds_without_a_source_when_no_literal_match_exists(self):
+        fact = self._fact("Assembly service performed on structure zeta.",
+                          anatomy="structure zeta")
+        grounded = resolution._requirement_grounded_status(
+            fact, self.LOSER, self._requirements(), [], None, None, source=None)
+        self.assertIsNone(grounded)
