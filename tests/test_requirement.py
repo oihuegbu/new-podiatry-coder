@@ -1987,3 +1987,294 @@ class ChosenCandidateOwnRequirementsConfirmedTest(unittest.TestCase):
             requirements=requirements, judgements=[judgement], coverage=None)
         self.assertEqual(line.chosen.code if line.chosen else None, "CAND_R")
         self.assertEqual(line.method, resolution.ResolutionMethod.VERIFIED)
+
+
+def _admissions(candidates, supported):
+    """Synthetic `candidate_admission` records: SUPPORTED governed identity
+    standing for `supported` codes, recall-only (UNGROUNDED) for the rest."""
+    return {
+        c.code: resolution.CandidateAdmission(
+            (c.code, c.system),
+            (resolution.CandidateStanding.SUPPORTED if c.code in supported
+             else resolution.CandidateStanding.UNGROUNDED),
+            (("governed_term_mapping",) if c.code in supported else ()), (), (), (),
+            {"code": c.code, "descriptor": c.descriptor}, (c.source,))
+        for c in candidates}
+
+
+class BaselineDescriptorGroundingTest(unittest.TestCase):
+    """issue #6, real-note investigation (designated note F11/F12): a candidate
+    surviving into a tie purely because no evaluator named a reason to rule
+    it out is not the same as being entailed. `_baseline_descriptor_grounded`
+    (used by `_settle_uniqueness`) checks a candidate's own distinguishing
+    vocabulary (`AXIS_DESCRIPTOR_TERM`) against the fact's own evidence
+    before letting it count as "still entailed" -- but only for a candidate
+    that has not already cleared a curated, authoritative term-to-code
+    match (`authority["term_to_code_match"]`), never by its `source` label
+    alone."""
+
+    AUTHORITATIVE = CandidateCode(
+        code="CAND_AUTH", system="icd10",
+        descriptor="Other specified condition alpha, structure gamma",
+        score=1.0, source="crosswalk-match",
+        authority={"source": "curated crosswalk",
+                   "term_to_code_match": {"method": "contained_source_phrase"}})
+    RETRIEVAL_ONE = CandidateCode(
+        code="CAND_R1", system="icd10",
+        descriptor="Other calcification of structure beta, structure gamma",
+        score=0.05, source="retrieval")
+    RETRIEVAL_TWO = CandidateCode(
+        code="CAND_R2", system="icd10",
+        descriptor="Other specific arthropathy of structure delta, structure gamma",
+        score=0.04, source="retrieval")
+
+    def _fact(self, text):
+        return ClinicalFact(
+            kind=FactKind.DIAGNOSIS, description="condition alpha",
+            evidence=[EvidenceSpan(text=text, anchored=True, span_id="s1")],
+            confidence=0.9, fact_id="F1")
+
+    def test_eliminates_retrieval_candidates_whose_own_term_is_absent(self):
+        fact = self._fact("Painful condition alpha of structure gamma.")
+        shortlist = [self.AUTHORITATIVE, self.RETRIEVAL_ONE, self.RETRIEVAL_TWO]
+        reconciliation = SourceReconciliation(spans=(
+            SpanReconciliation(span_id="s1", status=ReconciliationStatus.AGREED),))
+        judgement = verify.Judgement(chosen=self.AUTHORITATIVE,
+                                     entailed=(self.AUTHORITATIVE.code,),
+                                     eliminated={}, declared=True)
+        line = resolution._settle_uniqueness(
+            fact, self.AUTHORITATIVE, shortlist, [judgement], {}, "",
+            reconciliation, requirements=(), coverage=None,
+            admissions=_admissions(shortlist, supported={"CAND_AUTH"}))
+        self.assertEqual(line.chosen.code if line.chosen else None, "CAND_AUTH")
+        self.assertEqual(line.method, resolution.ResolutionMethod.VERIFIED)
+
+    def test_a_page_word_miss_never_settles_a_tie_without_governed_standing(self):
+        """Codex F8-R1 / F9-R19-A: with NO candidate holding governed identity
+        standing, an ungrounded rival stays standing exactly as before this
+        floor existed -- a raw descriptor-word miss is not typed evidence."""
+        fact = self._fact("Painful condition alpha of structure gamma.")
+        shortlist = [self.AUTHORITATIVE, self.RETRIEVAL_ONE, self.RETRIEVAL_TWO]
+        reconciliation = SourceReconciliation(spans=(
+            SpanReconciliation(span_id="s1", status=ReconciliationStatus.AGREED),))
+        judgement = verify.Judgement(chosen=self.AUTHORITATIVE,
+                                     entailed=(self.AUTHORITATIVE.code,),
+                                     eliminated={}, declared=True)
+        for admissions in (None, _admissions(shortlist, supported=set())):
+            line = resolution._settle_uniqueness(
+                fact, self.AUTHORITATIVE, shortlist, [judgement], {}, "",
+                reconciliation, requirements=(), coverage=None, admissions=admissions)
+            self.assertIsNone(line.chosen, line.rationale)
+            self.assertEqual(set(line.tie_record["still_entailed"]),
+                             {"CAND_AUTH", "CAND_R1", "CAND_R2"})
+
+    def test_never_eliminates_the_authoritative_term_matched_candidate(self):
+        """The authoritative candidate's own distinguishing word ("alpha") is
+        genuinely absent from this terse fact's evidence too -- it must stay
+        anyway, because `term_to_code_match` exempts it from this floor."""
+        fact = self._fact("Painful prominence of structure gamma.")
+        shortlist = [self.AUTHORITATIVE, self.RETRIEVAL_ONE, self.RETRIEVAL_TWO]
+        reconciliation = SourceReconciliation(spans=(
+            SpanReconciliation(span_id="s1", status=ReconciliationStatus.AGREED),))
+        judgement = verify.Judgement(chosen=self.AUTHORITATIVE,
+                                     entailed=(self.AUTHORITATIVE.code,),
+                                     eliminated={}, declared=True)
+        line = resolution._settle_uniqueness(
+            fact, self.AUTHORITATIVE, shortlist, [judgement], {}, "",
+            reconciliation, requirements=(), coverage=None,
+            admissions=_admissions(shortlist, supported={"CAND_AUTH"}))
+        self.assertEqual(line.chosen.code if line.chosen else None, "CAND_AUTH")
+
+    def test_never_eliminates_every_remaining_candidate_at_once(self):
+        """All three candidates here are `source="retrieval"` and none of
+        their distinguishing words appear in evidence -- this must NOT
+        collapse `remaining` to zero and manufacture a false "nothing
+        fits" state; it must leave the tie exactly as it found it."""
+        r3 = CandidateCode(code="CAND_R3", system="icd10",
+                           descriptor="Unrelated condition epsilon, structure gamma",
+                           score=0.03, source="retrieval")
+        shortlist = [self.RETRIEVAL_ONE, self.RETRIEVAL_TWO, r3]
+        fact = self._fact("Painful prominence of structure gamma.")
+        reconciliation = SourceReconciliation(spans=(
+            SpanReconciliation(span_id="s1", status=ReconciliationStatus.AGREED),))
+        judgement = verify.Judgement(chosen=None, entailed=(), eliminated={}, declared=True)
+        line = resolution._settle_uniqueness(
+            fact, None, shortlist, [judgement], {}, "",
+            reconciliation, requirements=(), coverage=None,
+            admissions=_admissions(shortlist, supported={"CAND_R1"}))
+        self.assertIsNone(line.chosen)
+        self.assertIn("CAND_R1", line.rationale)
+        self.assertIn("CAND_R2", line.rationale)
+        self.assertIn("CAND_R3", line.rationale)
+
+    def test_keeps_a_retrieval_candidate_whose_own_term_is_present(self):
+        """A `source="retrieval"` candidate whose distinguishing word DOES
+        appear in the fact's own evidence is never eliminated by this
+        floor -- only genuine, confirmed absence counts (and only against a
+        rival with governed standing)."""
+        fact = self._fact("Structure beta calcification was noted near structure gamma.")
+        shortlist = [self.RETRIEVAL_ONE, self.RETRIEVAL_TWO]
+        reconciliation = SourceReconciliation(spans=(
+            SpanReconciliation(span_id="s1", status=ReconciliationStatus.AGREED),))
+        judgement = verify.Judgement(chosen=None, entailed=(), eliminated={}, declared=True)
+        line = resolution._settle_uniqueness(
+            fact, None, shortlist, [judgement], {}, "",
+            reconciliation, requirements=(), coverage=None,
+            admissions=_admissions(shortlist, supported={"CAND_R1"}))
+        self.assertIn("CAND_R1", line.rationale)
+        self.assertNotIn("CAND_R2", line.rationale)
+
+    def test_a_non_retrieval_source_without_term_match_is_not_exempt(self):
+        """issue #6, F12 re-review: a mechanically-derived sibling-expansion
+        candidate (e.g. `icd10-specificity-family`) carries no
+        `term_to_code_match` -- exemption must track that field, never the
+        `source` label alone, or a genuinely ungrounded sibling escapes this
+        floor merely because it wasn't literally sourced from "retrieval"."""
+        sibling = CandidateCode(
+            code="CAND_SIB", system="icd10",
+            descriptor="Other specified condition alpha, structure gamma",
+            score=0.17, source="icd10-specificity-family",
+            authority={"source": "ICD-10-CM authoritative specificity family",
+                      "base_candidate": "CAND_R1"})
+        fact = self._fact("Structure beta calcification was noted near structure gamma.")
+        shortlist = [self.RETRIEVAL_ONE, sibling]
+        reconciliation = SourceReconciliation(spans=(
+            SpanReconciliation(span_id="s1", status=ReconciliationStatus.AGREED),))
+        judgement = verify.Judgement(chosen=None, entailed=(), eliminated={}, declared=True)
+        line = resolution._settle_uniqueness(
+            fact, None, shortlist, [judgement], {}, "",
+            reconciliation, requirements=(), coverage=None,
+            admissions=_admissions(shortlist, supported={"CAND_R1"}))
+        self.assertIn("CAND_R1", line.rationale)
+        self.assertNotIn("CAND_SIB", line.rationale)
+
+
+class UngroundedTieNeverAsksTheProviderTest(unittest.TestCase):
+    """issue #6, real-note investigation (designated note F2/F3/F5/F7): a tie in
+    which NO candidate's own distinguishing vocabulary appears in the fact's
+    evidence must not manufacture a provider question out of those candidates'
+    differences -- the question would be about the wrong codes entirely."""
+
+    RIGHT_POWERED = CandidateCode(
+        code="CAND_RP", system="cpt",
+        descriptor="Assembly of structure alpha, right, powered technique",
+        score=0.5, source="retrieval")
+    LEFT_MANUAL = CandidateCode(
+        code="CAND_LM", system="cpt",
+        descriptor="Assembly of structure beta, left, manual technique",
+        score=0.4, source="retrieval")
+
+    def _settle(self, text):
+        fact = ClinicalFact(
+            kind=FactKind.PROCEDURE, description="widget service",
+            evidence=[EvidenceSpan(text=text, anchored=True, span_id="s1")],
+            confidence=0.9, fact_id="F1")
+        reconciliation = SourceReconciliation(spans=(
+            SpanReconciliation(span_id="s1", status=ReconciliationStatus.AGREED),))
+        judgement = verify.Judgement(chosen=None, entailed=(), eliminated={}, declared=True)
+        return resolution._settle_uniqueness(
+            fact, None, [self.RIGHT_POWERED, self.LEFT_MANUAL], [judgement], {}, "",
+            reconciliation, requirements=(), coverage=None)
+
+    def test_an_all_ungrounded_tie_withholds_the_provider_question(self):
+        line = self._settle("A widget service was performed.")
+        self.assertIsNone(line.chosen)
+        self.assertIsNone(line.documentation_gap)
+        self.assertIn("no provider question", line.rationale)
+        self.assertEqual(set(line.tie_record["baseline_ungrounded"]), {"CAND_RP", "CAND_LM"})
+
+    def test_a_tie_with_a_grounded_candidate_still_asks(self):
+        """The record states one candidate's own word ("powered"), so the pool is
+        not all-ungrounded: the question is NOT withheld, and (no candidate
+        holding governed standing) nothing is eliminated either -- Codex F8-R1."""
+        line = self._settle("A powered widget service was performed.")
+        self.assertIsNone(line.chosen)
+        self.assertNotIn("baseline_ungrounded", line.tie_record)
+        self.assertIsNotNone(line.documentation_gap)
+        self.assertEqual(set(line.tie_record["still_entailed"]), {"CAND_RP", "CAND_LM"})
+
+    def test_ungrounded_pool_is_all_or_nothing(self):
+        fact = ClinicalFact(
+            kind=FactKind.PROCEDURE, description="widget service",
+            evidence=[EvidenceSpan(text="A powered widget service was performed.",
+                                   anchored=True, span_id="s1")],
+            confidence=0.9, fact_id="F1")
+        self.assertEqual(resolution._baseline_ungrounded_pool(
+            fact, [self.RIGHT_POWERED, self.LEFT_MANUAL], None), {})
+        fact2 = ClinicalFact(
+            kind=FactKind.PROCEDURE, description="widget service",
+            evidence=[EvidenceSpan(text="A widget service was performed.",
+                                   anchored=True, span_id="s1")],
+            confidence=0.9, fact_id="F1")
+        pool = resolution._baseline_ungrounded_pool(
+            fact2, [self.RIGHT_POWERED, self.LEFT_MANUAL], None)
+        self.assertEqual(set(pool), {"CAND_RP", "CAND_LM"})
+
+    def test_a_lone_candidate_is_judged_on_its_whole_vocabulary(self):
+        fact = ClinicalFact(
+            kind=FactKind.IMAGING, description="intra-operative check",
+            evidence=[EvidenceSpan(text="Imaging confirmed the contour of structure gamma.",
+                                   anchored=True, span_id="s1")],
+            confidence=0.9, fact_id="F1")
+        lone = CandidateCode(code="CAND_X", system="cpt",
+                             descriptor="Radiologic examination; site delta, 2 views",
+                             score=0.3, source="retrieval")
+        self.assertEqual(set(resolution._baseline_ungrounded_pool(fact, [lone], None)),
+                         {"CAND_X"})
+        # Fail-safe: a generic word that forms a whole clause on its own
+        # ("structure") still grounds a lone candidate -- the line stays open...
+        shared = CandidateCode(code="CAND_Z", system="cpt",
+                               descriptor="Radiologic examination; structure, 2 views",
+                               score=0.3, source="retrieval")
+        self.assertEqual(resolution._baseline_ungrounded_pool(fact, [shared], None), {})
+        # ...but a longer run that merely CONTAINS that word ("structure delta")
+        # is checked as the whole phrase, and is absent.
+        contained = CandidateCode(code="CAND_W", system="cpt",
+                                  descriptor="Radiologic examination; structure delta, 2 views",
+                                  score=0.3, source="retrieval")
+        self.assertEqual(set(resolution._baseline_ungrounded_pool(fact, [contained], None)),
+                         {"CAND_W"})
+        stated = CandidateCode(code="CAND_Y", system="cpt",
+                               descriptor="Imaging of structure gamma", score=0.3,
+                               source="retrieval")
+        self.assertEqual(resolution._baseline_ungrounded_pool(fact, [stated], None), {})
+
+
+class GovernedFamilyBaselineGroundingTest(unittest.TestCase):
+    """issue #6, real-note investigation (designated note F3): two siblings that
+    differ only by a qualified-child qualifier have no residual descriptor_term
+    vocabulary at all -- the family stem and both qualifiers are governed words.
+    Whether that STEM is documented is what decides the family's viability, so
+    the baseline floor falls back to the candidate's own vocabulary minus grammar,
+    laterality, and the words every pool member shares."""
+
+    LOCAL = CandidateCode(code="CAND_LOC", system="cpt", score=0.4, source="retrieval",
+                          descriptor="Division, percutaneous, structure alpha (separate procedure); local technique")
+    GENERAL = CandidateCode(code="CAND_GEN", system="cpt", score=0.3, source="retrieval",
+                            descriptor="Division, percutaneous, structure alpha (separate procedure); general technique")
+    REPAIR = CandidateCode(code="CAND_REP", system="cpt", score=0.3, source="retrieval",
+                           descriptor="Repair, secondary, structure alpha, with or without graft")
+
+    def _fact(self, text):
+        return ClinicalFact(
+            kind=FactKind.PROCEDURE, description="deposits removed",
+            evidence=[EvidenceSpan(text=text, anchored=True, span_id="s1")],
+            confidence=0.9, fact_id="F1")
+
+    def test_an_undocumented_family_stem_leaves_the_siblings_ungrounded(self):
+        pool = [self.LOCAL, self.GENERAL, self.REPAIR]
+        fact = self._fact("Deposits near the structure alpha attachment were removed.")
+        self.assertEqual(set(resolution._baseline_ungrounded_pool(fact, pool, None)),
+                         {"CAND_LOC", "CAND_GEN", "CAND_REP"})
+
+    def test_a_documented_family_stem_grounds_the_siblings(self):
+        pool = [self.LOCAL, self.GENERAL, self.REPAIR]
+        fact = self._fact("A percutaneous division of structure alpha was performed.")
+        self.assertEqual(resolution._baseline_ungrounded_pool(fact, pool, None), {})
+        self.assertIsNone(resolution._baseline_descriptor_grounded(fact, self.LOCAL, pool, None))
+
+    def test_siblings_differing_only_by_laterality_still_fail_open(self):
+        pool = [_cand("CAND_R", "assembly service, right structure alpha"),
+                _cand("CAND_L", "assembly service, left structure alpha")]
+        fact = self._fact("Something else entirely was documented.")
+        self.assertEqual(resolution._baseline_ungrounded_pool(fact, pool, None), {})

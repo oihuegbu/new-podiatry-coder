@@ -2143,7 +2143,8 @@ def _ranked(fact: ClinicalFact, pool: list[CandidateCode],
 def _tie_escalation(fact: ClinicalFact, candidates: list[CandidateCode],
                     reconciliation, reason: str, tie=None,
                     record: dict | None = None,
-                    requirements: tuple = ()) -> ResolvedLine:
+                    requirements: tuple = (),
+                    ungrounded: dict[str, str] | None = None) -> ResolvedLine:
     """Tie policy step 5 -- turn an unresolved tie into ONE targeted provider query.
 
     The directive forbids exactly one outcome here: routing the line to generic human
@@ -2177,12 +2178,32 @@ def _tie_escalation(fact: ClinicalFact, candidates: list[CandidateCode],
         # documentation gap.
         askable = tuple(a for a in tie.axes if a.axis not in tie.documented)
         question = _tiebreak.provider_query(fact, askable)
+    detail = tie.detail
+    if ungrounded:
+        # issue #6, real-note investigation (designated note F2/F3/F5/F7): a
+        # provider question is only answerable about a candidate whose own
+        # identity the record already documents. When NONE of the tied
+        # candidates' own distinguishing vocabulary appears in this event's
+        # evidence (`_baseline_ungrounded_pool`), the axes that separate them
+        # from each other are a question about the wrong codes -- asking it
+        # manufactured a documentation request (a clause from a candidate
+        # for an unrelated device; a qualifier from candidates for an
+        # unrelated procedure) that no answer could satisfy. This is a
+        # candidate-mapping/recall question for a coder, or a reportability
+        # decision for the post-selection reporting controls -- never a
+        # provider documentation gap. The candidates and the full tie record
+        # are preserved; only the fabricated question is withheld.
+        question = None
+        detail = (f"{tie.detail}; none of the shortlisted candidates' own "
+                  f"distinguishing vocabulary appears in this event's own evidence, "
+                  f"so no provider question about them is answerable")
     return ResolvedLine(
         fact=fact, chosen=None, alternatives=candidates[:5],
         method=ResolutionMethod.ABSTAINED,
         documentation_gap=(question or None),
-        tie_record={**(record or {}), **tie.as_record()},
-        rationale=f"{reason} -- {tie.detail}")
+        tie_record={**(record or {}), **tie.as_record(),
+                    **({"baseline_ungrounded": dict(ungrounded)} if ungrounded else {})},
+        rationale=f"{reason} -- {detail}")
 
 
 def _requirement_grounded_status(fact: ClinicalFact, cand: CandidateCode,
@@ -2458,6 +2479,219 @@ def _model_cited_descriptor_term_grounded(fact: ClinicalFact, loser: CandidateCo
     return True, (f"{loser.code}'s own distinguishing phrase(s) {sorted(engaged)} -- "
                  f"named by every evaluator's own reason for ruling it out -- "
                  f"confirmed genuinely absent from the complete reconciled document")
+
+
+def _baseline_descriptor_grounded(fact: ClinicalFact, cand: CandidateCode,
+                                  pool: list[CandidateCode],
+                                  reconciliation,
+                                  ) -> tuple[bool, str] | None:
+    """issue #6, real-note investigation (designated note, F11: a diagnosis fact
+    with three tied candidates, none independently confirmed by either
+    evaluator -- a residual/NEC bone-disorder code the SNOMED crosswalk
+    proposed, alongside two low-score retrieval candidates for an entirely
+    different tissue/condition, "other calcification of MUSCLE" and "other
+    specific ARTHROPATHIES") -- neither of the two evaluator-dependent paths
+    above can help here: `_grounded_elimination`/`_model_cited_descriptor_
+    term_grounded` only ever engage when SOME evaluator's own written reason
+    names the candidate it is ruling out, and here no evaluator confirmed OR
+    explicitly eliminated any of the three -- `remaining` held all three
+    purely because nobody named a reason to drop the other two, which is not
+    the same thing as their being entailed (`_propose_then_verify`'s own
+    contract: "nothing bills on recall alone -- only a positively-supported
+    entailment").
+
+    `AXIS_DESCRIPTOR_TERM` (`discriminating_axes`) already computes, for
+    every candidate in a tied family, the residual vocabulary that is
+    genuinely ITS OWN -- not shared with any rival, not governed by a typed
+    clause (laterality, exclusion, definitional, sequence-qualifier,
+    qualified-child) already handled elsewhere. It is deliberately
+    `selectable=False` in `tiebreak.narrow` (it cannot, by itself, positively
+    prove which candidate a document means -- shared silence proves
+    nothing), but the CONVERSE question is answerable and safe: when a
+    candidate's own distinguishing vocabulary is the ONLY thing that would
+    make it a different diagnosis/procedure from its rivals, and this fact's
+    OWN reconciled evidence -- the actual sentence(s) this event was
+    extracted from, never the whole document, never a rival's evidence --
+    confirms NONE of those words, the candidate was never actually shown to
+    be what this event describes. This is the exact "nothing bills on recall
+    alone" bar applied at the baseline, not a new, weaker one.
+
+    Deliberately the SAME grammar-only word set `discriminating_axes` already
+    subtracts (laterality words, exclusion/indication/definitional/sequence
+    markers, "eg"/"example") -- never a hardcoded clinical term list; the
+    candidates' own authoritative descriptors are the only input.
+
+    Exempt only a candidate whose own `authority` record carries a genuine
+    `term_to_code_match` -- the structured field `resolve()`'s diagnosis path
+    already stamps EXCLUSIVELY on a curated, authoritative phrase->code
+    mapping (the ICD-10-CM Alphabetic Index, the SNOMED crosswalk) recording
+    that THIS candidate's identity was independently established by matching
+    the FACT'S OWN wording, not its descriptor -- a different, already-
+    trusted grounding path, not a source-name label. Checking `source`
+    instead of this field was tried and reproducibly wrong: F11's correct
+    candidate (`source="snomed-crosswalk"`) needed the exemption and has
+    `term_to_code_match`, so a `source`-string check also happened to work
+    there -- but F12's designated-note re-review exposed source-string
+    checking as the wrong test. F12's `"icd10-specificity-family"` sibling-
+    expansion candidates (`_diagnosis_specificity_candidates`) carry no
+    `term_to_code_match` at all -- they are MECHANICALLY derived by widening
+    an "unspecified" leaf to its more-specific siblings via the code
+    hierarchy, never matched against the fact's own phrase -- so a
+    source-string exemption wrongly protected a genuinely ungrounded sibling
+    (a residual "other specified [condition-beta]" catch-all whose own
+    distinguishing word never appears in the fact's own evidence) from ever
+    being checked, while its rival ("[condition-beta], NEC" -- the literal
+    word the record actually states) sat un-selected beside it. This
+    field-based test correctly narrows F12 to that rival and still correctly
+    exempts F11's crosswalk hit, because the exemption now tracks WHY a
+    candidate is trusted rather than WHERE it came from.
+
+    A candidate reached through a curated, authoritative term-to-code mapping
+    already cleared a materially higher recall bar than bag-of-words
+    similarity -- already established and RELIED ON elsewhere in this module
+    ("A crosswalk proposes recall only, so every mapped leaf requires the
+    same descriptor/evidence verification as broad retrieval" -- it still
+    cannot close a line unconfirmed, it is exempt from only THIS specific
+    floor, never from independent entailment altogether).
+
+    Returns None (never eliminates) whenever there is nothing safe to check:
+    fewer than two candidates in `pool`, `cand.authority` carries a
+    `term_to_code_match`, `cand`'s own distinguishing vocabulary is empty (it
+    differs from its rivals only on an axis governed elsewhere, e.g. purely
+    by laterality -- exactly the residual-silence case `AXIS_DESCRIPTOR_TERM`
+    is deliberately non-selectable for), or this fact's own evidence is not
+    source-confirmed. Fail-open on ambiguity: a hit anywhere in the fact's
+    own text returns None (grounded), never a partial-credit "maybe."
+    """
+    if not pool or (cand.authority or {}).get("term_to_code_match"):
+        return None
+    if len(pool) >= 2:
+        axes = _tiebreak.discriminating_axes(pool)
+        terms = next((a.terms_by_code.get(cand.code, ())
+                     for a in axes if a.axis == _tiebreak.AXIS_DESCRIPTOR_TERM), ())
+        if not terms:
+            # `discriminating_axes` subtracts every word a TYPED axis already
+            # governs (a qualified-child family's shared stem and its
+            # qualifiers, an exclusion/indication/definitional clause, ...).
+            # Replayed against the designated note (F3): two sibling codes
+            # differing only by a qualified-child qualifier had NO residual
+            # vocabulary at all, and "nothing to check" fails open -- so a
+            # family whose stem ("<technique> <structure>") the record never
+            # states counted as grounded, and its rivals' provider question
+            # went out. Whether that stem is documented is exactly what
+            # decides the family's viability, so fall back to the candidate's
+            # own vocabulary minus grammar, laterality, and the words EVERY
+            # pool member shares -- a pair differing only by laterality still
+            # has nothing left and still fails open.
+            from .ontology import _LATERALITY
+            shared_all = set.intersection(
+                *(_tiebreak._descriptor_tokens(c.descriptor) for c in pool))
+            terms = tuple(sorted(_tiebreak._descriptor_tokens(cand.descriptor)
+                                 - _tiebreak._GRAMMAR - set(_LATERALITY) - shared_all))
+    else:
+        # A lone candidate has no rival to differ from, so its ENTIRE own
+        # vocabulary (the same singularized, grammar-free token set
+        # `discriminating_axes` starts from, less the closed laterality set
+        # it likewise subtracts) is what would have to be documented. Only a
+        # post-selection reporting control (`pipeline.apply_surgical_package_
+        # components`) asks this of a single candidate -- `_settle_
+        # uniqueness` never does, so no resolution path changes here.
+        from .ontology import _LATERALITY
+        terms = tuple(sorted(_tiebreak._descriptor_tokens(cand.descriptor)
+                             - _tiebreak._GRAMMAR - set(_LATERALITY)))
+    if not terms:
+        return None
+    supported, proof, proven_text, _spans = _gc.source_support(fact, reconciliation)
+    if not supported:
+        return None
+    # Checked as the candidate's own distinguishing PHRASES, never as a bag of
+    # independent words -- the SAME whole-phrase discipline `_model_cited_
+    # descriptor_term_grounded` already holds itself to, for the same reason:
+    # replayed against the designated note, single-word matching grounded a
+    # quality-measure code on the lone word "bone" (from "bone mineral density
+    # test") because the repair sentence mentions "heel bone", and grounded two
+    # anesthesia-qualified codes on the lone word "anesthesia". A run is a
+    # maximal contiguous sequence of the candidate's own distinguishing words
+    # (`terms`, above) inside ONE descriptor clause (clauses are the descriptor's
+    # own punctuation: comma, semicolon, colon, parentheses, slash), in the
+    # descriptor's own word order; any run stated in the evidence grounds the
+    # candidate. A generic word that forms a whole clause on its own still
+    # grounds (fail-open) -- a longer run that merely CONTAINS it does not.
+    allowed = {_tiebreak._sing(t) for t in terms} | set(terms)
+    phrases: list[str] = []
+    for clause in re.split(r"[,;:()\[\]/]+", (cand.descriptor or "").lower()):
+        run: list[str] = []
+        for raw in re.split(r"[^a-z0-9]+", clause):
+            if raw and (raw in allowed or _tiebreak._sing(raw) in allowed):
+                run.append(raw)
+            elif run:
+                phrases.append(" ".join(run))
+                run = []
+        if run:
+            phrases.append(" ".join(run))
+    if len(pool) >= 2:
+        # A candidate the record NAMES is grounded even when nothing
+        # distinguishes it from its rivals in the evidence: its descriptor's
+        # own IDENTITY clause -- everything before the first punctuation mark,
+        # the procedure/condition itself ("Repair, secondary, ..." -> "Repair";
+        # "Other calcification of <tissue>, <site>" -> the condition) -- stated
+        # in the evidence means the candidates are about the documented
+        # service and only their differentiator is open, which is exactly the
+        # answerable provider question this module exists to ask (regression
+        # caught by `test_candidate_evidence_state`: siblings "<service>,
+        # variant one/two" with "<service>" documented). Shared vocabulary is
+        # subtracted from `terms` above precisely because it cannot tell
+        # rivals APART; it can still tell whether any of them is the
+        # documented service at all. Checked as phrases within that clause,
+        # like everything else here.
+        from .ontology import _LATERALITY as _lat_words
+        identity = re.split(r"[,;:()\[\]/]+", (cand.descriptor or "").lower(), 1)[0]
+        identity_allowed = {w for w in re.split(r"[^a-z0-9]+", identity)
+                            if w and not w.isdigit()
+                            and _tiebreak._sing(w) not in _tiebreak._GRAMMAR
+                            and w not in _lat_words}
+        run = []
+        for raw in re.split(r"[^a-z0-9]+", identity):
+            if raw and raw in identity_allowed:
+                run.append(raw)
+            elif run:
+                phrases.append(" ".join(run))
+                run = []
+        if run:
+            phrases.append(" ".join(run))
+    if not phrases:
+        return None
+    if any(_tiebreak.asserted_status((p,), proven_text) == "supported"
+           for p in dict.fromkeys(phrases)):
+        return None
+    rivals = ", ".join(c.code for c in pool if c.code != cand.code)
+    separates = (f"the only vocabulary that separates it from {rivals}" if rivals
+                 else "its own descriptor's entire vocabulary")
+    return False, (f"{cand.code}'s own distinguishing descriptor term(s) {list(terms)} -- "
+                  f"{separates} -- are absent from this event's own reconciled "
+                  f"evidence, and no evaluator independently confirmed it")
+
+
+def _baseline_ungrounded_pool(fact: ClinicalFact, pool: list[CandidateCode],
+                              reconciliation) -> dict[str, str]:
+    """`{code: reason}` when EVERY candidate in `pool` fails
+    `_baseline_descriptor_grounded` -- i.e. no generated candidate's own
+    distinguishing vocabulary appears in this event's own evidence, so no
+    provider question ABOUT those candidates could ever make one of them
+    entailed (issue #6, real-note investigation: designated note F7 asked the
+    provider to document a clause from a candidate for an unrelated device;
+    F2/F3/F5 asked about axes of candidates for unrelated procedures). Empty
+    (never a partial map) when any candidate is grounded, exempt, or
+    unchecked -- the caller keeps today's behavior exactly in that case."""
+    if not pool:
+        return {}
+    out: dict[str, str] = {}
+    for cand in pool:
+        verdict = _baseline_descriptor_grounded(fact, cand, pool, reconciliation)
+        if verdict is None or verdict[0] is not False:
+            return {}
+        out[cand.code] = verdict[1]
+    return out
 
 
 def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: CandidateCode,
@@ -3577,6 +3811,61 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
     if _disposition_verdict is not None:
         remaining, _further_eliminated, _system_unresolved = _disposition_verdict
         eliminated.update(_further_eliminated)
+    # issue #6, real-note investigation (designated note, F11): a baseline
+    # floor UNDERNEATH the two evaluator-dependent elimination paths above --
+    # they only ever fire when some evaluator's own reason names the
+    # candidate being ruled out; a candidate nobody discussed at all survives
+    # into `remaining` by default, which is not the same as being entailed.
+    # Tried only once >1 candidate remains (a lone survivor has already
+    # cleared every other check this function runs) and only when the
+    # standard system-disagreement hold above did not already fire (that
+    # path is a SYSTEM verification gap, never a content-grounding question).
+    _baseline_ungrounded: dict[str, str] = {}
+    if not _system_unresolved and len(remaining) > 1:
+        _baseline_verdicts = {
+            cand.code: _baseline_descriptor_grounded(fact, cand, remaining, reconciliation)
+            for cand in remaining}
+        _baseline_failed = {code: v[1] for code, v in _baseline_verdicts.items()
+                            if v is not None and v[0] is False}
+        if _baseline_failed and len(_baseline_failed) == len(remaining):
+            # Never let this floor eliminate every remaining candidate at once
+            # -- that would convert "nobody's distinguishing vocabulary is in
+            # the record" into a false appearance of narrowing down to zero
+            # rather than the genuine no-candidate-fits gap `_settle_
+            # uniqueness`'s own `if not remaining` branch already handles
+            # correctly below. It IS recorded, though: a tie in which no
+            # candidate is grounded must not go on to manufacture a provider
+            # question out of those candidates' differences (`_tie_
+            # escalation`, `ungrounded=`).
+            _baseline_ungrounded = _baseline_failed
+        elif _baseline_failed:
+            # Codex F8-R1 / F9-R19-A (`tests/test_tie_policy.py`): a raw
+            # descriptor-word hit or miss on the page can never, by itself,
+            # settle an untyped tie between candidates whose identities rest
+            # equally on retrieval -- a rival that nobody entailed is still
+            # standing until INDEPENDENT typed evidence removes it. The one
+            # discriminator this module already sanctions for telling rivals
+            # apart is `CandidateStanding` (`candidate_admission`: a compiled
+            # requirement independently supported, a direct authoritative
+            # term, or a governed crosswalk/Index mapping -- "calibrated for
+            # DISCRIMINATING BETWEEN RIVALS", see below). So this floor
+            # removes an ungrounded rival ONLY when it holds no such standing
+            # itself AND some other still-remaining candidate does: the tie
+            # is then between a candidate whose identity a governed source
+            # established against the fact's own wording and one whose
+            # identity rests on nothing the record states (F11's exact
+            # shape). Two plain-retrieval rivals differing on an untyped word
+            # are left exactly as before this floor existed.
+            standing = {code for code, adm in (admissions or {}).items()
+                        if getattr(adm, "standing", None) is CandidateStanding.SUPPORTED}
+            if any(c.code in standing for c in remaining):
+                _baseline_survivors = [c for c in remaining
+                                       if c.code not in _baseline_failed or c.code in standing]
+                _baseline_eliminated = {code: reason for code, reason in _baseline_failed.items()
+                                        if code not in standing}
+                if _baseline_eliminated and _baseline_survivors:
+                    remaining = _baseline_survivors
+                    eliminated.update(_baseline_eliminated)
     # Candidates eliminated BEFORE the shortlist existed (a failed deterministic
     # constraint) belong in the same accounting: the record has to show the whole
     # retrieved pool being disposed of, not only the part the models were shown.
@@ -3660,11 +3949,18 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
             fact, shortlist, reconciliation,
             requirements=_elimination_requirements)
         if tie.provider_question and not defer_page_local_exhaustion:
+            # issue #6, real-note investigation (designated note F3): the
+            # "one documentable distinguishing fact" is only worth asking
+            # about when at least one rejected candidate's own identity is
+            # in the record -- otherwise the question is about the wrong
+            # codes entirely (see `_tie_escalation`, `ungrounded=`).
+            shortlist_ungrounded = _baseline_ungrounded_pool(fact, shortlist, reconciliation)
             return _tie_escalation(
                 fact, shortlist, reconciliation,
                 "every generated candidate was rejected, and the authoritative "
                 "candidate contracts identify one documentable distinguishing fact",
-                tie=tie, record=record, requirements=_elimination_requirements)
+                tie=tie, record=record, requirements=_elimination_requirements,
+                ungrounded=(shortlist_ungrounded or None))
         return _candidate_recall_gap_line(
             fact, shortlist,
             ("both independent evaluators accounted for every candidate on this "
@@ -3789,7 +4085,8 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
         f"{len(remaining)} shortlisted candidates are still entailed by the documentation "
         f"({', '.join(c.code for c in remaining)}) -- agreement on one of them is not "
         f"evidence that the others are wrong",
-        tie=tie, record=record, requirements=requirements)
+        tie=tie, record=record, requirements=requirements,
+        ungrounded=(_baseline_ungrounded or None))
 
 
 def _propose_then_verify(fact: ClinicalFact, source: CodeSource,

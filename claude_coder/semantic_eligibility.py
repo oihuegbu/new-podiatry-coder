@@ -633,6 +633,15 @@ _TARGET_SPLIT = re.compile(r"\s*(?:,|;|/|\bor\b)\s*", re.IGNORECASE)
 _CARDINALITY_LEADING_RE = re.compile(
     r"^(?:" + "|".join(re.escape(w) for w in _ontology._CARDINALITY) + r")\b",
     re.IGNORECASE)
+#: The closed laterality vocabulary (`ontology._LATERALITY` -- the SAME set
+#: `_anatomy_compatibility`'s structural side comparison, `tiebreak.
+#: discriminating_axes`, and `resolution._model_cited_descriptor_term_grounded`
+#: all already key on), as a word-boundary scanner: see
+#: `_candidate_anatomy_targets` for why a target is ALSO tried without it.
+_LATERALITY_WORD_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in sorted(_ontology._LATERALITY)) + r")\b",
+    re.IGNORECASE)
+_LATERALITY_FREE_SPACES = re.compile(r"\s+")
 
 
 def _candidate_anatomy_targets(feats) -> tuple[str, ...]:
@@ -657,7 +666,31 @@ def _candidate_anatomy_targets(feats) -> tuple[str, ...]:
         p.strip() for p in _TARGET_SPLIT.split(truncated) if p.strip()))
     if not parts:
         parts = (truncated,)
-    return tuple(p for p in parts if not _CARDINALITY_LEADING_RE.match(p))
+    targets: list[str] = []
+    for part in parts:
+        if _CARDINALITY_LEADING_RE.match(part):
+            continue
+        targets.append(part)
+        # issue #6, real-note investigation (designated note, F13): a
+        # laterality-QUALIFIED target ("right structure beta") is the SAME
+        # anatomical concept as its side-neutral form ("structure beta") --
+        # the side is a separate, closed-vocabulary axis
+        # (`ontology._LATERALITY`) that `_anatomy_compatibility` already
+        # compares STRUCTURALLY, before any concept lookup, and that
+        # `tiebreak.discriminating_axes` likewise subtracts from every
+        # descriptor's residual vocabulary for the same reason. Passed to the
+        # concept graph verbatim, the side word made the qualified leaf of an
+        # ICD-10-CM laterality family UNRESOLVED while its own "unspecified"
+        # sibling (whose qualifier the index tolerates) grounded fine -- so
+        # the dominance rule then removed the more-specific, side-matching
+        # leaf on the strength of its own less-specific sibling, and the only
+        # code left could never satisfy a side-documented fact. Strictly
+        # additive: the verbatim target is kept first, the side-free form is
+        # tried as well, and a target with no side word is unchanged.
+        bare = _LATERALITY_FREE_SPACES.sub(" ", _LATERALITY_WORD_RE.sub(" ", part)).strip(" ,;")
+        if bare and bare.lower() != part.lower():
+            targets.append(bare)
+    return tuple(dict.fromkeys(targets))
 
 
 def _anatomy_compatibility(candidate, facts: list[ClinicalFact], source,

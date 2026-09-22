@@ -43,6 +43,27 @@ def _fingerprint(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _report_claim_surface(path: Path = RESULT_PATH) -> None:
+    """Print what the written ClaimBundle actually says, pass or fail: the codes
+    that made it through (its submission projection) and every open provider-
+    documentation question, first-class (schema version 5) -- so an acceptance
+    run's outcome is readable from the bundle's own surface, never only from a
+    prose hold list."""
+    try:
+        from app.contracts.claim_bundle import load_bundle
+        bundle = load_bundle(json.loads(path.read_text()))
+    except Exception as exc:  # the verdict path below reports this precisely
+        print(f"claim surface unavailable: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return
+    released = ", ".join(bundle.released_codes) or "(none)"
+    print(f"released codes: {released}")
+    questions = bundle.provider_documentation_questions
+    print(f"provider documentation questions open: {len(questions)}")
+    for question in questions:
+        print(f"  - {question.clinical_event_id} [{question.kind}] "
+              f"{question.subject}: {question.question}")
+
+
 def _verify_written_result(path: Path = RESULT_PATH) -> tuple[bool, str]:
     """Independently re-read the artifact this acceptance run just produced.
 
@@ -161,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if child_status:
         return child_status
+    _report_claim_surface()
     accepted, detail = _verify_written_result()
     if not accepted:
         print(f"release-gate run failed: {detail}", file=sys.stderr)

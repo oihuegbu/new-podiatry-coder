@@ -844,3 +844,59 @@ class ServiceRoleExclusion(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LateralityQualifiedAnatomyTarget(unittest.TestCase):
+    """issue #6, real-note investigation (designated note, F13): a candidate whose
+    anatomy target carries a side word ("right structure beta") must also ground
+    through its side-free form ("structure beta") -- the side is a separate,
+    closed-vocabulary axis compared structurally, never part of the anatomical
+    concept. Passed verbatim to the concept graph, the qualified leaf of a
+    laterality family went UNRESOLVED while its own "unspecified" sibling grounded,
+    so dominance removed the more-specific, side-matching leaf on the strength of
+    its less-specific sibling."""
+
+    def _source(self, relation_map):
+        return MockSource(
+            records={
+                ("UNSPEC", "cpt"): {"long_description": "Condition alpha, unspecified structure beta",
+                                    "active": True},
+                ("SIDED", "cpt"): {"long_description": "Condition alpha, right structure beta",
+                                   "active": True}},
+            concept_relation=relation_map)
+
+    def test_a_side_qualified_target_is_also_tried_side_free(self):
+        feats = semelig._ontology.parse_descriptor("Condition alpha, right structure beta")
+        targets = semelig._candidate_anatomy_targets(feats)
+        self.assertEqual(targets, ("right structure beta", "structure beta"), targets)
+
+    def test_a_target_without_a_side_word_is_unchanged(self):
+        feats = semelig._ontology.parse_descriptor("Excision, structure gamma")
+        self.assertEqual(semelig._candidate_anatomy_targets(feats), ("structure gamma",))
+
+    def test_the_side_matching_leaf_is_not_dominated_by_its_unspecified_sibling(self):
+        source = self._source({
+            ("structure gamma", "unspecified structure beta"): "ancestor_descendant",
+            ("structure gamma", "structure beta"): "ancestor_descendant"})
+        fact = ClinicalFact(FactKind.DIAGNOSIS, "condition alpha",
+                            attributes={"anatomy": "structure gamma"})
+        result = semelig.eligible_partition(
+            [fact], [_candidate("UNSPEC"), _candidate("SIDED")], source, None)
+        self.assertEqual({c.code for c in result}, {"UNSPEC", "SIDED"})
+
+    def test_an_explicit_side_contradiction_still_excludes_the_leaf(self):
+        """Grounding through the side-free form never weakens the structural side
+        check that runs first: a right-side leaf against an authorized LEFT fact is
+        still CONTRADICTED_EXPLICIT."""
+        from claude_coder.models import AttributeEvidence, EvidenceSpan, RelationState
+        source = self._source({("structure gamma", "structure beta"): "same"})
+        span = EvidenceSpan("condition alpha on the left", anchored=True, span_id="s1")
+        fact = ClinicalFact(FactKind.DIAGNOSIS, "condition alpha",
+                            attributes={"anatomy": "structure gamma", "laterality": "left"},
+                            evidence=[span],
+                            attribute_evidence={"laterality": (
+                                AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                                  value="left"),)})
+        result = semelig.eligible_partition(
+            [fact], [_candidate("UNSPEC"), _candidate("SIDED")], source, None)
+        self.assertEqual([c.code for c in result], ["UNSPEC"])

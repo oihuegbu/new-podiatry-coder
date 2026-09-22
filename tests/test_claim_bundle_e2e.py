@@ -2023,3 +2023,99 @@ def test_an_uncertifiable_compiled_database_stops_the_deployed_entrypoint(deploy
     assert release["holds"], payload["release"]
     assert release["destination"] != "AUTO_READY"
     assert load_bundle(payload).release_blockers()
+
+
+# --------------------------------------------------------------------------
+# issue #6, real-note investigation (product-owner requirement): the bundle
+# carries the codes that made it through AND every open provider-documentation
+# question, first-class (schema version 5)
+# --------------------------------------------------------------------------
+
+def _questions_result():
+    from claude_coder.models import (
+        CandidateCode, ClinicalFact, CodingResult, Disposition, EvidenceSpan,
+        FactKind, ResolutionMethod, ResolvedLine)
+    released_fact = ClinicalFact(
+        FactKind.PROCEDURE, "synthetic service", fact_id="F1",
+        disposition=Disposition.PERFORMED,
+        evidence=[EvidenceSpan("synthetic service", anchored=True, span_id="s1")],
+        confidence=0.9)
+    released = ResolvedLine(released_fact, CandidateCode("SYNTHETIC", "cpt", "Synthetic"),
+                            method=ResolutionMethod.DETERMINISTIC)
+    asking_fact = ClinicalFact(
+        FactKind.SUPPLY, "synthetic supply", fact_id="F2",
+        disposition=Disposition.PERFORMED,
+        evidence=[EvidenceSpan("a synthetic supply was applied", anchored=True,
+                               span_id="s2")], confidence=0.9)
+    asking = ResolvedLine(
+        asking_fact, None, method=ResolutionMethod.ABSTAINED,
+        alternatives=[CandidateCode("SUPPLY_X", "hcpcs", "Supply, prefabricated", 0.6)],
+        documentation_gap="the descriptor requires a prefabricated supply; "
+                          "prefabrication is not stated",
+        rationale="candidate needs one specific fact")
+    tied_fact = ClinicalFact(
+        FactKind.PROCEDURE, "synthetic ancillary", fact_id="F3",
+        disposition=Disposition.PERFORMED,
+        evidence=[EvidenceSpan("an ancillary was done", anchored=True, span_id="s3")],
+        confidence=0.9)
+    tied = ResolvedLine(
+        tied_fact, None, method=ResolutionMethod.ABSTAINED,
+        alternatives=[CandidateCode("ALT_A", "cpt", "Alpha", 0.5),
+                      CandidateCode("ALT_B", "cpt", "Beta", 0.4)],
+        rationale="2 shortlisted candidates are still entailed")
+    return CodingResult("enc", "2026-03-14", lines=[released, asking, tied])
+
+
+def _questions_bundle():
+    from app.contracts.claim_bundle import (AuthorityBinding, SourceDocument,
+                                             bundle_from_coding_result)
+    from app.contracts.encounter_context import EncounterContext
+    return bundle_from_coding_result(
+        _questions_result(), source_document=SourceDocument(),
+        context=EncounterContext(), authority=AuthorityBinding())
+
+
+def test_provider_documentation_questions_are_first_class_next_to_released_codes():
+    from app.contracts.claim_bundle import SCHEMA_VERSION, ExternalDisposition, load_bundle
+    bundle = _questions_bundle()
+    assert bundle.schema_version == SCHEMA_VERSION == 5
+    assert bundle.released_codes == ("cpt SYNTHETIC",)
+    assert [q.clinical_event_id for q in bundle.provider_documentation_questions] == ["F2"]
+    question = bundle.provider_documentation_questions[0]
+    assert question.kind == "supply" and question.subject == "synthetic supply"
+    assert "prefabrication is not stated" in question.question
+    assert [c.code for c in question.candidates] == ["SUPPLY_X"]
+    assert question.evidence and question.evidence[0].text == "a synthetic supply was applied"
+    # the tied (coder-review) line is NOT a provider question
+    tied = next(c for c in bundle.candidate_lines if c.clinical_event_id == "F3")
+    assert tied.external_disposition is ExternalDisposition.EXCLUDED
+    # round-trips through the canonical reader unchanged
+    reloaded = load_bundle(bundle.model_dump(mode="json"))
+    assert reloaded.provider_documentation_questions == bundle.provider_documentation_questions
+    assert reloaded.released_codes == bundle.released_codes
+
+
+def test_a_v4_artifact_without_the_questions_section_still_loads():
+    from app.contracts.claim_bundle import load_bundle
+    payload = _questions_bundle().model_dump(mode="json")
+    payload["schema_version"] = 4
+    del payload["provider_documentation_questions"]
+    legacy = load_bundle(payload)
+    assert legacy.provider_documentation_questions == ()
+    # the per-line question is still there where v4 recorded it
+    assert any("prefabrication is not stated" in c.blocking_reason
+               for c in legacy.candidate_lines)
+
+
+def test_a_v5_artifact_whose_questions_drift_from_its_candidate_lines_is_refused():
+    import pytest
+    from app.contracts.claim_bundle import InvalidClaimBundle, load_bundle
+    payload = _questions_bundle().model_dump(mode="json")
+    payload["provider_documentation_questions"] = []
+    with pytest.raises(InvalidClaimBundle) as caught:
+        load_bundle(payload)
+    assert "provider_documentation_questions must restate" in str(caught.value)
+    payload = _questions_bundle().model_dump(mode="json")
+    payload["provider_documentation_questions"][0]["question"] = "a reworded question"
+    with pytest.raises(InvalidClaimBundle):
+        load_bundle(payload)

@@ -2533,6 +2533,136 @@ def apply_integral_bundling(result: CodingResult, source: CodeSource) -> None:
                 break
 
 
+def _package_parents(fact, parents_by_fact: dict, relations: list) -> list:
+    """The billed global-package lines `fact` is documented as belonging to:
+    a grounded, ASSERTED `PART_OF` edge from `fact` to a parent wins outright;
+    failing that, a grounded, ASSERTED `SAME_EPISODE_AS` edge in either
+    direction (the composition layer's own structural section grouping). A
+    parent documented as performed by a DIFFERENT performer never qualifies
+    (both `performer_id` attributes present and unequal) -- a package belongs
+    to the surgeon who billed it."""
+    from .models import RelationPredicate, RelationState
+    from .provenance import GROUNDED_RECONCILIATION_STATUSES
+
+    def _val(x):
+        return str(getattr(x, "value", x) or "")
+
+    def _same_performer(parent_fact) -> bool:
+        mine = str((fact.attributes or {}).get("performer_id") or "")
+        theirs = str((parent_fact.attributes or {}).get("performer_id") or "")
+        return not (mine and theirs and mine != theirs)
+
+    part_of, same_episode = [], []
+    for rel in relations or []:
+        if _val(rel.state) != RelationState.ASSERTED.value:
+            continue
+        if _val(rel.reconciliation_status) not in GROUNDED_RECONCILIATION_STATUSES:
+            continue
+        pred = _val(rel.predicate)
+        if pred == RelationPredicate.PART_OF.value and rel.subject_event_id == fact.fact_id:
+            parent = parents_by_fact.get(rel.object_event_id)
+            if parent is not None and _same_performer(parent.fact):
+                part_of.append(parent)
+        elif pred == RelationPredicate.SAME_EPISODE_AS.value:
+            other = (rel.object_event_id if rel.subject_event_id == fact.fact_id
+                     else rel.subject_event_id if rel.object_event_id == fact.fact_id
+                     else None)
+            parent = parents_by_fact.get(other) if other else None
+            if parent is not None and _same_performer(parent.fact):
+                same_episode.append(parent)
+    chosen = part_of or same_episode
+    return list({id(p): p for p in chosen}.values())
+
+
+def apply_surgical_package_components(result: CodingResult, source: CodeSource,
+                                      reconciliation=None) -> None:
+    """The authoritative reporting control `resolution._candidate_recall_gap_
+    line`'s own docstring defers to ("prove non-reportability from an
+    authoritative reporting control") -- issue #6, real-note investigation
+    (designated note F2/F3/F5/F7/F8): a documented intra-operative action
+    (debriding/removing tissue in the surgical field, excising an incidental
+    structure, an implant placed during the repair, imaging used to confirm the
+    surgeon's own resection) for which NO code of its own exists is INCLUDED
+    in the global surgical package of the procedure it was part of. Every one
+    of those lines used to fall through to an open coder-review hold -- or
+    worse, a provider question fabricated from candidates for unrelated
+    services -- because the only prior route to "included in X" was an NCCI
+    PTP pair against an already-billed code (`apply_integral_bundling`), which
+    can never exist for an action that has no code to pair.
+
+    Authority: the CMS global surgical package (Medicare Claims Processing
+    Manual, Ch. 12 §40.1 -- intra-operative services that are a normal,
+    necessary part of the procedure, and supplies, are included in the
+    package) and the NCCI Policy Manual, Ch. I (services integral to the
+    primary procedure are not separately reportable). Both are stated
+    GENERALLY there; this control applies them generally too -- no service,
+    action, or code is named anywhere in it. Three typed signals, each already
+    governed elsewhere, must ALL hold:
+
+      1. A billed procedure on this claim carries a CMS global period
+         (`source.global_period` in 000/010/090 -- the same authoritative
+         field `apply_global_package` already keys on) -- that is what makes
+         a "package" exist at all.
+      2. The line's fact is documented as belonging to that procedure's
+         operative episode: a grounded, ASSERTED `PART_OF` edge to it, or the
+         composition layer's grounded `SAME_EPISODE_AS` structural grouping
+         (`_package_parents`) -- the note's own structure, never a clinical
+         inference about which actions are "usually" part of which.
+      3. The line has NO separately reportable code of its own: every
+         candidate the recall layer generated for it fails
+         `resolution._baseline_ungrounded_pool` -- none of their own
+         distinguishing vocabulary appears in this event's own evidence (a
+         candidate whose identity a curated Index/crosswalk term match already
+         established is exempt there, so such a line is never touched here).
+         A line with NO candidates at all is left alone: that is a pure recall
+         gap for the retry path, not a proven non-reportable service.
+
+    Fail-safe by construction: this ONLY converts an unresolved hold into a
+    NON-billed exclusion naming the package it belongs to -- it never bills
+    anything, never touches a resolved line, and never removes a line whose
+    candidates could still be documented into a code (designated note F20:
+    the record states the splint candidate's own word, so its "prefabricated?"
+    question survives; F4: its repair candidate's own vocabulary is documented,
+    so its sequence-qualifier question survives). The line, its candidates,
+    and the full decision record stay in the bundle as an excluded line; the
+    coder still sees exactly which package absorbed it and why.
+    """
+    from .models import FactKind
+    dos = result.date_of_service
+    parents_by_fact = {}
+    for ln in result.billable_lines:
+        if (ln.chosen and ln.chosen.system in ("cpt", "hcpcs")
+                and ln.fact.kind is FactKind.PROCEDURE
+                and source.global_period(ln.chosen.code, dos) in ("000", "010", "090")):
+            parents_by_fact[ln.fact.fact_id] = ln
+    if not parents_by_fact:
+        return
+    for ln in result.lines:
+        if ln.resolved or ln.excluded_reason or not ln.fact.billable:
+            continue
+        if ln.fact.kind not in (FactKind.PROCEDURE, FactKind.IMAGING, FactKind.SUPPLY):
+            continue
+        if ln.fact.fact_id in parents_by_fact:
+            continue
+        alternatives = list(ln.alternatives or [])
+        if not alternatives:
+            continue
+        ungrounded = resolution._baseline_ungrounded_pool(ln.fact, alternatives, reconciliation)
+        if not ungrounded:
+            continue
+        parents = _package_parents(ln.fact, parents_by_fact, result.relations)
+        if not parents:
+            continue
+        codes = ", ".join(sorted({p.chosen.code for p in parents}))
+        ln.excluded_reason = (
+            f"included in the global surgical package of {codes} -- documented as part "
+            f"of the same operative episode, and no separately reportable code of its "
+            f"own is documented (every generated candidate's own distinguishing "
+            f"vocabulary is absent from this event's evidence: "
+            f"{', '.join(sorted(ungrounded))}) [CMS MCPM Ch.12 §40.1; NCCI Policy "
+            f"Manual Ch.I -- not separately reportable]")
+
+
 def apply_global_package(result: CodingResult, source: CodeSource) -> None:
     """Global surgical package (CMS global-period data): an E/M related to a
     same-day procedure that carries a global period (000/010/090) is included in
@@ -2695,6 +2825,7 @@ def _reconcile_claim_after_pruning(
         modifier_engine.assign_claim(result, source, source_reconciliation)
         apply_ncci_bundling(result, source)
         apply_integral_bundling(result, source)
+        apply_surgical_package_components(result, source, source_reconciliation)
         apply_global_package(result, source)
         result.gates = pre_retrieval_gates + gates.run_gates(
             result, note_text, source, readings=readings,

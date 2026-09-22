@@ -36,9 +36,23 @@ _GATE_REMEDIATION = {
 def build_recommendations(result: CodingResult) -> list[dict]:
     recs: list[dict] = []
 
+    # A line a post-selection reporting control has already EXCLUDED from the
+    # claim (`excluded_reason`: NCCI/section/global-package bundling, or
+    # `pipeline.apply_surgical_package_components`' "included in the global
+    # surgical package of <parent>") has its disposition; no provider query or
+    # coder question about it is open any more, whatever its own resolution
+    # stage left behind (issue #6, real-note investigation: a line absorbed into
+    # a surgical package still carried the model's earlier "please document ..."
+    # text and would have asked the provider to document a service that is not
+    # separately reportable, while its sibling would have asked a coder whether
+    # it was "separately reportable vs integral" -- the exact question the
+    # control had just answered). Its reason stays visible on the excluded line
+    # itself in the bundle; `autonomy.decide` already routes nothing for it.
+    open_lines = [ln for ln in result.lines if not ln.excluded_reason]
+
     # 1. Documentation gaps flagged at resolution (a code fits, an element is
     #    undocumented) — a targeted provider query.
-    for ln in result.lines:
+    for ln in open_lines:
         if ln.documentation_gap and not ln.resolved:
             recs.append({
                 "issue": "documentation_gap",
@@ -60,7 +74,7 @@ def build_recommendations(result: CodingResult) -> list[dict]:
     #    retrieved is the note genuinely too thin to code. DIAGNOSIS lines are included
     #    (they previously produced no recommendation at all).
     from .resolution import _RESIDUAL_MARKERS
-    for ln in result.lines:
+    for ln in open_lines:
         if not (ln.fact.billable and not ln.resolved and not ln.documentation_gap):
             continue
         if ln.fact.kind is FactKind.EM:

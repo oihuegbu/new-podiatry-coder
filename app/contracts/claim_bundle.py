@@ -114,10 +114,21 @@ SCHEMA_ID = "claim_bundle"
 #: DID reach RECOMMENDED or HELD_POLICY_OR_DATA. A reader that could not tell
 #: those apart would read a v3 artifact's silence as a clean claim rather than
 #: as an unrecorded uncertainty.
-SCHEMA_VERSION = 4
+#: 5 adds `ClaimBundle.provider_documentation_questions` (issue #6, real-note
+#: investigation, product-owner requirement: the bundle must carry the codes
+#: that made it through AND, first-class, every provider-answerable question
+#: standing between a documented event and a code). It is DERIVED -- one entry
+#: per `candidate_lines` member whose `external_disposition` is
+#: CANDIDATE_REQUIRING_FACT, carrying that line's own `blocking_reason` as the
+#: question -- and a v5 reader refuses a bundle in which the two disagree, so
+#: the section can never drift from the certified candidate lines it restates.
+#: A version bump for the same reason 4 was: in a v4 artifact the ABSENCE of
+#: this section means "the question was only ever recorded per line"; in a v5
+#: artifact an empty section means "no provider question is open".
+SCHEMA_VERSION = 5
 #: Every version this build can read. Adding a version means adding a reader,
 #: never silently accepting a shape whose semantics are unknown.
-SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4})
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5})
 
 
 class ClaimBundleError(Exception):
@@ -1543,6 +1554,23 @@ class AuditSurface(_Strict):
     advisory_terminology: tuple[dict[str, Any], ...] = ()
 
 
+class ProviderDocumentationQuestion(_Strict):
+    """One provider-answerable question standing between a documented event and
+    a code (schema version 5) -- the first-class restatement of a
+    `CandidateLine` whose `external_disposition` is CANDIDATE_REQUIRING_FACT.
+    Derived, never authored separately: `question` IS that line's
+    `blocking_reason`, `candidates`/`evidence` ARE its own; `ClaimBundle`
+    refuses a v5 artifact whose questions do not match its candidate lines
+    one-for-one, so a reader may trust this section without re-deriving it."""
+
+    clinical_event_id: str = ""
+    kind: str = ""
+    subject: str = ""
+    question: str
+    candidates: tuple[CandidateReference, ...] = ()
+    evidence: tuple[EvidenceReference, ...] = ()
+
+
 # --------------------------------------------------------------------------
 # the bundle
 # --------------------------------------------------------------------------
@@ -1563,12 +1591,43 @@ class ClaimBundle(_Strict):
     #: reach RECOMMENDED or HELD_POLICY_OR_DATA -- see `CandidateLine`. Never
     #: consulted by `release_blockers()`.
     candidate_lines: tuple[CandidateLine, ...] = ()
+    #: Schema version 5: every open provider-answerable question, first-class
+    #: -- see `ProviderDocumentationQuestion`. Empty in a v5 artifact means no
+    #: provider question is open; absent (v4 and earlier) means the questions
+    #: were only ever recorded per line in `candidate_lines`.
+    provider_documentation_questions: tuple[ProviderDocumentationQuestion, ...] = ()
     context: EncounterContext = Field(default_factory=EncounterContext)
     outcomes: tuple[DecisionOutcome, ...] = ()
     authority: AuthorityBinding = Field(default_factory=AuthorityBinding)
     certificate: CertificateReference | None = None
     release: ReleaseStatus
     audit: AuditSurface = Field(default_factory=AuditSurface)
+
+    @model_validator(mode="after")
+    def _questions_match_candidate_lines(self) -> "ClaimBundle":
+        if self.schema_version < 5:
+            return self
+        expected = sorted(
+            (line.clinical_event_id, line.blocking_reason)
+            for line in self.candidate_lines
+            if line.external_disposition is ExternalDisposition.CANDIDATE_REQUIRING_FACT)
+        stated = sorted((q.clinical_event_id, q.question)
+                        for q in self.provider_documentation_questions)
+        if expected != stated:
+            raise ValueError(
+                "provider_documentation_questions must restate exactly the "
+                "CANDIDATE_REQUIRING_FACT candidate lines (one question per line, "
+                f"the line's own blocking_reason); expected {expected}, got {stated}")
+        return self
+
+    @property
+    def released_codes(self) -> tuple[str, ...]:
+        """The codes that made it through, as `"<system> <code>"`, diagnoses first
+        -- the submission projection (`submission_diagnoses` +
+        `submission_service_lines`), never a held or candidate line."""
+        return tuple(f"{line.system} {line.code}"
+                     for line in (*self.submission_diagnoses,
+                                  *self.submission_service_lines))
 
     #: `sha256:<hex>` over `claim_content()`. Stored so a claim edited on disk
     #: after certification is detectable by any reader, including one that
@@ -2659,6 +2718,13 @@ def bundle_from_coding_result(
         diagnoses=tuple(diagnoses),
         service_lines=tuple(service_lines),
         candidate_lines=tuple(candidate_lines),
+        provider_documentation_questions=tuple(
+            ProviderDocumentationQuestion(
+                clinical_event_id=line.clinical_event_id, kind=line.kind,
+                subject=line.subject, question=line.blocking_reason,
+                candidates=line.candidates, evidence=line.evidence)
+            for line in candidate_lines
+            if line.external_disposition is ExternalDisposition.CANDIDATE_REQUIRING_FACT),
         context=context,
         outcomes=outcomes + tuple(eligibility_outcomes),
         authority=authority,

@@ -3737,3 +3737,157 @@ class DiagnosisVerifyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SurgicalPackageComponentTest(unittest.TestCase):
+    """issue #6, real-note investigation: a documented intra-operative action with
+    NO code of its own, documented as part of a billed global-period procedure's
+    operative episode, is INCLUDED in that procedure's global surgical package
+    (CMS MCPM Ch.12 §40.1 / NCCI Policy Manual Ch.I) -- never left as an open
+    hold. Synthetic codes/structures throughout."""
+
+    def _component(self, evidence_text, descriptors, fact_id="C", kind=None,
+                   performer=None):
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod, ResolvedLine)
+        kind = kind or FactKind.PROCEDURE
+        attrs = {"performer_id": performer} if performer else {}
+        f = ClinicalFact(kind=kind, description="component action", attributes=attrs,
+                         evidence=[EvidenceSpan(evidence_text, anchored=True, span_id="c1")],
+                         fact_id=fact_id)
+        alts = [CandidateCode(f"ALT{i}", "cpt", d, 0.4, source="retrieval")
+                for i, d in enumerate(descriptors)]
+        return ResolvedLine(fact=f, chosen=None, method=ResolutionMethod.ABSTAINED,
+                            alternatives=alts)
+
+    def _primary(self, performer=None):
+        from claude_coder.models import FactKind
+        ln = _line("PRIMARY", FactKind.PROCEDURE, "Assembly of structure alpha",
+                   attrs=({"performer_id": performer} if performer else {}))
+        ln.fact.fact_id = "P"
+        return ln
+
+    def _relation(self, predicate, subject="C", obj="P", status=None, state=None):
+        from claude_coder.models import RelationAssertion, RelationPredicate, RelationState
+        from claude_coder.provenance import SOURCE_STRUCTURED_PRIMARY
+        return RelationAssertion(
+            subject_event_id=subject, predicate=RelationPredicate(predicate),
+            object_event_id=obj, state=(state or RelationState.ASSERTED),
+            reconciliation_status=(status or SOURCE_STRUCTURED_PRIMARY))
+
+    def _result(self, component, relations, gp="090", primary=None):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CodingResult
+        primary = primary or self._primary()
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14",
+                         lines=[primary, component], relations=relations)
+        return r, MockSource(gp={"PRIMARY": gp})
+
+    UNRELATED = ("Excision of lesion of structure epsilon", "Drainage of structure zeta")
+
+    def test_component_with_no_code_of_its_own_is_included_in_the_package(self):
+        from claude_coder.pipeline import apply_surgical_package_components
+        comp = self._component("Tissue of structure alpha was tidied in the field.",
+                               self.UNRELATED)
+        r, src = self._result(comp, [self._relation("same_episode_as")])
+        apply_surgical_package_components(r, src)
+        self.assertIsNotNone(comp.excluded_reason)
+        self.assertIn("included in the global surgical package of PRIMARY", comp.excluded_reason)
+        self.assertIsNone(comp.chosen)
+        self.assertEqual([ln.chosen.code for ln in r.billable_lines], ["PRIMARY"])
+
+    def test_part_of_edge_also_qualifies(self):
+        from claude_coder.pipeline import apply_surgical_package_components
+        comp = self._component("Tissue was tidied.", self.UNRELATED)
+        r, src = self._result(comp, [self._relation("part_of")])
+        apply_surgical_package_components(r, src)
+        self.assertIn("PRIMARY", comp.excluded_reason or "")
+
+    def test_a_lone_ungrounded_candidate_line_is_included(self):
+        from claude_coder.models import FactKind
+        from claude_coder.pipeline import apply_surgical_package_components
+        comp = self._component("Imaging confirmed the contour of structure alpha.",
+                               ("Radiologic examination; site delta, 2 views",),
+                               kind=FactKind.IMAGING)
+        r, src = self._result(comp, [self._relation("same_episode_as")])
+        apply_surgical_package_components(r, src)
+        self.assertIn("PRIMARY", comp.excluded_reason or "")
+
+    def test_a_candidate_the_record_names_keeps_the_line_open(self):
+        """Designated-note F20 shape: the record states a candidate's own word,
+        so that candidate could still be documented into a code -- never absorbed."""
+        from claude_coder.pipeline import apply_surgical_package_components
+        comp = self._component("A brace was applied at the end of the case.",
+                               ("Brace, prefabricated, structure alpha",) + self.UNRELATED)
+        r, src = self._result(comp, [self._relation("same_episode_as")])
+        apply_surgical_package_components(r, src)
+        self.assertIsNone(comp.excluded_reason)
+
+    def test_no_grounded_relation_means_no_package_membership(self):
+        from claude_coder.pipeline import apply_surgical_package_components
+        comp = self._component("Tissue was tidied.", self.UNRELATED)
+        r, src = self._result(comp, [self._relation("same_episode_as", status="unreconciled")])
+        apply_surgical_package_components(r, src)
+        self.assertIsNone(comp.excluded_reason)
+        r, src = self._result(comp, [])
+        apply_surgical_package_components(r, src)
+        self.assertIsNone(comp.excluded_reason)
+
+    def test_a_primary_without_a_global_period_has_no_package(self):
+        from claude_coder.pipeline import apply_surgical_package_components
+        comp = self._component("Tissue was tidied.", self.UNRELATED)
+        r, src = self._result(comp, [self._relation("same_episode_as")], gp="XXX")
+        apply_surgical_package_components(r, src)
+        self.assertIsNone(comp.excluded_reason)
+
+    def test_a_different_performers_procedure_is_not_this_lines_package(self):
+        from claude_coder.pipeline import apply_surgical_package_components
+        comp = self._component("Tissue was tidied.", self.UNRELATED, performer="DR_A")
+        r, src = self._result(comp, [self._relation("same_episode_as")],
+                              primary=self._primary(performer="DR_B"))
+        apply_surgical_package_components(r, src)
+        self.assertIsNone(comp.excluded_reason)
+
+    def test_a_line_with_no_candidates_is_left_for_the_recall_path(self):
+        from claude_coder.pipeline import apply_surgical_package_components
+        comp = self._component("Tissue was tidied.", ())
+        r, src = self._result(comp, [self._relation("same_episode_as")])
+        apply_surgical_package_components(r, src)
+        self.assertIsNone(comp.excluded_reason)
+
+
+class ExcludedLineRecommendationTest(unittest.TestCase):
+    """issue #6, real-note investigation: a line a reporting control has already
+    excluded from the claim ("included in the global surgical package of ...")
+    must not ALSO ask the provider to document it (its stale `documentation_gap`)
+    or ask a coder whether it is "separately reportable vs integral"."""
+
+    def _excluded(self, doc_gap):
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod, ResolvedLine)
+        f = ClinicalFact(kind=FactKind.IMAGING, description="an intra-operative check",
+                         evidence=[EvidenceSpan("an intra-operative check was done")])
+        return ResolvedLine(
+            fact=f, chosen=None, method=ResolutionMethod.ABSTAINED,
+            alternatives=[CandidateCode("ALT_X", "cpt", "d", 0.4)],
+            documentation_gap=doc_gap, rationale="r",
+            excluded_reason="included in the global surgical package of PRIMARY")
+
+    def test_an_excluded_line_emits_no_provider_or_coder_recommendation(self):
+        from claude_coder.models import CodingResult
+        from claude_coder.recommendations import build_recommendations
+        for gap in ("the descriptor requires two views", None):
+            recs = build_recommendations(CodingResult(
+                encounter_id="e", date_of_service="2026-03-14", lines=[self._excluded(gap)]))
+            self.assertEqual([r for r in recs if r["issue"] in
+                              ("documentation_gap", "coder_review", "unresolved_service")],
+                             [], recs)
+
+    def test_an_open_line_still_gets_its_recommendation(self):
+        from claude_coder.models import CodingResult
+        from claude_coder.recommendations import build_recommendations
+        ln = self._excluded("the descriptor requires two views")
+        ln.excluded_reason = None
+        recs = build_recommendations(CodingResult(
+            encounter_id="e", date_of_service="2026-03-14", lines=[ln]))
+        self.assertEqual([r["issue"] for r in recs], ["documentation_gap"])
