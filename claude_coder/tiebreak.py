@@ -1064,6 +1064,7 @@ def narrow(fact, candidates: list[CandidateCode],
 
     support: dict[str, list[str]] = {c.code: [] for c in unique}
     settled: set[str] = set()
+    convention_settled: dict[str, Any] = {}
     #: Axes where the proven text confirms AT LEAST ONE candidate's term -- issue #6
     #: F9-R2-B: settling to exactly ONE candidate (`settled`, above) and the fact
     #: itself being DOCUMENTED are different questions. Two candidates can each state
@@ -1107,6 +1108,30 @@ def narrow(fact, candidates: list[CandidateCode],
         else:
             hits = {code: tuple(t for t in terms if asserted_status((t,), proven_text) == "supported")
                     for code, terms in probe.terms_by_code.items()}
+        if probe.selectable and not any(hits.values()):
+            # Product-owner decision (2026-09-22, option 2): an axis the page
+            # states NOTHING about may be settled by a governed coding
+            # convention (`conventions.py`, config with a cited authority) --
+            # per candidate, scoped by that candidate's own descriptor, and
+            # only to a value the candidate's descriptor actually states. A
+            # value the page DOES state is never overridden (this branch is
+            # reached only when no candidate's term is documented), and the
+            # settlement is named in the outcome's detail so the release
+            # record shows it rested on a convention, not on the page.
+            from . import conventions as _conv
+            by_convention: dict[str, tuple[str, ...]] = {}
+            for cand in unique:
+                match = _conv.authorized_value(fact, probe.axis, reconciliation,
+                                               candidate_descriptor=cand.descriptor)
+                if match is None:
+                    continue
+                stated = tuple(t for t in probe.terms_by_code.get(cand.code, ())
+                               if _sing(t.lower()) == _sing(match.value.lower()))
+                if stated:
+                    by_convention[cand.code] = stated
+                    convention_settled[probe.axis] = match
+            if by_convention:
+                hits = {code: by_convention.get(code, ()) for code in probe.terms_by_code}
         documented = [code for code, found in hits.items() if found]
         if documented:
             documented_axes.add(probe.axis)
@@ -1124,12 +1149,18 @@ def narrow(fact, candidates: list[CandidateCode],
         winner = documented_codes[0]
         stated = ", ".join(frozen_support[winner.code])
         axis_names = ", ".join(sorted(settled))
+        detail = (f"every discriminating axis ({axis_names}) is settled by the "
+                  f"original document, which states {stated!r} — asserted only by "
+                  f"this candidate's authoritative descriptor")
+        if convention_settled:
+            detail += "; " + "; ".join(
+                f"axis {axis!r} settled by governed coding convention "
+                f"{m.convention_id!r} [{m.authority}; verification_status="
+                f"{m.verification_status}], not by the page"
+                for axis, m in sorted(convention_settled.items()))
         return TieOutcome(
             winner=winner, axes=axes, support=frozen_support, proof=proof,
-            documented=tuple(sorted(documented_axes)),
-            detail=(f"every discriminating axis ({axis_names}) is settled by the "
-                    f"original document, which states {stated!r} — asserted only by "
-                    f"this candidate's authoritative descriptor"))
+            documented=tuple(sorted(documented_axes)), detail=detail)
 
     if not documented_codes:
         detail = ("the original document states none of the axes that distinguish the "

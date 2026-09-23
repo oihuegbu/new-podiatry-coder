@@ -156,6 +156,12 @@ MODIFIER_FILE = CODES_DIR / os.getenv("MODIFIER_FILENAME", "modifiers.json")
 INSTRUCTIONAL_NOTES_FILE = CODES_DIR / os.getenv(
     "INSTRUCTIONAL_NOTES_FILENAME", "icd10cm_instructional_notes.json")
 VALIDATOR_RULES_FILE = DATA_DIR / "rules" / "validator_rules.json"
+# Governed coding conventions (issue #6, product-owner decision 2026-09-22):
+# reviewed in-repo config, same status as VALIDATOR_RULES_FILE above -- a
+# convention authorizes a value on an axis the record is silent on, so an
+# unreadable pack must degrade to "no conventions available" (fail closed),
+# never to a fabricated default.
+CODING_CONVENTIONS_FILE = DATA_DIR / "rules" / "coding_conventions.json"
 # Descriptor-qualifier ontology the validator's family-arbitration checks read.  Every
 # qualifier it publishes is a RESTRICTION on which family member may be released, so an
 # unreadable file used to degrade to {} and silently clear codes the reviewed ontology

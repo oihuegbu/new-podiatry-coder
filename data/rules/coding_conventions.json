@@ -1,0 +1,22 @@
+{
+  "version": "2026-09-22.2",
+  "_comment": "Governed CODING CONVENTIONS consumed by claude_coder.conventions (issue #6, product-owner decision 2026-09-22). Each entry authorizes ONE value on ONE descriptor axis for a fact whose own source-confirmed evidence matches applies_when. Expressed in descriptor grammar (axis/value) and in what the record documents (regexes) -- NEVER a medical code (guarded by tests/test_conventions.py). Every entry MUST cite its authority with issue/date; verification_status records what was checked against the source and any DISSENT among authorities, so a reviewer sees a convention as a documented choice, never as settled fact. A convention never overrides a value the record itself states; it fills only an axis the record is silent on, and every use is written into the line's audit record.",
+  "conventions": [
+    {
+      "id": "tendon-reattachment-without-rupture-is-secondary-repair",
+      "enabled": true,
+      "axis": "sequence_qualifier",
+      "value": "secondary",
+      "applies_when": {
+        "fact_kinds": ["procedure"],
+        "candidate_descriptor_regex": "\\bachilles\\b",
+        "evidence_regex": "\\breattach(?:ed|ment|ing)?\\b",
+        "absent_regex": "\\bruptur"
+      },
+      "authority": "AMA CPT Assistant, March 2020 p.14 (Surgery/Musculoskeletal System, Q3) as corrected by the April 2020 erratum (p.8), referencing July 2019 p.5: debridement/debulking of a diseased Achilles tendon is reported with the secondary-repair Achilles descriptor, not an unlisted or muscle/fascia debridement descriptor; AHA Coding Clinic for HCPCS (as relayed in Becker's ASC 'Surgery Center Coding Guidance: Haglund's Deformity'): Achilles detachment/debridement/reattachment with calcaneal spur removal is captured by the secondary-repair Achilles descriptor; AOFAS coding guidance (as relayed in AAPC Orthopedic Coding Alert): 'Achilles tendon debridement and repair for tendonosis' -> the secondary-repair Achilles descriptor; AAPC coding-forum consensus (2024, citing CPT Assistant 24 May 2024 for the calcaneal ostectomy line): calcaneal ostectomy plus the secondary-repair Achilles descriptor for Achilles debridement due to tendonitis.",
+      "verification_status": "verified 2026-09-22 against the public summaries of the sources above (the CPT Assistant and AMA CPT Knowledge Base full texts are paywalled: AMA KB entries 2017-01-09 'Should [the secondary-repair Achilles descriptor] be reported for a simple repair of a chronic Achilles tear (re-tear)...' and 2020-05-28 'When using the secondary repair [descriptor], does the descriptor mean the Achilles tendon...' were not readable). AUTHORITIES DISAGREE -- see dissent.",
+      "dissent": "AOFAS guidance (via AAPC Orthopedic Coding Alert 'Could Be Best Choice for Non-Ruptured Tendon'): for debridement of INSERTIONAL Achilles tendinitis with repair (suture anchor vs bony trough) it names the TENOLYSIS leg/ankle descriptor, not the secondary-repair descriptor. AMA CPT Knowledge Base (via Becker's ASC): calcaneal ostectomy plus, for tendon work beyond exposure, the FOOT flexor-tendon repair descriptor. NYSPMA (2017): the PRIMARY-repair Achilles descriptor plus the calcaneal spur ostectomy descriptor. This entry follows the CPT Assistant / Coding Clinic / AOFAS-tendonosis position because it is the most-cited and most recent; the product owner may disable it or adopt a dissenting position by editing this file, never by changing code.",
+      "rationale": "The primary-repair family in this descriptor set is defined on a RUPTURED tendon. A tendon that is debrided and reattached with no rupture documented does not satisfy that descriptor, and the record never literally states 'secondary'; the cited convention reports such a reattachment with the secondary-repair descriptor. Scoped to the Achilles family by candidate descriptor because that is the family the cited guidance addresses."
+    }
+  ]
+}

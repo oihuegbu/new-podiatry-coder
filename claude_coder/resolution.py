@@ -2841,6 +2841,74 @@ def _grounded_elimination(fact: ClinicalFact, loser: CandidateCode, winner: Cand
     return False, "neither candidate's distinguishing term is stated in the documentation"
 
 
+#: Audit marker every evaluator-adjudicated elimination carries in its reason
+#: text and in `_settle_uniqueness`'s record (`evaluator_adjudicated`), so a
+#: reviewer can list exactly which releases rest on the evaluator's own
+#: declared, descriptor-engaged reason rather than on the record's words.
+_EVALUATOR_ADJUDICATED = "evaluator-adjudicated"
+
+
+def _evaluator_adjudicated_elimination(fact: ClinicalFact, loser: CandidateCode,
+                                       winner: CandidateCode, judgements: list,
+                                       named: list, reconciliation, requirements: tuple,
+                                       coverage, source: Any = None) -> bool:
+    """Product-owner release-policy decision (2026-09-22, option 1, scoped):
+    a DECLARED evaluator's NAMED elimination is accepted when -- and only when
+    -- the record offers no independent evidence EITHER WAY about the rival.
+
+    This deliberately relaxes Codex F8-R1 / F9-R19-A ("a model's own say-so is
+    not grounds") for exactly one case: `_uniqueness_view` used to leave a
+    rival STANDING whenever the record was silent about its distinguishing
+    vocabulary, so a note that never uses a rival descriptor's own words
+    (which is most notes, for most rivals) could never release. Every safety
+    property that rule was built on is kept:
+
+      * a rival the record CONTRADICTS the evaluator about (its own typed
+        axis independently validated the other way, `_requirement_grounded_
+        status`; or its own distinguishing phrase genuinely stated in the
+        complete document, `_model_cited_descriptor_term_grounded`) is never
+        accepted -- Codex's exact round-9 counterexample still holds;
+      * a rival the page positively documents on ANY axis (`tiebreak.narrow`
+        `support`) is never accepted -- silence is the only case;
+      * the fact's own quotations must be source-confirmed; an unconfirmed or
+        disagreed span still refuses (F8-R1 exact-SHA re-review);
+      * every judgement must have DECLARED a complete shortlist verdict, and
+        every named reason must ENGAGE the rival's own vocabulary -- name at
+        least one word of the rival's descriptor that the winner's does not
+        share -- so a bare pick, an undeclared answer, or a generic
+        "eliminated" carries nothing (the stub reason every existing
+        tie-policy test uses is exactly that, and still holds);
+      * the acceptance is written into the elimination reason and the
+        uniqueness record (`_EVALUATOR_ADJUDICATED`), never silent.
+    """
+    if not judgements or not all(getattr(j, "declared", False) for j in judgements):
+        return False
+    typed = _requirement_grounded_status(fact, loser, requirements, judgements,
+                                         reconciliation, coverage, source=source)
+    if typed is not None and typed[0] is False:
+        return False
+    phrase = _model_cited_descriptor_term_grounded(fact, loser, winner, judgements, coverage)
+    if phrase is not None and phrase[0] is False:
+        return False
+    tie = _tiebreak.narrow(fact, [winner, loser], reconciliation)
+    if tie.source_integrity or tie.winner is not None or tie.support.get(loser.code):
+        return False
+    supported, _proof, _text, _spans = _gc.source_support(fact, reconciliation)
+    if not supported:
+        return False
+    from .ontology import _LATERALITY
+    loser_only = (_tiebreak._descriptor_tokens(loser.descriptor)
+                  - _tiebreak._descriptor_tokens(winner.descriptor)
+                  - _tiebreak._GRAMMAR - set(_LATERALITY))
+    if not loser_only:
+        return False
+    for reason in named:
+        words = {_tiebreak._sing(w) for w in re.split(r"[^a-z0-9]+", str(reason or "").lower()) if w}
+        if not (words & loser_only):
+            return False
+    return True
+
+
 def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
                      chosen: CandidateCode, judgements: list,
                      eliminated_earlier: dict[str, str], reconciliation=None,
@@ -2884,6 +2952,16 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
             if grounded:
                 eliminated[cand.code] = (f"{'; '.join(dict.fromkeys(named))} "
                                          f"(document-confirmed: {ground_detail})")
+                continue
+            if _evaluator_adjudicated_elimination(fact, cand, chosen, judgements, named,
+                                                  reconciliation, requirements, coverage,
+                                                  source=source):
+                eliminated[cand.code] = (
+                    f"{'; '.join(dict.fromkeys(named))} ({_EVALUATOR_ADJUDICATED}: the "
+                    f"record states nothing for or against this candidate's own "
+                    f"distinguishing vocabulary; accepted as the declared evaluator's "
+                    f"named, descriptor-engaged reason under the 2026-09-22 release-policy "
+                    f"decision)")
                 continue
         remaining.append(cand)
     return remaining, eliminated
@@ -3781,6 +3859,23 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
     # still carries them for audit completeness and for the one path that IS
     # meant to read them.
     _elimination_requirements = tuple(r for r in requirements if r.axis not in _SEMANTIC_AXES)
+    # Product-owner release-policy decision (2026-09-22, option 1): with ONE
+    # evaluator, a declared verdict that entails exactly one candidate and
+    # names a reason against every other is a proposal of that candidate --
+    # `_candidate_disposition_uniqueness` (the only other path that could
+    # narrow a no-pick verdict) needs two judgements to cross-check, so a
+    # single evaluator's complete matrix used to leave the WHOLE shortlist
+    # standing as a tie. The named reasons still go through `_uniqueness_view`
+    # (independent grounding first, evaluator adjudication only where the
+    # record is silent), never accepted on the pick alone.
+    if chosen is None and len(judgements) == 1 and getattr(judgements[0], "declared", False):
+        _entailed_only = [c for c in shortlist if judgements[0].entails(c.code)]
+        if (len(_entailed_only) == 1
+                and all(judgements[0].elimination_of(c.code)
+                        for c in shortlist if c.code != _entailed_only[0].code)):
+            chosen = _entailed_only[0]
+            why = (f"the evaluator entailed exactly one candidate ({chosen.code}) and "
+                   f"named a reason against every other")
     # A verifier is allowed to return a complete disposition matrix without
     # nominating a code.  That is not a failed verification: it is a safer
     # representation of "classify every candidate, then let the deterministic
@@ -3877,6 +3972,8 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
         "selected": chosen.code if chosen is not None else "",
         "still_entailed": [c.code for c in remaining],
         "eliminated": dict(sorted(eliminated.items())),
+        "evaluator_adjudicated": sorted(code for code, reason in eliminated.items()
+                                        if _EVALUATOR_ADJUDICATED in reason),
         "judgements": [j.as_record() for j in judgements],
         # issue #6 F9-R6 Phase 5: the COMPILED requirement matrix itself (axis,
         # candidate, required/optional, role, expected terms, authority clause +
@@ -4657,6 +4754,7 @@ def _chosen_own_requirements_confirmed(fact: ClinicalFact, cand: CandidateCode,
     for r in cand_reqs:
         by_axis.setdefault(r.axis, []).append(r)
     evidence_by_span_id = _verify.evidence_text_by_span_id(fact, evidence_packet)
+    notes: list[str] = []
     for axis, axis_reqs in by_axis.items():
         is_exclusion = axis_reqs[0].role is _requirement.RequirementRole.EXCLUSION
         target = (_requirement.RequirementStatus.NOT_DOCUMENTED if is_exclusion
@@ -4676,13 +4774,30 @@ def _chosen_own_requirements_confirmed(fact: ClinicalFact, cand: CandidateCode,
             if {rj.status for rj in outcomes} == {target}:
                 confirmed = True
                 break
+        if not confirmed and not is_exclusion:
+            # Product-owner decision (2026-09-22, option 2): an axis the record
+            # is silent on may be authorized by a GOVERNED coding convention
+            # (`conventions.py`, config with a cited authority) -- tried only
+            # AFTER the record's own evidence was checked and found silent,
+            # only for a MUST_SUPPORT axis (a convention never asserts that
+            # something is absent), and only when the convention's value is
+            # one this candidate's own descriptor actually states. Recorded
+            # by name in the released line's rationale and audit record.
+            from . import conventions as _conv
+            match = _conv.authorized_value(fact, axis, reconciliation,
+                                           candidate_descriptor=cand.descriptor)
+            if match is not None and any(
+                    _tiebreak._sing(match.value.lower()) == _tiebreak._sing(str(t).lower())
+                    for r in axis_reqs for t in r.expected):
+                notes.append(match.describe())
+                confirmed = True
         if not confirmed:
             names = ", ".join(sorted(r.requirement_id for r in axis_reqs))
             verb = "requires" if not is_exclusion else "excludes"
             return False, (f"{cand.code}'s own descriptor {verb} a fact on axis "
                           f"{axis!r} ({names}) that no evaluator independently "
                           f"confirmed against the document")
-    return True, ""
+    return True, "; ".join(notes)
 
 
 def _entailed_line(fact: ClinicalFact, chosen: CandidateCode,
@@ -4710,6 +4825,7 @@ def _entailed_line(fact: ClinicalFact, chosen: CandidateCode,
     fails to name the exact unconfirmed fact. Callers that omit these (the defaults)
     skip this check entirely, exactly preserving prior behavior for every call site
     that has not been updated to supply them."""
+    convention_note = ""
     if requirements:
         confirmed, gap_detail = _chosen_own_requirements_confirmed(
             fact, chosen, requirements, judgements, reconciliation, coverage,
@@ -4722,13 +4838,19 @@ def _entailed_line(fact: ClinicalFact, chosen: CandidateCode,
                 rationale=(f"{chosen.code} is the sole entailed candidate, but {gap_detail} -- "
                           f"a model's own say-so of its OWN required premise is not, by "
                           f"itself, grounds to release it"))
+        convention_note = gap_detail
     base = (f"authoritative descriptor entailed by documentation: {why}"
             if why else "authoritative descriptor entailed by documentation")
+    if convention_note:
+        base = f"{base}; {convention_note}"
+    record = {**uniqueness, "released_code": chosen.code} if uniqueness else None
+    if convention_note:
+        record = {**(record or {}), "convention_authorized": convention_note}
     return ResolvedLine(
         fact=fact, chosen=chosen,
         alternatives=[c for c in shortlist if c.code != chosen.code][:4],
         method=ResolutionMethod.VERIFIED,
-        tie_record=({**uniqueness, "released_code": chosen.code} if uniqueness else None),
+        tie_record=record,
         rationale=base)
 
 

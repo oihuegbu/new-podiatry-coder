@@ -1498,3 +1498,60 @@ class SemanticAxisSelectionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EvaluatorAdjudicatedEliminationTest(unittest.TestCase):
+    """Product-owner release-policy decision (2026-09-22, option 1, scoped): a
+    DECLARED evaluator's NAMED, descriptor-engaged reason eliminates a rival
+    the record says nothing about either way. Every F8-R1 safety property the
+    tests above pin is kept: a generic reason (the stub judge's fixed
+    "not entailed" text included), an undeclared verdict, and a rival the
+    document contradicts the evaluator about all still hold."""
+
+    def _resolve(self, evidence, judge):
+        fact = _fact("assembly service", evidence)
+        return resolve(_request(fact), _source(SYN_A, SYN_B),
+                       llm=_pinned(judge, "provider-a"),
+                       reconciliation=_agreed("span-0"))
+
+    def _settle(self, evidence, reason, declared=True):
+        from claude_coder import resolution, verify
+        fact = _fact("assembly service", evidence)
+        judgement = verify.Judgement(chosen=SYN_A, entailed=("SYN_A",),
+                                     eliminated={"SYN_B": reason}, declared=declared)
+        return resolution._settle_uniqueness(
+            fact, SYN_A, [SYN_A, SYN_B], [judgement], {}, "shortlist verdict",
+            _agreed("span-0"), requirements=req.compile_requirements([SYN_A, SYN_B]),
+            coverage=None)
+
+    def test_engaged_named_reason_releases_when_the_record_is_silent(self):
+        line = self._settle(SelectionUniquenessTest.ONE_DOCUMENTED,
+                            "component two is not documented anywhere in the record")
+        self.assertEqual(line.chosen.code if line.chosen else None, "SYN_A", line.rationale)
+        self.assertEqual(line.tie_record["still_entailed"], ["SYN_A"])
+        self.assertEqual(line.tie_record["evaluator_adjudicated"], ["SYN_B"])
+        self.assertIn("evaluator-adjudicated", line.tie_record["eliminated"]["SYN_B"])
+
+    def test_a_reason_that_does_not_engage_the_rivals_own_words_still_holds(self):
+        line = self._settle(SelectionUniquenessTest.ONE_DOCUMENTED, "not the right one")
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
+        self.assertEqual(line.tie_record["evaluator_adjudicated"], [])
+
+    def test_a_reason_the_document_contradicts_still_holds(self):
+        line = self._settle(SelectionUniquenessTest.BOTH_DOCUMENTED,
+                            "component two is not documented anywhere in the record")
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
+
+    def test_an_undeclared_verdict_still_holds(self):
+        line = self._settle(SelectionUniquenessTest.ONE_DOCUMENTED,
+                            "component two is not documented anywhere in the record",
+                            declared=False)
+        self.assertIsNone(line.chosen, line.rationale)
+
+    def test_the_stub_judges_generic_reason_still_holds_end_to_end(self):
+        judge = _sv.judge(entails=lambda d: _ONE in d, prefer=lambda d: _ONE in d, declare=True)
+        line = self._resolve(SelectionUniquenessTest.ONE_DOCUMENTED, judge)
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])

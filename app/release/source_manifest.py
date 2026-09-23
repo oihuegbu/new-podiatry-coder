@@ -41,6 +41,10 @@ _AUTHORITATIVE = {
     # validation gate.
     "instructional_notes": config.INSTRUCTIONAL_NOTES_FILE,
     "validator_rules": config.VALIDATOR_RULES_FILE,
+    # Governed coding conventions: a convention can authorize a value that
+    # changes a release the way a validator rule can, so it is release-
+    # bearing and bound into the same immutable manifest.
+    "coding_conventions": config.CODING_CONVENTIONS_FILE,
     # SNOMED root concepts + the confidence CAP applied to a root-level concept. Absence
     # leaves the root set empty, so the cap is never applied and a root-level match keeps
     # its full confidence -- absence RELAXES a validation restriction.
@@ -431,6 +435,12 @@ _REQUIRED_RELEASE_SOURCES: dict[str, dict[str, str]] = {
     },
     "validator_rules": {
         "role": "deterministic validation rule pack",
+        "release_metadata_exemption":
+            "reviewed in-repo rule pack, not an ingested upstream publication; it carries "
+            "its own pack version and its identity rests on the content digest",
+    },
+    "coding_conventions": {
+        "role": "governed coding-convention pack",
         "release_metadata_exemption":
             "reviewed in-repo rule pack, not an ingested upstream publication; it carries "
             "its own pack version and its identity rests on the content digest",

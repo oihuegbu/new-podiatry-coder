@@ -2574,6 +2574,65 @@ def _package_parents(fact, parents_by_fact: dict, relations: list) -> list:
     return list({id(p): p for p in chosen}.values())
 
 
+def apply_cross_line_code_ownership(result: CodingResult, source: CodeSource,
+                                    reconciliation=None) -> None:
+    """A code already released for a DISTINCT documented event on this claim is
+    not also this event's code (product-owner release-policy decision,
+    2026-09-22; ICD-10-CM/CPT report each documented condition/service once).
+
+    Real reproduction (designated note): one sentence of the note names three
+    conditions together, so the retrieval pool for condition alpha's fact ALSO
+    carried condition beta's code, and condition beta's fact -- which released
+    that code cleanly -- left condition alpha's fact in a permanent two-way tie
+    with a code that already belongs to its sibling. Resolution sees one fact
+    at a time and cannot know that; the claim can.
+
+    For an unresolved, billable line whose uniqueness record still holds two
+    or more entailed candidates, remove every candidate already released (a
+    resolved, non-excluded line) for a DIFFERENT fact; when exactly one
+    remains -- and it does not contradict this fact's own documented axes
+    (`resolution._evaluate`) -- release it, with the ownership stated in the
+    rationale. Nothing is invented: the survivor was already entailed for this
+    event by the evaluator, and every removed rival is on the claim already.
+    Re-derived every reconciliation round like the other claim-set mechanics
+    (`chosen`/`method`/`rationale` are restored from the pre-mechanic baseline
+    first), so a rival that later leaves the claim returns the tie.
+    """
+    from .models import ResolutionMethod
+    owner: dict[tuple[str, str], str] = {}
+    for ln in result.lines:
+        if ln.resolved and ln.chosen is not None and not ln.excluded_reason:
+            owner.setdefault((ln.chosen.code, ln.chosen.system), ln.fact.fact_id)
+    if not owner:
+        return
+    for ln in result.lines:
+        if ln.resolved or ln.excluded_reason or not ln.fact.billable:
+            continue
+        record = getattr(ln, "tie_record", None) or {}
+        standing = [str(c) for c in (record.get("still_entailed") or [])]
+        if len(standing) < 2:
+            continue
+        by_code = {c.code: c for c in (ln.alternatives or [])}
+        if any(code not in by_code for code in standing):
+            continue
+        owned = [code for code in standing
+                 if owner.get((code, by_code[code].system)) not in (None, ln.fact.fact_id)]
+        survivors = [code for code in standing if code not in owned]
+        if not owned or len(survivors) != 1:
+            continue
+        survivor = by_code[survivors[0]]
+        if resolution._evaluate(ln.fact, survivor, source, reconciliation) is None:
+            continue
+        owned_text = ", ".join(
+            f"{code} (released for {owner[(code, by_code[code].system)]})" for code in owned)
+        ln.chosen = survivor
+        ln.method = ResolutionMethod.VERIFIED
+        ln.rationale = (
+            f"{ln.rationale} -- cross-line code ownership: {owned_text} already "
+            f"released for a distinct documented event on this claim; {survivor.code} "
+            f"is the sole remaining candidate the evaluator entailed for this event")
+
+
 def apply_surgical_package_components(result: CodingResult, source: CodeSource,
                                       reconciliation=None) -> None:
     """The authoritative reporting control `resolution._candidate_recall_gap_
@@ -2822,6 +2881,7 @@ def _reconcile_claim_after_pruning(
         _restore_pre_claim_set_state(result, baseline)
         _apply_dependency_exclusions(
             result, dependency_excluded_ids, dependency_hold_reasons)
+        apply_cross_line_code_ownership(result, source, source_reconciliation)
         modifier_engine.assign_claim(result, source, source_reconciliation)
         apply_ncci_bundling(result, source)
         apply_integral_bundling(result, source)

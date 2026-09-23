@@ -3891,3 +3891,74 @@ class ExcludedLineRecommendationTest(unittest.TestCase):
         recs = build_recommendations(CodingResult(
             encounter_id="e", date_of_service="2026-03-14", lines=[ln]))
         self.assertEqual([r["issue"] for r in recs], ["documentation_gap"])
+
+
+class CrossLineCodeOwnershipTest(unittest.TestCase):
+    """Product-owner release-policy decision (2026-09-22): a code already released
+    for a DISTINCT documented event on this claim is not also this event's code,
+    so a two-way tie between that code and one other entailed candidate resolves
+    to the other. Synthetic codes."""
+
+    def _lines(self, standing, alternatives, owner_fact="F_A"):
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod, ResolvedLine)
+        released_fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="condition beta",
+                                     evidence=[EvidenceSpan("condition beta", anchored=True,
+                                                            span_id="a1")], fact_id=owner_fact)
+        released = ResolvedLine(fact=released_fact,
+                                chosen=CandidateCode("CODE_X", "icd10", "Condition beta", 0.9),
+                                method=ResolutionMethod.VERIFIED)
+        held_fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="condition alpha",
+                                 evidence=[EvidenceSpan("condition alpha with condition beta",
+                                                        anchored=True, span_id="b1")],
+                                 fact_id="F_B")
+        held = ResolvedLine(fact=held_fact, chosen=None, method=ResolutionMethod.ABSTAINED,
+                            alternatives=[CandidateCode(c, "icd10", d, 0.5)
+                                          for c, d in alternatives],
+                            tie_record={"still_entailed": list(standing)},
+                            rationale="2 shortlisted candidates are still entailed")
+        return released, held
+
+    def test_the_sibling_owned_code_leaves_the_tie_and_the_survivor_releases(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CodingResult, ResolutionMethod
+        from claude_coder.pipeline import apply_cross_line_code_ownership
+        released, held = self._lines(["CODE_X", "CODE_Y"],
+                                     [("CODE_X", "Condition beta"), ("CODE_Y", "Condition alpha")])
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14", lines=[released, held])
+        apply_cross_line_code_ownership(r, MockSource())
+        self.assertEqual(held.chosen.code if held.chosen else None, "CODE_Y")
+        self.assertEqual(held.method, ResolutionMethod.VERIFIED)
+        self.assertIn("cross-line code ownership", held.rationale)
+        self.assertIn("released for F_A", held.rationale)
+
+    def test_more_than_one_survivor_stays_a_tie(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CodingResult
+        from claude_coder.pipeline import apply_cross_line_code_ownership
+        released, held = self._lines(
+            ["CODE_X", "CODE_Y", "CODE_Z"],
+            [("CODE_X", "Condition beta"), ("CODE_Y", "Condition alpha"), ("CODE_Z", "Condition gamma")])
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14", lines=[released, held])
+        apply_cross_line_code_ownership(r, MockSource())
+        self.assertIsNone(held.chosen)
+
+    def test_a_code_released_for_the_same_event_is_not_ownership(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CodingResult
+        from claude_coder.pipeline import apply_cross_line_code_ownership
+        released, held = self._lines(["CODE_X", "CODE_Y"],
+                                     [("CODE_X", "Condition beta"), ("CODE_Y", "Condition alpha")],
+                                     owner_fact="F_B")
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14", lines=[released, held])
+        apply_cross_line_code_ownership(r, MockSource())
+        self.assertIsNone(held.chosen)
+
+    def test_a_standing_candidate_missing_from_alternatives_blocks_the_mechanic(self):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CodingResult
+        from claude_coder.pipeline import apply_cross_line_code_ownership
+        released, held = self._lines(["CODE_X", "CODE_Y"], [("CODE_X", "Condition beta")])
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14", lines=[released, held])
+        apply_cross_line_code_ownership(r, MockSource())
+        self.assertIsNone(held.chosen)
