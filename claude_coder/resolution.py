@@ -4667,6 +4667,44 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
             or "a required element is not documented"
             for c in verifiable if primary.missing_element.get(c.code, False)))
         if missing_details:
+            flagged = [c for c in verifiable if primary.missing_element.get(c.code, False)]
+            from . import requirement as _requirement
+            flagged_reqs = [r for r in requirements
+                           if flagged and r.candidate_code == flagged[0].code
+                           and r.role in (_requirement.RequirementRole.MUST_SUPPORT,
+                                         _requirement.RequirementRole.EXCLUSION)]
+            # Promotion is attempted ONLY when the flagged candidate has at
+            # least one COMPILED, typed requirement to check -- the model's
+            # free-text "missing_element" flag names no axis of its own, so
+            # without a typed requirement there is nothing concrete for
+            # `_chosen_own_requirements_confirmed` to confirm, and an empty
+            # `cand_reqs` there returns `(True, "")` UNCONDITIONALLY --
+            # auto-releasing an ungrounded candidate is exactly the failure
+            # this whole mechanism exists to prevent.
+            if (len(flagged) == 1 and flagged_reqs and not any(
+                    primary.entails(c.code) for c in verifiable if c.code != flagged[0].code)):
+                # Product-owner decision (2026-09-22, option 2): the
+                # evaluator's OWN verdict already says this ONE candidate is
+                # the right service, missing only one required element --
+                # never routed through a second, duplicated convention
+                # check here. Instead, promoted to a PROPOSAL and run
+                # through the SAME confirmation `_entailed_line` always
+                # applies (`_chosen_own_requirements_confirmed`, already
+                # convention-aware): the model's own `requirement_judgements`
+                # for this exact axis (populated regardless of `choice`) are
+                # checked first, a convention only after those come back
+                # unconfirmed. Fails safe: if neither confirms it, `_entailed_
+                # line` returns the identical ABSTAINED/documentation_gap
+                # shape this branch always produced, with no behavior change.
+                promoted = _entailed_line(
+                    fact, flagged[0], verifiable,
+                    "the evaluator's own verdict names this as the sole "
+                    "right-kind candidate, missing only one required element",
+                    requirements=requirements, judgements=[primary],
+                    reconciliation=reconciliation, coverage=coverage,
+                    evidence_packet=evidence_packet)
+                if promoted.resolved:
+                    return _with_admissions(promoted)
             question = "; ".join(missing_details)
             return _with_admissions(ResolvedLine(
                 fact=fact, chosen=None, alternatives=verifiable[:5],
