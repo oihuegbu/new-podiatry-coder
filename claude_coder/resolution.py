@@ -808,6 +808,29 @@ def _resolve_material_axis_conflict(
                         f"bounded reconciliation of {label} for {chosen.code} failed "
                         f"({type(exc).__name__}: {exc})")
                 if not found:
+                    # Product-owner decision (2026-09-22, option 2): tried
+                    # only here, AFTER both the evaluator's own validated
+                    # not_documented disposition AND a bounded page-local
+                    # re-check have confirmed the axis is genuinely silent --
+                    # the SAME "record checked and found silent" bar
+                    # `_chosen_own_requirements_confirmed`/`tiebreak.narrow`
+                    # already require before consulting a convention.
+                    from . import conventions as _conv
+                    match = _conv.authorized_value(fact, axis, reconciliation,
+                                                   candidate_descriptor=chosen.descriptor)
+                    # Verified against `chosen`'s own descriptor directly
+                    # (`requirement._find_clause`, the SAME literal-clause
+                    # check `_material_axis_conflicts_for` already used to
+                    # decide this conflict was material in the first place)
+                    # -- never against `requirements`, which this guard
+                    # always compiles from a SINGLE candidate and is
+                    # therefore always empty (`discriminating_axes` needs
+                    # 2+ to derive anything): cross-referencing it here
+                    # would silently never match.
+                    if (match is not None
+                            and _requirement._find_clause(chosen.descriptor, match.value)
+                            is not None):
+                        return "authorized", match.describe()
                     return "silent", (conflict.provider_question or (
                         f"the record does not settle {axis!r} for {fact.description!r}"))
                 # issue #6, Codex's independent re-review (F9-R18-A reopened
@@ -904,11 +927,21 @@ def _apply_attribute_axis_conflict_guard(
                     f"{axis}={value!r}"))
     if not outstanding:
         return line
+    convention_notes: list[str] = []
     for axis, conflict in outstanding:
         outcome, detail = _resolve_material_axis_conflict(
             fact, chosen, axis, conflict, source, llm, reconciliation,
             coverage, page_text)
         if outcome == "authorized":
+            if detail:
+                # `detail` is non-empty ONLY on the governed-convention path
+                # above (the pre-existing `claim_authorized_value` path
+                # never reaches `_resolve_material_axis_conflict` at all --
+                # it is handled by the FIRST loop, before `outstanding` is
+                # even built). Recorded so a convention-authorized release
+                # is never indistinguishable, in the audit record, from one
+                # the page itself settled.
+                convention_notes.append(detail)
             continue
         if outcome == "silent":
             return _dc_replace(
@@ -925,6 +958,10 @@ def _apply_attribute_axis_conflict_guard(
             line, chosen=None, alternatives=withdrawn[:5],
             method=ResolutionMethod.ABSTAINED,
             rationale=f"selected code withdrawn for {fact.fact_id}: {detail}")
+    if convention_notes:
+        return _dc_replace(
+            line, rationale=(f"{line.rationale}; " + "; ".join(convention_notes)
+                             if line.rationale else "; ".join(convention_notes)))
     return line
 
 

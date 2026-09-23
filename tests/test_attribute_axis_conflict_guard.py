@@ -16,6 +16,10 @@ codes/descriptors throughout -- no real medical terminology.
 import hashlib
 import json
 import unittest
+import pathlib
+import tempfile
+from unittest.mock import patch
+from claude_coder import conventions
 
 from claude_coder import models
 from claude_coder import resolution as res
@@ -431,3 +435,117 @@ class GuardTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GovernedConventionAuthorizesASilentAxisTest(unittest.TestCase):
+    """Product-owner release-policy decision (2026-09-22, option 2): a material
+    axis conflict the evaluator AND a bounded page-local re-check both confirm
+    is genuinely silent may still be authorized by a governed coding convention
+    -- never overriding a value the page states, never for an axis the
+    convention pack does not cover. Synthetic pack/vocabulary throughout."""
+
+    SYNTHETIC = [{
+        "id": "structure-alpha-reattachment-is-secondary",
+        "enabled": True, "axis": "sequence_qualifier", "value": "secondary",
+        "applies_when": {"fact_kinds": ["procedure"],
+                         "candidate_descriptor_regex": r"\bstructure alpha\b",
+                         "evidence_regex": r"\breattach(?:ed|ment)?\b",
+                         "absent_regex": r"\bsevered\b"},
+        "authority": "synthetic authority citation", "verification_status": "test",
+    }]
+
+    def _pack(self, tmp):
+        path = pathlib.Path(tmp) / "pack.json"
+        path.write_text(json.dumps({"version": "test", "conventions": self.SYNTHETIC}))
+        conventions.load_pack.cache_clear()
+        return str(path)
+
+    def _line(self, cand, fact):
+        return ResolvedLine(fact=fact, chosen=cand, alternatives=[],
+                            method=ResolutionMethod.DETERMINISTIC, rationale="x")
+
+    def test_the_convention_authorizes_a_silent_axis_and_the_line_still_releases(self):
+        cand = _cand("CAND_SEC", "Repair, secondary, structure alpha")
+        fact = _fact(
+            attributes={},
+            conflicts={"sequence_qualifier": _conflict("sequence_qualifier", "primary", "secondary")},
+            evidence=[EvidenceSpan(text="structure alpha was reattached under tension",
+                                   anchored=True, span_id="s1", page=1)])
+        line = self._line(cand, fact)
+        llm = _disposition_llm("not_documented", cand.descriptor, [],
+                               missing_fact="whether the repair was primary or secondary")
+
+        class _Coverage:
+            complete = True
+            text = "structure alpha was reattached under tension"
+
+        page_text = {1: "structure alpha was reattached under tension"}
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = self._pack(tmp)
+            with patch.object(conventions, "PACK_PATH", pathlib.Path(pack)):
+                conventions.load_pack.cache_clear()
+                try:
+                    out = res._apply_attribute_axis_conflict_guard(
+                        line, _SourceStub(), llm, _reconciliation({"s1": "AGREED"}),
+                        _Coverage(), page_text)
+                finally:
+                    conventions.load_pack.cache_clear()
+        self.assertIs(out.chosen, cand)
+        self.assertIn("structure-alpha-reattachment-is-secondary", out.rationale)
+        self.assertIn("synthetic authority citation", out.rationale)
+
+    def test_no_convention_pack_still_holds_exactly_as_before(self):
+        cand = _cand("CAND_SEC", "Repair, secondary, structure alpha")
+        fact = _fact(
+            attributes={},
+            conflicts={"sequence_qualifier": _conflict("sequence_qualifier", "primary", "secondary")},
+            evidence=[EvidenceSpan(text="structure alpha was reattached under tension",
+                                   anchored=True, span_id="s1", page=1)])
+        line = self._line(cand, fact)
+        llm = _disposition_llm("not_documented", cand.descriptor, [],
+                               missing_fact="whether the repair was primary or secondary")
+
+        class _Coverage:
+            complete = True
+            text = "structure alpha was reattached under tension"
+
+        page_text = {1: "structure alpha was reattached under tension"}
+        conventions.load_pack.cache_clear()
+        with patch.object(conventions, "PACK_PATH", pathlib.Path("/nonexistent/pack.json")):
+            out = res._apply_attribute_axis_conflict_guard(
+                line, _SourceStub(), llm, _reconciliation({"s1": "AGREED"}), _Coverage(), page_text)
+        conventions.load_pack.cache_clear()
+        self.assertIsNone(out.chosen)
+
+    def test_a_page_that_states_the_value_is_never_overridden_by_a_convention(self):
+        """The bounded page-local text literally states 'severed' -- the
+        convention's own absent_regex excludes it, AND the record genuinely
+        settling the axis takes precedence; the guard's existing SYSTEM ERROR
+        path (source text found, not yet bound) still fires unchanged."""
+        cand = _cand("CAND_SEC", "Repair, secondary, structure alpha")
+        fact = _fact(
+            attributes={},
+            conflicts={"sequence_qualifier": _conflict("sequence_qualifier", "primary", "secondary")},
+            evidence=[EvidenceSpan(text="structure alpha was severed and reattached",
+                                   anchored=True, span_id="s1", page=1)])
+        line = self._line(cand, fact)
+        llm = _disposition_llm("not_documented", cand.descriptor, [],
+                               missing_fact="whether the repair was primary or secondary")
+
+        class _Coverage:
+            complete = True
+            text = "structure alpha was severed and reattached"
+
+        page_text = {1: "The repair was documented as secondary after the structure alpha was severed."}
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = self._pack(tmp)
+            with patch.object(conventions, "PACK_PATH", pathlib.Path(pack)):
+                conventions.load_pack.cache_clear()
+                try:
+                    out = res._apply_attribute_axis_conflict_guard(
+                        line, _SourceStub(), llm, _reconciliation({"s1": "AGREED"}),
+                        _Coverage(), page_text)
+                finally:
+                    conventions.load_pack.cache_clear()
+        self.assertIsNone(out.chosen)
+        self.assertIn("SYSTEM ERROR, retryable", out.rationale)
