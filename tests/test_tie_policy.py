@@ -1555,3 +1555,74 @@ class EvaluatorAdjudicatedEliminationTest(unittest.TestCase):
         line = self._resolve(SelectionUniquenessTest.ONE_DOCUMENTED, judge)
         self.assertIsNone(line.chosen, line.rationale)
         self.assertEqual(line.tie_record["still_entailed"], ["SYN_A", "SYN_B"])
+
+
+class SingularizationFoldTest(unittest.TestCase):
+    """`_sing` folds a descriptor's '-ies' plural and a reason's/note's '-y'
+    or '-ie' singular onto ONE token; before, 'categories' -> 'categorie' never
+    met 'category', silently emptying every descriptor-engagement check that
+    compares the two sides."""
+
+    def test_ies_plural_meets_its_y_singular(self):
+        self.assertEqual(tiebreak._sing("categories"), tiebreak._sing("category"))
+        self.assertEqual(tiebreak._sing("assemblies"), tiebreak._sing("assembly"))
+
+    def test_ie_singular_meets_its_ies_plural(self):
+        self.assertEqual(tiebreak._sing("calories"), tiebreak._sing("calorie"))
+
+    def test_existing_folds_are_unchanged(self):
+        self.assertEqual(tiebreak._sing("boxes"), "box")
+        self.assertEqual(tiebreak._sing("words"), "word")
+        self.assertEqual(tiebreak._sing("glass"), "glass")
+        self.assertEqual(tiebreak._sing("ties"), "ties")
+
+
+class ClauseLevelContradictionTest(unittest.TestCase):
+    """`_model_cited_descriptor_term_grounded` judges "the record states the
+    rival's own distinguishing concept" per descriptor CLAUSE: one coincidental
+    word of a multi-run clause present in the document is not a contradiction
+    of the evaluator (designated note F12: the document mentions the structure
+    it excised, so one run of a rival's "<substance> deposit in <structure>"
+    clause was present while the substance never was), but a clause every
+    engaged run of which is present still is. Synthetic vocabulary."""
+
+    WIN = _cand("WIN_A", "assembly service, region alpha", 0.90)
+    LOSER = _cand("LOSE_C", "mineral deposit in vessel gamma, region alpha", 0.50)
+    EVIDENCE = "assembly service performed on region alpha"
+
+    def _settle(self, coverage_text, reason):
+        from claude_coder import resolution, verify
+        fact = _fact("assembly service", self.EVIDENCE)
+        judgement = verify.Judgement(chosen=self.WIN, entailed=("WIN_A",),
+                                     eliminated={"LOSE_C": reason}, declared=True)
+        import hashlib
+        coverage = req.CoverageCorpus(
+            channel_id="primary", text=coverage_text,
+            text_sha256=hashlib.sha256(coverage_text.encode("utf-8")).hexdigest(),
+            covered_pages=(1,), page_image_sha256=("page-1",))
+        return resolution._settle_uniqueness(
+            fact, self.WIN, [self.WIN, self.LOSER], [judgement], {}, "shortlist verdict",
+            _agreed("span-0"), requirements=req.compile_requirements([self.WIN, self.LOSER]),
+            coverage=coverage)
+
+    REASON = "A mineral deposit in the vessel gamma is not documented."
+
+    def test_one_coincidental_run_present_is_not_a_contradiction(self):
+        doc = ("The vessel gamma was excised in the field. " + self.EVIDENCE + ".")
+        line = self._settle(doc, self.REASON)
+        self.assertEqual(line.chosen.code if line.chosen else None, "WIN_A", line.rationale)
+        self.assertEqual(line.tie_record["still_entailed"], ["WIN_A"])
+        self.assertEqual(line.tie_record["evaluator_adjudicated"], ["LOSE_C"])
+
+    def test_a_clause_every_engaged_run_of_which_is_present_still_contradicts(self):
+        doc = ("A mineral deposit in the vessel gamma was found. " + self.EVIDENCE + ".")
+        line = self._settle(doc, self.REASON)
+        self.assertIsNone(line.chosen, line.rationale)
+        self.assertEqual(line.tie_record["still_entailed"], ["WIN_A", "LOSE_C"])
+
+    def test_every_run_absent_is_document_confirmed_not_merely_adjudicated(self):
+        doc = ("Nothing else of note. " + self.EVIDENCE + ".")
+        line = self._settle(doc, self.REASON)
+        self.assertEqual(line.chosen.code if line.chosen else None, "WIN_A", line.rationale)
+        self.assertIn("document-confirmed", line.tie_record["eliminated"]["LOSE_C"])
+        self.assertEqual(line.tie_record["evaluator_adjudicated"], [])

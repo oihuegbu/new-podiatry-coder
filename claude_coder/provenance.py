@@ -32,6 +32,7 @@ from typing import Any
 from .checkpoint import (ADOPT_ENV, REQUIRED_ENV, AnchorFormatError, Checkpoint,
                          CheckpointError, checkpoint_adoption_allowed, checkpoint_required,
                          resolve_checkpoint_anchor)
+from . import composition as _composition
 from .models import (EvidenceSpan, FactKind, RelationAssertion, RelationPredicate,
                      RelationState)
 
@@ -548,6 +549,14 @@ SOURCE_STRUCTURED_PRIMARY = "source_structured_primary"
 # that passage states the DIRECTIONAL claim. Co-occurrence is not a clinical proposition, so
 # this status exists to record what was seen, not to satisfy a release control.
 SOURCE_COLOCATED = "source_colocated"
+# Both endpoints' own verified PRIMARY-reading mentions fall inside ONE deterministically
+# detected section of the source (`composition.structural_section_proof`, re-derived here
+# from the spans' verified offsets). This grounds only the SYMMETRIC, non-composing
+# `SAME_EPISODE_AS` predicate -- "these events are documented together, under one heading"
+# is exactly what a section boundary states, and exactly what that predicate asserts. It
+# proves no direction and no composition, so it is never stamped on a directional edge:
+# `PART_OF` still needs the document's own linking clause (SOURCE_DIRECTIONAL).
+SOURCE_STRUCTURAL_SECTION = "source_structural_section"
 
 # The statuses that constitute INDEPENDENT GROUNDING IN THE RECORD -- the only values a
 # claim-affecting control may accept. This set is the single place that answers "does this
@@ -556,12 +565,14 @@ SOURCE_COLOCATED = "source_colocated"
 # safe values. A status is a member because a deterministic re-read of the source proved it,
 # never because assertions agreed.
 GROUNDED_RECONCILIATION_STATUSES = frozenset({SOURCE_DIRECTIONAL,
-                                              SOURCE_STRUCTURED_PRIMARY})
+                                              SOURCE_STRUCTURED_PRIMARY,
+                                              SOURCE_STRUCTURAL_SECTION})
 # Every status this layer can stamp. UNRECONCILED and SOURCE_COLOCATED are deliberately NOT
 # grounded: they record, respectively, that nothing was proved and that co-occurrence was
 # observed.
 RECONCILIATION_STATUSES = frozenset({UNRECONCILED, SOURCE_DIRECTIONAL,
-                                     SOURCE_STRUCTURED_PRIMARY, SOURCE_COLOCATED})
+                                     SOURCE_STRUCTURED_PRIMARY, SOURCE_STRUCTURAL_SECTION,
+                                     SOURCE_COLOCATED})
 # Values that WERE reconciliation statuses and no longer are. Named so that a control config
 # (or a persisted record) still carrying one fails loudly with the reason, instead of quietly
 # matching nothing -- or, worse, being re-added by a config edit and silently reinstating the
@@ -662,11 +673,17 @@ def reconcile_relations(relations: list[RelationAssertion], facts: list, note_te
          each endpoint has its own verified verbatim mention, the two mentions are disjoint,
          and the text between them links them, within one clause, by a phrase the reviewed
          relation-evidence grammar declares for this predicate in that orientation. This is
-         the only grounded status (`GROUNDED_RECONCILIATION_STATUSES`).
-      2. SOURCE_COLOCATED -- observational only: one verified passage documents both endpoints
+         a grounded status (`GROUNDED_RECONCILIATION_STATUSES`).
+      2. SOURCE_STRUCTURAL_SECTION -- for the symmetric `SAME_EPISODE_AS` predicate only: each
+         endpoint has its own verified primary-reading mention and both fall inside one
+         deterministically detected section of the document (`composition.
+         structural_section_proof`, re-derived here from the verified offsets). Grounded,
+         because a section boundary is a statement the document itself makes about which
+         events it documents together -- which is all that predicate asserts.
+      3. SOURCE_COLOCATED -- observational only: one verified passage documents both endpoints
          but states no directional claim. Recorded so the audit shows what WAS seen; it is not
          an accepted justification.
-      3. UNRECONCILED -- the record establishes nothing about this edge.
+      4. UNRECONCILED -- the record establishes nothing about this edge.
 
     A non-UNRECONCILED status ALWAYS names the verified spans that established it, so a
     certificate can never report a grounded relation while citing no source text.
@@ -720,6 +737,15 @@ def reconcile_relations(relations: list[RelationAssertion], facts: list, note_te
         # that is the whole point of the two axes being separate.
         if directional:
             status, proof = SOURCE_DIRECTIONAL, list(directional)
+        elif (getattr(rel.predicate, "value", rel.predicate)
+              == RelationPredicate.SAME_EPISODE_AS.value) and (
+                structural := _composition.structural_section_proof(
+                    [s for s in located_by_event.get(rel.subject_event_id, [])
+                     if s.span_id in cited],
+                    [s for s in located_by_event.get(rel.object_event_id, [])
+                     if s.span_id in cited],
+                    readings.get("") or "")):
+            status, proof = SOURCE_STRUCTURAL_SECTION, list(structural)
         elif shared:
             status, proof = SOURCE_COLOCATED, sorted(shared)
         # AGREEMENT: recorded beside the grounding, never folded into it.

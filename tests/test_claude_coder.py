@@ -4122,3 +4122,128 @@ def _agreed_local(*span_ids):
     return SourceReconciliation(spans=tuple(
         SpanReconciliation(span_id=sid, status=ReconciliationStatus.AGREED)
         for sid in span_ids))
+
+
+class SiblingQuoteAttributionTest(unittest.TestCase):
+    """Product-owner release-policy decision (2026-09-22): a rival candidate whose
+    only grounding in this event's evidence is a DISTINCT sibling event's own
+    contained quotation is that sibling's candidate. Synthetic vocabulary."""
+
+    FULL = ("Painful alpha prominence of the right part with condition gamma and "
+            "condition delta.")
+
+    def _held(self, kind=None, survivor_authority=None):
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod, ResolvedLine)
+        kind = kind or FactKind.DIAGNOSIS
+        fact = ClinicalFact(kind=kind, description="alpha prominence",
+                            evidence=[EvidenceSpan(self.FULL, anchored=True, span_id="h1",
+                                                   start=0, end=len(self.FULL), page=1)],
+                            fact_id="F_A")
+        authority = ({"term_to_code_match": {"method": "distinctive_source_token"}}
+                     if survivor_authority is None else survivor_authority)
+        survivor = CandidateCode("CODE_A", "icd10", "Other specified disorders of part, region",
+                                 0.9, source="snomed-crosswalk", authority=authority)
+        rival = CandidateCode("CODE_G", "icd10",
+                              "Other condition gamma, not elsewhere classified, right part",
+                              0.5, source="retrieval")
+        return ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
+                            alternatives=[survivor, rival],
+                            tie_record={"still_entailed": ["CODE_A", "CODE_G"]},
+                            rationale="2 shortlisted candidates are still entailed")
+
+    def _sibling(self, carries_rival=True, start=None):
+        from claude_coder.models import (ClinicalFact, EvidenceSpan, FactKind,
+                                         ResolutionMethod, ResolvedLine)
+        quote = "condition gamma"
+        start = self.FULL.index(quote) if start is None else start
+        fact = ClinicalFact(kind=FactKind.DIAGNOSIS, description="condition gamma",
+                            evidence=[EvidenceSpan(quote, anchored=True, span_id="s1",
+                                                   start=start, end=start + len(quote),
+                                                   page=1)],
+                            fact_id="F_G")
+        alts = [CandidateCode("CODE_G2", "icd10", "Condition gamma, unspecified part", 0.5)]
+        if carries_rival:
+            alts.insert(0, CandidateCode(
+                "CODE_G", "icd10",
+                "Other condition gamma, not elsewhere classified, right part", 0.5))
+        return ResolvedLine(fact=fact, chosen=None, method=ResolutionMethod.ABSTAINED,
+                            alternatives=alts,
+                            tie_record={"still_entailed": [c.code for c in alts]})
+
+    def _run(self, held, sib):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import CodingResult
+        from claude_coder.pipeline import apply_sibling_quote_attribution
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14", lines=[held, sib])
+        apply_sibling_quote_attribution(r, MockSource())
+        return held
+
+    def test_the_rival_grounded_only_by_the_siblings_words_is_attributed_away(self):
+        from claude_coder.models import ResolutionMethod
+        held = self._run(self._held(), self._sibling())
+        self.assertEqual(held.chosen.code if held.chosen else None, "CODE_A", held.rationale)
+        self.assertIs(held.method, ResolutionMethod.VERIFIED)
+        self.assertIn("cross-line evidence attribution", held.rationale)
+        self.assertIn("F_G", held.rationale)
+        self.assertIn("condition gamma", held.rationale)
+
+    def test_a_survivor_without_a_term_match_never_releases(self):
+        held = self._run(self._held(survivor_authority={}), self._sibling())
+        self.assertIsNone(held.chosen)
+
+    def test_a_rival_the_sibling_never_generated_is_not_attributed(self):
+        held = self._run(self._held(), self._sibling(carries_rival=False))
+        self.assertIsNone(held.chosen)
+
+    def test_a_sibling_quotation_outside_this_facts_span_is_not_attributed(self):
+        held = self._run(self._held(), self._sibling(start=500))
+        self.assertIsNone(held.chosen)
+
+    def test_only_diagnosis_lines_participate(self):
+        from claude_coder.models import FactKind
+        held = self._run(self._held(kind=FactKind.PROCEDURE), self._sibling())
+        self.assertIsNone(held.chosen)
+
+
+class StructuralSectionGroundedPackageTest(unittest.TestCase):
+    """The package control accepts a composition-layer SAME_EPISODE_AS edge carrying
+    the structural-section grounded status -- and, documenting the prior silent
+    failure, never an UNRECONCILED one."""
+
+    def _result(self, status):
+        from claude_coder.data_access import MockSource
+        from claude_coder.models import (ClinicalFact, CodingResult, EvidenceSpan, FactKind,
+                                         RelationAssertion, RelationPredicate,
+                                         RelationState, ResolutionMethod, ResolvedLine)
+        primary = _line("PRIMARY", FactKind.PROCEDURE, "Assembly of structure alpha")
+        primary.fact.fact_id = "P"
+        f = ClinicalFact(kind=FactKind.PROCEDURE, description="component action",
+                         evidence=[EvidenceSpan("Tissue of structure alpha was tidied.",
+                                                anchored=True, span_id="c1")],
+                         fact_id="C")
+        comp = ResolvedLine(fact=f, chosen=None, method=ResolutionMethod.ABSTAINED,
+                            alternatives=[CandidateCode("ALT0", "cpt",
+                                                        "Excision of lesion of structure epsilon",
+                                                        0.4, source="retrieval")])
+        rel = RelationAssertion(subject_event_id="C",
+                                predicate=RelationPredicate.SAME_EPISODE_AS,
+                                object_event_id="P", state=RelationState.ASSERTED,
+                                reconciliation_status=status)
+        r = CodingResult(encounter_id="e", date_of_service="2026-03-14",
+                         lines=[primary, comp], relations=[rel])
+        return r, comp, MockSource(gp={"PRIMARY": "090"})
+
+    def test_structural_section_status_qualifies_the_component_for_the_package(self):
+        from claude_coder.pipeline import apply_surgical_package_components
+        from claude_coder.provenance import SOURCE_STRUCTURAL_SECTION
+        r, comp, src = self._result(SOURCE_STRUCTURAL_SECTION)
+        apply_surgical_package_components(r, src)
+        self.assertIn("included in the global surgical package of PRIMARY", comp.excluded_reason or "")
+
+    def test_an_unreconciled_episode_edge_does_not(self):
+        from claude_coder.pipeline import apply_surgical_package_components
+        from claude_coder.provenance import UNRECONCILED
+        r, comp, src = self._result(UNRECONCILED)
+        apply_surgical_package_components(r, src)
+        self.assertIsNone(comp.excluded_reason)

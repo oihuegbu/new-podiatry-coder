@@ -2631,6 +2631,185 @@ def apply_cross_line_code_ownership(result: CodingResult, source: CodeSource,
             f"{ln.rationale} -- cross-line code ownership: {owned_text} already "
             f"released for a distinct documented event on this claim; {survivor.code} "
             f"is the sole remaining candidate the evaluator entailed for this event")
+        ln.tie_record = {**record, "claim_level_resolution": {
+            "mechanic": "cross_line_code_ownership",
+            "standing_before": list(standing),
+            "released": survivor.code,
+            "removed": {code: f"released for {owner[(code, by_code[code].system)]}"
+                        for code in owned}}}
+
+
+def _residual_without_sibling(fact, sibling_fact) -> tuple[str, list[str]] | None:
+    """(`fact`'s own source-support text with `sibling_fact`'s CONTAINED quotation(s)
+    cut out, the quotations cut) -- or None when no sibling quotation is a proper
+    sub-passage of one of `fact`'s own spans.
+
+    Containment is by verified offsets in the same reading when both spans carry
+    them, else by verbatim containment on the same page. The cut is made only
+    inside the span that contains the quotation, at that position -- never a
+    global text replacement, so an identical phrase this fact states in ANOTHER
+    of its own spans is left intact. The residual is joined over the same spans,
+    in the same order, as `graph_consensus.source_support` joins the full text,
+    so it is a strict subset of that text.
+    """
+    spans = [s for s in (fact.evidence or [])
+             if getattr(s, "anchored", False) and str(getattr(s, "span_id", "") or "")]
+    cut: list[str] = []
+    pieces: list[str] = []
+    for mine in spans:
+        text = str(mine.text or "")
+        for theirs in sibling_fact.evidence or []:
+            quote = str(getattr(theirs, "text", "") or "")
+            if (not getattr(theirs, "anchored", False) or not quote.strip()
+                    or len(quote) >= len(text)):
+                continue
+            offsets = all(isinstance(getattr(x, k, None), int)
+                          for x in (mine, theirs) for k in ("start", "end"))
+            same_reading = (str(getattr(mine, "reading_channel_id", "") or "")
+                            == str(getattr(theirs, "reading_channel_id", "") or ""))
+            if offsets and same_reading:
+                if not (mine.start <= theirs.start and theirs.end <= mine.end):
+                    continue
+                lo, hi = theirs.start - mine.start, theirs.end - mine.start
+                if text[lo:hi].lower() != quote.lower():
+                    continue
+            else:
+                if getattr(mine, "page", None) != getattr(theirs, "page", None):
+                    continue
+                lo = text.lower().find(quote.lower())
+                if lo < 0:
+                    continue
+                hi = lo + len(quote)
+            text = text[:lo] + " " + text[hi:]
+            cut.append(quote)
+        pieces.append(text)
+    if not cut:
+        return None
+    return " ".join(pieces), list(dict.fromkeys(cut))
+
+
+def apply_sibling_quote_attribution(result: CodingResult, source: CodeSource,
+                                    reconciliation=None) -> None:
+    """A rival candidate whose ONLY grounding in this event's evidence is the words
+    of a DISTINCT documented event's own quotation is that sibling's candidate,
+    not this event's (product-owner release-policy decision, 2026-09-22 -- the
+    same claim-level standpoint as `apply_cross_line_code_ownership`; ICD-10-CM
+    Official Guidelines §I.B.7/§IV: each documented condition is reported once,
+    to its own code).
+
+    Real reproduction (designated note): one sentence of the note names three
+    conditions, and the extractor anchored condition alpha's fact to the WHOLE
+    sentence while anchoring beta's and gamma's facts to their own sub-phrases
+    inside it. Alpha's fact carried beta's code in its retrieval pool, and that
+    code looked "documented" for ALPHA only because beta's own words sit inside
+    alpha's span -- a permanent tie resolution, which sees one fact at a time,
+    can never break, and which `apply_cross_line_code_ownership` cannot break
+    either while beta's own line is still tied.
+
+    For an unresolved DIAGNOSIS line whose uniqueness record still holds two or
+    more entailed candidates, a standing candidate R is attributed to a sibling
+    S -- a distinct diagnosis fact on this claim -- when ALL of:
+      1. R carries no `term_to_code_match` authority (a candidate whose identity
+         a curated Index/crosswalk term match already established from THIS
+         fact's own wording is never attributed away -- the same exemption
+         `resolution._baseline_descriptor_grounded` applies);
+      2. S's own candidate universe (its generated candidates) carries R -- R
+         is genuinely S's candidate, not merely a code alpha's words happen not
+         to mention;
+      3. at least one of S's own verified quotations is a proper sub-passage of
+         one of this fact's own spans (verified offsets, else verbatim
+         containment on the same page);
+      4. R's own distinguishing vocabulary IS grounded in this fact's full
+         evidence text but is NOT grounded in that text with S's contained
+         quotation(s) removed -- i.e. the grounding came from S's words alone
+         (`resolution._baseline_descriptor_grounded`, full text vs. residual).
+    When exactly one standing candidate survives, its identity was established
+    from this fact's own wording (`term_to_code_match` present), and it does
+    not contradict this fact's documented axes (`resolution._evaluate`), it is
+    released with the attribution stated in the rationale. Nothing is invented:
+    the survivor was already entailed for this event by the evaluator, and every
+    attributed rival is a candidate of the sibling whose words grounded it.
+    Re-derived every reconciliation round like the other claim-set mechanics.
+    A combination code that legitimately names both conditions is protected by
+    (1): reached through the Index's own "with" sub-term it carries a term match
+    and is never attributed away; absent that match both candidates simply stay
+    tied, exactly as today.
+    """
+    from .models import FactKind, ResolutionMethod
+    diagnosis_lines = [ln for ln in result.lines if ln.fact.kind is FactKind.DIAGNOSIS]
+    if len(diagnosis_lines) < 2:
+        return
+
+    def _universe(ln) -> set[str]:
+        codes = {c.code for c in (ln.alternatives or [])}
+        codes.update(str(row.get("code")) for row in (ln.candidate_eligibility or [])
+                     if isinstance(row, dict) and row.get("code"))
+        if ln.chosen is not None:
+            codes.add(ln.chosen.code)
+        return codes
+
+    for ln in diagnosis_lines:
+        if ln.resolved or ln.excluded_reason or not ln.fact.billable:
+            continue
+        record = getattr(ln, "tie_record", None) or {}
+        standing = [str(c) for c in (record.get("still_entailed") or [])]
+        if len(standing) < 2:
+            continue
+        by_code = {c.code: c for c in (ln.alternatives or [])}
+        if any(code not in by_code for code in standing):
+            continue
+        supported, _proof, full_text, _spans = _gc.source_support(ln.fact, reconciliation)
+        if not supported or not full_text:
+            continue
+        pool = [by_code[code] for code in standing]
+        attributed: dict[str, tuple[str, str, str]] = {}
+        for code in standing:
+            cand = by_code[code]
+            if (cand.authority or {}).get("term_to_code_match"):
+                continue
+            for sib in diagnosis_lines:
+                if sib is ln or sib.fact.fact_id == ln.fact.fact_id:
+                    continue
+                if code not in _universe(sib):
+                    continue
+                cut = _residual_without_sibling(ln.fact, sib.fact)
+                if cut is None:
+                    continue
+                residual, quotes = cut
+                on_full = resolution._baseline_descriptor_grounded(
+                    ln.fact, cand, pool, reconciliation, support_text=full_text)
+                on_residual = resolution._baseline_descriptor_grounded(
+                    ln.fact, cand, pool, reconciliation, support_text=residual)
+                if on_full is None and on_residual is not None and on_residual[0] is False:
+                    attributed[code] = (sib.fact.fact_id, "; ".join(quotes), on_residual[1])
+                    break
+        if not attributed:
+            continue
+        survivors = [code for code in standing if code not in attributed]
+        if len(survivors) != 1:
+            continue
+        survivor = by_code[survivors[0]]
+        if not (survivor.authority or {}).get("term_to_code_match"):
+            continue
+        if resolution._evaluate(ln.fact, survivor, source, reconciliation) is None:
+            continue
+        attributed_text = "; ".join(
+            f"{code} (grounded here only by the words of distinct event {fid}: '{quote}')"
+            for code, (fid, quote, _reason) in sorted(attributed.items()))
+        ln.chosen = survivor
+        ln.method = ResolutionMethod.VERIFIED
+        ln.rationale = (
+            f"{ln.rationale} -- cross-line evidence attribution: {attributed_text}; each is "
+            f"a candidate of that event's own line; {survivor.code} is the sole remaining "
+            f"candidate the evaluator entailed for this event and its identity was "
+            f"independently established from this event's own wording")
+        ln.tie_record = {**record, "claim_level_resolution": {
+            "mechanic": "sibling_quote_attribution",
+            "standing_before": list(standing),
+            "released": survivor.code,
+            "removed": {code: {"attributed_to": fid, "contained_quote": quote,
+                               "residual_grounding": reason}
+                        for code, (fid, quote, reason) in sorted(attributed.items())}}}
 
 
 def apply_surgical_package_components(result: CodingResult, source: CodeSource,
@@ -2751,6 +2930,13 @@ def _snapshot_pre_claim_set_state(result: CodingResult) -> dict:
     the SAME `ResolvedLine` objects persist for the life of one `decide`
     loop, never recreated, so identity is a safe, real key here.
 
+    `tie_record` joined the set when the claim-level release mechanics
+    (`apply_cross_line_code_ownership`, `apply_sibling_quote_attribution`)
+    started stamping their decision into it (`claim_level_resolution`): the
+    resolution-time record is the baseline, and a stamp from a round whose
+    premise later changed (a rival left the claim, the tie returned) must not
+    outlive that round.
+
     `claim_submission_status`/`rationale` (issue #6, Codex's independent
     re-review, F9-R20-A clarification: "downstream controls classify; they
     do not erase") joined `excluded_reason`/`chosen`/`method` here once
@@ -2759,18 +2945,20 @@ def _snapshot_pre_claim_set_state(result: CodingResult) -> dict:
     field exactly like `excluded_reason` always was, and must restore to the
     SAME pre-mechanic baseline every round for the same reason."""
     return {id(ln): (ln.excluded_reason, ln.chosen, ln.method,
-                    ln.claim_submission_status, ln.rationale)
+                    ln.claim_submission_status, ln.rationale, ln.tie_record)
            for ln in result.lines}
 
 
 def _restore_pre_claim_set_state(result: CodingResult, baseline: dict) -> None:
     for ln in result.lines:
-        excluded_reason, chosen, method, claim_submission_status, rationale = baseline[id(ln)]
+        (excluded_reason, chosen, method, claim_submission_status, rationale,
+         tie_record) = baseline[id(ln)]
         ln.excluded_reason = excluded_reason
         ln.chosen = chosen
         ln.method = method
         ln.claim_submission_status = claim_submission_status
         ln.rationale = rationale
+        ln.tie_record = tie_record
     # Both accumulate ACROSS calls by construction (append-only) and are
     # entirely DERIVED by claim-set mechanics -- their baseline value is
     # always empty, since nothing populates either before those mechanics
@@ -2882,6 +3070,7 @@ def _reconcile_claim_after_pruning(
         _apply_dependency_exclusions(
             result, dependency_excluded_ids, dependency_hold_reasons)
         apply_cross_line_code_ownership(result, source, source_reconciliation)
+        apply_sibling_quote_attribution(result, source, source_reconciliation)
         modifier_engine.assign_claim(result, source, source_reconciliation)
         apply_ncci_bundling(result, source)
         apply_integral_bundling(result, source)

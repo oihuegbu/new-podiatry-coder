@@ -2478,20 +2478,30 @@ def _model_cited_descriptor_term_grounded(fact: ClinicalFact, loser: CandidateCo
     fact_words = {_tiebreak._sing(w)
                  for w in re.split(r"[^a-z0-9]+", fact_text.lower()) if w}
     excluded = winner_words | fact_words | {"eg", "example"} | set(_LATERALITY)
-    phrases: list[str] = []
-    current: list[str] = []
-    for raw in re.split(r"[^a-z0-9]+", (loser.descriptor or "").lower()):
-        if not raw:
-            continue
-        if raw.isdigit() or _tiebreak._sing(raw) in _tiebreak._GRAMMAR or \
-                _tiebreak._sing(raw) in excluded:
-            if current:
-                phrases.append(" ".join(current))
-            current = []
-        else:
-            current.append(raw)
-    if current:
-        phrases.append(" ".join(current))
+    # Phrases are grouped by the descriptor CLAUSE they came from (the same
+    # comma/semicolon/bracket clause split every other multi-word check in
+    # this module uses). A grammar word inside one clause ("calcium deposit IN
+    # bursa") splits that clause's vocabulary into two runs, but those runs
+    # still state ONE concept together -- see the "stated" rule below.
+    clauses: list[list[str]] = []
+    for clause_text in re.split(r"[,;:()\[\]/]+", (loser.descriptor or "").lower()):
+        runs: list[str] = []
+        current: list[str] = []
+        for raw in re.split(r"[^a-z0-9]+", clause_text):
+            if not raw:
+                continue
+            if raw.isdigit() or _tiebreak._sing(raw) in _tiebreak._GRAMMAR or \
+                    _tiebreak._sing(raw) in excluded:
+                if current:
+                    runs.append(" ".join(current))
+                current = []
+            else:
+                current.append(raw)
+        if current:
+            runs.append(" ".join(current))
+        if runs:
+            clauses.append(runs)
+    phrases: list[str] = [p for runs in clauses for p in runs]
     if not phrases:
         return None
     engaged: set[str] = set()
@@ -2509,10 +2519,30 @@ def _model_cited_descriptor_term_grounded(fact: ClinicalFact, loser: CandidateCo
         if not this_engaged:
             return None
         engaged |= this_engaged
-    for phrase in sorted(engaged):
-        if _tiebreak.asserted_status((phrase,), coverage.text) == "supported":
-            return False, (f"the complete document states {phrase!r}, "
-                           f"{loser.code}'s own distinguishing phrase")
+    present = {p for p in engaged
+               if _tiebreak.asserted_status((p,), coverage.text) == "supported"}
+    # CONTRADICTION -- the record states the rival's own distinguishing concept
+    # -- is judged per descriptor clause: a clause is STATED only when EVERY
+    # engaged run it contains is present. One coincidental word of a multi-run
+    # clause (a real note, designated note F12: the document mentions the
+    # bursa it excised, so the run "bursa" of a rival's "calcium deposit in
+    # bursa" clause is present while "calcium deposit" is not) does not state
+    # that clause's concept and is not evidence against the evaluator. A
+    # single-run clause is stated by its one run, exactly as before -- the
+    # reviewer's counterexample (a record that names the rival's own
+    # distinguishing word outright) still refuses here.
+    stated = [runs for runs in clauses
+              if any(p in engaged for p in runs)
+              and all(p in present for p in runs if p in engaged)]
+    if stated:
+        return False, (f"the complete document states {sorted(stated[0])!r}, "
+                       f"{loser.code}'s own distinguishing phrase(s)")
+    if present:
+        # Mixed: some engaged run present, no clause fully stated. Neither
+        # confirmed absent (this path may not ground the elimination) nor
+        # contradicted (the record does not state the concept) -- the caller's
+        # other gates decide, exactly as when no engaged phrase exists.
+        return None
     return True, (f"{loser.code}'s own distinguishing phrase(s) {sorted(engaged)} -- "
                  f"named by every evaluator's own reason for ruling it out -- "
                  f"confirmed genuinely absent from the complete reconciled document")
@@ -2521,6 +2551,7 @@ def _model_cited_descriptor_term_grounded(fact: ClinicalFact, loser: CandidateCo
 def _baseline_descriptor_grounded(fact: ClinicalFact, cand: CandidateCode,
                                   pool: list[CandidateCode],
                                   reconciliation,
+                                  support_text: str | None = None,
                                   ) -> tuple[bool, str] | None:
     """issue #6, real-note investigation (designated note, F11: a diagnosis fact
     with three tied candidates, none independently confirmed by either
@@ -2599,6 +2630,10 @@ def _baseline_descriptor_grounded(fact: ClinicalFact, cand: CandidateCode,
     is deliberately non-selectable for), or this fact's own evidence is not
     source-confirmed. Fail-open on ambiguity: a hit anywhere in the fact's
     own text returns None (grounded), never a partial-credit "maybe."
+
+    `support_text`, when given, replaces the fact's reconciled evidence text as
+    the text the candidate's phrases are checked against; callers pass only a
+    subset of that same text (see `pipeline.apply_sibling_quote_attribution`).
     """
     if not pool or (cand.authority or {}).get("term_to_code_match"):
         return None
@@ -2638,9 +2673,17 @@ def _baseline_descriptor_grounded(fact: ClinicalFact, cand: CandidateCode,
                              - _tiebreak._GRAMMAR - set(_LATERALITY)))
     if not terms:
         return None
-    supported, proof, proven_text, _spans = _gc.source_support(fact, reconciliation)
-    if not supported:
-        return None
+    if support_text is None:
+        supported, proof, proven_text, _spans = _gc.source_support(fact, reconciliation)
+        if not supported:
+            return None
+    else:
+        # A caller-supplied SUBSET of this fact's own source-supported text (the
+        # claim-level sibling-quote attribution in `pipeline` passes the fact's
+        # reconciled evidence minus a distinct sibling event's own contained
+        # quotation). Never a superset, never another event's text: the check
+        # below can only become STRICTER through this parameter.
+        proven_text = support_text
     # Checked as the candidate's own distinguishing PHRASES, never as a bag of
     # independent words -- the SAME whole-phrase discipline `_model_cited_
     # descriptor_term_grounded` already holds itself to, for the same reason:

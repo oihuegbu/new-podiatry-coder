@@ -95,6 +95,39 @@ def _primary_offset(fact: ClinicalFact) -> int | None:
     return None
 
 
+def structural_section_proof(subject_spans: list, object_spans: list,
+                             note_text: str) -> list[str] | None:
+    """The two verified PRIMARY-reading span ids that place both endpoints of an
+    edge inside ONE deterministically detected section of `note_text`, or None.
+
+    This is the re-checkable re-reading of the source that grounds a
+    `SAME_EPISODE_AS` edge: the exact proof `compose` derived the edge from,
+    re-derived at reconciliation time from the endpoints' own verified offsets --
+    never from the edge's origin or from any assertion agreement. Only spans
+    anchored at integer offsets into the primary transcription participate (the
+    only reading `note_text`'s offsets are into); a span in an independent reading
+    channel, or unanchored, contributes no position here. Text before the first
+    detected heading carries no structural grouping signal and never groups.
+    """
+    sections = _sections(note_text)
+
+    def _primary(spans):
+        return [s for s in spans or []
+                if getattr(s, "anchored", False) and not getattr(s, "reading_channel_id", None)
+                and isinstance(getattr(s, "start", None), int) and getattr(s, "span_id", None)]
+
+    for a in _primary(subject_spans):
+        seg_a = _segment_for(a.start, sections)
+        if seg_a is None:
+            continue
+        for b in _primary(object_spans):
+            if b.span_id == a.span_id:
+                continue
+            if _segment_for(b.start, sections) == seg_a:
+                return [a.span_id, b.span_id]
+    return None
+
+
 def compose(facts: list[ClinicalFact], note_text: str) -> list[RelationAssertion]:
     """SAME_EPISODE_AS between every pair of facts whose primary-reading evidence
     falls in the SAME deterministically-detected section of the note.

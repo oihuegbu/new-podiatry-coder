@@ -270,3 +270,27 @@ class ServiceIntentsReachability(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StructuralSectionProof(unittest.TestCase):
+    NOTE = "SECTION A\nfirst thing. second thing.\n\nSECTION B\nthird thing.\n"
+
+    def _span(self, quote, fact_id, reading_channel_id=None):
+        start = self.NOTE.index(quote)
+        return EvidenceSpan(text=quote, start=start, end=start + len(quote), anchored=True,
+                            span_id=f"span-{fact_id}", reading_channel_id=reading_channel_id)
+
+    def test_two_spans_in_one_section_yield_both_span_ids(self):
+        a, b = self._span("first thing.", "F1"), self._span("second thing.", "F2")
+        self.assertEqual(composition.structural_section_proof([a], [b], self.NOTE),
+                         ["span-F1", "span-F2"])
+
+    def test_spans_in_different_sections_yield_no_proof(self):
+        a, c = self._span("first thing.", "F1"), self._span("third thing.", "F3")
+        self.assertIsNone(composition.structural_section_proof([a], [c], self.NOTE))
+
+    def test_a_second_reading_span_or_the_same_span_never_proves(self):
+        a = self._span("first thing.", "F1")
+        b = self._span("second thing.", "F2", reading_channel_id="r2")
+        self.assertIsNone(composition.structural_section_proof([a], [b], self.NOTE))
+        self.assertIsNone(composition.structural_section_proof([a], [a], self.NOTE))

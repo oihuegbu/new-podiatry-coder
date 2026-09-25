@@ -36,8 +36,18 @@ normalize_term = _norm
 
 def _sing(tok: str) -> str:
     """Light singularization so plural note vocabulary matches Index terms
-    ('words'->'word', 'boxes'->'box'). Conservative: only trims a
-    trailing 's' on longer words."""
+    ('words'->'word', 'boxes'->'box', 'arteries'->'artery'). Conservative:
+    trims a trailing 's' on longer words, and folds the '-ies' plural and its
+    '-ie'/'-y' singulars onto one '-y' form so a descriptor's plural and a
+    reason's or note's singular of the same word meet -- the two sides of
+    every comparison in this codebase are both passed through here, so the
+    fold only ever has to be consistent, never linguistically exact ('-ies'
+    stripped to '-ie' used to leave 'bursopathies' and 'bursopathy' as two
+    different tokens, silently emptying a descriptor-engagement check)."""
+    if len(tok) > 4 and tok.endswith("ies"):
+        return tok[:-3] + "y"
+    if len(tok) > 4 and tok.endswith("ie"):
+        return tok[:-2] + "y"
     if len(tok) > 4 and tok.endswith("es") and tok[-3] in "sxzo":
         return tok[:-2]
     if len(tok) > 4 and tok.endswith("s") and not tok.endswith("ss"):

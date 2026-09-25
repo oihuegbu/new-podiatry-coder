@@ -1655,3 +1655,78 @@ def test_the_anchor_is_wired_from_configuration_not_only_injection(tmp_path, mon
     _truncate_both_tails(repo)
     assert any("SHORTER than its anchored checkpoint" in p
                for p in SqliteAuditRepository(dbp).verify_chain("enc"))
+
+
+# ------------------------------------------ structural-section grounding
+def _section_note_facts():
+    """Three synthetic events under two detected headings; the first two share
+    SECTION A, the third sits alone under SECTION B."""
+    note = ("SECTION A\nThe first thing was done. The second thing was done.\n\n"
+            "SECTION B\nThe third thing was done.\n")
+    facts = []
+    for fid, quote in (("F1", "The first thing was done."),
+                       ("F2", "The second thing was done."),
+                       ("F3", "The third thing was done.")):
+        span = prov.anchor_span(note, EvidenceSpan(text=quote))
+        assert span.anchored
+        facts.append(ClinicalFact(FactKind.PROCEDURE, quote, evidence=[span], fact_id=fid))
+    return note, facts
+
+
+def test_structural_section_status_is_a_grounded_status():
+    assert prov.SOURCE_STRUCTURAL_SECTION in prov.GROUNDED_RECONCILIATION_STATUSES
+    assert prov.SOURCE_STRUCTURAL_SECTION in prov.RECONCILIATION_STATUSES
+
+
+def test_a_composed_same_episode_edge_is_grounded_by_its_section_proof():
+    """The composition layer's SAME_EPISODE_AS edge, put through the SAME
+    bind/validate pass as extracted edges, comes out grounded -- citing exactly
+    the two endpoints' verified spans. Before this, such an edge could only ever
+    be UNRECONCILED (the directional-cue proof cannot apply to a symmetric
+    section-membership claim), so every consumer requiring a grounded episode
+    edge silently never fired."""
+    from claude_coder import composition
+    note, facts = _section_note_facts()
+    composed = composition.compose(facts, note)
+    assert [(r.subject_event_id, r.object_event_id) for r in composed] == [("F1", "F2")]
+    out = prov.validate_relations(prov.bind_relation_evidence(composed, facts), facts, note)
+    (edge,) = out
+    assert edge.predicate is RelationPredicate.SAME_EPISODE_AS
+    assert edge.reconciliation_status == prov.SOURCE_STRUCTURAL_SECTION
+    assert set(edge.reconciliation_evidence) == {
+        facts[0].evidence[0].span_id, facts[1].evidence[0].span_id}
+
+
+def test_a_same_episode_edge_across_sections_stays_unreconciled():
+    note, facts = _section_note_facts()
+    f1, _f2, f3 = facts
+    rel = _rel("F1", RelationPredicate.SAME_EPISODE_AS, "F3",
+               ev=[f1.evidence[0].span_id, f3.evidence[0].span_id], conf=1.0)
+    (edge,) = prov.validate_relations([rel], facts, note)
+    assert edge.reconciliation_status == prov.UNRECONCILED
+    assert edge.reconciliation_evidence == []
+
+
+def test_section_co_membership_never_grounds_a_directional_part_of_edge():
+    """Same section proves togetherness, not direction: PART_OF still needs the
+    document's own linking clause."""
+    note, facts = _section_note_facts()
+    f1, f2, _f3 = facts
+    rel = _rel("F2", RelationPredicate.PART_OF, "F1",
+               ev=[f2.evidence[0].span_id, f1.evidence[0].span_id], conf=1.0)
+    (edge,) = prov.validate_relations([rel], facts, note)
+    assert edge.reconciliation_status == prov.UNRECONCILED
+
+
+def test_an_endpoint_anchored_only_in_a_second_reading_has_no_section_position():
+    note, facts = _section_note_facts()
+    f1, f2, _f3 = facts
+    reading = "The second thing was done."
+    other = prov.anchor_span(reading, EvidenceSpan(text=reading), reading_channel_id="r2")
+    assert other.anchored
+    f2b = ClinicalFact(FactKind.PROCEDURE, reading, evidence=[other], fact_id="F2")
+    facts2 = [f1, f2b, facts[2]]
+    rel = _rel("F1", RelationPredicate.SAME_EPISODE_AS, "F2",
+               ev=[f1.evidence[0].span_id, other.span_id], conf=1.0)
+    (edge,) = prov.validate_relations([rel], facts2, note, readings={"r2": reading})
+    assert edge.reconciliation_status == prov.UNRECONCILED
