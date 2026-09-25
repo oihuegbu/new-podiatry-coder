@@ -201,6 +201,16 @@ _OPTIONAL_SOURCES: dict[str, dict] = {
             "long-tail synonym/eponym recall aid requiring a UMLS licence; absence "
             "removes candidates only, and each surviving candidate is still validated",
     },
+    "snomed_crosswalk_rules": {
+        "path": config.SNOMED_ICD10_RULES_FILE,
+        "role": "concept crosswalk context rules",
+        "absence_justification":
+            "companion of the SNOMED crosswalk: the extended map's own IFA/OTHERWISE "
+            "context rules, resolved deterministically at recall time against the "
+            "documented wording and typed laterality (issue #6, F13-type holds); "
+            "absence degrades recall to the unconditional term map only -- it removes "
+            "candidates, and every surviving candidate is still validated",
+    },
     "cpt_index_terms": {
         "path": config.CODES_DIR / "cpt_index_terms.json",
         "role": "procedure descriptor index",

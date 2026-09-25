@@ -174,6 +174,9 @@ SCOPE_REGISTRY_FILE = DATA_DIR / "release" / "autonomous_scopes.json"
 # upstream authority) -- reviewed-OPTIONAL, declared with the other optional aids.
 RULE_EXERCISE_FILE = DATA_DIR / "registry" / "rule_exercise.json"
 SNOMED_ROOTS_FILE = DATA_DIR / "snomed_root_concepts.json"
+# SNOMED CT -> ICD-10-CM extended-map CONTEXT rules (tools/build_snomed_icd10_map.py,
+# companion of snomed_icd10_map.json) -- reviewed-OPTIONAL recall aid.
+SNOMED_ICD10_RULES_FILE = CODES_DIR / "snomed_icd10_rules.json"
 TERMINOLOGY_REGISTRY_FILE = (
     DATA_DIR / "terminology" / "clinical_abbreviations.json"
 )

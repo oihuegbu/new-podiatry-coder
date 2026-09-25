@@ -421,7 +421,24 @@ class AuthoritativeSource:
                 self._snomed_identity = None
         return self._snomed
 
-    def snomed_code_matches(self, description: str, system: str) -> dict[str, dict]:
+    def _ensure_snomed_rules(self):
+        """Load and bind the governed SNOMED->ICD context-rule companion once
+        (`snomed_icd10_rules.json`, REVIEWED-OPTIONAL like the term map: absence
+        degrades recall to the unconditional term map only, never a hold)."""
+        if getattr(self, "_snomed_rules", None) is None:
+            try:
+                from .terminology import MapRuleResolver
+                resolver, identity = MapRuleResolver.load_snapshot()
+                self._snomed_rules = resolver
+                self._snomed_rules_identity = dict(identity)
+                self._bound_sources.bind(identity)
+            except Exception:
+                self._snomed_rules = False
+                self._snomed_rules_identity = None
+        return self._snomed_rules
+
+    def snomed_code_matches(self, description: str, system: str, *,
+                            laterality: str | None = None) -> dict[str, dict]:
         """Mapped-code -> auditable governed term match for diagnosis recall.
 
         The caller still expands the mapped code to current billable leaves and
@@ -429,6 +446,13 @@ class AuthoritativeSource:
         missing semantic bridge: which exact source term/method proposed the code and
         which versioned bytes supplied that mapping.  Empty remains the safe behavior
         when the reviewed-optional map is unavailable.
+
+        `laterality` (the fact's CLAIM-AUTHORIZED typed laterality, or None) lets the
+        map's own CONTEXT rules resolve (`terminology.MapRuleResolver`): a concept
+        whose unconditional row is a poor residual target may carry `IFA <descendant>`
+        rows naming the code the documented wording (and typed side) actually reach.
+        Each such target is recorded with method "context_rule" and the full rule
+        provenance; it is a recall candidate like any other, never a decision.
         """
         if system != "icd10" or not self._ensure_snomed_term_index():
             return {}
@@ -442,6 +466,43 @@ class AuthoritativeSource:
                 "mapped_code": mapped_code,
                 "source_identity": dict(self._snomed_identity or {}),
             }
+        resolver = self._ensure_snomed_rules()
+        if resolver:
+            hits = resolver.resolve(description, laterality)
+            # Map semantics: within a group the FIRST firing row applies, so a base
+            # concept whose IFA row fired no longer maps to its own OTHERWISE default
+            # for this wording. The unconditional term map cannot know that -- it
+            # carries that default under the base's own terms -- so a term hit
+            # produced ONLY by that base's terms, for a target that is one of its
+            # default rows in a group where an IFA row fired, is superseded here.
+            for hit in hits:
+                if hit.get("rule") != "IFA":
+                    continue
+                base_terms = set(hit.get("base_terms") or [])
+                defaults = {str(r.get("target") or "")
+                            for r in resolver.rows_for(hit["base_concept"])
+                            if int(r.get("group") or 0) == int(hit.get("group") or 0)
+                            and str(r.get("rule") or "").upper() in ("TRUE", "OTHERWISE TRUE")}
+                for code in [c for c in out if c in defaults]:
+                    produced_by = set(out[code].get("source_terms") or [])
+                    if produced_by and produced_by <= base_terms:
+                        del out[code]
+            for hit in hits:
+                target = str(hit.get("target") or "")
+                if not target or target in out or not self.leaf_codes(target, "icd10"):
+                    continue
+                out[target] = {
+                    "method": "context_rule",
+                    "normalized_query": str(hit.get("base_match", {}).get("normalized_query")
+                                            or description),
+                    "source_terms": list(hit.get("base_terms") or []),
+                    "context_rule": {k: hit[k] for k in ("base_concept", "base_match", "group",
+                                                          "priority", "rule", "ifa_concept",
+                                                          "ifa_terms", "advice", "why")
+                                     if k in hit},
+                    "mapped_code": target,
+                    "source_identity": dict(self._snomed_rules_identity or {}),
+                }
         return out
 
     def snomed_codes(self, description: str, system: str) -> set[str]:
@@ -2197,7 +2258,7 @@ class MockSource:
     def snomed_codes(self, description, system):
         return set(self._snomed_map.get(description, set())) if system == "icd10" else set()
 
-    def snomed_code_matches(self, description, system):
+    def snomed_code_matches(self, description, system, *, laterality=None):
         if system != "icd10":
             return {}
         return {

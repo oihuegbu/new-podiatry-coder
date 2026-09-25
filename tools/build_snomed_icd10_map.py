@@ -38,6 +38,7 @@ from app.core.config import DATA_DIR
 
 _ICD = re.compile(r"^[A-Z]\d{2}[A-Z0-9]*$")
 _FSN_TAG = re.compile(r"\s*\([^)]*\)\s*$")   # trailing SNOMED semantic tag on an FSN
+_IFA = re.compile(r"^IFA\s+(\d+)\b", re.IGNORECASE)   # "IFA <conceptId> | <term> |"
 
 
 def _norm(s: str) -> str:
@@ -115,26 +116,46 @@ def main() -> int:
     icd = _icd_set()
 
     # 1) ExtendedMap: SNOMED concept -> ICD-10-CM code(s); active, unconditional, in-set.
+    #    Alongside (issue #6, F13-type holds): every active TRUE / OTHERWISE TRUE /
+    #    `IFA <concept>` row of each concept that carries at least one IFA rule, kept
+    #    in map order with its referenced concept, for the context-rule companion
+    #    file `claude_coder.terminology.MapRuleResolver` resolves at recall time.
     concept_codes: dict[str, set] = defaultdict(set)
+    rule_rows: dict[str, list[dict]] = defaultdict(list)
     with open(ext, encoding="utf-8") as fh:
         c = _cols(fh)
         A, CID, RULE, TGT = c["active"], c["referencedComponentId"], c["mapRule"], c["mapTarget"]
+        GRP, PRI, ADV = c["mapGroup"], c["mapPriority"], c["mapAdvice"]
         for line in fh:
             f = line.rstrip("\n").split("\t")
             if len(f) <= TGT or f[A] != "1":
                 continue
-            if f[RULE].strip().upper() not in ("TRUE", "OTHERWISE TRUE"):
-                continue
+            rule = f[RULE].strip()
             tgt = f[TGT].strip().upper().replace(".", "")
-            if not _ICD.match(tgt) or (icd and tgt not in icd):
+            target_ok = bool(_ICD.match(tgt)) and (not icd or tgt in icd)
+            ifa = _IFA.match(rule)
+            if ifa or rule.upper() in ("TRUE", "OTHERWISE TRUE"):
+                rule_rows[f[CID]].append({
+                    "group": int(f[GRP] or 0), "priority": int(f[PRI] or 0),
+                    "rule": "IFA" if ifa else rule.upper(),
+                    "ifa": ifa.group(1) if ifa else "",
+                    "target": _dot(tgt) if target_ok else "",
+                    "advice": f[ADV].strip()[:160]})
+            if rule.upper() not in ("TRUE", "OTHERWISE TRUE") or not target_ok:
                 continue
             concept_codes[f[CID]].add(_dot(tgt))
+    rule_bases = {cid: rows for cid, rows in rule_rows.items()
+                  if any(r["rule"] == "IFA" for r in rows)}
+    rule_concept_ids = set(rule_bases) | {r["ifa"] for rows in rule_bases.values()
+                                          for r in rows if r["ifa"]}
     if not concept_codes:
         print(f"{release.name}: no ICD-10-CM maps parsed — skipping.")
         return 0
 
-    # 2) Description: SNOMED concept -> clinician terms (active English), mapped concepts only.
+    # 2) Description: SNOMED concept -> clinician terms (active English), mapped concepts
+    #    only -- plus the terms of every concept the context rules involve.
     terms: dict[str, set] = defaultdict(set)
+    rule_terms: dict[str, set] = defaultdict(set)
     with open(desc, encoding="utf-8") as fh:
         c = _cols(fh)
         A, LANG, CID, TERM = c["active"], c["languageCode"], c["conceptId"], c["term"]
@@ -142,11 +163,13 @@ def main() -> int:
             f = line.rstrip("\n").split("\t")
             if len(f) <= TERM or f[A] != "1" or f[LANG] != "en":
                 continue
-            codes = concept_codes.get(f[CID])
-            if not codes:
-                continue
             t = _norm(_FSN_TAG.sub("", f[TERM]))
-            if t:
+            if not t:
+                continue
+            if f[CID] in rule_concept_ids:
+                rule_terms[f[CID]].add(t)
+            codes = concept_codes.get(f[CID])
+            if codes:
                 terms[t].update(codes)
 
     out = DATA_DIR / "codes" / "snomed_icd10_map.json"
@@ -164,6 +187,47 @@ def main() -> int:
     }
     out.write_text(json.dumps(payload, indent=1))
     print(f"{release.name}: {len(concept_codes)} mapped concepts -> {len(terms)} terms -> {out}")
+    # 3) Context-rule companion: only base concepts carrying an IFA rule; only rows with
+    #    a target and (for IFA) a referenced concept that has at least one English term
+    #    -- a rule nothing can be matched against is unusable and is not shipped.
+    base_rules: dict[str, list[dict]] = {}
+    term_to_base: dict[str, set] = defaultdict(set)
+    for cid, rows in rule_bases.items():
+        usable = [r for r in sorted(rows, key=lambda r: (r["group"], r["priority"]))
+                  if r["target"] and (not r["ifa"] or rule_terms.get(r["ifa"]))]
+        if not any(r["rule"] == "IFA" for r in usable) or not rule_terms.get(cid):
+            continue
+        base_rules[cid] = usable
+        for t in rule_terms[cid]:
+            term_to_base[t].add(cid)
+    needed = set(base_rules) | {r["ifa"] for rows in base_rules.values()
+                                for r in rows if r["ifa"]}
+    rules_out = DATA_DIR / "codes" / "snomed_icd10_rules.json"
+    rules_payload = {
+        "source": ("SNOMED CT US Edition (official RF2) -> ICD-10-CM extended map, "
+                   "context rules"),
+        "release": release.name,
+        "map_file": ext.name,
+        "map_sha256": payload["map_sha256"],
+        "description_file": desc.name,
+        "license": payload["license"],
+        "provenance": ("official RF2 ExtendedMap x Description; every active TRUE / "
+                       "OTHERWISE TRUE / IFA <concept> row of each base concept carrying an "
+                       "IFA rule, in (mapGroup, mapPriority) order; targets restricted to the "
+                       "loaded ICD-10-CM set; concept terms are the concepts' own active "
+                       "English descriptions. Resolved at recall time by "
+                       "claude_coder.terminology.MapRuleResolver -- never authored here"),
+        "generated": payload["generated"],
+        "concept_count": len(needed),
+        "base_count": len(base_rules),
+        "rule_count": sum(len(v) for v in base_rules.values()),
+        "concepts": {cid: sorted(rule_terms.get(cid, ())) for cid in sorted(needed)},
+        "base": {cid: base_rules[cid] for cid in sorted(base_rules)},
+        "term_to_base": {t: sorted(v) for t, v in sorted(term_to_base.items())},
+    }
+    rules_out.write_text(json.dumps(rules_payload, separators=(",", ":")))
+    print(f"{release.name}: {len(base_rules)} rule-bearing concepts, "
+          f"{rules_payload['rule_count']} rules -> {rules_out}")
     return 0
 
 

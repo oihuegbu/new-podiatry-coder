@@ -900,3 +900,71 @@ class LateralityQualifiedAnatomyTarget(unittest.TestCase):
         result = semelig.eligible_partition(
             [fact], [_candidate("UNSPEC"), _candidate("SIDED")], source, None)
         self.assertEqual([c.code for c in result], ["UNSPEC"])
+
+
+class AuthorityMatchedCandidateSurvivesComparativeAnatomyExclusion(unittest.TestCase):
+    """issue #6, F13-type holds: the comparative anatomy rule ("a better-grounded
+    sibling exists") never removes a candidate whose identity a curated term->code
+    mapping established from the fact's own wording -- an explicit laterality
+    contradiction still does."""
+
+    def _source(self):
+        return MockSource(
+            records={("GROUNDED", "icd10"): {"long_description": "Condition alpha, great toe",
+                                             "active": True},
+                     ("MAPPED", "icd10"): {"long_description": "Condition alpha, unrelated site",
+                                           "active": True},
+                     ("MAPPED_LEFT", "icd10"): {"long_description": "Condition alpha, left unrelated site",
+                                                "active": True}},
+            concept_relation={("great toe", "great toe"): "same"})
+
+    def test_term_matched_candidate_is_kept_beside_a_grounded_sibling(self):
+        fact = ClinicalFact(FactKind.DIAGNOSIS, "condition alpha",
+                            attributes={"anatomy": "great toe"})
+        mapped = CandidateCode(code="MAPPED", system="icd10", descriptor="", score=0.5,
+                               authority={"term_to_code_match": {"method": "exact"}})
+        result = semelig.eligible_partition(
+            [fact], [_candidate("GROUNDED", "icd10"), mapped], self._source(), None)
+        self.assertEqual([c.code for c in result], ["GROUNDED", "MAPPED"])
+
+    def test_a_contained_fragment_match_does_not_exempt(self):
+        fact = ClinicalFact(FactKind.DIAGNOSIS, "condition alpha",
+                            attributes={"anatomy": "great toe"})
+        weak = CandidateCode(code="MAPPED", system="icd10", descriptor="", score=0.5,
+                             authority={"term_to_code_match": {"method": "contained_source_phrase"}})
+        result = semelig.eligible_partition(
+            [fact], [_candidate("GROUNDED", "icd10"), weak], self._source(), None)
+        self.assertEqual([c.code for c in result], ["GROUNDED"])
+
+    def test_a_resolved_context_rule_exempts(self):
+        fact = ClinicalFact(FactKind.DIAGNOSIS, "condition alpha",
+                            attributes={"anatomy": "great toe"})
+        ruled = CandidateCode(code="MAPPED", system="icd10", descriptor="", score=0.5,
+                              authority={"term_to_code_match": {"method": "context_rule"}})
+        result = semelig.eligible_partition(
+            [fact], [_candidate("GROUNDED", "icd10"), ruled], self._source(), None)
+        self.assertEqual([c.code for c in result], ["GROUNDED", "MAPPED"])
+
+    def test_an_unmatched_sibling_is_still_excluded(self):
+        fact = ClinicalFact(FactKind.DIAGNOSIS, "condition alpha",
+                            attributes={"anatomy": "great toe"})
+        result = semelig.eligible_partition(
+            [fact], [_candidate("GROUNDED", "icd10"), _candidate("MAPPED", "icd10")],
+            self._source(), None)
+        self.assertEqual([c.code for c in result], ["GROUNDED"])
+
+    def test_an_explicit_laterality_contradiction_still_excludes_a_term_matched_candidate(self):
+        from claude_coder.models import AttributeEvidence, EvidenceSpan, RelationState
+        span = EvidenceSpan("condition alpha of the right great toe", anchored=True, span_id="s1")
+        fact = ClinicalFact(FactKind.DIAGNOSIS, "condition alpha",
+                            attributes={"anatomy": "great toe", "laterality": "right"},
+                            evidence=[span],
+                            attribute_evidence={"laterality": (
+                                AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                                  value="right"),)})
+        mapped = CandidateCode(code="MAPPED_LEFT", system="icd10",
+                               descriptor="Condition alpha, left unrelated site", score=0.5,
+                               authority={"term_to_code_match": {"method": "exact"}})
+        result = semelig.eligible_partition(
+            [fact], [_candidate("GROUNDED", "icd10"), mapped], self._source(), None)
+        self.assertEqual([c.code for c in result], ["GROUNDED"])

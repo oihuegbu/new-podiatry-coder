@@ -631,3 +631,174 @@ class ConceptRelationIndex:
         document, identity = declared_document_snapshot(source_id,
                                                         DeclaredSourceUnavailable)
         return cls(document.get("concepts", {})), identity
+
+
+class MapRuleResolver:
+    """Resolve the SNOMED CT -> ICD-10-CM extended map's CONTEXT rules for a documented
+    wording (issue #6, F13-type holds: a documented condition whose crosswalk concept
+    maps, unconditionally, only to a poor default target -- e.g. an "other site"
+    residual -- while the map's own `IFA <descendant concept>` rules carry the target
+    a coder would actually reach; the term-level map keeps unconditional rows only).
+
+    Data: `snomed_icd10_rules.json` (tools/build_snomed_icd10_map.py) -- for every base
+    concept carrying an IFA rule, its rows in (mapGroup, mapPriority) order, plus the
+    active English descriptions of every concept involved. Nothing clinical is named
+    here; the map and the descriptions are the only inputs.
+
+    Resolution is deterministic:
+
+      * the documented wording is matched to base concepts through `TerminologyIndex`
+        over the base concepts' own descriptions (`recall_matches`);
+      * each `IFA <concept>` rule's referenced concept is characterised by its
+        RESIDUAL vocabulary -- its own description tokens minus the base concept's
+        (the same "what makes it more specific than its parent" idea
+        `tiebreak.discriminating_axes` applies to code descriptors). Laterality words
+        in that residual are never read lexically: they are satisfied only by the
+        caller-supplied TYPED laterality (`ontology._LATERALITY`). Every other
+        residual token counts only when it is INFORMATIVE within this base's own rule
+        set -- shared by at most `_MAX_INFORMATIVE_SHARE` of the base's referenced
+        concepts -- so a word half the rule set repeats (a body part, "with") can
+        never select one of them. A referenced concept fires when its typed
+        laterality (if any) matches and, if it has informative residual words, at
+        least one is stated by the wording; among the content-bearing concepts only
+        the UNIQUE best-covered one (most stated informative words, then the highest
+        share of its residual) fires -- a tie fires none, and the map's default row
+        stands;
+      * within each map group the first firing row by priority supplies that group's
+        target; `TRUE` / `OTHERWISE TRUE` always fire.
+
+    Every result names the base concept, the rule row, the referenced concept's own
+    terms and exactly which words selected it, so the candidate's
+    `term_to_code_match` authority is fully auditable. A resolved target is a recall
+    candidate like any other -- descriptor entailment, anatomy, laterality and every
+    other gate still apply downstream.
+    """
+
+    _MAX_INFORMATIVE_SHARE = 3
+
+    def __init__(self, document: dict):
+        self._concepts: dict[str, list[str]] = {
+            str(cid): [str(t) for t in terms or []]
+            for cid, terms in (document.get("concepts") or {}).items()}
+        self._base: dict[str, list[dict]] = {
+            str(cid): [dict(r) for r in rows or []]
+            for cid, rows in (document.get("base") or {}).items()}
+        self._base_index = TerminologyIndex(
+            {cid: self._concepts.get(cid, []) for cid in self._base})
+        self._profiles: dict[str, dict[str, dict]] = {}
+
+    def rows_for(self, base_id: str) -> list[dict]:
+        """This base concept's rule rows, in map order (empty when unknown)."""
+        return [dict(r) for r in self._base.get(str(base_id), ())]
+
+    @classmethod
+    def load_snapshot(cls, source_id: str = "snomed_crosswalk_rules"
+                      ) -> tuple["MapRuleResolver", dict]:
+        from app.release.source_manifest import (DeclaredSourceUnavailable,
+                                                 declared_document_snapshot)
+        document, identity = declared_document_snapshot(source_id, DeclaredSourceUnavailable)
+        return cls(document), identity
+
+    @staticmethod
+    def _tokens(terms) -> set[str]:
+        return {_sing(t) for term in terms for t in _norm(term).split() if len(t) > 2}
+
+    def _ifa_profiles(self, base_id: str) -> dict[str, dict]:
+        """Per referenced concept of `base_id`: its residual laterality words and its
+        INFORMATIVE residual content words (cached)."""
+        cached = self._profiles.get(base_id)
+        if cached is not None:
+            return cached
+        base_tokens = self._tokens(self._concepts.get(base_id, []))
+        ifa_ids = [r["ifa"] for r in self._base.get(base_id, ()) if r.get("ifa")]
+        residuals = {cid: self._tokens(self._concepts.get(cid, [])) - base_tokens
+                     for cid in dict.fromkeys(ifa_ids)}
+        # A token's share is counted over DISTINCT content profiles (residual minus
+        # laterality), so a concept's own left/right/bilateral variants never inflate
+        # the share of the word that actually distinguishes it.
+        share: dict[str, int] = {}
+        for profile in {frozenset(tokens - set(_LATERALITY)) for tokens in residuals.values()}:
+            for t in profile:
+                share[t] = share.get(t, 0) + 1
+        profiles = {}
+        for cid, residual in residuals.items():
+            profiles[cid] = {
+                "laterality": residual & set(_LATERALITY),
+                "content": {t for t in residual - set(_LATERALITY)
+                            if share.get(t, 0) <= self._MAX_INFORMATIVE_SHARE},
+            }
+        self._profiles[base_id] = profiles
+        return profiles
+
+    def _fired_concepts(self, base_id: str, wording_tokens: set[str],
+                        laterality: str | None) -> dict[str, str]:
+        """{referenced concept -> why} for the concepts of `base_id` the wording and
+        typed laterality select."""
+        typed = _sing(str(laterality or "").strip().lower())
+        fired: dict[str, str] = {}
+        scored: list[tuple[tuple[int, float], str, set[str]]] = []
+        for cid, profile in self._ifa_profiles(base_id).items():
+            lat = profile["laterality"]
+            if lat and (not typed or typed not in lat):
+                continue
+            content = profile["content"]
+            if not content:
+                if lat:
+                    fired[cid] = f"laterality rule: typed laterality {typed!r}"
+                continue
+            stated = content & wording_tokens
+            if not stated:
+                continue
+            scored.append(((len(stated), len(stated) / len(content)), cid, stated))
+        if scored:
+            scored.sort(key=lambda item: item[0], reverse=True)
+            best = scored[0]
+            if len(scored) == 1 or scored[1][0] != best[0]:
+                _score, cid, stated = best
+                lat = self._ifa_profiles(base_id)[cid]["laterality"]
+                fired[cid] = (f"wording states the referenced concept's own distinguishing "
+                              f"word(s) {sorted(stated)}"
+                              + (f"; typed laterality {typed!r}" if lat else ""))
+        return fired
+
+    def resolve(self, description: str, laterality: str | None = None) -> list[dict]:
+        """[{target, base_concept, base_terms, base_match, group, priority, rule, ifa_concept,
+        ifa_terms, advice, why}] -- one entry per (base concept, map group) whose first
+        firing rule has a target; empty when the wording matches no rule-bearing concept."""
+        # `TerminologyIndex` keys are ICD-code shaped (`_dot`): a concept id longer
+        # than three characters comes back with a dot inserted, so translate every
+        # hit back to the concept id (ids never contain a dot themselves).
+        base_hits = {key.replace(".", ""): match
+                     for key, match in self._base_index.recall_matches(description).items()}
+        wording_tokens = self._tokens([description])
+        out: list[dict] = []
+        for base_id in sorted(base_hits):
+            fired = self._fired_concepts(base_id, wording_tokens, laterality)
+            done_groups: set[int] = set()
+            for row in self._base.get(base_id) or []:
+                group = int(row.get("group") or 0)
+                if group in done_groups:
+                    continue
+                rule = str(row.get("rule") or "").upper()
+                ifa = str(row.get("ifa") or "")
+                if rule == "IFA":
+                    if ifa not in fired:
+                        continue
+                    why = fired[ifa]
+                elif rule in ("TRUE", "OTHERWISE TRUE"):
+                    why = "unconditional map row"
+                else:
+                    continue
+                done_groups.add(group)
+                target = str(row.get("target") or "")
+                if not target:
+                    continue
+                out.append({
+                    "target": target, "base_concept": base_id,
+                    "base_terms": sorted(self._concepts.get(base_id, [])),
+                    "base_match": dict(base_hits[base_id]),
+                    "group": group, "priority": int(row.get("priority") or 0),
+                    "rule": rule, "ifa_concept": ifa,
+                    "ifa_terms": sorted(self._concepts.get(ifa, [])) if ifa else [],
+                    "advice": str(row.get("advice") or ""), "why": why})
+        return out

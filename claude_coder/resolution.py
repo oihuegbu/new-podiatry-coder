@@ -1278,7 +1278,19 @@ def _resolve_core(request, source: CodeSource, top_k: int = _RECALL_POOL,
         # condition, so it is ALWAYS entailment-confirmed (never trusted blindly).
         match_fn = getattr(source, "snomed_code_matches", None)
         if callable(match_fn):
-            snomed_matches = dict(match_fn(fact.description, fact.system) or {})
+            import inspect as _inspect
+            try:
+                _params = _inspect.signature(match_fn).parameters
+                _accepts_laterality = ("laterality" in _params or any(
+                    p.kind is _inspect.Parameter.VAR_KEYWORD for p in _params.values()))
+            except (TypeError, ValueError):
+                _accepts_laterality = False
+            if _accepts_laterality:
+                snomed_matches = dict(match_fn(
+                    fact.description, fact.system,
+                    laterality=(_fact_laterality(fact, reconciliation) or None)) or {})
+            else:
+                snomed_matches = dict(match_fn(fact.description, fact.system) or {})
         else:
             # Backward-compatible protocol fallback.  It remains ungrounded for a
             # residual descriptor because it carries no match/source identity.
@@ -2007,6 +2019,22 @@ def _diagnosis_specificity_candidates(
                 overlap = len(concept & relative_tokens)
                 if not exact_family and (not concept or overlap < 2):
                     continue
+                # An IMMEDIATE-STEM sibling's identity is its base's identity plus the
+                # claim-authorized side (same subcategory, a different final side
+                # character): when the base was reached by a curated term->code
+                # match, such a sibling carries that same match record (annotated),
+                # so the gates that trust an authority-matched identity
+                # (`semantic_eligibility._identity_establishing_match`, the baseline
+                # floor's exemption) see it exactly as they see its base. A
+                # category-wide relative found by the token-overlap fallback (a
+                # cousin at another site) is NOT the base's identity and inherits
+                # nothing -- it stays subject to every comparison its base was
+                # exempt from.
+                base_match = (base.authority or {}).get("term_to_code_match")
+                inherited = ({"term_to_code_match": {**dict(base_match),
+                                                     "specificity_relative_of": base.code}}
+                             if isinstance(base_match, dict) and root == undotted[:-1]
+                             else {})
                 candidate = CandidateCode(
                     code=str(code), system="icd10", descriptor=relative_descriptor,
                     score=float(base.score), source="icd10-specificity-family",
@@ -2014,6 +2042,7 @@ def _diagnosis_specificity_candidates(
                         "source": "ICD-10-CM authoritative specificity family",
                         "base_candidate": base.code,
                         "base_source": base.source,
+                        **inherited,
                     },
                     requires_verification=True,
                 )

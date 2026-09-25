@@ -738,6 +738,25 @@ def _anatomy_compatibility(candidate, facts: list[ClinicalFact], source,
     return best
 
 
+#: `term_to_code_match["method"]` values that establish a candidate's IDENTITY from
+#: the fact's own wording strongly enough to outrank the comparative anatomy rule:
+#: a whole-term match of a curated Index/crosswalk term ("exact", "despaced",
+#: "token_set") or a resolved map context rule ("context_rule"). A CONTAINED
+#: fragment ("contained_source_phrase") or a single distinctive token is recall
+#: signal, not identity -- a two-word Index subterm matched inside a longer wording
+#: can name a whole unrelated code family -- and stays subject to the rule. These
+#: are the matcher's own method names (`terminology.TerminologyIndex.
+#: recall_matches`, `MapRuleResolver`), never a clinical vocabulary.
+_IDENTITY_ESTABLISHING_MATCH_METHODS = frozenset({"exact", "despaced", "token_set",
+                                                  "context_rule"})
+
+
+def _identity_establishing_match(candidate) -> bool:
+    match = (getattr(candidate, "authority", None) or {}).get("term_to_code_match")
+    return (isinstance(match, dict)
+            and str(match.get("method") or "") in _IDENTITY_ESTABLISHING_MATCH_METHODS)
+
+
 def _anatomy_dominance_exclusions(facts: list[ClinicalFact], candidates: list,
                                   source, reconciliation=None) -> dict[tuple[str, str], str]:
     """`{(code, system) -> reason}` for candidates the anatomy-dominance rule removes
@@ -769,6 +788,19 @@ def _anatomy_dominance_exclusions(facts: list[ClinicalFact], candidates: list,
             if key in out:
                 continue
             if verdicts[key] == _UNKNOWN:
+                if _identity_establishing_match(c):
+                    # Identity established from the FACT'S OWN WORDING by a curated,
+                    # authoritative term->code mapping, through a WHOLE-term match or
+                    # a resolved map context rule (never a contained fragment -- see
+                    # `_IDENTITY_ESTABLISHING_MATCH_METHODS`). The comparative rule
+                    # above is heuristic ("a better-grounded sibling exists"), and a
+                    # site phrase the body-structure graph cannot relate (a code
+                    # family's coarse region wording against the documented
+                    # sub-structure) is exactly the UNKNOWN it must not turn into an
+                    # exclusion of a candidate the authoritative map itself reached;
+                    # the descriptor is still verified downstream like every other
+                    # candidate.
+                    continue
                 out[key] = ("another candidate in the same pool is positively "
                            "grounded (concept-graph SAME or ancestor/descendant) to "
                            "the fact's documented anatomy, while this one is not")
