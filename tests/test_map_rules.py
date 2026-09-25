@@ -268,3 +268,65 @@ class SpecificityRelativeInheritsTheBasesMatchTest(unittest.TestCase):
         self.assertEqual(sibling["method"], "context_rule")
         self.assertEqual(sibling["specificity_relative_of"], "X0879")
         self.assertNotIn("term_to_code_match", relatives["X0851"].authority)
+
+
+class SiblingDisambiguationByTheRecordsOwnWordsTest(unittest.TestCase):
+    """`refine_diagnosis_specificity` step 2: when the verifier entails two or more
+    more-specific siblings of an already-established unspecified-side code (a code
+    edition that split the concept by tissue as well as side), the ONE sibling
+    whose own distinguishing vocabulary this event's evidence states -- every other
+    sibling's being absent -- is selected; anything less clear-cut stays a
+    documentation question. Synthetic vocabulary."""
+
+    def _source(self):
+        from claude_coder.data_access import MockSource
+        return MockSource(records={
+            ("RR10", "icd10"): {"long_description": "Widgetopathy of sheath and cord, unspecified region"},
+            ("RR11", "icd10"): {"long_description": "Widgetopathy of sheath, right region"},
+            ("RR13", "icd10"): {"long_description": "Widgetopathy of cord, right region"},
+            ("RR12", "icd10"): {"long_description": "Widgetopathy of sheath, left region"}})
+
+    def _line(self, evidence_text):
+        from claude_coder.models import (AttributeEvidence, CandidateCode, ClinicalFact,
+                                         Disposition, EvidenceSpan, FactKind, RelationState,
+                                         ResolutionMethod, ResolvedLine)
+        span = EvidenceSpan(evidence_text, anchored=True, span_id="s1")
+        f = ClinicalFact(FactKind.DIAGNOSIS, "widgetopathy right region",
+                         attributes={"laterality": "right"}, evidence=[span],
+                         attribute_evidence={"laterality": (
+                             AttributeEvidence(span=span, assertion_state=RelationState.ASSERTED,
+                                               value="right"),)},
+                         disposition=Disposition.PERFORMED)
+        return ResolvedLine(fact=f, chosen=CandidateCode(
+            "RR10", "icd10", "Widgetopathy of sheath and cord, unspecified region", 1.0),
+            method=ResolutionMethod.VERIFIED, rationale="entailed")
+
+    def _judge(self):
+        from tests import shortlist_verdict as _sv
+        return _sv.judge(entails=lambda d: "right" in d.lower(),
+                         prefer=lambda d: "cord" in d.lower(), reason="more specific")
+
+    def test_the_sibling_the_record_names_is_selected(self):
+        from claude_coder import resolution
+        from claude_coder.models import ResolutionMethod
+        out = resolution.refine_diagnosis_specificity(
+            self._line("widgetopathy of the cord of the right region"), self._source(), self._judge())
+        self.assertTrue(out.resolved, out.rationale)
+        self.assertEqual(out.chosen.code, "RR1.3")
+        self.assertIs(out.method, ResolutionMethod.VERIFIED)
+        self.assertEqual(out.tie_record["sibling_disambiguation"]["selected"], "RR1.3")
+        self.assertIn("RR1.1", out.tie_record["sibling_disambiguation"]["absent"])
+
+    def test_neither_sibling_named_stays_a_documentation_question(self):
+        from claude_coder import resolution
+        out = resolution.refine_diagnosis_specificity(
+            self._line("widgetopathy of the right region"), self._source(), self._judge())
+        self.assertIsNone(out.chosen)
+        self.assertIn("document the distinguishing detail", out.documentation_gap or "")
+
+    def test_both_siblings_named_stays_a_documentation_question(self):
+        from claude_coder import resolution
+        out = resolution.refine_diagnosis_specificity(
+            self._line("widgetopathy of the cord and sheath of the right region"),
+            self._source(), self._judge())
+        self.assertIsNone(out.chosen)

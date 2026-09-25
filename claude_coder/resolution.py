@@ -1782,6 +1782,52 @@ def upgrade_diagnosis_laterality(line: ResolvedLine, source: CodeSource,
     return line
 
 
+def _sibling_distinct_vocabulary_stated(fact: ClinicalFact, cand: CandidateCode,
+                                        siblings: list[CandidateCode],
+                                        reconciliation) -> bool | None:
+    """Whether this event's own source-supported evidence states `cand`'s
+    DISTINCT vocabulary relative to `siblings` -- the descriptor-term residual
+    `tiebreak.discriminating_axes` computes (words no sibling shares, minus
+    grammar and laterality), checked as contiguous phrases within `cand`'s own
+    descriptor clauses with the negation-aware matcher. True / False, or None
+    when there is nothing safe to check (no residual, or evidence not source-
+    supported).
+
+    Deliberately narrower than `_baseline_descriptor_grounded`: that check also
+    grounds a candidate through its identity clause, which is right when a
+    candidate's IDENTITY is in question, but among siblings of one already-
+    established base the identity clause is shared by construction, and a
+    grammar word inside it would split it into single words that every sibling
+    then "states" -- exactly what must not decide a split-sibling tie.
+    """
+    if len(siblings) < 2:
+        return None
+    axes = _tiebreak.discriminating_axes(siblings)
+    terms = next((a.terms_by_code.get(cand.code, ())
+                  for a in axes if a.axis == _tiebreak.AXIS_DESCRIPTOR_TERM), ())
+    if not terms:
+        return None
+    supported, _proof, proven_text, _spans = _gc.source_support(fact, reconciliation)
+    if not supported:
+        return None
+    allowed = {_tiebreak._sing(t) for t in terms} | set(terms)
+    phrases: list[str] = []
+    for clause in re.split(r"[,;:()\[\]/]+", (cand.descriptor or "").lower()):
+        run: list[str] = []
+        for raw in re.split(r"[^a-z0-9]+", clause):
+            if raw and (raw in allowed or _tiebreak._sing(raw) in allowed):
+                run.append(raw)
+            elif run:
+                phrases.append(" ".join(run))
+                run = []
+        if run:
+            phrases.append(" ".join(run))
+    if not phrases:
+        return None
+    return any(_tiebreak.asserted_status((p,), proven_text) == "supported"
+               for p in dict.fromkeys(phrases))
+
+
 def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
                                  llm=None,
                                  reconciliation=None,
@@ -1874,6 +1920,41 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
     still_entailed, _elim = _uniqueness_view(fact, offered, picked, judgements, {},
                                              reconciliation)
     if len(still_entailed) > 1:
+        # Sibling disambiguation by the record's OWN words (issue #6, F13-type
+        # holds, real reproduction: a code edition split one unspecified-side
+        # code's concept into side-specific siblings that ALSO differ by tissue,
+        # and the verifier entailed both siblings although the note names only
+        # one tissue). The base code's identity is already established (it is the
+        # line's chosen, entailed code); the only open question is WHICH split
+        # sibling, and that is answered by the same fact-scoped distinguishing-
+        # vocabulary check the baseline floor uses -- with no standing scoping,
+        # because no candidate's identity is in doubt here: pick the one sibling
+        # whose own distinguishing words this event's evidence states when every
+        # other standing sibling's are absent. Anything less clear-cut stays a
+        # documentation question exactly as before.
+        verdicts = {c.code: _sibling_distinct_vocabulary_stated(fact, c, still_entailed,
+                                                                reconciliation)
+                    for c in still_entailed}
+        grounded = [c for c in still_entailed if verdicts[c.code] is True]
+        absent = {c.code: (f"{c.code}'s own distinguishing word(s) are absent from this "
+                           f"event's evidence")
+                  for c in still_entailed if verdicts[c.code] is False}
+        if len(grounded) == 1 and len(absent) == len(still_entailed) - 1:
+            winner = grounded[0]
+            line.chosen = winner
+            line.method = ResolutionMethod.VERIFIED
+            line.alternatives = [c for c in still_entailed if c.code != winner.code]
+            line.rationale = (
+                f"{line.rationale}; upgraded to the most specific entailed code "
+                f"({winner.code}): of the {len(still_entailed)} more-specific siblings the "
+                f"evaluator entailed, only its own distinguishing vocabulary is stated by "
+                f"this event's evidence; the others' is absent -- "
+                + "; ".join(absent[c.code] for c in still_entailed if c.code in absent))
+            line.tie_record = {**(line.tie_record or {}), "sibling_disambiguation": {
+                "still_entailed": [c.code for c in still_entailed],
+                "selected": winner.code,
+                "absent": dict(absent)}}
+            return line
         prior = line.chosen
         line.chosen = None
         line.method = ResolutionMethod.ABSTAINED
