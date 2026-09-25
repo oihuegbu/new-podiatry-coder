@@ -538,7 +538,7 @@ class AuthoritativeSource:
         index = self._ensure_concept_relation_index()
         if not index:
             return _term.CONCEPT_UNRESOLVED
-        return index.relation_detail(term_a, term_b, embedded=True).verdict
+        return index.relation_detail(term_a, term_b, embedded=True, phrase=True).verdict
 
     def concept_relation_detail(self, term_a: str, term_b: str) -> dict:
         """The full auditable basis (issue #6 F7-R3-C4) behind `concept_relation`'s
@@ -574,7 +574,7 @@ class AuthoritativeSource:
         index = self._ensure_concept_relation_index()
         if not index:
             return {"verdict": _term.CONCEPT_UNRESOLVED, "source_identity": None}
-        detail = index.relation_detail(term_a, term_b, embedded=True)
+        detail = index.relation_detail(term_a, term_b, embedded=True, phrase=True)
         return {
             "verdict": detail.verdict,
             "confidence": detail.confidence,
@@ -1036,7 +1036,7 @@ class AuthoritativeSource:
         # widening `concept_relation_detail` now applies to a two-value comparison,
         # extended to this single-value normalization/expansion path -- see
         # `ConceptRelationIndex.normalize`'s own docstring.
-        match, expansions = index.normalize(term, embedded=True)
+        match, expansions = index.normalize(term, embedded=True, phrase=True)
         return {
             "term": match.term,
             "candidates": list(match.candidates),

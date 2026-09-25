@@ -370,6 +370,19 @@ CONCEPT_DISJOINT = "disjoint"
 CONCEPT_UNRESOLVED = "unresolved"
 
 
+#: Tokens that never make an embedded value-phrase match PARTIAL when they sit next
+#: to the matched governed phrase: closed grammar/orientation vocabulary only (side
+#: words, connectives, the residual qualifiers code descriptors use) -- never a
+#: clinical term.
+_PHRASE_NEUTRAL_TOKENS = frozenset(_LATERALITY) | {
+    "side", "with", "without", "and", "or", "of", "the", "for", "from", "into", "onto",
+    "per", "each", "other", "specified", "unspecified", "nos", "nec", "eg", "example"}
+#: SNOMED description scaffolding that never counts as a qualifier or as "extra"
+#: vocabulary when a qualified phrase is matched to a descendant concept
+#: ("structure of X", "entire X", "X structure"): closed, non-clinical.
+_CONCEPT_SCAFFOLD_TOKENS = _PHRASE_NEUTRAL_TOKENS | {"structure", "entire", "part"}
+
+
 @dataclass(frozen=True)
 class ConceptMatch:
     """How ONE term resolved against the concept graph: which concept id(s) matched, by
@@ -377,10 +390,20 @@ class ConceptMatch:
     term: str
     candidates: tuple[str, ...]
     method: str   # "exact" | "despaced" | "token_set" | "none"
+    #: issue #6, F13-type holds (live run): an EMBEDDED match of a VALUE PHRASE (a
+    #: string naming one entity, e.g. an anatomy value) whose matched governed window
+    #: sits immediately next to an unmatched qualifying token ("posterior tibial
+    #: TENDON", "accessory navicular BONE"). The window's concept is at best an
+    #: ancestor of the structure the phrase names, never its identity, so a partial
+    #: match is not `unique` and grounds no SAME/RELATED verdict. Only
+    #: `match_longest(..., phrase=True)` sets it; a full action description scanned
+    #: for embedded governed phrases has verbs and adverbs next to every hit by
+    #: nature and is never judged this way.
+    partial: bool = False
 
     @property
     def unique(self) -> bool:
-        return len(self.candidates) == 1
+        return len(self.candidates) == 1 and not self.partial
 
 
 @dataclass(frozen=True)
@@ -487,7 +510,7 @@ class ConceptRelationIndex:
         authoritative codes."""
         return set(self.match(term).candidates)
 
-    def match_longest(self, text: str) -> ConceptMatch:
+    def match_longest(self, text: str, *, phrase: bool = False) -> ConceptMatch:
         """Like `match`, but for a full action DESCRIPTION rather than a bare term
         (issue #6 F9-R4-R1): tries a whole-string `match` first (unchanged), and only
         when that finds nothing, scans `text` LEFT TO RIGHT for governed phrases,
@@ -514,6 +537,7 @@ class ConceptRelationIndex:
         tokens = tuple(_norm(text).split())
         hits: set[str] = set()
         matched_widths: list[int] = []
+        windows: list[tuple[int, int]] = []
         cursor = 0
         while cursor < len(tokens):
             found = False
@@ -522,13 +546,187 @@ class ConceptRelationIndex:
                 if concepts:
                     hits.update(concepts)
                     matched_widths.append(width)
+                    windows.append((cursor, cursor + width))
                     cursor += width
                     found = True
                     break
             if not found:
                 cursor += 1
         method = ("token_scan:" + ",".join(map(str, matched_widths))) if hits else "none"
-        return ConceptMatch(text, tuple(sorted(hits)), method)
+        partial = False
+        if phrase and hits:
+            # A value phrase: an unmatched, non-neutral token of any substance (four
+            # or more characters) immediately before or after a matched window
+            # QUALIFIES that window -- the phrase names something more specific
+            # than the window's concept. The qualifiers then RESOLVE the phrase:
+            # they select, within the window concept's own descendants, the one
+            # concept whose own (or ancestors') governed terms carry every
+            # qualifier (`_qualified_descendant`). A window whose qualifiers
+            # select nothing, or several unrelated things, leaves the match
+            # PARTIAL: the phrase is more specific than any identity found.
+            matched_positions = {i for start, end in windows for i in range(start, end)}
+
+            def _qualifier(i: int) -> bool:
+                t = tokens[i]
+                return (i not in matched_positions and len(t) >= 4 and not t.isdigit()
+                        and t not in _PHRASE_NEUTRAL_TOKENS)
+
+            resolved_hits: set[str] = set()
+            qualified_any = False
+            consumed: set[tuple[int, int]] = set()
+            window_by_end = {end: (start, end) for start, end in windows}
+            # Head-first (right to left): a window absorbs the governed window that
+            # immediately precedes it, so the preceding one must not have been
+            # counted as its own hit already.
+            for start, end in reversed(windows):
+                if (start, end) in consumed:
+                    continue
+                concepts = self._phrases.get(end - start, {}).get(tokens[start:end], set())
+                qualifiers: list[str] = []
+                i = start - 1
+                while i >= 0 and _qualifier(i):
+                    qualifiers.append(tokens[i]); i -= 1
+                # A governed window IMMEDIATELY preceding this one ("<muscle> tendon")
+                # qualifies it: its tokens name the structure this head belongs to,
+                # and it is then not a separate hit of its own.
+                if i == start - 1 and i >= 0 and (i + 1) in window_by_end:
+                    p_start, p_end = window_by_end[i + 1]
+                    qualifiers.extend(tokens[p_start:p_end])
+                    consumed.add((p_start, p_end))
+                i = end
+                while i < len(tokens) and _qualifier(i):
+                    qualifiers.append(tokens[i]); i += 1
+                if not qualifiers:
+                    resolved_hits |= set(concepts)
+                    continue
+                target = (self._qualified_descendant(next(iter(concepts)), qualifiers)
+                          if len(concepts) == 1 else None)
+                if target:
+                    resolved_hits.add(target)
+                    qualified_any = True
+                else:
+                    partial = True
+                    resolved_hits |= set(concepts)
+            hits = resolved_hits
+            if qualified_any and not partial:
+                method += "+qualified_descendant"
+        return ConceptMatch(text, tuple(sorted(hits)), method, partial)
+
+    def _children_of(self, concept_id: str) -> tuple[str, ...]:
+        children = getattr(self, "_children", None)
+        if children is None:
+            children = {}
+            for cid, parents in self._parents.items():
+                for parent in parents:
+                    children.setdefault(parent, []).append(cid)
+            self._children = children
+        return tuple(children.get(concept_id, ()))
+
+    def _descendants(self, concept_id: str) -> frozenset:
+        cache = getattr(self, "_descendant_cache", None)
+        if cache is None:
+            cache = self._descendant_cache = {}
+        hit = cache.get(concept_id)
+        if hit is None:
+            seen: set[str] = set()
+            stack = [concept_id]
+            while stack:
+                cid = stack.pop()
+                for child in self._children_of(cid):
+                    if child not in seen:
+                        seen.add(child)
+                        stack.append(child)
+            hit = cache[concept_id] = frozenset(seen)
+        return hit
+
+    def _own_tokens(self, concept_id: str) -> frozenset:
+        cache = getattr(self, "_own_tokens_cache", None)
+        if cache is None:
+            cache = self._own_tokens_cache = {}
+        hit = cache.get(concept_id)
+        if hit is None:
+            hit = cache[concept_id] = frozenset(
+                _sing(t) for term in self._terms_by_concept.get(concept_id, ())
+                for t in term.split() if t)
+        return hit
+
+    @staticmethod
+    def _stem_equal(a: str, b: str) -> bool:
+        """Equality tolerant of inflected/adjectival forms of one stem (five or more
+        shared leading characters, e.g. a Latin muscle name and its English
+        adjective) -- never a fuzzy or phonetic match."""
+        a, b = _sing(a), _sing(b)
+        return a == b or (len(a) >= 5 and len(b) >= 5 and (a.startswith(b) or b.startswith(a)))
+
+    def _qualified_descendant(self, head: str, qualifiers: list[str]) -> str | None:
+        """The ONE descendant of `head` that `qualifiers` select, or None.
+
+        A descendant qualifies when EVERY qualifier is stated by its own governed
+        terms or by the terms of one of its ancestors below `head` (a qualifier may
+        name the structure at a higher level of its own lineage: the region a bone
+        lies in). Ranking, in order: (1) how many qualifiers the concept's OWN terms
+        state -- a sibling whose grouper ancestor happens to mention the qualifier
+        never outranks the concept that carries it itself; (2) the fewest tokens
+        its best head-final term adds beyond the qualifiers, the head's words,
+        description scaffolding and the vocabulary its own chain already uses; if
+        the survivors form one ancestor chain (a structure and its own "entire" or
+        sided children) the most general is the identity; unrelated survivors are
+        ambiguous and select nothing. Only terms whose last non-scaffold token is a
+        head word are considered (`head_final_terms`): a tendon SHEATH or a
+        "... muscle" grouper is not a kind of the head structure.
+        """
+        quals = [_sing(q) for q in qualifiers]
+        head_tokens = self._own_tokens(head)
+        lineage = self._descendants(head)
+        if not lineage:
+            return None
+
+        def stated_by(cid: str, q: str) -> bool:
+            return any(self._stem_equal(q, t) for t in self._own_tokens(cid))
+
+        def head_final_terms(cid: str) -> list[str]:
+            out = []
+            for term in self._terms_by_concept.get(cid, ()):
+                content = [t for t in term.split() if _sing(t) not in _CONCEPT_SCAFFOLD_TOKENS]
+                if content and any(self._stem_equal(content[-1], h) for h in head_tokens):
+                    out.append(term)
+            return out
+
+        matching: dict[str, tuple[int, list[str]]] = {}
+        for cid in lineage:
+            terms = head_final_terms(cid)
+            if not terms:
+                continue
+            own = sum(1 for q in quals if stated_by(cid, q))
+            if own < len(quals):
+                ancestors_in_lineage = self._ancestors(cid) & lineage
+                if not all(stated_by(cid, q) or any(stated_by(anc, q) for anc in ancestors_in_lineage)
+                           for q in quals):
+                    continue
+            matching[cid] = (own, terms)
+        if not matching:
+            return None
+
+        def extra(cid: str) -> int:
+            chain_tokens: set[str] = set(head_tokens)
+            for rel in (self._ancestors(cid) | self._descendants(cid)) & lineage:
+                chain_tokens |= self._own_tokens(rel)
+            best = None
+            for term in matching[cid][1]:
+                extra_tokens = {_sing(t) for t in term.split()
+                                if t and _sing(t) not in _CONCEPT_SCAFFOLD_TOKENS
+                                and _sing(t) not in chain_tokens
+                                and not any(self._stem_equal(t, q) for q in quals)}
+                best = len(extra_tokens) if best is None else min(best, len(extra_tokens))
+            return best if best is not None else 99
+
+        ranked = sorted(((-matching[cid][0], extra(cid), cid) for cid in matching))
+        top = ranked[0][:2]
+        best = [cid for own, ex, cid in ranked if (own, ex) == top]
+        if len(best) == 1:
+            return best[0]
+        roots = [c for c in best if all(c == o or c in self._ancestors(o) for o in best)]
+        return roots[0] if len(roots) == 1 else None
 
     def _ancestors(self, concept_id: str) -> set[str]:
         seen: set[str] = set()
@@ -542,7 +740,7 @@ class ConceptRelationIndex:
         return seen
 
     def relation_detail(self, term_a: str, term_b: str, *,
-                        embedded: bool = False) -> ConceptRelationDetail:
+                        embedded: bool = False, phrase: bool = False) -> ConceptRelationDetail:
         """The full auditable basis (see `ConceptRelationDetail`) for one relation
         verdict between two clinical terms.
 
@@ -565,10 +763,16 @@ class ConceptRelationIndex:
         opts into this; every other governed axis keeps the stricter whole-string
         match unchanged.
         """
-        matcher = self.match_longest if embedded else self.match
+        if embedded:
+            matcher = lambda t: self.match_longest(t, phrase=phrase)   # noqa: E731
+        else:
+            matcher = self.match
         ma, mb = matcher(term_a), matcher(term_b)
         a, b = set(ma.candidates), set(mb.candidates)
-        if not a or not b:
+        # A PARTIAL value-phrase match (see `ConceptMatch.partial`) identifies nothing:
+        # the phrase names a more specific structure than the window's concept, and
+        # that structure's relation to the other side is unknown.
+        if not a or not b or ma.partial or mb.partial:
             return ConceptRelationDetail(CONCEPT_UNRESOLVED, ma, mb, 0.0,
                                          "none", 0, len(a) * len(b))
         if ma.unique and mb.unique and a == b:
@@ -592,7 +796,7 @@ class ConceptRelationIndex:
         `relation_detail` for the full auditable basis behind it."""
         return self.relation_detail(term_a, term_b).verdict
 
-    def normalize(self, term: str, *, embedded: bool = False
+    def normalize(self, term: str, *, embedded: bool = False, phrase: bool = False
                  ) -> tuple[ConceptMatch, tuple[str, ...]]:
         """This ONE term's match, plus every OTHER term the SAME concept is known by
         (issue #6 F7-R3-C4) -- independent of any comparison against a second value,
@@ -609,7 +813,7 @@ class ConceptRelationIndex:
         normalization/retrieval-expansion path so a verbose phrase can still expand
         under its governed synonyms.
         """
-        m = (self.match_longest if embedded else self.match)(term)
+        m = self.match_longest(term, phrase=phrase) if embedded else self.match(term)
         expansions = self.terms_for_concept(m.candidates[0]) if m.unique else ()
         return m, tuple(t for t in expansions if t != _norm(term))
 
@@ -720,11 +924,32 @@ class MapRuleResolver:
         for profile in {frozenset(tokens - set(_LATERALITY)) for tokens in residuals.values()}:
             for t in profile:
                 share[t] = share.get(t, 0) + 1
+        # Side scaffolding: a word the map uses to phrase the SIDE of a variant
+        # ("... of right WRIST" / "... of left WRIST", "... of right UPPER LIMB")
+        # rather than to distinguish it -- it appears in sided variants of at least
+        # two different sides and in no unsided variant (a word that also names an
+        # unsided variant, e.g. a calcific form, is genuine content). Such words
+        # never count as content, so sided rows stay laterality rules.
+        lat_set = set(_LATERALITY)
+        sided = [(frozenset(tokens & lat_set), tokens - lat_set)
+                 for tokens in residuals.values() if tokens & lat_set]
+        unsided_content: set[str] = set()
+        for tokens in residuals.values():
+            if not tokens & lat_set:
+                unsided_content |= tokens
+        side_scaffold = {
+            t for _side, content in sided for t in content
+            if t not in unsided_content
+            and len({side for side, c in sided if t in c}) >= 2}
         profiles = {}
         for cid, residual in residuals.items():
+            lat = residual & set(_LATERALITY)
+            content = residual - set(_LATERALITY)
+            if lat:
+                content -= side_scaffold
             profiles[cid] = {
-                "laterality": residual & set(_LATERALITY),
-                "content": {t for t in residual - set(_LATERALITY)
+                "laterality": lat,
+                "content": {t for t in content
                             if share.get(t, 0) <= self._MAX_INFORMATIVE_SHARE},
             }
         self._profiles[base_id] = profiles

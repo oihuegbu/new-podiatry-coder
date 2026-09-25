@@ -80,6 +80,31 @@ class MapRuleResolverTest(unittest.TestCase):
         self.assertEqual(self._targets("calcific structure alpha degeneration", "left"),
                          [(1, "X01.9", "OTHERWISE TRUE", "")])
 
+    def test_side_words_phrased_with_shared_site_scaffolding_are_still_laterality_rules(self):
+        doc = _document()
+        doc["concepts"]["I8"] = ["structure alpha degeneration of right upper part"]
+        doc["concepts"]["I9"] = ["structure alpha degeneration of left upper part"]
+        doc["base"]["B1"] = [
+            {"group": 1, "priority": 1, "rule": "IFA", "ifa": "I8", "target": "X01.8", "advice": ""},
+            {"group": 1, "priority": 2, "rule": "IFA", "ifa": "I9", "target": "X01.7", "advice": ""},
+            {"group": 1, "priority": 3, "rule": "OTHERWISE TRUE", "ifa": "", "target": "X01.9", "advice": ""}]
+        self.assertEqual([(h["group"], h["target"]) for h in term.MapRuleResolver(doc).resolve(
+            "structure alpha degeneration", "left")], [(1, "X01.7")])
+        self.assertEqual([(h["group"], h["target"]) for h in term.MapRuleResolver(doc).resolve(
+            "structure alpha degeneration", None)], [(1, "X01.9")])
+        # a bilateral variant without the site words does not disturb the scaffold
+        doc["concepts"]["I11"] = ["bilateral structure alpha degeneration"]
+        doc["base"]["B1"].insert(2, {"group": 1, "priority": 2, "rule": "IFA", "ifa": "I11",
+                                     "target": "X01.5", "advice": ""})
+        self.assertEqual([(h["group"], h["target"]) for h in term.MapRuleResolver(doc).resolve(
+            "structure alpha degeneration", "right")], [(1, "X01.8")])
+        # a word that also names an UNSIDED variant is content, not scaffolding
+        doc["concepts"]["I10"] = ["structure alpha degeneration of upper part"]
+        doc["base"]["B1"].insert(0, {"group": 1, "priority": 0, "rule": "IFA", "ifa": "I10",
+                                     "target": "X01.6", "advice": ""})
+        self.assertEqual([(h["group"], h["target"]) for h in term.MapRuleResolver(doc).resolve(
+            "structure alpha degeneration", "left")], [(1, "X01.9")])
+
     def test_wording_matching_no_rule_bearing_concept_resolves_nothing(self):
         self.assertEqual(self._targets("an unrelated documented condition", "right"), [])
 
@@ -284,7 +309,10 @@ class SiblingDisambiguationByTheRecordsOwnWordsTest(unittest.TestCase):
             ("RR10", "icd10"): {"long_description": "Widgetopathy of sheath and cord, unspecified region"},
             ("RR11", "icd10"): {"long_description": "Widgetopathy of sheath, right region"},
             ("RR13", "icd10"): {"long_description": "Widgetopathy of cord, right region"},
-            ("RR12", "icd10"): {"long_description": "Widgetopathy of sheath, left region"}})
+            ("RR12", "icd10"): {"long_description": "Widgetopathy of sheath, left region"},
+            # side-specific but still "unspecified" in type: never a strictly more
+            # specific sibling, must not enter the set (it shares both concept words)
+            ("RR19", "icd10"): {"long_description": "Unspecified widgetopathy of sheath and cord, right region"}})
 
     def _line(self, evidence_text):
         from claude_coder.models import (AttributeEvidence, CandidateCode, ClinicalFact,
@@ -316,6 +344,7 @@ class SiblingDisambiguationByTheRecordsOwnWordsTest(unittest.TestCase):
         self.assertIs(out.method, ResolutionMethod.VERIFIED)
         self.assertEqual(out.tie_record["sibling_disambiguation"]["selected"], "RR1.3")
         self.assertIn("RR1.1", out.tie_record["sibling_disambiguation"]["absent"])
+        self.assertNotIn("RR1.9", out.tie_record["sibling_disambiguation"]["still_entailed"])
 
     def test_neither_sibling_named_stays_a_documentation_question(self):
         from claude_coder import resolution
@@ -330,3 +359,96 @@ class SiblingDisambiguationByTheRecordsOwnWordsTest(unittest.TestCase):
             self._line("widgetopathy of the cord and sheath of the right region"),
             self._source(), self._judge())
         self.assertIsNone(out.chosen)
+
+
+class PartialValuePhraseMatchTest(unittest.TestCase):
+    """`ConceptRelationIndex`: an EMBEDDED match of a VALUE PHRASE whose governed
+    window sits next to an unmatched qualifying token is partial -- it neither
+    identifies the phrase nor grounds a relation -- while side words, connectives
+    and action descriptions are untouched. Synthetic concepts."""
+
+    def _index(self):
+        return term.ConceptRelationIndex({
+            "T": {"terms": ["cord", "cord structure"], "parents": []},
+            "A": {"terms": ["alpha cord", "structure of alpha cord"], "parents": ["T"]},
+            "B": {"terms": ["beta cord"], "parents": ["T"]},
+            # a qualified descendant named by a Latin-form muscle name
+            "D": {"terms": ["cord of deltoideus muscle structure", "deltoideus muscle cord"],
+                  "parents": ["T"]},
+            "D_ENTIRE": {"terms": ["entire deltoideus muscle cord"], "parents": ["D"]},
+            # a different structure that merely mentions the head: never the identity
+            "D_SHEATH": {"terms": ["deltoideus muscle cord sheath"], "parents": ["T"]},
+            # a lineage where one qualifier lives on an ancestor
+            "BONE": {"terms": ["bone", "bone structure"], "parents": []},
+            "TARSAL": {"terms": ["tarsal bone", "tarsal bone structure"], "parents": ["BONE"]},
+            "EPS": {"terms": ["structure of epsilon bone"], "parents": ["TARSAL"]},
+            "EPS_ENTIRE": {"terms": ["entire epsilon bone"], "parents": ["EPS"]},
+            # a governed muscle window immediately before the head qualifies it
+            "FM": {"terms": ["flexor muscle"], "parents": []},
+            "FMC": {"terms": ["flexor muscle cord structure"], "parents": ["T"]},
+        })
+
+    def test_a_qualified_head_noun_is_partial_and_unresolved(self):
+        idx = self._index()
+        m = idx.match_longest("gamma cord", phrase=True)
+        self.assertTrue(m.partial)
+        self.assertFalse(m.unique)
+        self.assertEqual(idx.relation_detail("alpha cord", "gamma cord",
+                                             embedded=True, phrase=True).verdict,
+                         term.CONCEPT_UNRESOLVED)
+        # the same text scanned as a DESCRIPTION keeps today's hierarchy verdict
+        self.assertEqual(idx.relation_detail("alpha cord", "gamma cord", embedded=True).verdict,
+                         term.CONCEPT_RELATED)
+
+    def test_side_words_connectives_and_of_phrases_are_not_qualifiers(self):
+        idx = self._index()
+        for text in ("right alpha cord", "alpha cord with graft", "insertion of alpha cord",
+                     "structure of alpha cord"):
+            self.assertEqual(idx.relation_detail("alpha cord", text, embedded=True,
+                                                 phrase=True).verdict,
+                             term.CONCEPT_SAME, text)
+
+    def test_normalize_gives_a_partial_match_no_expansions(self):
+        idx = self._index()
+        m, expansions = idx.normalize("gamma cord", embedded=True, phrase=True)
+        self.assertTrue(m.partial)
+        self.assertEqual(expansions, ())
+        m2, expansions2 = idx.normalize("alpha cord", embedded=True, phrase=True)
+        self.assertTrue(m2.unique)
+        self.assertIn("structure of alpha cord", expansions2)
+
+    def test_qualifiers_resolve_to_the_heads_descendant(self):
+        idx = self._index()
+        m = idx.match_longest("deltoid cord", phrase=True)        # "deltoid" ~ "deltoideus"
+        self.assertEqual(m.candidates, ("D",))                    # the structure, not its "entire" child or the sheath
+        self.assertTrue(m.unique)
+        self.assertIn("qualified_descendant", m.method)
+        _m, expansions = idx.normalize("deltoid cord", embedded=True, phrase=True)
+        self.assertIn("cord of deltoideus muscle structure", expansions)
+        # two sibling tendons are neither the same nor hierarchically related
+        self.assertEqual(idx.relation_detail("alpha cord", "deltoid cord",
+                                             embedded=True, phrase=True).verdict,
+                         term.CONCEPT_UNRESOLVED)
+
+    def test_a_qualifier_stated_by_an_ancestor_and_the_structure_over_its_entire_child(self):
+        idx = self._index()
+        m = idx.match_longest("tarsal epsilon bone", phrase=True)
+        self.assertEqual(m.candidates, ("EPS",))
+        self.assertTrue(m.unique)
+        # the structure concept wins over its own "entire" child; the region qualifier
+        # is stated by the ancestor, not by the concept's own terms
+        self.assertEqual(idx.relation_detail("tarsal bone", "tarsal epsilon bone",
+                                             embedded=True, phrase=True).verdict,
+                         term.CONCEPT_RELATED)
+
+    def test_a_qualifier_no_descendant_states_stays_partial(self):
+        idx = self._index()
+        m = idx.match_longest("omega cord", phrase=True)
+        self.assertTrue(m.partial)
+        self.assertFalse(m.unique)
+
+    def test_an_adjacent_governed_window_qualifies_the_head(self):
+        idx = self._index()
+        m = idx.match_longest("flexor muscle cord", phrase=True)
+        self.assertEqual(m.candidates, ("FMC",))
+        self.assertTrue(m.unique)

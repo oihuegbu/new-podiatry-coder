@@ -1768,7 +1768,13 @@ def upgrade_diagnosis_laterality(line: ResolvedLine, source: CodeSource,
         sdesc = (source.descriptions(su, "icd10") or [""])[0]
         # a genuine laterality sibling: names the documented side AND is otherwise
         # the identical concept (self-validates the structural guess above).
-        if sdesc and lat in sdesc.lower() and _strip_laterality(sdesc) == family:
+        # `_strip_laterality` also removes "unspecified", so a side-specific sibling
+        # that is still unspecified in TYPE ("Unspecified <disorder> ..., right ...")
+        # compares equal to the family and used to be adopted as an "upgrade" to a
+        # LESS specific code (issue #6, F13-type holds, live run). Strictly more
+        # specific means the word is gone from the sibling's own descriptor.
+        if (sdesc and lat in sdesc.lower() and "unspecified" not in sdesc.lower()
+                and _strip_laterality(sdesc) == family):
             if target is not None:
                 return line              # ambiguous family — keep the original
             target = (su, sdesc)
@@ -1890,7 +1896,15 @@ def refine_diagnosis_specificity(line: ResolvedLine, source: CodeSource,
             continue
         sdesc = (source.descriptions(su, "icd10") or [""])[0]
         sl = sdesc.lower()
-        if not sdesc or lat not in sl or "unspecified" in _strip_laterality(sl):
+        # `_strip_laterality` also removes the word "unspecified", so testing the
+        # stripped string could never find it -- a relative that is side-specific
+        # but still "unspecified" in some OTHER respect ("Unspecified <disorder>
+        # of ..., right ...") slipped in beside the genuinely more-specific
+        # siblings and, sharing their concept words, made none of them
+        # distinguishable (issue #6, F13-type holds, live run). The raw descriptor
+        # is the right thing to test: strictly more specific means the word is
+        # gone altogether.
+        if not sdesc or lat not in sl or "unspecified" in sl:
             continue                               # not strictly more specific / wrong side
         if concept and not (concept & tok(_strip_laterality(sl))):
             continue                               # off-concept sibling in the same category
