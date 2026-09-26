@@ -382,6 +382,34 @@ _PHRASE_NEUTRAL_TOKENS = frozenset(_LATERALITY) | {
 #: ("structure of X", "entire X", "X structure"): closed, non-clinical.
 _CONCEPT_SCAFFOLD_TOKENS = _PHRASE_NEUTRAL_TOKENS | {"structure", "entire", "part"}
 
+# Prepositions that INVERT a term's head: in "<P> of <Q>" the term names a P
+# (a part, surface, sheath, bursa ... OF Q), not a Q -- unless nothing but
+# scaffold precedes the preposition ("structure of Q" names Q).
+_HEAD_INVERTING_TOKENS = frozenset({"of", "for", "from", "into", "onto", "per",
+                                    "with", "without", "in", "on", "to", "at"})
+# Coordinators: a term joined by and/or ("<X> of anterior and/or posterior <Y>")
+# names a GROUP of structures, never one -- it has no head and is never a kind.
+_COORDINATING_TOKENS = frozenset({"and", "or"})
+
+
+def _term_head(term: str) -> str | None:
+    """The (singularized) head word of a concept term: the last non-scaffold token
+    before the first head-inverting preposition, else the last non-scaffold token
+    of the whole term; None when the term is scaffold only or coordinated."""
+    tokens = term.split()
+    if any(tok in _COORDINATING_TOKENS for tok in tokens):
+        return None
+    pre: list[str] = []
+    for tok in tokens:
+        if tok in _HEAD_INVERTING_TOKENS:
+            break
+        if _sing(tok) not in _CONCEPT_SCAFFOLD_TOKENS:
+            pre.append(tok)
+    if pre:
+        return _sing(pre[-1])
+    content = [t for t in tokens if _sing(t) not in _CONCEPT_SCAFFOLD_TOKENS]
+    return _sing(content[-1]) if content else None
+
 
 @dataclass(frozen=True)
 class ConceptMatch:
@@ -582,28 +610,45 @@ class ConceptRelationIndex:
                 if (start, end) in consumed:
                     continue
                 concepts = self._phrases.get(end - start, {}).get(tokens[start:end], set())
-                qualifiers: list[str] = []
+                before: list[str] = []
                 i = start - 1
                 while i >= 0 and _qualifier(i):
-                    qualifiers.append(tokens[i]); i -= 1
+                    before.append(tokens[i]); i -= 1
                 # A governed window IMMEDIATELY preceding this one ("<muscle> tendon")
                 # qualifies it: its tokens name the structure this head belongs to,
                 # and it is then not a separate hit of its own.
+                governed: dict[str, frozenset[str]] = {}
                 if i == start - 1 and i >= 0 and (i + 1) in window_by_end:
                     p_start, p_end = window_by_end[i + 1]
-                    qualifiers.extend(tokens[p_start:p_end])
+                    p_concepts = frozenset(
+                        self._phrases.get(p_end - p_start, {}).get(tokens[p_start:p_end], set()))
+                    for tok in tokens[p_start:p_end]:
+                        before.append(tok)
+                        governed[_sing(tok)] = p_concepts
                     consumed.add((p_start, p_end))
+                after: list[str] = []
                 i = end
                 while i < len(tokens) and _qualifier(i):
-                    qualifiers.append(tokens[i]); i += 1
-                if not qualifiers:
+                    after.append(tokens[i]); i += 1
+                if not before and not after:
                     resolved_hits |= set(concepts)
                     continue
-                target = (self._qualified_descendant(next(iter(concepts)), qualifiers)
-                          if len(concepts) == 1 else None)
+                if len(concepts) != 1:
+                    partial = True
+                    resolved_hits |= set(concepts)
+                    continue
+                # English noun phrases are head-final: tokens BEFORE the window narrow
+                # it ("posterior tibial TENDON"); an unmatched token AFTER it is the
+                # phrase's real head and the window its modifier ("HEEL bone" is a
+                # bone of the heel) -- the last trailing token is that head, any
+                # earlier trailing tokens qualify it.
+                head_word = after[-1] if after else None
+                target = self._qualified_descendant(
+                    next(iter(concepts)), before + after[:-1], head_word=head_word,
+                    governed=governed)
                 if target:
                     resolved_hits.add(target)
-                    qualified_any = True
+                    qualified_any = qualified_any or target not in concepts
                 else:
                     partial = True
                     resolved_hits |= set(concepts)
@@ -658,53 +703,83 @@ class ConceptRelationIndex:
         a, b = _sing(a), _sing(b)
         return a == b or (len(a) >= 5 and len(b) >= 5 and (a.startswith(b) or b.startswith(a)))
 
-    def _qualified_descendant(self, head: str, qualifiers: list[str]) -> str | None:
-        """The ONE descendant of `head` that `qualifiers` select, or None.
+    def _qualified_descendant(self, head: str, qualifiers: list[str], *,
+                              head_word: str | None = None,
+                              governed: dict[str, frozenset[str]] | None = None) -> str | None:
+        """The ONE descendant of `head` that `qualifiers` (and, when the phrase's
+        real head is a trailing unmatched token, `head_word`) select; `head` itself
+        when the qualifiers are merely descriptive; None when distinguishing
+        qualifiers select nothing or several unrelated things.
 
-        A descendant qualifies when EVERY qualifier is stated by its own governed
-        terms or by the terms of one of its ancestors below `head` (a qualifier may
-        name the structure at a higher level of its own lineage: the region a bone
-        lies in). Ranking, in order: (1) how many qualifiers the concept's OWN terms
-        state -- a sibling whose grouper ancestor happens to mention the qualifier
-        never outranks the concept that carries it itself; (2) the fewest tokens
-        its best head-final term adds beyond the qualifiers, the head's words,
-        description scaffolding and the vocabulary its own chain already uses; if
-        the survivors form one ancestor chain (a structure and its own "entire" or
-        sided children) the most general is the identity; unrelated survivors are
-        ambiguous and select nothing. Only terms whose last non-scaffold token is a
-        head word are considered (`head_final_terms`): a tendon SHEATH or a
-        "... muscle" grouper is not a kind of the head structure.
+        Kinds: only descendants with a term whose HEAD word (`_term_head`: the word
+        before the first "of"/"for"/..., else the last) is a head word (`head_word`
+        if given, else the head concept's own words) are kinds of the phrase's head
+        -- a SHEATH for a "tendon" phrase, a "... muscle" grouper or a "facet of
+        <bone>" is not. Distinguishing: a qualifier no kind states (itself or an
+        ancestor below the head) is descriptive and cannot name a different
+        structure; only the rest select, and every one must be stated. A qualifier
+        that came from a GOVERNED window (`governed`: token -> that window's
+        concepts) is also stated by every descendant of that window's concept --
+        "<region> bone" is a bone that IS (part of) the region, whatever its
+        terms call it. Ranking:
+        qualifiers stated by the concept's OWN terms first, then the fewest tokens
+        its best head-final term adds beyond the phrase and its chain's vocabulary;
+        a surviving chain collapses to its most general member and a winning child
+        walks up to its parent while that parent is itself a kind that qualifies
+        (a structure over its own "entire" or sided children); unrelated survivors
+        are ambiguous.
         """
-        quals = [_sing(q) for q in qualifiers]
         head_tokens = self._own_tokens(head)
         lineage = self._descendants(head)
-        if not lineage:
-            return None
+        finals = {_sing(head_word)} if head_word else set(head_tokens)
+        governed_lineage: dict[str, set[str]] = {}
+        for tok, concept_ids in (governed or {}).items():
+            members: set[str] = set()
+            for qc in concept_ids:
+                members.add(qc)
+                members |= self._descendants(qc)
+            governed_lineage[tok] = members
 
         def stated_by(cid: str, q: str) -> bool:
-            return any(self._stem_equal(q, t) for t in self._own_tokens(cid))
+            return (cid in governed_lineage.get(q, ())
+                    or any(self._stem_equal(q, t) for t in self._own_tokens(cid)))
 
         def head_final_terms(cid: str) -> list[str]:
             out = []
             for term in self._terms_by_concept.get(cid, ()):
-                content = [t for t in term.split() if _sing(t) not in _CONCEPT_SCAFFOLD_TOKENS]
-                if content and any(self._stem_equal(content[-1], h) for h in head_tokens):
+                term_head = _term_head(term)
+                if term_head and any(self._stem_equal(term_head, h) for h in finals):
                     out.append(term)
             return out
 
-        matching: dict[str, tuple[int, list[str]]] = {}
-        for cid in lineage:
-            terms = head_final_terms(cid)
-            if not terms:
-                continue
-            own = sum(1 for q in quals if stated_by(cid, q))
-            if own < len(quals):
-                ancestors_in_lineage = self._ancestors(cid) & lineage
-                if not all(stated_by(cid, q) or any(stated_by(anc, q) for anc in ancestors_in_lineage)
-                           for q in quals):
-                    continue
-            matching[cid] = (own, terms)
+        kinds = {cid: terms for cid in lineage if (terms := head_final_terms(cid))}
+        if not kinds:
+            if head_word:
+                # No descendant is a kind of the trailing head: the phrase may name a
+                # DIFFERENT structure built on the window ("<tendon> sheath"), found
+                # graph-wide by its head-final term stating the window's own words --
+                # or a mere part/aspect of the window's structure ("<tendon>
+                # insertion"), for which the window stands.
+                return self._global_kind(head_word, head, qualifiers) or head
+            # No kind of the window exists below it: leading qualifiers can only
+            # describe the window's structure ("<orientation> <bone>" is a region
+            # OF the bone, even when a PART of it states the same word).
+            return head
+
+        def lineage_stated(cid: str, q: str) -> bool:
+            return stated_by(cid, q) or any(stated_by(anc, q)
+                                            for anc in self._ancestors(cid) & lineage)
+
+        quals = [q for q in (_sing(x) for x in qualifiers)
+                 if any(lineage_stated(cid, q) for cid in kinds)]
+        if not quals and not head_word:
+            return head                                # descriptive qualifiers only
+        matching = {cid: (sum(1 for q in quals if stated_by(cid, q)), terms)
+                    for cid, terms in kinds.items()
+                    if all(lineage_stated(cid, q) for q in quals)}
         if not matching:
+            if head_word:
+                return self._global_kind(head_word, head, qualifiers) or head
             return None
 
         def extra(cid: str) -> int:
@@ -723,6 +798,77 @@ class ConceptRelationIndex:
         ranked = sorted(((-matching[cid][0], extra(cid), cid) for cid in matching))
         top = ranked[0][:2]
         best = [cid for own, ex, cid in ranked if (own, ex) == top]
+        if len(best) > 1:
+            roots = [c for c in best if all(c == o or c in self._ancestors(o) for o in best)]
+            if len(roots) != 1:
+                return None
+            best = roots
+        chosen = best[0]
+        while True:
+            parents = [p for p in self._parents.get(chosen, ()) if p in matching]
+            if len(parents) != 1:
+                return chosen
+            chosen = parents[0]
+
+    def _head_final_index(self) -> dict[str, set[str]]:
+        """token -> concepts with a term whose last non-scaffold token is that token
+        (built once, lazily)."""
+        index = getattr(self, "_head_final_cache", None)
+        if index is None:
+            index = {}
+            for cid, terms in self._terms_by_concept.items():
+                for term in terms:
+                    term_head = _term_head(term)
+                    if term_head:
+                        index.setdefault(term_head, set()).add(cid)
+            self._head_final_cache = index
+        return index
+
+    def _global_kind(self, head_word: str, head: str, qualifiers: list[str]) -> str | None:
+        """Graph-wide: the ONE concept with a term head-final on `head_word` whose own
+        terms state one FULL term of the `head` concept and every distinguishing
+        qualifier ("<muscle tendon> sheath" -> that tendon's sheath structure),
+        ranked by the fewest tokens its best such term adds beyond the phrase, a
+        chain collapsing to its most general member."""
+        hw = _sing(head_word)
+        cands = {cid for tok, cids in self._head_final_index().items()
+                 if self._stem_equal(tok, hw) for cid in cids}
+        if not cands:
+            return None
+        head_terms = [
+            [_sing(t) for t in term.split() if t and _sing(t) not in _CONCEPT_SCAFFOLD_TOKENS]
+            for term in self._terms_by_concept.get(head, ())]
+        head_terms = [ts for ts in head_terms if ts]
+        quals = [_sing(q) for q in qualifiers]
+
+        def stated_by(cid: str, q: str) -> bool:
+            return any(self._stem_equal(q, t) for t in self._own_tokens(cid))
+
+        def named_head_terms(cid: str) -> list[list[str]]:
+            return [ts for ts in head_terms if all(stated_by(cid, w) for w in ts)]
+
+        matching = {cid: named for cid in cands if (named := named_head_terms(cid))
+                    and all(stated_by(cid, q) for q in quals
+                            if any(stated_by(c, q) for c in cands))}
+        if not matching:
+            return None
+
+        def extra(cid: str) -> int:
+            best = None
+            for term in self._terms_by_concept.get(cid, ()):
+                toks = {_sing(t) for t in term.split() if t}
+                if not any(self._stem_equal(t, hw) for t in toks):
+                    continue
+                for named in matching[cid]:
+                    ex = {t for t in toks if t not in _CONCEPT_SCAFFOLD_TOKENS
+                          and not self._stem_equal(t, hw)
+                          and not any(self._stem_equal(t, w) for w in named)
+                          and not any(self._stem_equal(t, q) for q in quals)}
+                    best = len(ex) if best is None else min(best, len(ex))
+            return best if best is not None else 99
+
+        ranked = sorted((extra(cid), cid) for cid in matching)
+        best = [cid for ex, cid in ranked if ex == ranked[0][0]]
         if len(best) == 1:
             return best[0]
         roots = [c for c in best if all(c == o or c in self._ancestors(o) for o in best)]

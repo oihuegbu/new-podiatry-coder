@@ -386,19 +386,82 @@ class PartialValuePhraseMatchTest(unittest.TestCase):
             # a governed muscle window immediately before the head qualifies it
             "FM": {"terms": ["flexor muscle"], "parents": []},
             "FMC": {"terms": ["flexor muscle cord structure"], "parents": ["T"]},
+            # "<region> bone": a bone of the region -- a bone AND (part of) the region,
+            # under both, named by terms that never say "heel"
+            "HEEL": {"terms": ["heel", "heel region"], "parents": []},
+            "HEELBONE": {"terms": ["calcaneum", "fibular tarsal bone", "bone structure of calcaneum"],
+                         "parents": ["HEEL", "TARSAL"]},
+            # a PART of the bone whose term ends "... of calcaneum": not a kind of it
+            "HEELBONE_FACET": {"terms": ["entire dorsal articular facet of calcaneum"],
+                               "parents": ["HEELBONE"]},
+            # two unrelated chains distinguished by an orientation word
+            # ... under a coordinated GROUPER that names both: never itself a kind
+            "TIBC": {"terms": ["cord structure of anterior and or posterior tibial"], "parents": ["T"]},
+            "PTC": {"terms": ["posterior tibial cord", "structure of posterior tibial cord"], "parents": ["TIBC"]},
+            "ATC": {"terms": ["anterior tibial cord"], "parents": ["TIBC"]},
+            # a different structure built on a governed phrase, outside its descendants
+            "ACS": {"terms": ["alpha cord sheath structure"], "parents": []},
         })
 
-    def test_a_qualified_head_noun_is_partial_and_unresolved(self):
+    def test_a_distinguishing_qualifier_that_selects_two_unrelated_chains_is_partial(self):
         idx = self._index()
-        m = idx.match_longest("gamma cord", phrase=True)
+        m = idx.match_longest("tibial cord", phrase=True)      # posterior or anterior? ambiguous
         self.assertTrue(m.partial)
         self.assertFalse(m.unique)
-        self.assertEqual(idx.relation_detail("alpha cord", "gamma cord",
+        self.assertEqual(idx.relation_detail("alpha cord", "tibial cord",
                                              embedded=True, phrase=True).verdict,
                          term.CONCEPT_UNRESOLVED)
         # the same text scanned as a DESCRIPTION keeps today's hierarchy verdict
-        self.assertEqual(idx.relation_detail("alpha cord", "gamma cord", embedded=True).verdict,
+        self.assertEqual(idx.relation_detail("alpha cord", "tibial cord", embedded=True).verdict,
                          term.CONCEPT_RELATED)
+        # with its orientation word the phrase resolves strictly
+        self.assertEqual(idx.match_longest("posterior tibial cord", phrase=True).candidates, ("PTC",))
+
+    def test_a_descriptive_qualifier_no_descendant_states_leaves_the_window_concept(self):
+        idx = self._index()
+        m = idx.match_longest("prominent gamma cord", phrase=True)
+        self.assertEqual(m.candidates, ("T",))
+        self.assertTrue(m.unique)
+        self.assertFalse(m.partial)
+
+    def test_a_trailing_unmatched_head_resolves_to_the_regions_descendant(self):
+        idx = self._index()
+        m = idx.match_longest("heel bone", phrase=True)
+        self.assertEqual(m.candidates, ("HEELBONE",))
+        self.assertTrue(m.unique)
+        m2 = idx.match_longest("upper posterior heel bone", phrase=True)   # descriptive prefix
+        self.assertEqual(m2.candidates, ("HEELBONE",))
+        m3 = idx.match_longest("heel prominence", phrase=True)             # a part/aspect: the region stands
+        self.assertEqual(m3.candidates, ("HEEL",))
+        self.assertFalse(m3.partial)
+
+    def test_a_part_named_of_the_head_is_not_a_kind_of_it(self):
+        idx = self._index()
+        m = idx.match_longest("dorsal calcaneum", phrase=True)             # a region OF the bone, not its facet
+        self.assertEqual(m.candidates, ("HEELBONE",))
+        self.assertFalse(m.partial)
+        self.assertEqual(term._term_head("entire dorsal articular facet of calcaneum"), "facet")
+        self.assertEqual(term._term_head("structure of alpha cord"), "cord")
+        self.assertEqual(term._term_head("bone structure of calcaneum"), "bone")
+        self.assertIsNone(term._term_head("entire structure"))
+        self.assertIsNone(term._term_head("cord structure of anterior and or posterior tibial"))
+
+    def test_a_coordinated_grouper_is_never_the_identity_nor_a_walk_up_target(self):
+        idx = self._index()
+        m = idx.match_longest("posterior tibial cord", phrase=True)       # exact window
+        self.assertEqual(m.candidates, ("PTC",))
+        m2 = idx.match_longest("tibial cord", phrase=True)                # two unrelated kinds
+        self.assertTrue(m2.partial)
+        self.assertNotIn("TIBC", m2.candidates)
+
+    def test_a_trailing_head_naming_a_different_structure_is_found_graph_wide(self):
+        idx = self._index()
+        m = idx.match_longest("alpha cord sheath", phrase=True)
+        self.assertEqual(m.candidates, ("ACS",))
+        self.assertTrue(m.unique)
+        m2 = idx.match_longest("alpha cord insertion", phrase=True)       # a part of the cord itself
+        self.assertEqual(m2.candidates, ("A",))
+        self.assertFalse(m2.partial)
 
     def test_side_words_connectives_and_of_phrases_are_not_qualifiers(self):
         idx = self._index()
@@ -410,7 +473,7 @@ class PartialValuePhraseMatchTest(unittest.TestCase):
 
     def test_normalize_gives_a_partial_match_no_expansions(self):
         idx = self._index()
-        m, expansions = idx.normalize("gamma cord", embedded=True, phrase=True)
+        m, expansions = idx.normalize("tibial cord", embedded=True, phrase=True)
         self.assertTrue(m.partial)
         self.assertEqual(expansions, ())
         m2, expansions2 = idx.normalize("alpha cord", embedded=True, phrase=True)
@@ -441,11 +504,6 @@ class PartialValuePhraseMatchTest(unittest.TestCase):
                                              embedded=True, phrase=True).verdict,
                          term.CONCEPT_RELATED)
 
-    def test_a_qualifier_no_descendant_states_stays_partial(self):
-        idx = self._index()
-        m = idx.match_longest("omega cord", phrase=True)
-        self.assertTrue(m.partial)
-        self.assertFalse(m.unique)
 
     def test_an_adjacent_governed_window_qualifies_the_head(self):
         idx = self._index()
