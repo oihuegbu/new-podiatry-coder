@@ -2394,8 +2394,16 @@ def apply_section_applicability(result: CodingResult) -> None:
     Fail-closed: excluded by default, kept in the audit trail."""
     from .ontology import code_section
     from .models import FactKind
-    proc_lines = [ln for ln in result.billable_lines
-                  if ln.chosen.system in ("cpt", "hcpcs")
+    # Every RESOLVED procedure line, submission-held ones included (third live
+    # run: the anesthesia line resolved while its performer was unresolved, so it
+    # sat in `submission_held_lines`, never in `billable_lines`, and this control
+    # never saw it -- the claim then held for an administrative question about a
+    # service that is not separately reportable on the operating provider's claim
+    # whoever performed it).
+    proc_lines = [ln for ln in result.lines
+                  if ln.resolved and ln.chosen is not None and ln.fact.billable
+                  and not ln.excluded_reason
+                  and ln.chosen.system in ("cpt", "hcpcs")
                   and ln.fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING)]
     has_operative = any(code_section(ln.chosen.descriptor) != "anesthesia"
                         for ln in proc_lines)
@@ -2686,6 +2694,219 @@ def _residual_without_sibling(fact, sibling_fact) -> tuple[str, list[str]] | Non
     if not cut:
         return None
     return " ".join(pieces), list(dict.fromkeys(cut))
+
+
+def _anatomy_sites(source: CodeSource, *texts: str) -> tuple[str, ...]:
+    """Governed anatomy phrases stated in `texts` (a code's own descriptor, a fact's
+    typed anatomy), via the source's body-structure scan; empty when the source
+    has none."""
+    scan = getattr(source, "concept_scan", None)
+    if not callable(scan):
+        return ()
+    out: list[str] = []
+    for text in texts:
+        if not text:
+            continue
+        try:
+            found = scan("anatomy", str(text)) or ()
+        except Exception:
+            found = ()
+        out.extend(f for f in found if f not in out)
+    return tuple(out)
+
+
+def _stated_laterality(*texts: str) -> set[str]:
+    words: set[str] = set()
+    for text in texts:
+        words |= {t for t in re.split(r"[^a-z]+", str(text or "").lower()) if t}
+    return words & ontology._LATERALITY
+
+
+def apply_integral_symptom_exclusion(result: CodingResult, source: CodeSource) -> None:
+    """A released sign/symptom diagnosis is not additionally reported beside a released
+    DEFINITIVE diagnosis of the same or a related site (ICD-10-CM Official Guidelines
+    I.B.4/I.B.5; parameters and citation in `data/rules/coding_conventions.json`
+    `claim_controls`, mechanic "integral_symptom_exclusion").
+
+    Sign/symptom vs disease is the classification's own account, never a code
+    list: `source.icd_semantic_profile(code)` -- the SNOMED semantic tags of the
+    concepts the SNOMED CT -> ICD-10-CM map sends to the code. A code reached only
+    from the control's `symptom_semantic_tags` is a symptom code; one reached from
+    any `definitive_semantic_tags` concept is definitive; a code with no profile is
+    UNCLASSIFIED and never excluded nor used to exclude. Sites are the governed
+    anatomy phrases in each code's own descriptor plus the fact's typed anatomy,
+    related through the body-structure graph (`source.concept_relation`, verdicts
+    in `site_relations`); a stated laterality that differs on the two lines is a
+    contradiction and keeps the symptom. Fail-closed at every gap (no pack, no
+    profile, no sites, unresolved relation): the symptom stays reported. Excluded
+    lines keep their code and gain a cited `excluded_reason` (kept in the audit
+    trail); re-derived every reconciliation round like every claim-set mechanic.
+    """
+    from . import conventions as _conventions
+    from .models import FactKind
+    controls = _conventions.load_claim_controls("integral_symptom_exclusion")
+    if not controls:
+        return
+    profile_fn = getattr(source, "icd_semantic_profile", None)
+    relation_fn = getattr(source, "concept_relation", None)
+    if not callable(profile_fn) or not callable(relation_fn):
+        return
+    released = [ln for ln in result.lines
+                if ln.resolved and ln.chosen is not None and not ln.excluded_reason
+                and ln.fact.kind is FactKind.DIAGNOSIS]
+    if len(released) < 2:
+        return
+
+    def profile(code: str) -> dict[str, int]:
+        try:
+            return dict(profile_fn(code) or {})
+        except Exception:
+            return {}
+
+    for control in controls:
+        symptom_tags = {str(t).lower() for t in control.get("symptom_semantic_tags") or ()}
+        definitive_tags = {str(t).lower() for t in control.get("definitive_semantic_tags") or ()}
+        relations = {str(v) for v in control.get("site_relations") or ()}
+        if not symptom_tags or not definitive_tags or not relations:
+            continue
+        # Classification by SHARE of the code's mapped source concepts (pack
+        # thresholds): a symptom code's concepts are (nearly) all findings, a
+        # definitive code's (nearly) all disorders; a mixed profile below both
+        # thresholds is unclassified and plays neither role.
+        symptom_min = float(control.get("symptom_min_share", 1.0))
+        definitive_min = float(control.get("definitive_min_share", 1.0))
+        symptoms, definitives = [], []
+        for ln in released:
+            counts = {str(t).lower(): int(n) for t, n in profile(ln.chosen.code).items()}
+            total = sum(counts.values())
+            if total <= 0:
+                continue                                  # unclassified: neither role
+            symptom_share = sum(n for t, n in counts.items() if t in symptom_tags) / total
+            definitive_share = sum(n for t, n in counts.items() if t in definitive_tags) / total
+            if definitive_share >= definitive_min:
+                definitives.append(ln)
+            elif symptom_share >= symptom_min:
+                symptoms.append(ln)
+        for sym in symptoms:
+            sym_sites = _anatomy_sites(source, sym.chosen.descriptor,
+                                       str(sym.fact.attributes.get("anatomy") or ""))
+            if not sym_sites:
+                continue
+            sym_side = _stated_laterality(sym.chosen.descriptor,
+                                          str(sym.fact.attributes.get("laterality") or ""))
+            for dx in definitives:
+                dx_sites = _anatomy_sites(source, dx.chosen.descriptor,
+                                          str(dx.fact.attributes.get("anatomy") or ""))
+                dx_side = _stated_laterality(dx.chosen.descriptor,
+                                             str(dx.fact.attributes.get("laterality") or ""))
+                if sym_side and dx_side and sym_side != dx_side:
+                    continue
+                link = next(((a, b, verdict) for a in sym_sites for b in dx_sites
+                             if (verdict := str(relation_fn(a, b))) in relations), None)
+                if link is None:
+                    continue
+                a, b, verdict = link
+                sym.excluded_reason = (
+                    f"integral sign/symptom: {sym.chosen.code} ('{sym.chosen.descriptor}') is a "
+                    f"symptom code (mapped only from SNOMED '{'/'.join(sorted(symptom_tags))}' "
+                    f"concepts) whose site '{a}' is {verdict.replace('_', '/')} the site '{b}' of "
+                    f"the definitive diagnosis {dx.chosen.code} ('{dx.chosen.descriptor}') "
+                    f"released for {dx.fact.fact_id} -- not additionally coded per "
+                    f"{control.get('authority')} [claim control {control.get('id')}]")
+                sym.tie_record = {**(getattr(sym, "tie_record", None) or {}),
+                                  "claim_level_exclusion": {
+                                      "mechanic": "integral_symptom_exclusion",
+                                      "control_id": control.get("id"),
+                                      "definitive_fact_id": dx.fact.fact_id,
+                                      "definitive_code": dx.chosen.code,
+                                      "sites": [a, b], "relation": verdict,
+                                      "authority": control.get("authority")}}
+                break
+
+
+def apply_convention_component_absorption(result: CodingResult, source: CodeSource,
+                                          reconciliation=None, *,
+                                          pack_path: str | None = None) -> None:
+    """A RELEASED procedure line that a cited coding convention says is INCLUDED in
+    another released procedure of the same operative episode is excluded from the
+    claim, naming the parent code and the authority (conventions pack
+    `claim_controls`, mechanic "component_included_in_released_service").
+
+    The surgical-package control absorbs an UNRESOLVED intra-operative action; a
+    component the evaluator did resolve to a code of its own escaped it (fourth
+    live run: tendon debridement released as a separate excision code beside the
+    secondary-repair code that, per the cited CPT Assistant guidance, already
+    reports that debridement). Each control is config: `applies_when.evidence_
+    regex` matched against the component fact's OWN source-confirmed evidence
+    (never the whole document), optional `fact_kinds`; `parent.descriptor_regex`
+    matched against the released parent code's own authoritative descriptor; the
+    component's own released descriptor must NOT match the parent regex (it is
+    then the parent itself). Parent and component must share a service context
+    (`result.service_intents`, the same episode grouping the release controller
+    reads). Fail-closed: no pack entry, no source-confirmed evidence, no parent in
+    the same context -- the line stays. Re-derived every reconciliation round.
+    """
+    from . import conventions as _conventions
+    from .models import FactKind
+    controls = _conventions.load_claim_controls("component_included_in_released_service",
+                                                pack_path)
+    if not controls:
+        return
+    released = [ln for ln in result.lines
+                if ln.resolved and ln.chosen is not None and not ln.excluded_reason
+                and ln.fact.billable and ln.chosen.system in ("cpt", "hcpcs")
+                and ln.fact.kind in (FactKind.PROCEDURE, FactKind.IMAGING)]
+    if len(released) < 2:
+        return
+    context_of: dict[str, set[str]] = {}
+    for intent in (getattr(result, "service_intents", None) or ()):
+        ids = set((intent or {}).get("component_event_ids") or ())
+        for fid in ids:
+            context_of.setdefault(fid, set()).update(ids)
+    for control in controls:
+        when = control.get("applies_when") or {}
+        parent_re = str((control.get("parent") or {}).get("descriptor_regex") or "")
+        ev_re = str(when.get("evidence_regex") or "")
+        if not parent_re or not ev_re:
+            continue
+        kinds = when.get("fact_kinds")
+        parents = [ln for ln in released
+                   if re.search(parent_re, ln.chosen.descriptor or "", re.IGNORECASE)]
+        if not parents:
+            continue
+        for ln in released:
+            if ln.excluded_reason or ln in parents:
+                continue
+            if kinds and str(getattr(ln.fact.kind, "value", "") or "") not in kinds:
+                continue
+            supported, _proof, text, _spans = _gc.source_support(ln.fact, reconciliation)
+            if not supported or not text:
+                continue
+            match = re.search(ev_re, text, re.IGNORECASE)
+            if not match:
+                continue
+            absent = when.get("absent_regex")
+            if absent and re.search(str(absent), text, re.IGNORECASE):
+                continue
+            parent = next((p for p in parents
+                           if context_of.get(p.fact.fact_id, {p.fact.fact_id})
+                           & context_of.get(ln.fact.fact_id, {ln.fact.fact_id})), None)
+            if parent is None:
+                continue
+            ln.excluded_reason = (
+                f"included in {parent.chosen.code} ('{parent.chosen.descriptor}', released for "
+                f"{parent.fact.fact_id}) -- the record states '{match.group(0)}', which "
+                f"the cited convention reports with that code, not separately as "
+                f"{ln.chosen.code} ('{ln.chosen.descriptor}'): {control.get('authority')} "
+                f"[claim control {control.get('id')}]")
+            ln.tie_record = {**(getattr(ln, "tie_record", None) or {}),
+                             "claim_level_exclusion": {
+                                 "mechanic": "component_included_in_released_service",
+                                 "control_id": control.get("id"),
+                                 "parent_fact_id": parent.fact.fact_id,
+                                 "parent_code": parent.chosen.code,
+                                 "matched_text": match.group(0),
+                                 "authority": control.get("authority")}}
 
 
 def apply_sibling_quote_attribution(result: CodingResult, source: CodeSource,
@@ -3071,6 +3292,8 @@ def _reconcile_claim_after_pruning(
             result, dependency_excluded_ids, dependency_hold_reasons)
         apply_cross_line_code_ownership(result, source, source_reconciliation)
         apply_sibling_quote_attribution(result, source, source_reconciliation)
+        apply_integral_symptom_exclusion(result, source)
+        apply_convention_component_absorption(result, source, source_reconciliation)
         modifier_engine.assign_claim(result, source, source_reconciliation)
         apply_ncci_bundling(result, source)
         apply_integral_bundling(result, source)

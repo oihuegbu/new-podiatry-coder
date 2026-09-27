@@ -314,6 +314,30 @@ def decide(result: CodingResult,
                             f"unresolved fact {fact_id} is part of the same "
                             f"code-determining claim-line intent as {target}"),
                     })
+        # issue #6, designated note, third live run (2026-09-26): a performed
+        # procedure that shares a SERVICE INTENT -- the operative episode /
+        # service context `composition.service_intents` grouped these events
+        # into for retrieval -- with a billed procedure is never an "isolated
+        # ambiguity". Whether it is separately reportable, bundled into the
+        # billed line's global package, or changes that line's code/modifier
+        # (NCCI PTP) is decided AGAINST that billed line, so its open question
+        # is material to that line's submission: the claim released 28118
+        # alone as AUTO_READY while the same episode's tendon reattachment sat
+        # unresolved as a non-blocking coder note. Same-episode grouping is
+        # read from the result's own recorded service intents (never
+        # recomputed), the same record the audit trail carries.
+        for intent in (getattr(result, "service_intents", None) or ()):
+            ids = set((intent or {}).get("component_event_ids") or ())
+            if fact_id in ids:
+                for target in ids - {fact_id}:
+                    add(target, {
+                        "basis": "service_intent",
+                        "source_fact_id": fact_id,
+                        "intent_id": str((intent or {}).get("intent_id") or ""),
+                        "summary": (
+                            f"unresolved fact {fact_id} shares a service context "
+                            f"(same operative episode) with {target}"),
+                    })
         for rel in (getattr(result, "relations", None) or ()):
             if rel.predicate is not RelationPredicate.REASON_FOR:
                 continue

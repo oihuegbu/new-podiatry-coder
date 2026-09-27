@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from typing import Callable
 
+from .ontology import _LATERALITY
 from .models import (AttributeEvidence, AttributeEvidenceGap, ClinicalFact, Disposition,
                      EvidenceSpan, FactKind, RelationAssertion, RelationPredicate,
                      RelationState)
@@ -1298,6 +1299,49 @@ def _parse_extraction_response(
     return ExtractionResult(facts=facts, relations=relations, origin=origin)
 
 
+#: Axes whose values come from a CLOSED governed lexicon, so a claimed value can
+#: be checked against the fact's own quoted evidence word for word.
+_LEXICON_AXES: dict[str, frozenset[str]] = {"laterality": frozenset(_LATERALITY)}
+
+
+def _bind_lexicon_value_from_own_evidence(fact: ClinicalFact, axis: str, value: Any):
+    """A local `AttributeEvidence` for a claimed lexicon-valued axis (laterality) the
+    extractor asserted but supplied NO evidence entry for -- bound to one of the
+    fact's OWN cited quotations that states exactly that value (issue #6,
+    designated note, third live run: the extractor wrote laterality=right and
+    cited the operative title stating "Right ... reattachment", but emitted no
+    attribute_evidence entry; the axis was sanitized away and the line's only
+    fitting code withdrawn as "no relation-valid, value-bound evidence").
+
+    Binding requires ALL of: the axis has a closed lexicon; the claimed value is
+    one of its words; a quotation the extractor itself cited for THIS fact states
+    that word, asserted (clause-scoped negation-aware, `tiebreak.asserted_status`),
+    and states NO OTHER word of the lexicon (a quote naming both sides binds
+    neither). Applies ONLY when the extractor supplied no entry at all -- an
+    entry it did supply that fails to bind the value (wrong side, dropped
+    inheritance) is a defect the gap records, never repaired from the quote pool.
+    The bound span is the quotation the fact already carries, so downstream
+    anchoring/reconciliation treats it exactly like an extractor-supplied local
+    entry. Returns None when nothing binds."""
+    lexicon = _LEXICON_AXES.get(axis)
+    if not lexicon:
+        return None
+    claimed = _norm_attribute_value(value)
+    if claimed not in lexicon:
+        return None
+    from . import tiebreak as _tiebreak
+    for span in fact.evidence or ():
+        text = getattr(span, "text", "") or ""
+        words = {t for t in re.split(r"[^a-z0-9]+", text.lower()) if t}
+        if words & lexicon != {claimed}:
+            continue
+        if _tiebreak.asserted_status((claimed,), text) != "supported":
+            continue
+        return AttributeEvidence(span=EvidenceSpan(text=text), scope="local",
+                                 assertion_state=RelationState.ASSERTED, value=claimed)
+    return None
+
+
 def finalize_attribute_evidence(facts: list[ClinicalFact]) -> None:
     """Sanitize each FINAL fact's "attributes" against its own settled
     "attribute_evidence" -- never the pre-resolution accumulator, which can still
@@ -1321,6 +1365,11 @@ def finalize_attribute_evidence(facts: list[ClinicalFact]) -> None:
                            for entry in entries)
             if supported:
                 continue
+            if not entries:
+                bound = _bind_lexicon_value_from_own_evidence(fact, axis, value)
+                if bound is not None:
+                    fact.attribute_evidence = {**fact.attribute_evidence, axis: (bound,)}
+                    continue
             # Never authorize the unsupported value, but preserve the documented event.
             fact.attributes.pop(axis, None)
             fact.attribute_evidence.pop(axis, None)

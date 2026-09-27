@@ -38,6 +38,8 @@ from app.core.config import DATA_DIR
 
 _ICD = re.compile(r"^[A-Z]\d{2}[A-Z0-9]*$")
 _FSN_TAG = re.compile(r"\s*\([^)]*\)\s*$")   # trailing SNOMED semantic tag on an FSN
+_FSN_TAG_NAME = re.compile(r"\(([^)]*)\)\s*$")  # ... and the tag's own text ("finding")
+_FSN_TYPE_ID = "900000000000003001"              # RF2 description typeId: fully specified name
 _IFA = re.compile(r"^IFA\s+(\d+)\b", re.IGNORECASE)   # "IFA <conceptId> | <term> |"
 
 
@@ -156,13 +158,23 @@ def main() -> int:
     #    only -- plus the terms of every concept the context rules involve.
     terms: dict[str, set] = defaultdict(set)
     rule_terms: dict[str, set] = defaultdict(set)
+    # Each mapped concept's SNOMED semantic tag (the FSN's trailing "(finding)" /
+    # "(disorder)" / ...): the classification's OWN statement of whether a concept
+    # is a sign/symptom/observation or a disease, carried per ICD target below.
+    concept_tag: dict[str, str] = {}
     with open(desc, encoding="utf-8") as fh:
         c = _cols(fh)
         A, LANG, CID, TERM = c["active"], c["languageCode"], c["conceptId"], c["term"]
+        TYPE = c.get("typeId")
         for line in fh:
             f = line.rstrip("\n").split("\t")
             if len(f) <= TERM or f[A] != "1" or f[LANG] != "en":
                 continue
+            if TYPE is not None and f[TYPE] == _FSN_TYPE_ID and (
+                    f[CID] in concept_codes or f[CID] in rule_bases):
+                m = _FSN_TAG_NAME.search(f[TERM])
+                if m:
+                    concept_tag[f[CID]] = m.group(1).strip().lower()
             t = _norm(_FSN_TAG.sub("", f[TERM]))
             if not t:
                 continue
@@ -187,6 +199,39 @@ def main() -> int:
     }
     out.write_text(json.dumps(payload, indent=1))
     print(f"{release.name}: {len(concept_codes)} mapped concepts -> {len(terms)} terms -> {out}")
+    # 2b) Semantic-tag profile per ICD target: how many source concepts of each SNOMED
+    #     semantic tag map to the code (unconditional rows, plus every context-rule
+    #     target of a tagged base concept). A code reached only from "(finding)"
+    #     concepts is a sign/symptom/observation code by the classification's own
+    #     account; one reached from "(disorder)" concepts names a disease. Consumed by
+    #     `claude_coder.pipeline.apply_integral_symptom_exclusion` (ICD-10-CM I.B.4/5).
+    code_tags: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    pairs: set[tuple[str, str]] = set()          # each (concept, target) counted once
+    for cid, codes in concept_codes.items():
+        pairs.update((cid, code) for code in codes)
+    for cid, rows in rule_bases.items():
+        pairs.update((cid, r["target"]) for r in rows if r["target"])
+    for cid, code in pairs:
+        tag = concept_tag.get(cid)
+        if tag:
+            code_tags[code][tag] += 1
+    tags_out = DATA_DIR / "codes" / "snomed_icd10_semantic_tags.json"
+    tags_payload = {
+        "source": ("SNOMED CT US Edition (official RF2) -> ICD-10-CM extended map, "
+                   "source-concept semantic tags per target code"),
+        "release": release.name,
+        "map_file": ext.name,
+        "map_sha256": payload["map_sha256"],
+        "description_file": desc.name,
+        "license": payload["license"],
+        "provenance": ("official RF2 ExtendedMap x Description FSN semantic tags; per ICD-10-CM "
+                       "target, the count of mapped source concepts carrying each tag"),
+        "generated": payload["generated"],
+        "count": len(code_tags),
+        "tags": {code: dict(sorted(v.items())) for code, v in sorted(code_tags.items())},
+    }
+    tags_out.write_text(json.dumps(tags_payload, indent=1))
+    print(f"{release.name}: semantic-tag profiles for {len(code_tags)} codes -> {tags_out}")
     # 3) Context-rule companion: only base concepts carrying an IFA rule; only rows with
     #    a target and (for IFA) a referenced concept that has at least one English term
     #    -- a rule nothing can be matched against is unusable and is not shipped.

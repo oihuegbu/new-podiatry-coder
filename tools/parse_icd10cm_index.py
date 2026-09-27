@@ -128,19 +128,61 @@ def norm_code(raw: str) -> str | None:
     return raw.replace(".", "").rstrip("-").upper()
 
 
+#: A title's comma-joined heading forms are ALTERNATIVE spellings of one
+#: heading ("Alphitis, alphonitis"; "juvenile, juvenilis"), never a list
+#: of distinct subterms (those are nested <term> nodes). Capped so a rare
+#: many-form heading cannot multiply a deep path's phrases without bound.
+_MAX_TITLE_ALTERNATIVES = 4
+#: Upper bound on the phrases one navigational path expands to across all
+#: its levels' alternatives; beyond it only each level's first form is used.
+_MAX_PATH_EXPANSION = 64
+
+
+def title_alternatives(title: str) -> list[str]:
+    """The heading forms of one title, whitespace-normalized and lower-cased,
+    canonical (first) form first; empty for an empty title."""
+    parts = [_norm_ws(p).lower() for p in (title or "").split(",") if _norm_ws(p)]
+    return parts[:_MAX_TITLE_ALTERNATIVES]
+
+
+def _expand(levels):
+    """Every combination of one heading form per level, bounded by
+    `_MAX_PATH_EXPANSION` (else each level's canonical form only)."""
+    from itertools import product
+    total = 1
+    for forms in levels:
+        total *= max(1, len(forms))
+    if total > _MAX_PATH_EXPANSION:
+        return [tuple(forms[0] for forms in levels)]
+    return list(product(*levels))
+
+
+def anchored_phrases(levels) -> set[str]:
+    """Every phrase a coder could read off one navigational path, each ANCHORED
+    on the main term (level 0): the full path and the main term followed by
+    each suffix of the deeper levels -- never a suffix alone. The Index's main
+    term is the CONDITION; a bare deeper sub-path ("<site> <side>") names a
+    site and a side, not a condition, and attaching it to the leaf's code made
+    any record mentioning that site match the code. Each level's comma-joined
+    alternative heading forms are expanded."""
+    out: set[str] = set()
+    if not levels:
+        return out
+    for j in range(1, len(levels)):
+        for combo in _expand([levels[0]] + list(levels[j:])):
+            out.add(" ".join(combo))
+    if len(levels) == 1:
+        for combo in _expand(levels):
+            out.add(" ".join(combo))
+    return out
+
+
 def walk(node, path, out):
-    title = plain_title(node)
-    p = path + [title] if title else path
+    forms = title_alternatives(plain_title(node))
+    p = path + [forms] if forms else path
     code = norm_code(node.findtext("code") or "")
     if code and p:
-        out[code].add(" ".join(p).lower())       # full navigational path
-        if title:
-            out[code].add(title.lower())           # the leaf clinician term alone,
-        # ...and every suffix sub-path in between, so a note's phrasing matches at
-        # any depth. Generic suffixes that collide across codes are handled by the
-        # resolver's single-code trust rule (a multi-code hit defers to retrieval).
-        for i in range(1, len(p)):
-            out[code].add(" ".join(p[i:]).lower())
+        out[code].update(anchored_phrases(p))
     for child in node.findall("term"):
         walk(child, p, out)
 
@@ -200,8 +242,16 @@ def navigate(ref, main_terms):
     for part in parts[1:]:
         if node is None:
             return None
-        node = next((t for t in node.findall("term")
-                     if _norm_ws(plain_title(t)).lower() == part), None)
+        children = node.findall("term")
+        node = next((t for t in children if _norm_ws(plain_title(t)).lower() == part), None)
+        if node is None:
+            # A directive cites ONE heading form of a comma-joined child title
+            # ("see Osteo, juvenile, tarsus" for a child titled "juvenile,
+            # juvenilis") -- the same composite-title convention the
+            # main-term tiers in `main()` handle at the top level. Resolved
+            # only when exactly one child carries that form.
+            by_form = [t for t in children if part in title_alternatives(plain_title(t))]
+            node = by_form[0] if len(by_form) == 1 else None
     return node
 
 

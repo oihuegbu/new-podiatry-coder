@@ -200,6 +200,8 @@ class CodeSource(Protocol):
 
     def snomed_code_matches(self, description: str, system: str) -> dict[str, dict]: ...
 
+    def icd_semantic_profile(self, code: str) -> dict[str, int]: ...
+
     def cpt_index_codes(self, description: str, system: str) -> set[str]: ...
 
     def learned_index_codes(self, description: str, system: str) -> set[str]: ...
@@ -257,6 +259,37 @@ class CodeSource(Protocol):
 # list. Any code carrying such a signal is excluded from the claim.
 _NOT_SEPARATELY = ("noncovered", "non-covered", "not separately", "bundled",
                    "packaged", "not payable", "included in", "not billed separately")
+
+
+def _stem_profile(tags: dict, code: str) -> dict[str, int]:
+    """The semantic-tag profile of `code` or, when the map targets a STEM above
+    it (the extended map often maps to a category or subcategory rather than a
+    leaf), of its most specific profiled ancestor stem; empty when none."""
+    norm = str(code or "").replace(".", "").upper()
+    for ln in range(len(norm), 2, -1):
+        found = tags.get(norm[:ln])
+        if found:
+            return dict(found)
+    return {}
+
+
+def governed_condition_content(source, terms) -> set[str]:
+    """`terminology.condition_content` over `source`'s governed anatomy graph
+    (`concept_scan("anatomy", ...)`): the condition-naming words of governed
+    source `terms`. A source without an anatomy scan leaves site words in
+    place -- a term then looks MORE specific than it is, never less, which is
+    the conservative direction for every caller (a comparison stays a tie)."""
+    from . import terminology as _term
+    scan = getattr(source, "concept_scan", None)
+
+    def anatomy(text: str):
+        if not callable(scan):
+            return ()
+        try:
+            return scan("anatomy", text) or ()
+        except Exception:
+            return ()
+    return _term.condition_content(terms, anatomy)
 
 
 class AuthoritativeSource:
@@ -420,6 +453,35 @@ class AuthoritativeSource:
                 self._snomed = False
                 self._snomed_identity = None
         return self._snomed
+
+    def _ensure_semantic_tags(self):
+        """Load and bind the SNOMED semantic-tag profile per mapped ICD-10-CM code once
+        (`snomed_icd10_semantic_tags.json`, REVIEWED-OPTIONAL: absence leaves the
+        integral-symptom claim control inert -- a symptom code stays reported)."""
+        if getattr(self, "_semantic_tags", None) is None:
+            try:
+                document, identity = _declared_document_snapshot(
+                    "snomed_semantic_tags", AuthoritativeDataUnavailable)
+                tags = dict((document or {}).get("tags") or {})
+                self._semantic_tags = {str(k).replace(".", "").upper(): dict(v)
+                                       for k, v in tags.items() if isinstance(v, dict)}
+                self._semantic_tags_identity = dict(identity)
+                self._bound_sources.bind(identity)
+            except Exception:
+                self._semantic_tags = False
+                self._semantic_tags_identity = None
+        return self._semantic_tags
+
+    def icd_semantic_profile(self, code: str) -> dict[str, int]:
+        """{SNOMED semantic tag -> number of mapped source concepts} for an ICD-10-CM
+        code -- the classification's own account of whether the code names a
+        sign/symptom/observation ("finding") or a disease ("disorder"). Empty when
+        the profile is absent or the code has no mapped source concept: a caller
+        must then treat the code as UNCLASSIFIED, never as either."""
+        tags = self._ensure_semantic_tags()
+        if not tags:
+            return {}
+        return _stem_profile(tags, code)
 
     def _ensure_snomed_rules(self):
         """Load and bind the governed SNOMED->ICD context-rule companion once
@@ -998,11 +1060,16 @@ class AuthoritativeSource:
         to clear `concept_lookup`'s own `unique` gate before a caller may
         treat it as anything more than a candidate to try.
 
-        Only "procedure" has a scan index today (`_ensure_procedure_scan_index`,
-        built from `_ensure_procedure_synonym_index`'s existing table); any
-        other axis returns empty, the same honesty discipline as
-        `concept_lookup`.
+        "procedure" scans `_ensure_procedure_scan_index` (built from
+        `_ensure_procedure_synonym_index`'s existing table); "anatomy" scans the
+        governed SNOMED CT body-structure graph (`ConceptRelationIndex.
+        scan_phrases`, the same window scan `concept_lookup`'s anatomy axis
+        matches with); any other axis returns empty, the same honesty
+        discipline as `concept_lookup`.
         """
+        if axis == "anatomy":
+            index = self._ensure_concept_relation_index()
+            return tuple(index.scan_phrases(text)) if index else ()
         if axis != "procedure" or not self._ensure_procedure_scan_index():
             return ()
         from . import ontology as _ontology
@@ -1349,6 +1416,12 @@ class AuthoritativeSource:
         out: dict[str, dict] = {}
         for stem, match in idx.recall_matches(description).items():
             if not self.leaf_codes(stem, "icd10"):
+                continue
+            # A source term naming only a SITE and a side ("<region> right")
+            # identifies no condition: whatever code the Index path attaches
+            # to it, matching it says nothing about what the record's
+            # condition is, so it is not term-to-code identity evidence.
+            if not governed_condition_content(self, dict(match).get("source_terms") or ()):
                 continue
             out[str(stem)] = {
                 **dict(match),
@@ -2162,7 +2235,8 @@ class MockSource:
                  semantic_class: dict[str, str] | None = None,
                  snapshot: dict[str, Any] | None = None,
                  umls_crosswalk: dict[str, dict] | None = None,
-                 umls_candidates: dict[tuple[str, str], list[CandidateCode]] | None = None
+                 umls_candidates: dict[tuple[str, str], list[CandidateCode]] | None = None,
+                 semantic_profile: dict[str, dict[str, int]] | None = None,
                  ) -> None:
         self._records = records or {}
         self._retrieval = retrieval or {}
@@ -2196,6 +2270,8 @@ class MockSource:
                           {str(x).replace(".", "").upper() for x in v}
                           for k, v in (coverage or {}).items()}
         self._concept_relation_map = concept_relation or {}
+        self._semantic_profile = {str(k).replace(".", "").upper(): dict(v)
+                                  for k, v in (semantic_profile or {}).items()}
         # {(term_a, term_b) -> full detail dict, minus "source_identity"/"confidence"
         # which the mock fills in} -- a SEPARATE governed graph from anatomy's
         # `_concept_relation_map` (issue #6 F9-R4), test-configured with the real
@@ -2415,6 +2491,9 @@ class MockSource:
     def qualifying_dx_for(self, code, system="cpt"):
         c = str(code).replace(".", "").upper()
         return set(self._coverage[c]) if c in self._coverage else None
+
+    def icd_semantic_profile(self, code):
+        return _stem_profile(self._semantic_profile, code)
 
     def concept_relation(self, term_a, term_b):
         from .terminology import CONCEPT_UNRESOLVED

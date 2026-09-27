@@ -225,10 +225,14 @@ class BuilderEmitsContextRulesTest(unittest.TestCase):
         descs = [("B1", "structure alpha degeneration"), ("B1", "Structure alpha degeneration (disorder)"),
                  ("700", "insertional structure alpha tendinopathy"), ("800", "calcific structure alpha degeneration of right side"),
                  ("B2", "condition beta"), ("B3", "condition gamma"), ("900", "inactive concept")]
+        # fully specified names carry the semantic tag: B1 a disorder, B2 a finding
+        fsns = [("B1", "Structure alpha degeneration (disorder)"), ("B2", "Condition beta (finding)")]
         with open(rel / "Snapshot" / "Terminology" / "sct2_Description_Snapshot-en_TEST.txt", "w") as fh:
             fh.write(self.HEADER_DESC)
             for i, (cid, t) in enumerate(descs):
                 fh.write(f"{i}\t20260101\t1\tm\t{cid}\ten\tsyn\t{t}\tcs\n")
+            for i, (cid, t) in enumerate(fsns, start=100):
+                fh.write(f"{i}\t20260101\t1\tm\t{cid}\ten\t900000000000003001\t{t}\tcs\n")
         return rel
 
     def test_companion_rules_file(self):
@@ -258,6 +262,11 @@ class BuilderEmitsContextRulesTest(unittest.TestCase):
             self.assertEqual(rules["term_to_base"], {"structure alpha degeneration": ["B1"]})
             terms = json.loads((data / "codes" / "snomed_icd10_map.json").read_text())["terms"]
             self.assertEqual(terms["structure alpha degeneration"], ["X01.9"])   # unconditional map unchanged
+            tags = json.loads((data / "codes" / "snomed_icd10_semantic_tags.json").read_text())["tags"]
+            self.assertEqual(tags["Y01.1"], {"finding": 1})                     # B2 (finding) -> Y01.1
+            self.assertEqual(tags["X01.9"], {"disorder": 1})                    # B1 (disorder) unconditional target
+            self.assertEqual(tags["X01.2"], {"disorder": 1})                    # ... and its context-rule targets
+            self.assertNotIn("X01.8", tags)                                     # inactive row never counted
 
 
 class SpecificityRelativeInheritsTheBasesMatchTest(unittest.TestCase):

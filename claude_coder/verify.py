@@ -753,15 +753,27 @@ class Judgement:
     #: `resolution._candidate_disposition_uniqueness`.
     candidate_dispositions: tuple["CandidateDispositionEvidence", ...] = ()
 
+    def _disposition_entailed(self, code: str) -> bool:
+        """Whether this model's STRUCTURED disposition on `code` (its own validated
+        `candidate_dispositions` entry -- descriptor identity checked at parse
+        time) says "entailed". The same model's statement about the same
+        candidate, in a second field: read together with the `entailed` list, so
+        the two cannot disagree about what the model found (fourth live run: a
+        candidate the dispositions marked entailed was also named in the
+        eliminated list, and the list alone was believed)."""
+        return any(d.candidate_code == code and d.status == "entailed"
+                   for d in self.candidate_dispositions)
+
     def entails(self, code: str) -> bool:
-        return code in self.entailed
+        return code in self.entailed or self._disposition_entailed(code)
 
     def elimination_of(self, code: str) -> str:
         """The reason this model NAMED for eliminating `code`, or "" if it did not
-        eliminate it. A candidate this model still entails is never eliminated by it, even
-        if it also appeared in the eliminated list — a self-contradicting verdict leaves
-        the candidate STANDING, which blocks a release rather than allowing one."""
-        if code in self.entailed:
+        eliminate it. A candidate this model still entails -- in its `entailed` list
+        OR its structured disposition -- is never eliminated by it, even if it also
+        appeared in the eliminated list — a self-contradicting verdict leaves the
+        candidate STANDING, which blocks a release rather than allowing one."""
+        if self.entails(code):
             return ""
         return self.eliminated.get(code, "")
 

@@ -411,6 +411,31 @@ def _term_head(term: str) -> str | None:
     return _sing(content[-1]) if content else None
 
 
+def condition_content(terms, scan) -> set[str]:
+    """The words of governed source `terms` that name a CONDITION: what is left
+    once the anatomy phrases `scan(term)` finds in each term (a site), the
+    laterality/orientation words and the scaffold/neutral words are removed,
+    singularized. Empty for a term that names only a site and a side -- such a
+    term identifies no condition, whatever code the source attaches to it."""
+    content: set[str] = set()
+    for term in terms or ():
+        n = _norm(str(term))
+        if not n:
+            continue
+        anatomy: set[str] = set()
+        for found in scan(n) or ():
+            anatomy.update(_sing(t) for t in _norm(found).split())
+        for tok in n.split():
+            if len(tok) <= 2 or tok.isdigit():
+                continue
+            stem = _sing(tok)
+            if stem in anatomy or stem in _ORIENTATION_ONLY_TOKENS \
+                    or stem in _CONCEPT_SCAFFOLD_TOKENS:
+                continue
+            content.add(stem)
+    return content
+
+
 @dataclass(frozen=True)
 class ConceptMatch:
     """How ONE term resolved against the concept graph: which concept id(s) matched, by
@@ -537,6 +562,27 @@ class ConceptRelationIndex:
         order/plural-independent token set), just against concept ids instead of
         authoritative codes."""
         return set(self.match(term).candidates)
+
+    def scan_phrases(self, text: str) -> tuple[str, ...]:
+        """The governed anatomy phrases that occur in `text`, as the SAME left-to-
+        right longest-window scan `match_longest` performs reports them (the whole
+        text when it is itself a governed term) -- token-bounded, never fuzzy.
+        Callers use this to tell which words of a source term are ANATOMY (a site)
+        and which name a condition."""
+        if self.match(text).candidates:
+            return (_norm(text),)
+        tokens = tuple(_norm(text).split())
+        found: list[str] = []
+        cursor = 0
+        while cursor < len(tokens):
+            for width in range(min(self._max_phrase_tokens, len(tokens) - cursor), 0, -1):
+                if self._phrases.get(width, {}).get(tokens[cursor:cursor + width]):
+                    found.append(" ".join(tokens[cursor:cursor + width]))
+                    cursor += width
+                    break
+            else:
+                cursor += 1
+        return tuple(found)
 
     def match_longest(self, text: str, *, phrase: bool = False) -> ConceptMatch:
         """Like `match`, but for a full action DESCRIPTION rather than a bare term

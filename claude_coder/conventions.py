@@ -86,6 +86,22 @@ def load_pack(path: str | None = None) -> tuple[dict, ...]:
     return tuple(dict(r) for r in rules if r.get("enabled", True))
 
 
+@lru_cache(maxsize=8)
+def load_claim_controls(mechanic: str, path: str | None = None) -> tuple[dict, ...]:
+    """Every ENABLED claim-set control in the pack's `claim_controls` list whose
+    `mechanic` is `mechanic`, in pack order -- the governed parameters and cited
+    authority of a claim-level control implemented once in `pipeline` (e.g.
+    `apply_integral_symptom_exclusion`). An absent pack or list is an empty
+    tuple: the control is then inert."""
+    target = Path(path) if path else PACK_PATH
+    if not target.exists():
+        return ()
+    payload = json.loads(target.read_text())
+    controls = payload.get("claim_controls") or ()
+    return tuple(dict(c) for c in controls
+                 if c.get("enabled", True) and c.get("mechanic") == mechanic)
+
+
 def authorized_value(fact, axis: str, reconciliation=None, *,
                      candidate_descriptor: str = "",
                      pack_path: str | None = None) -> ConventionMatch | None:

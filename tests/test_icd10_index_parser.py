@@ -379,3 +379,85 @@ def test_repeated_failures_at_different_source_paths_are_not_collapsed(tmp_path,
     assert len(records) == 2
     source_phrases = {r["source_phrase"] for r in records}
     assert source_phrases == {"alpha", "alpha beta"}
+
+
+# ------------------------------------------------------------------------------
+# Composite (comma-joined) titles and main-term-anchored phrases. Synthetic
+# structure only: none of these are real Index headings or codes.
+_COMPOSITE_XML = """
+<index>
+  <letter>
+    <mainTerm><title>Alphaosis</title>
+      <term level="1"><title>juvenile, juvenilis</title><code>Z92.9</code>
+        <term level="2"><title>tarsus</title><code>Z92.6-</code></term>
+      </term>
+    </mainTerm>
+    <mainTerm><title>Eponym's disease</title><see>Alphaosis, juvenile, tarsus</see></mainTerm>
+    <mainTerm><title>Betitis, betonitis</title>
+      <term level="1"><title>gamma</title><code>Z76.6-</code></term>
+    </mainTerm>
+    <mainTerm><title>Lesion</title>
+      <term level="1"><title>lower limb</title>
+        <term level="2"><title>heel</title>
+          <term level="3"><title>right</title><code>Z97.419</code></term>
+        </term>
+      </term>
+    </mainTerm>
+  </letter>
+</index>
+"""
+
+
+def test_navigate_matches_one_heading_form_of_a_comma_joined_child_title():
+    """A <see> directive cites a single heading form ("juvenile") of a child
+    whose title lists alternatives ("juvenile, juvenilis"); the exact-title
+    match used to fail there and the directive stayed unresolved -- the real
+    source's own composite-title convention, at every depth."""
+    node = navigate("Alphaosis, juvenile, tarsus", _main_terms(_COMPOSITE_XML))
+    assert node is not None
+    assert (node.findtext("code") or "").strip() == "Z92.6-"
+
+
+def test_a_resolved_composite_directive_emits_the_alias(tmp_path, monkeypatch):
+    import tools.parse_icd10cm_index as mod
+    src = tmp_path / "index.xml"
+    src.write_text(_COMPOSITE_XML)
+    dst = tmp_path / "out.json"
+    monkeypatch.setattr(sys, "argv", ["parse_icd10cm_index.py", str(src), str(dst)])
+    mod.main()
+    data = json.loads(dst.read_text())
+    assert "eponym's disease" in data["cross_reference_terms"].get("Z926", [])
+    assert data["reference_directives"]["unresolved"] == 0
+
+
+def test_direct_phrases_expand_every_heading_form(tmp_path, monkeypatch):
+    """"Betitis, betonitis" > gamma is readable as either "betitis gamma" or
+    "betonitis gamma"; the single composite phrase "betitis, betonitis gamma"
+    matched neither wording a record actually uses."""
+    import tools.parse_icd10cm_index as mod
+    src = tmp_path / "index.xml"
+    src.write_text(_COMPOSITE_XML)
+    dst = tmp_path / "out.json"
+    monkeypatch.setattr(sys, "argv", ["parse_icd10cm_index.py", str(src), str(dst)])
+    mod.main()
+    data = json.loads(dst.read_text())
+    assert set(data["terms"]["Z766"]) == {"betitis gamma", "betonitis gamma"}
+    assert set(data["terms"]["Z929"]) == {"alphaosis juvenile", "alphaosis juvenilis"}
+
+
+def test_every_direct_phrase_is_anchored_on_the_main_term(tmp_path, monkeypatch):
+    """A deep path's bare suffixes ("heel right", "right") name a site and a
+    side, not a condition; attached to the leaf's code they made every record
+    mentioning that site recall the code. Only main-term-anchored phrases are
+    emitted: the full path and the main term plus each deeper suffix."""
+    import tools.parse_icd10cm_index as mod
+    src = tmp_path / "index.xml"
+    src.write_text(_COMPOSITE_XML)
+    dst = tmp_path / "out.json"
+    monkeypatch.setattr(sys, "argv", ["parse_icd10cm_index.py", str(src), str(dst)])
+    mod.main()
+    data = json.loads(dst.read_text())
+    assert set(data["terms"]["Z97419"]) == {"lesion lower limb heel right",
+                                             "lesion heel right", "lesion right"}
+    for phrases in data["terms"].values():
+        assert "heel right" not in phrases and "right" not in phrases

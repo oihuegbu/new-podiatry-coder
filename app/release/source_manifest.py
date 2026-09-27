@@ -218,6 +218,15 @@ _OPTIONAL_SOURCES: dict[str, dict] = {
             "AMA-licensed recall aid that cannot be redistributed; absence removes "
             "candidates only and the coder falls back to descriptor/embedding retrieval",
     },
+    "snomed_semantic_tags": {
+        "path": config.SNOMED_ICD10_SEMANTIC_TAGS_FILE,
+        "role": "sign/symptom vs disease profile of mapped ICD-10-CM codes",
+        "absence_justification":
+            "companion of the SNOMED crosswalk: per ICD-10-CM target, the SNOMED semantic "
+            "tags of its source concepts; consumed only by the integral-symptom claim "
+            "control (ICD-10-CM I.B.4/I.B.5); absence leaves that control inert -- a "
+            "symptom code stays reported beside a definitive diagnosis, never the reverse",
+    },
     "snomed_concept_terms": {
         "path": config.CODES_DIR / "snomed_concept_terms.json",
         "role": "SNOMED CT Body Structure concept identity and hierarchy",

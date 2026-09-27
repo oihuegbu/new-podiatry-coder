@@ -137,6 +137,117 @@ def _governed_term_mapping_grounded(chosen: CandidateCode) -> bool:
     return False
 
 
+_TERM_PRECEDENCE_AUTHORITY = (
+    "ICD-10-CM Official Guidelines for Coding and Reporting, Section I.B.1: a code is "
+    "selected by locating the DOCUMENTED CONDITION's term in the Alphabetic Index (whose "
+    "main terms are conditions; anatomic sites are subterms under them) and verifying it "
+    "in the Tabular List -- so, between governed source terms the record's own wording "
+    "matches, the term that names the condition governs over a term stating only a "
+    "generic word and a site")
+
+
+def _governed_term_payloads(candidate: CandidateCode) -> list[dict]:
+    """Every AUDITABLE governed term-to-code match this candidate carries (any
+    governed source: Index phrase recall, crosswalk, context rule): method,
+    source terms, a mapped code that IS this candidate's, and a versioned source
+    identity -- the same completeness bar `_governed_term_mapping_grounded` sets."""
+    authority = dict(candidate.authority or {})
+    payloads = [authority]
+    nested = authority.get("snomed-crosswalk")
+    if isinstance(nested, dict):
+        payloads.append(nested)
+    out: list[dict] = []
+    for payload in payloads:
+        match = dict(payload.get("term_to_code_match") or {})
+        identity = dict(match.get("source_identity") or {})
+        if (match.get("method") and match.get("source_terms")
+                and str(match.get("mapped_code") or "").replace(".", "").upper()
+                    == str(candidate.code or "").replace(".", "").upper()
+                and identity.get("source_id") and identity.get("sha256")
+                and identity.get("size")):
+            out.append(match)
+    return out
+
+
+def _governed_source_terms(match: dict) -> list[str]:
+    """The source terms a governed match consumed, including the concept terms a
+    context rule fired on (its base concept's term and the IFA concept's)."""
+    terms = [str(t) for t in (match.get("source_terms") or ()) if t]
+    rule = match.get("context_rule")
+    if isinstance(rule, dict):
+        terms += [str(t) for t in (rule.get("ifa_terms") or ()) if t]
+        base = rule.get("base_match")
+        if isinstance(base, dict):
+            terms += [str(t) for t in (base.get("source_terms") or ()) if t]
+    return terms
+
+
+def _governed_term_precedence(fact: ClinicalFact, remaining: list[CandidateCode],
+                              source: Any, reconciliation,
+                              admissions: dict[str, CandidateAdmission] | None) -> dict | None:
+    """Settle a tie between still-entailed candidates EACH of which a governed
+    source bound to the record's own wording, by WHAT each source term names.
+
+    Each candidate's governed source terms are reduced to their condition-naming
+    words (`data_access.governed_condition_content`: anatomy phrases from the
+    body-structure graph, laterality and scaffold words removed) THAT THE RECORD'S
+    OWN WORDING STATES -- a term the wording contains whole counts in full, a term
+    matched on one distinctive token counts for that token only. ONE candidate
+    wins when every rival's stated condition content is a STRICT SUBSET of its own: the
+    rival's term stated nothing about the condition that the winner's term does
+    not also state (typically a generic word plus a site, or a site and a side
+    alone), while the winner's term names the documented condition itself. Two
+    terms each naming something the other does not stay a tie. Any candidate
+    without an auditable governed match leaves this step alone (a retrieval-only
+    rival is the baseline floor's business, never this one's). Authority:
+    `_TERM_PRECEDENCE_AUTHORITY`. Returns the audit record or None.
+    """
+    from . import data_access as _data_access
+    from .terminology import _norm as _term_norm, _sing as _term_sing
+    if len(remaining) < 2:
+        return None
+    stated = {_term_sing(t) for t in _term_norm(fact.description or "").split() if len(t) > 2}
+    content: dict[str, set[str]] = {}
+    terms_by_code: dict[str, list[str]] = {}
+    for cand in remaining:
+        payloads = _governed_term_payloads(cand)
+        if not payloads:
+            return None
+        terms = sorted({t for m in payloads for t in _governed_source_terms(m)})
+        terms_by_code[cand.code] = terms
+        content[cand.code] = _data_access.governed_condition_content(source, terms) & stated
+    winners = [cand for cand in remaining
+               if content[cand.code]
+               and all(content[o.code] < content[cand.code]
+                       for o in remaining if o.code != cand.code)]
+    if len(winners) != 1:
+        return None
+    winner = winners[0]
+    admission = (admissions or {}).get(winner.code)
+    if admission is not None and admission.standing is not CandidateStanding.SUPPORTED:
+        return None
+    if (_evaluate(fact, winner, reconciliation=reconciliation) is None
+            or _interval_unsupported(fact, parse_descriptor(winner.descriptor))):
+        return None
+    eliminated = {
+        o.code: (f"governed term precedence: its governed source term(s) "
+                 f"{terms_by_code[o.code]} name no condition beyond what {winner.code}'s "
+                 f"own term(s) {terms_by_code[winner.code]} state (condition words "
+                 f"{sorted(content[o.code])} vs {sorted(content[winner.code])}); the "
+                 f"record's wording names the condition {winner.code}'s source term "
+                 f"states -- {_TERM_PRECEDENCE_AUTHORITY}")
+        for o in remaining if o.code != winner.code}
+    return {
+        "stage": "governed_term_specificity_precedence",
+        "selected": winner.code,
+        "eliminated": eliminated,
+        "condition_content": {code: sorted(words) for code, words in content.items()},
+        "stated_words": sorted(stated),
+        "source_terms": terms_by_code,
+        "authority": _TERM_PRECEDENCE_AUTHORITY,
+    }
+
+
 def _residual_without_grounding(fact: ClinicalFact, chosen: CandidateCode) -> bool:
     """A DIAGNOSIS resolved to a RESIDUAL/catch-all code whose descriptor shares NO
     distinctive clinical term with the documented condition AND carries no governed,
@@ -3157,6 +3268,18 @@ def _uniqueness_view(fact: ClinicalFact, shortlist: list[CandidateCode],
                 eliminated[cand.code] = (f"{'; '.join(dict.fromkeys(named))} "
                                          f"(document-confirmed: {ground_detail})")
                 continue
+            # A silent-record adjudication (below) may not remove a candidate whose
+            # identity a governed source established from the record's OWN
+            # condition wording in favor of a proposal that has no such identity
+            # (fourth live run: the evaluator preferred a retrieval-only code over
+            # the crosswalk's code for the documented eponym with a reason the
+            # record neither states nor contradicts; the released code then
+            # conflicted with a sibling diagnosis under Excludes1). The record is
+            # not silent about such a candidate: it names the condition an
+            # authority maps to it. It stays standing for the grounded controls.
+            if _governed_term_payloads(cand) and not _governed_term_payloads(chosen):
+                remaining.append(cand)
+                continue
             if _evaluator_adjudicated_elimination(fact, cand, chosen, judgements, named,
                                                   reconciliation, requirements, coverage,
                                                   source=source):
@@ -4165,6 +4288,21 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                 if _baseline_eliminated and _baseline_survivors:
                     remaining = _baseline_survivors
                     eliminated.update(_baseline_eliminated)
+    # Governed term precedence (product-owner decision 2026-09-25, "figure out
+    # a solution" for entailed sibling ties): when EVERY still-standing
+    # candidate was bound to the record's own wording by a governed source,
+    # the one whose source term names the documented condition governs over
+    # rivals whose terms state only a generic word and a site (or a site and
+    # a side alone) -- an authority-cited comparison of what each source
+    # matched, never a model preference. Tried once, after the baseline
+    # floor, only when >1 candidate remains and no system gap was recorded.
+    _precedence: dict | None = None
+    if not _system_unresolved and len(remaining) > 1:
+        _precedence = _governed_term_precedence(fact, remaining, source, reconciliation,
+                                                admissions)
+        if _precedence is not None:
+            remaining = [c for c in remaining if c.code == _precedence["selected"]]
+            eliminated.update(_precedence["eliminated"])
     # Candidates eliminated BEFORE the shortlist existed (a failed deterministic
     # constraint) belong in the same accounting: the record has to show the whole
     # retrieved pool being disposed of, not only the part the models were shown.
@@ -4300,15 +4438,46 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
     # exists for -- so its own standing check stays as Codex wrote it.
     if len(remaining) == 1:
         survivor = remaining[0]
-        if chosen is None and _disposition_verdict is not None:
+        # Single-evaluator counterpart of the two-matrix conditions below (the
+        # 2026-09-22 release-policy decision retired the second evaluator, which
+        # made `_disposition_verdict` permanently None and both branches dead --
+        # third live run: the evaluator entailed two candidates and proposed the
+        # retrieval-only one, the baseline floor removed that proposal, and the
+        # sole SUPPORTED survivor it had ALSO entailed was held as a one-candidate
+        # "tie"). The survivor still has to be entailed by every judgement and
+        # carry governed identity standing; nothing here trusts the pick.
+        _survivor_admission = (admissions or {}).get(survivor.code)
+        _single_evaluator_settled = bool(
+            judgements
+            and all(getattr(j, "declared", False) and j.entails(survivor.code)
+                    for j in judgements)
+            and _survivor_admission is not None
+            and _survivor_admission.standing is CandidateStanding.SUPPORTED)
+        if _precedence is not None and survivor.code == _precedence["selected"]:
+            precedence_record = {**record, "selected": survivor.code,
+                                 "governed_term_precedence": _precedence}
+            note = (f"{len(_precedence['eliminated']) + 1} candidates remained entailed; "
+                    f"{survivor.code}'s governed source term names the documented "
+                    f"condition, the others' state only a generic word and/or a site "
+                    f"(governed term precedence)")
+            return _entailed_line(
+                fact, survivor, shortlist, f"{why}; {note}" if why else note,
+                uniqueness=precedence_record, requirements=requirements,
+                judgements=judgements, reconciliation=reconciliation,
+                coverage=coverage, evidence_packet=evidence_packet)
+        if chosen is None and (_disposition_verdict is not None or _single_evaluator_settled):
             matrix_record = {
                 **record,
                 "selected": survivor.code,
-                "selected_from_complete_disposition_matrix": True,
+                "selected_from_complete_disposition_matrix": _disposition_verdict is not None,
+                "selected_sole_entailed_survivor": _single_evaluator_settled,
             }
-            note = ("the first evaluator made no proposal; two independent, "
-                    "descriptor-bound disposition matrices left exactly one "
-                    "source-cited candidate")
+            note = (("the first evaluator made no proposal; two independent, "
+                     "descriptor-bound disposition matrices left exactly one "
+                     "source-cited candidate") if _disposition_verdict is not None else
+                    ("the evaluator made no proposal; every other shortlisted candidate "
+                     "was eliminated by grounded controls and the sole survivor is "
+                     "entailed by the evaluator and carries governed identity standing"))
             return _entailed_line(
                 fact, survivor, shortlist, f"{why}; {note}" if why else note,
                 uniqueness=matrix_record, requirements=requirements,
@@ -4321,7 +4490,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                                   coverage=coverage, evidence_packet=evidence_packet)
         survivor_admission = (admissions or {}).get(survivor.code)
         if (chosen is not None
-                and _disposition_verdict is not None
+                and (_disposition_verdict is not None or _single_evaluator_settled)
                 and survivor_admission is not None
                 and survivor_admission.standing is CandidateStanding.SUPPORTED):
             reselection_record = {
@@ -4329,6 +4498,7 @@ def _settle_uniqueness(fact: ClinicalFact, chosen: CandidateCode | None,
                 "proposed": chosen.code,
                 "selected": survivor.code,
                 "reselected_from_verified_survivor": True,
+                "proposal_eliminated_by": eliminated.get(chosen.code, ""),
             }
             note = (f"the initial proposal {chosen.code} was eliminated; "
                     f"{survivor.code} is the sole independently verified candidate "
@@ -4880,6 +5050,21 @@ def _propose_then_verify_core(fact: ClinicalFact, source: CodeSource,
                 rationale=("PROVIDER QUERY — every otherwise-plausible remaining "
                           "candidate requires an element the documentation does "
                           f"not establish ({question})")))
+        # A DECLARED verdict that entails candidates without nominating one is a
+        # complete disposition matrix, not a failed verification (`_settle_
+        # uniqueness`'s own contract) -- third live run: routed here as "nothing
+        # entailed", it never reached the grounded controls (baseline floor,
+        # ownership, precedence) that settle exactly this shape. Settled with no
+        # proposal; every release branch there still requires entailment of the
+        # survivor and governed identity standing.
+        if primary.entailed and getattr(primary, "declared", False):
+            return _with_admissions(_settle_uniqueness(
+                fact, None, verifiable, [primary],
+                constraint_eliminated, why,
+                reconciliation, requirements,
+                coverage, source, admissions=admissions,
+                evidence_packet=evidence_packet,
+                defer_page_local_exhaustion=has_more_authoritative_candidates))
         # Tie policy step 5: the evaluator supplied no unique selection, so
         # name the missing discriminating fact rather than guessing.
         return _with_admissions(_tie_escalation(

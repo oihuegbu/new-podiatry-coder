@@ -1150,3 +1150,62 @@ def test_a_valid_relation_graph_is_unchanged_by_the_new_identity_checks():
     assert len(result.relations) == 1
     rel = result.relations[0]
     assert rel.subject_event_id == "F2" and rel.object_event_id == "F1"
+
+
+# ------------------------------------------------ own-evidence lexicon binding (2026-09-26)
+# issue #6, designated note, third live run: the extractor asserted laterality=right
+# for a component procedure and cited the operative title that states "Right ...",
+# but emitted no attribute_evidence entry for the axis; the axis was sanitized away
+# and the line's only fitting code withdrawn. A claimed CLOSED-LEXICON value that a
+# quotation the extractor itself cited for the fact states -- asserted, and alone
+# among the lexicon's words -- is bound to that quotation as local evidence.
+def test_a_claimed_lexicon_value_stated_by_the_facts_own_quote_is_bound_not_gapped():
+    result = extract_note("note", _stub({"facts": [_fact(
+        attributes={"laterality": "right"},
+        evidence=["Right assembly service with component step"])]}))
+    fact = result.facts[0]
+    assert fact.attributes["laterality"] == "right"
+    (entry,) = fact.attribute_evidence["laterality"]
+    assert entry.value == "right" and entry.scope == "local"
+    assert entry.span.text == "Right assembly service with component step"
+    assert fact.attribute_evidence_gaps == {}
+
+
+def test_a_value_the_quote_states_only_negated_stays_a_gap():
+    result = extract_note("note", _stub({"facts": [_fact(
+        attributes={"laterality": "right"},
+        evidence=["assembly service, no right component involved"])]}))
+    fact = result.facts[0]
+    assert "laterality" not in fact.attributes
+    assert fact.attribute_evidence_gaps["laterality"].rejected_value == "right"
+
+
+def test_a_quote_naming_two_lexicon_values_binds_neither():
+    result = extract_note("note", _stub({"facts": [_fact(
+        attributes={"laterality": "right"},
+        evidence=["assembly service on the right and left components"])]}))
+    fact = result.facts[0]
+    assert "laterality" not in fact.attributes
+    assert fact.attribute_evidence_gaps["laterality"].axis == "laterality"
+
+
+def test_a_supplied_entry_that_fails_to_bind_is_never_repaired_from_the_quote_pool():
+    """The extractor DID supply an entry (wrong side): that is the defect the gap
+    records; the fact's own quote stating the claimed side does not paper over it."""
+    result = extract_note("note", _stub({"facts": [_fact(
+        attributes={"laterality": "right"},
+        evidence=["Right assembly service"],
+        attribute_evidence={"laterality": [
+            {"text": "Right assembly service", "scope": "local", "value": "left"}]})]}))
+    fact = result.facts[0]
+    assert "laterality" not in fact.attributes
+    assert fact.attribute_evidence_gaps["laterality"].axis == "laterality"
+
+
+def test_a_value_outside_the_lexicon_is_never_bound_from_a_quote():
+    result = extract_note("note", _stub({"facts": [_fact(
+        attributes={"anatomy": "component"},
+        evidence=["component assembly service"])]}))
+    fact = result.facts[0]
+    assert "anatomy" not in fact.attributes
+    assert fact.attribute_evidence_gaps["anatomy"].axis == "anatomy"

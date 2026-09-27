@@ -8,7 +8,9 @@
       "axis": "sequence_qualifier",
       "value": "secondary",
       "applies_when": {
-        "fact_kinds": ["procedure"],
+        "fact_kinds": [
+          "procedure"
+        ],
         "candidate_descriptor_regex": "\\bachilles\\b",
         "evidence_regex": "\\breattach(?:ed|ment|ing)?\\b",
         "absent_regex": "\\bruptur"
@@ -17,6 +19,47 @@
       "verification_status": "verified 2026-09-22 against the public summaries of the sources above (the CPT Assistant and AMA CPT Knowledge Base full texts are paywalled: AMA KB entries 2017-01-09 'Should [the secondary-repair Achilles descriptor] be reported for a simple repair of a chronic Achilles tear (re-tear)...' and 2020-05-28 'When using the secondary repair [descriptor], does the descriptor mean the Achilles tendon...' were not readable). AUTHORITIES DISAGREE -- see dissent.",
       "dissent": "AOFAS guidance (via AAPC Orthopedic Coding Alert 'Could Be Best Choice for Non-Ruptured Tendon'): for debridement of INSERTIONAL Achilles tendinitis with repair (suture anchor vs bony trough) it names the TENOLYSIS leg/ankle descriptor, not the secondary-repair descriptor. AMA CPT Knowledge Base (via Becker's ASC): calcaneal ostectomy plus, for tendon work beyond exposure, the FOOT flexor-tendon repair descriptor. NYSPMA (2017): the PRIMARY-repair Achilles descriptor plus the calcaneal spur ostectomy descriptor. This entry follows the CPT Assistant / Coding Clinic / AOFAS-tendonosis position because it is the most-cited and most recent; the product owner may disable it or adopt a dissenting position by editing this file, never by changing code.",
       "rationale": "The primary-repair family in this descriptor set is defined on a RUPTURED tendon. A tendon that is debrided and reattached with no rupture documented does not satisfy that descriptor, and the record never literally states 'secondary'; the cited convention reports such a reattachment with the secondary-repair descriptor. Scoped to the Achilles family by candidate descriptor because that is the family the cited guidance addresses."
+    }
+  ],
+  "claim_controls": [
+    {
+      "id": "integral-symptom-not-additionally-coded",
+      "enabled": true,
+      "mechanic": "integral_symptom_exclusion",
+      "authority": "ICD-10-CM Official Guidelines for Coding and Reporting FY2026, Section I.B.4 (codes that describe symptoms and signs are acceptable for reporting when a related definitive diagnosis has not been established by the provider) and Section I.B.5 (signs and symptoms that are associated routinely with a disease process should not be assigned as additional codes, unless otherwise instructed by the classification)",
+      "symptom_semantic_tags": [
+        "finding"
+      ],
+      "definitive_semantic_tags": [
+        "disorder"
+      ],
+      "site_relations": [
+        "same",
+        "ancestor_descendant"
+      ],
+      "_how": "a released diagnosis whose ICD-10-CM code is reached in the SNOMED CT -> ICD-10-CM map ONLY from concepts tagged (finding) is a sign/symptom code; it is not additionally reported when another released diagnosis, reached from (disorder) concepts, names a site the SNOMED body-structure graph relates to the symptom's site (same, or ancestor/descendant) with no contradicting laterality. Sites come from the codes' own descriptors (governed anatomy phrases) and the facts' typed anatomy; nothing is inferred from wording alone",
+      "_why": "designated operative note, third live run: the second reading surfaced the chief complaint ('pain in <site>') as its own diagnosis and it released beside three definitive diagnoses of that site; a coder would not report it",
+      "symptom_min_share": 0.6,
+      "definitive_min_share": 0.6,
+      "_share_why": "a code's mapped source concepts are counted by SNOMED semantic tag; a symptom code such as a localized-pain code is reached overwhelmingly from (finding) concepts (measured on the US 2026-03 edition: 'pain in <site>' codes 65-100% finding), a disease code overwhelmingly from (disorder) concepts; 0.6 leaves a genuinely mixed profile unclassified, which keeps the code reported (fail-open toward reporting, never toward silent removal)"
+    },
+    {
+      "id": "achilles-debridement-included-in-secondary-repair",
+      "enabled": true,
+      "mechanic": "component_included_in_released_service",
+      "applies_when": {
+        "fact_kinds": [
+          "procedure"
+        ],
+        "evidence_regex": "\\b(debrid\\w*|debulk\\w*)\\b|\\b(abnormal|damaged|diseased|degenerat\\w*)\\b[^.]{0,60}\\btendon tissue\\b[^.]{0,30}\\b(removed|excised|resected)\\b",
+        "absent_regex": "\\bruptur"
+      },
+      "parent": {
+        "descriptor_regex": "\\brepair,\\s*secondary,\\s*achilles tendon\\b"
+      },
+      "authority": "AMA CPT Assistant, March 2020 p.14 (Surgery/Musculoskeletal System, Q3) as corrected by the April 2020 erratum (p.8), referencing July 2019 p.5: debridement/debulking of a diseased Achilles tendon is reported with the secondary-repair Achilles descriptor, not with an unlisted, muscle/fascia debridement or separate tendon-excision descriptor; NCCI Policy Manual Ch. I (services integral to the primary procedure are not separately reportable)",
+      "_why": "designated operative note, fourth live run: the tendon debridement resolved to a separate tendon-lesion excision code beside the secondary-repair code already reporting the same Achilles work; the same authority the pack's sequence-qualifier convention cites says the debridement IS the secondary repair -- so the released component is excluded, never the parent",
+      "_scope_why": "scoped to a released parent whose descriptor is the secondary-repair Achilles code, and to a component whose own confirmed evidence documents debridement/debulking or removal of abnormal tendon tissue (no rupture documented) in the same operative episode -- the exact clinical situation the cited guidance addresses"
     }
   ]
 }

@@ -177,6 +177,10 @@ SNOMED_ROOTS_FILE = DATA_DIR / "snomed_root_concepts.json"
 # SNOMED CT -> ICD-10-CM extended-map CONTEXT rules (tools/build_snomed_icd10_map.py,
 # companion of snomed_icd10_map.json) -- reviewed-OPTIONAL recall aid.
 SNOMED_ICD10_RULES_FILE = CODES_DIR / "snomed_icd10_rules.json"
+# SNOMED semantic-tag profile per mapped ICD-10-CM code (same tool): which source
+# concepts ("(finding)" vs "(disorder)") map to each code -- the classification's own
+# sign/symptom-vs-disease distinction, never a code list.
+SNOMED_ICD10_SEMANTIC_TAGS_FILE = CODES_DIR / "snomed_icd10_semantic_tags.json"
 TERMINOLOGY_REGISTRY_FILE = (
     DATA_DIR / "terminology" / "clinical_abbreviations.json"
 )
